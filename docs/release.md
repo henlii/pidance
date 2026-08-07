@@ -220,6 +220,7 @@ ls /opt/pidance/current/node_modules/.bin/   # 仅 pidance，无 pi-web
 
 | 版本 | tgz sha256（前 8） | 部署日期 | 内容 | 验收 |
 |------|--------------------|----------|------|------|
+| `0.1.0-local-708c08cf-4c2f1c72` | 4c2f1c72 | 2026-08-08 | 设置面板（SettingsView/settings-nav）、tool-execution-buffer AgentToolResult 文本提取、chat-lazy-load 懒加载、chat-auto-follow、i18n/样式、旧 logo 清理；lint 修复 ui-session prefer-const | 前后审计通过；安装后 bin 仅 pidance；/ 200；未认证 API 401（页内登录保护）；ui-session 状态正常；30141 PID 未变；31416 独立 |
 | `0.1.0-local-2e66db5-0f4d928d` | 0f4d928d | 2026-08-07 | #18 页内登录+UI 会话 Cookie；大会话 tail-first；文件树行菜单；31416 Turbopack 测试构建；toolResult 大 diff 剥离 | 无密码 API 401；Basic/Cookie 登录后 home/sessions/models 200；页面无 WWW-Authenticate；bin 仅 pidance；30141 PID 未变 |
 | `0.1.0-local-4e6743a-239da6fe` | 239da6fe | 2026-08-06 | 首发准备全量收口：review P0/P1 修复（非回环强制认证、files symlink 越界、models-config 密钥脱敏、归档全功能+前端、循环依赖/投影统一等）+ Chamber 主题/双主题/图标/tooltip/二级侧边栏 + 侧栏一竖排对齐、运行圆环旋转、最近区与项目树一致 | home/sessions 带密码 200，bin 仅 pidance（无 pi-web） |
 | `0.1.0-local-9c3fe02-6421a251` | 6421a251 | 2026-08-03 | P0–P5 会话系统重构收口（分支/新会话/去坞/右栏分屏/滚动跟随/流式同构/实时工具 UI）+ 侧栏交互对齐 openchamber（行点击折叠）+ 引导页项目/工作树缓存（含 localStorage 持久化） | A2 全路由带密码 200 / 无密码 401，bin 仅 pidance（无 pi-web） |
