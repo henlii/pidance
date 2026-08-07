@@ -219,7 +219,7 @@ export function checkLoginRateLimit(key: string, nowMs = Date.now()): {
   limit: number;
 } {
   const limit = UI_LOGIN_RATE_MAX;
-  let entry = loginRateMap.get(key);
+  const entry = loginRateMap.get(key);
   if (!entry) {
     return { allowed: true, remaining: limit, retryAfterSeconds: 0, limit };
   }
