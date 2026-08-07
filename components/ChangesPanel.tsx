@@ -91,7 +91,7 @@ export function ChangesPanel({ open, width, onWidthChange, cwd, isMobile, mobile
             : <div className="changes-panel-hint">{t("changes_diffUnavailable")}</div>;
 
   return (
-    <aside className={`changes-panel${open ? " changes-panel-open" : " changes-panel-closed"}${dragging ? " changes-panel-dragging" : ""}${mobileReady ? "" : " workspace-mobile-pending"}`} style={{ width: open ? width : 0, minWidth: open ? width : 0 }} aria-label={t("secondary_title")}>
+    <aside className={`changes-panel${open ? " changes-panel-open" : " changes-panel-closed"}${dragging ? " changes-panel-dragging" : ""}${mobileReady ? "" : " workspace-mobile-pending"}`} style={{ width: open ? width : 0, minWidth: open ? width : 0, height: "100%", minHeight: 0, flex: "1 1 auto", display: "flex", flexDirection: "column" }} aria-label={t("secondary_title")}>
       {open && <div className={`changes-panel-resize-handle${dragging ? " dragging" : ""}`} role="separator" aria-orientation="vertical" tabIndex={0} title={t("changes_resizeHandle")} aria-label={t("changes_resizeHandle")} onPointerDown={handleResizeStart} onPointerMove={handleResizeMove} onPointerUp={handleResizeEnd} onPointerCancel={handleResizeEnd} />}
       <div className="secondary-panel-inner">
         {tabs.length > 0 && <div className="secondary-panel-tabs" style={{ display: "flex", alignItems: "stretch", flexShrink: 0 }}>

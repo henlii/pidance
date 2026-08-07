@@ -83,6 +83,8 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
   const { t } = useI18n();
   const [data, setData] = useState<AgentSettingsView | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
+  /** 可选模型列表（来自 /api/models），供默认 provider/model 下拉。 */
+  const [modelList, setModelList] = useState<Array<{ id: string; name: string; provider: string }>>([]);
   /** 桌面流式期 Enter 默认动作（localStorage，与 Pi settings 分离）。 */
   const [streamingEnterDefault, setStreamingEnterDefault] = useState<StreamingEnterAction>("followUp");
   /** 完成提示音（localStorage pi-sound-enabled）。 */
@@ -102,14 +104,26 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
       const params = new URLSearchParams();
       if (cwd) params.set("cwd", cwd);
       const qs = params.toString();
-      const res = await fetch(`/api/agent-settings${qs ? `?${qs}` : ""}`);
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(body.error ?? `HTTP ${res.status}`);
+      const [settingsRes, modelsRes] = await Promise.all([
+        fetch(`/api/agent-settings${qs ? `?${qs}` : ""}`),
+        fetch(`/api/models${qs ? `?${qs}` : ""}`),
+      ]);
+      if (!settingsRes.ok) {
+        const body = (await settingsRes.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${settingsRes.status}`);
       }
-      const body = (await res.json()) as AgentSettingsView;
+      const body = (await settingsRes.json()) as AgentSettingsView;
       setData(body);
       setDraft(viewToDraft(body));
+
+      if (modelsRes.ok) {
+        const modelsBody = (await modelsRes.json()) as {
+          modelList?: Array<{ id: string; name: string; provider: string }>;
+        };
+        setModelList(Array.isArray(modelsBody.modelList) ? modelsBody.modelList : []);
+      } else {
+        setModelList([]);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setData(null);
@@ -222,6 +236,15 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
 
   const dirty = draftDirty(draft, data);
 
+  // provider 去重保序；model 按当前选中 provider 过滤。
+  const providerOptions: string[] = [];
+  for (const m of modelList) {
+    if (!providerOptions.includes(m.provider)) providerOptions.push(m.provider);
+  }
+  const modelsForSelectedProvider = draft.defaultProvider
+    ? modelList.filter((m) => m.provider === draft.defaultProvider)
+    : [];
+
   return (
     <div style={{ padding: "18px 20px" }}>
       <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 16 }}>
@@ -239,23 +262,59 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div>
             <div style={labelStyle}>{t("defaults_provider")}</div>
-            <input
+            <select
               value={draft.defaultProvider}
-              onChange={(e) => setDraft({ ...draft, defaultProvider: e.target.value })}
-              placeholder="e.g. new-api"
-              style={inputStyle}
-              spellCheck={false}
-            />
+              onChange={(e) => {
+                const nextProvider = e.target.value;
+                const modelsForProvider = modelList.filter((m) => m.provider === nextProvider);
+                const modelStillValid = modelsForProvider.some((m) => m.id === draft.defaultModel);
+                setDraft({
+                  ...draft,
+                  defaultProvider: nextProvider,
+                  // 切换 provider 后若当前 model 不在该 provider 下则清空，避免错配。
+                  defaultModel: modelStillValid ? draft.defaultModel : "",
+                });
+              }}
+              style={selectStyle}
+            >
+              <option value="">{t("defaults_providerUnset")}</option>
+              {/* 当前值不在列表中时保留可选，避免静默丢值 */}
+              {draft.defaultProvider &&
+                !providerOptions.includes(draft.defaultProvider) && (
+                  <option value={draft.defaultProvider}>{draft.defaultProvider}</option>
+                )}
+              {providerOptions.map((provider) => (
+                <option key={provider} value={provider}>
+                  {provider}
+                </option>
+              ))}
+            </select>
           </div>
           <div>
             <div style={labelStyle}>{t("defaults_model")}</div>
-            <input
+            <select
               value={draft.defaultModel}
               onChange={(e) => setDraft({ ...draft, defaultModel: e.target.value })}
-              placeholder="e.g. grok-4.5"
-              style={inputStyle}
-              spellCheck={false}
-            />
+              style={selectStyle}
+              disabled={!draft.defaultProvider}
+            >
+              <option value="">
+                {draft.defaultProvider
+                  ? modelsForSelectedProvider.length === 0 && !draft.defaultModel
+                    ? t("defaults_modelEmpty")
+                    : t("defaults_modelUnset")
+                  : t("defaults_modelUnset")}
+              </option>
+              {draft.defaultModel &&
+                !modelsForSelectedProvider.some((m) => m.id === draft.defaultModel) && (
+                  <option value={draft.defaultModel}>{draft.defaultModel}</option>
+                )}
+              {modelsForSelectedProvider.map((m) => (
+                <option key={`${m.provider}:${m.id}`} value={m.id}>
+                  {m.name && m.name !== m.id ? `${m.name} (${m.id})` : m.id}
+                </option>
+              ))}
+            </select>
           </div>
           <div>
             <div style={labelStyle}>{t("defaults_thinking")}</div>

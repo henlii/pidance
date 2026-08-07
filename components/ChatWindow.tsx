@@ -23,7 +23,9 @@ import {
   captureScrollDistance,
   getNextVisibleCount,
   getVisibleRenderWindow,
+  resolveHistoryLoadAction,
   restoreScrollTop,
+  shouldShowHistorySentinel,
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
 
@@ -179,7 +181,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     loadOlderHistory,
     handleSend, handleAbort, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
-    handleRecallQueue,
+    handleRecallQueue, handleSendQueueAsSteer,
     handleBuiltinSlashCommand,
     handleThinkingLevelChange, loadSlashCommands,
     handleBranchHere, handleBranchFromAssistant,
@@ -284,7 +286,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   }, [session?.id]);
 
   // IntersectionObserver on the sentinel div at the top of the message list.
-  // When it becomes visible, load the next page of older messages.
+  // When it becomes visible, expand local window or fetch older pages from server.
   useEffect(() => {
     const sentinel = sentinelRef.current;
     const container = scrollContainerRef.current;
@@ -292,20 +294,25 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     const observer = new IntersectionObserver(
       (entries) => {
         if (!entries[0]?.isIntersecting) return;
+        const action = resolveHistoryLoadAction({
+          visibleCount,
+          messagesLength: messages.length,
+          hasMoreBefore,
+          historyLoading,
+        });
+        if (action === "none") return;
         // Save distance from top before prepending to restore scroll later
         prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
-        // 先扩大本地渲染窗口；若已到本地头且服务端还有更旧，再拉一页
-        setVisibleCount((prev) => {
-          const next = getNextVisibleCount(prev);
-          if (next >= messages.length && hasMoreBefore && !historyLoading) {
-            void loadOlderHistory().then((loaded) => {
-              if (loaded) setVisibleCount((v) => getNextVisibleCount(v));
-            });
-          }
-          return next;
+        if (action === "expand-local") {
+          setVisibleCount((prev) => getNextVisibleCount(prev));
+          return;
+        }
+        // action === "load-server"：已到本地头，拉更旧页
+        void loadOlderHistory().then((loaded) => {
+          if (loaded) setVisibleCount((v) => getNextVisibleCount(v));
         });
       },
-      { root: container, threshold: 0 }
+      { root: container, threshold: 0 },
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
@@ -424,6 +431,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
       retryInfo={retryInfo}
       queuedMessages={queuedMessages}
       onRecallQueue={handleRecallQueue}
+      onSendQueueAsSteer={handleSendQueueAsSteer}
       slashCommands={slashCommands}
       slashCommandsLoading={slashCommandsLoading}
       onLoadSlashCommands={loadSlashCommands}
@@ -681,12 +689,16 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
                     </div>,
                   );
               }
-              const { startIndex, hasMore } = getVisibleRenderWindow(rendered.length, visibleCount);
+              const { startIndex, hasMore: localHasMore } = getVisibleRenderWindow(rendered.length, visibleCount);
+              // 服务端仍有更旧时也要挂哨兵，否则本地渲染到头后无法再触发上滚加载。
+              const showSentinel = shouldShowHistorySentinel(localHasMore, hasMoreBefore);
               return (
                 <>
-                  {hasMore && (
+                  {showSentinel && (
                     <div ref={sentinelRef} className="py-3 text-center text-xs text-text-muted">
-                      {t("chat_loadEarlier", { count: startIndex })}
+                      {historyLoading
+                        ? t("chat_loadingSession")
+                        : t("chat_loadEarlier", { count: localHasMore ? startIndex : VISIBLE_PAGE_SIZE })}
                     </div>
                   )}
                   {rendered.slice(startIndex)}

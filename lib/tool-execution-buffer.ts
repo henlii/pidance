@@ -110,13 +110,37 @@ function optionalRenderedLines(value: unknown): string[] | undefined {
 }
 
 /**
- * 把任意 partialResult / result 序列化为展示文本：
- * 字符串原样保留；对象/数组 JSON 序列化（保留结构信息）；失败降级 String()。
- * 不做深度限制——长度上限由 clampOutput 统一兜底。
+ * 把任意 partialResult / result 序列化为展示文本。
+ * - 字符串原样保留（\r 去掉，保留真实换行）；
+ * - AgentToolResult 形 `{ content: [{ type:"text", text }] }` 提取 text 拼接
+ *   （bash 实时 update 即此形状；切勿 JSON.stringify，否则 \n 变成字面量、换行全坏）；
+ * - 其它对象/数组 JSON 序列化；失败降级 String()。
  */
 function stringifyPartial(value: unknown): string {
   if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value;
+  if (typeof value === "string") return value.replace(/\r/g, "");
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (Array.isArray(record.content)) {
+      const texts: string[] = [];
+      for (const block of record.content) {
+        if (typeof block === "string") {
+          texts.push(block.replace(/\r/g, ""));
+          continue;
+        }
+        if (typeof block !== "object" || block === null) continue;
+        const item = block as Record<string, unknown>;
+        if (item.type === "text" && typeof item.text === "string") {
+          texts.push(item.text.replace(/\r/g, ""));
+        }
+      }
+      // 有 text 块或 content 为空数组时都走文本路径，避免回落成 "{}" / "[]"。
+      if (texts.length > 0 || record.content.length === 0) {
+        return texts.join("\n");
+      }
+    }
+    if (typeof record.text === "string") return record.text.replace(/\r/g, "");
+  }
   try {
     const json = JSON.stringify(value);
     return json === undefined ? String(value) : json;

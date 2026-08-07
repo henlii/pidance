@@ -21,10 +21,12 @@ export const RIGHT_PANEL_WIDTH_MIN = 320;
 export const RIGHT_PANEL_WIDTH_MAX = 720;
 export const RIGHT_PANEL_WIDTH_DEFAULT = 400;
 
-/** Git 变更侧栏可调宽边界。 */
-export const CHANGES_PANEL_WIDTH_MIN = 240;
-export const CHANGES_PANEL_WIDTH_MAX = 640;
-export const CHANGES_PANEL_WIDTH_DEFAULT = 360;
+/** 二级文件编辑/预览侧栏可调宽边界（打开文件时的主阅读区，宜明显宽于文件树）。 */
+export const CHANGES_PANEL_WIDTH_MIN = 320;
+export const CHANGES_PANEL_WIDTH_MAX = 960;
+export const CHANGES_PANEL_WIDTH_DEFAULT = 560;
+/** 打开文件时若当前宽度低于此值则抬到此宽度，避免编辑区过窄。 */
+export const CHANGES_PANEL_WIDTH_OPEN_MIN = 480;
 
 /**
  * 文件树按 cwd 记忆的展开路径与滚动位置（跨刷新持久化）。

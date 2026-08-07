@@ -607,7 +607,7 @@ export function RunningSessionIndicator({ size = 14 }: { size?: number }) {
 }
 
 /**
- * 展开会话行的运行时长（P1-5）：静态圆点 + 时长文本。
+ * 展开会话行的运行时长（P1-5）：仅时长文本（圆环只在图标列显示一次，避免双环）。
  * - running + startedAt（首次见到 running 的时刻）：显示如「2m 14s」；
  * - running + 无 startedAt（刷新后 SSE 重建，无法确认真实开始时间）：
  *   显示「运行中」而不是伪造时长；
@@ -628,7 +628,6 @@ export function RunningDurationText({ startedAt, now, running }: {
       style={{
         display: "inline-flex",
         alignItems: "center",
-        gap: 4,
         flexShrink: 0,
         color: "var(--status-running)",
         fontSize: 10,
@@ -636,7 +635,6 @@ export function RunningDurationText({ startedAt, now, running }: {
         whiteSpace: "nowrap",
       }}
     >
-      <RunningSessionIndicator size={10} />
       <span>
         {startedAt !== undefined
           ? formatRunningDuration(Math.max(0, now - startedAt), t)

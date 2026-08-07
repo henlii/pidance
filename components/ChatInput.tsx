@@ -98,6 +98,8 @@ interface Props {
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
   queuedMessages?: QueuedMessages | null;
   onRecallQueue?: () => void;
+  /** 将队列中消息按引导方式重新入队（follow-up → steer）；可选 extraMessage 并入队尾。 */
+  onSendQueueAsSteer?: (extraMessage?: string) => void;
   slashCommands?: SlashCommandInfo[];
   slashCommandsLoading?: boolean;
   onLoadSlashCommands?: () => Promise<SlashCommandInfo[]> | SlashCommandInfo[];
@@ -261,7 +263,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelAuthConfigured, onModelChange,
   onAbortCompaction, isCompacting, compactError, compactResult,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
-  retryInfo, queuedMessages, onRecallQueue,
+  retryInfo, queuedMessages, onRecallQueue, onSendQueueAsSteer,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
   onAudioUnlock,
@@ -805,6 +807,31 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     clearInput();
   }, [value, attachedImages.length, hasReadyUploads, hasUploading, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, composeMessageWithUploads]);
 
+  /** 引导发送队列：若输入框有内容则并入队尾后整队以 steer 发送。 */
+  const flushQueueAsSteer = useCallback(() => {
+    if (!onSendQueueAsSteer) return;
+    // 图片附件流式期不可入队；仅文本/路径附件可并入。
+    if (attachedImages.length || hasUploading) {
+      onSendQueueAsSteer();
+      return;
+    }
+    const base = value.trim();
+    const hasInput = Boolean(base) || hasReadyUploads;
+    const extra = hasInput ? composeMessageWithUploads(base).trim() : "";
+    onAudioUnlock?.();
+    onSendQueueAsSteer(extra || undefined);
+    if (extra) clearInput();
+  }, [
+    onSendQueueAsSteer,
+    attachedImages.length,
+    hasUploading,
+    value,
+    hasReadyUploads,
+    composeMessageWithUploads,
+    onAudioUnlock,
+    clearInput,
+  ]);
+
   const getNextSlashIndex = useCallback((direction: "up" | "down" | "left" | "right") => {
     const lastIndex = filteredSlashCommands.length - 1;
     if (lastIndex < 0) return 0;
@@ -929,12 +956,19 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
       // 手机端：Enter 仅换行，通过发送按钮提交。
       // 桌面：Enter = 配置的默认动作；Ctrl/Cmd+Enter = 相反动作（流式期）。
+      // 队列有内容时：Ctrl/Cmd+Enter 优先引导发送整队（输入框有内容则先并入队尾）。
       // 非流式：Enter / Ctrl+Enter 均发送。
       if (e.key === "Enter" && !e.shiftKey) {
         if (isMobile) return;
         e.preventDefault();
+        const modifier = e.ctrlKey || e.metaKey;
+        const queueCount =
+          (queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0);
+        if (modifier && queueCount > 0 && onSendQueueAsSteer) {
+          flushQueueAsSteer();
+          return;
+        }
         if (isStreaming && (onSteer || onFollowUp)) {
-          const modifier = e.ctrlKey || e.metaKey;
           const defaultIsQueue = streamingEnterDefault !== "steer";
           // 默认队列：Enter=followup，Ctrl+Enter=steer；默认引导则相反。
           const mode: "steer" | "followup" = modifier
@@ -946,7 +980,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }
       }
     },
-    [isStreaming, isMobile, streamingEnterDefault, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion]
+    [isStreaming, isMobile, streamingEnterDefault, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, queuedMessages, onSendQueueAsSteer, flushQueueAsSteer]
   );
 
   const handleInput = useCallback(() => {
@@ -1217,41 +1251,79 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               }}>
                 {t("input_queued", { count: (queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0) })}
               </span>
-              {onRecallQueue && (
-                 <button
-                   onClick={onRecallQueue}
-                   data-tooltip={t("input_recall")}
-                   className="instant-tooltip tooltip-up"
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    padding: "4px 12px",
-                    fontSize: 12,
-                    color: "var(--text)",
-                    background: "transparent",
-                    border: "1px solid var(--border)",
-                    borderRadius: 7,
-                    cursor: "pointer",
-                    transition: "background 0.12s, border-color 0.12s",
-                    whiteSpace: "nowrap",
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.background = "var(--bg-hover)";
-                    e.currentTarget.style.borderColor = "color-mix(in srgb, var(--accent) 45%, var(--border))";
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = "transparent";
-                    e.currentTarget.style.borderColor = "var(--border)";
-                  }}
-                >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="9 14 4 9 9 4" />
-                    <path d="M20 20v-7a4 4 0 0 0-4-4H4" />
-                  </svg>
-                  {t("input_recall")}
-                </button>
-              )}
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                {onSendQueueAsSteer && (
+                  <button
+                    type="button"
+                    onClick={flushQueueAsSteer}
+                    data-tooltip={t("input_sendQueueAsSteerTooltip")}
+                    className="instant-tooltip tooltip-up"
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      padding: "4px 12px",
+                      fontSize: 12,
+                      color: "var(--accent)",
+                      background: "transparent",
+                      border: "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))",
+                      borderRadius: 7,
+                      cursor: "pointer",
+                      transition: "background 0.12s, border-color 0.12s",
+                      whiteSpace: "nowrap",
+                      fontWeight: 600,
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = "color-mix(in srgb, var(--accent) 10%, transparent)";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = "transparent";
+                    }}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <line x1="22" y1="2" x2="11" y2="13" />
+                      <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                    </svg>
+                    {t("input_sendQueueAsSteer")}
+                  </button>
+                )}
+                {onRecallQueue && (
+                  <button
+                    type="button"
+                    onClick={onRecallQueue}
+                    data-tooltip={t("input_recall")}
+                    className="instant-tooltip tooltip-up"
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      padding: "4px 12px",
+                      fontSize: 12,
+                      color: "var(--text)",
+                      background: "transparent",
+                      border: "1px solid var(--border)",
+                      borderRadius: 7,
+                      cursor: "pointer",
+                      transition: "background 0.12s, border-color 0.12s",
+                      whiteSpace: "nowrap",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = "var(--bg-hover)";
+                      e.currentTarget.style.borderColor = "color-mix(in srgb, var(--accent) 45%, var(--border))";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = "transparent";
+                      e.currentTarget.style.borderColor = "var(--border)";
+                    }}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <polyline points="9 14 4 9 9 4" />
+                      <path d="M20 20v-7a4 4 0 0 0-4-4H4" />
+                    </svg>
+                    {t("input_recall")}
+                  </button>
+                )}
+              </div>
             </div>
             {queuedMessages?.steering.map((text, i) => (
               <QueuedMessageRow key={`steer-${i}`} kind="steer" text={text} />
@@ -1715,10 +1787,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               resize: "none",
               color: "var(--text)",
               fontSize: 14,
-              lineHeight: 1.6,
+              // 与两侧 32px 控件对齐；收紧行高 + 对称 padding，避免单行文字视觉偏下。
+              lineHeight: 1.45,
               fontFamily: "inherit",
-              minHeight: 24,
+              minHeight: 32,
               maxHeight: 200,
+              padding: "5px 0",
+              boxSizing: "border-box",
               overflow: "auto",
             }}
           />
@@ -1791,7 +1866,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
           {/* LEFT: model + thinking（思考紧贴模型；手机端常显） */}
           <div style={{ flex: "0 1 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 2, maxWidth: isMobile ? "100%" : undefined }}>
-            {/* Model selector — visible always, disabled during streaming */}
+            {/* Model selector — 运行中也可改，下次发送/引导/队列生效 */}
             {modelOptions.length > 0 && currentName && onModelChange && (
                 <div ref={dropdownRef} style={{ position: "relative", flex: "0 1 auto", minWidth: 0 }}>
                   <button
@@ -1810,7 +1885,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                         setAtMenuOpen(false);
                       }
                     }}
-                    disabled={isStreaming}
+                    title={isStreaming ? t("input_changeAppliesNextTurn") : undefined}
                     style={{
                       display: "flex", alignItems: "center", gap: isMobile ? 4 : 6,
                       justifyContent: "flex-start",
@@ -1824,15 +1899,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       border: "none",
                       borderRadius: 9,
                       color: "var(--text-muted)",
-                      cursor: isStreaming ? "not-allowed" : "pointer",
+                      cursor: "pointer",
                       fontSize: isMobile ? 11 : 12,
-                      opacity: isStreaming ? 0.5 : 1,
                       transition: "background 0.12s, color 0.12s",
                       flex: "0 1 auto",
                       minWidth: 0,
                     }}
                     onMouseEnter={(e) => {
-                      if (isStreaming) return;
                       e.currentTarget.style.background = "var(--bg-hover)";
                       e.currentTarget.style.color = "var(--text)";
                     }}
@@ -1944,12 +2017,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   )}
                 </div>
             )}
-            {/* Thinking — 紧贴模型旁，手机端也常显（不进 More 条） */}
-            {!isStreaming && onThinkingLevelChange && (
+            {/* Thinking — 紧贴模型旁，运行中也常显（下次发送生效） */}
+            {onThinkingLevelChange && (
               <div ref={thinkingDropdownRef} style={{ position: "relative", flexShrink: 0 }}>
                 <button
                   onClick={() => {
-                    if (isStreaming) return;
                     const opening = !thinkingDropdownOpen;
                     setThinkingDropdownOpen(opening);
                     if (opening) {
@@ -1959,9 +2031,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       setAtMenuOpen(false);
                     }
                   }}
-                  disabled={isStreaming}
-                  title={thinkingDisplayLabel}
-                  data-tooltip={thinkingDisplayLabel}
+                  title={isStreaming ? `${thinkingDisplayLabel} · ${t("input_changeAppliesNextTurn")}` : thinkingDisplayLabel}
+                  data-tooltip={isStreaming ? `${thinkingDisplayLabel} · ${t("input_changeAppliesNextTurn")}` : thinkingDisplayLabel}
                   className="instant-tooltip tooltip-up"
                   aria-label={t("input_thinkingTitle")}
                   aria-haspopup="menu"
@@ -1975,13 +2046,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     border: "none",
                     borderRadius: 9,
                     color: "var(--text-muted)",
-                    cursor: isStreaming ? "not-allowed" : "pointer",
+                    cursor: "pointer",
                     fontSize: 12,
-                    opacity: isStreaming ? 0.5 : 1,
                     transition: "background 0.12s, color 0.12s",
                   }}
                   onMouseEnter={(e) => {
-                    if (isStreaming) return;
                     e.currentTarget.style.background = "var(--bg-hover)";
                     e.currentTarget.style.color = "var(--text)";
                   }}

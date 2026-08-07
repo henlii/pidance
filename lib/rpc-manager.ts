@@ -1007,6 +1007,21 @@ export class AgentSessionWrapper {
         return this.inner.clearQueue();
       }
 
+      case "flush_queue_as_steer": {
+        // 将 steering + followUp 全部清空后按顺序重新 steer 入队，
+        // 使原 follow-up（等结束后发送）变为引导（当前轮工具结束后注入）。
+        // 可选 message：输入框内容并入队尾后再整队引导发送。
+        // 服务端原子完成，避免客户端 clear 后 requeue 的竞态窗口。
+        const cleared = this.inner.clearQueue();
+        const texts = [...cleared.steering, ...cleared.followUp];
+        const extra = typeof command.message === "string" ? command.message.trim() : "";
+        if (extra) texts.push(extra);
+        for (const text of texts) {
+          await this.inner.steer(text);
+        }
+        return { steering: texts, followUp: [] as string[] };
+      }
+
       case "steer": {
         const steerImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
         await this.inner.steer(command.message as string, steerImages?.length ? steerImages : undefined);

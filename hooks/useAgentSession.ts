@@ -40,7 +40,6 @@ import {
   getBottomZoneSize,
   getDistanceFromBottom,
   getScrollDirection,
-  isEntryStickActive,
   reduceAutoFollow,
   shouldShowJumpButton,
   type AutoFollowMode,
@@ -405,8 +404,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const lastScrollTopRef = useRef(0);
   const externalWriteUntilRef = useRef(0);
   const programmaticSmoothUntilRef = useRef(0);
-  const entryStickArmedAtRef = useRef<number | null>(null);
-  const entryLastGrowthAtRef = useRef(0);
   const runSettleUntilRef = useRef(0);
   const wasSessionBusyRef = useRef(false);
   const isMobileRef = useRef(false);
@@ -463,7 +460,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   /** 发送消息：无论此前是否 released，立即回到 following；pin 等 DOM 就绪后在 messages effect 执行。 */
   const notifyAutoFollowSend = useCallback(() => {
-    entryStickArmedAtRef.current = null;
     autoFollowModeRef.current = "following";
     pendingSendPinRef.current = true;
     setJumpButtonVisible(false);
@@ -474,9 +470,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * 恢复 following、隐藏 jump、标记 pendingReset 钉底，并重新 arm entry-stick 以覆盖异步重排。
    */
   const notifyAutoFollowBranchReset = useCallback(() => {
-    const now = Date.now();
-    entryStickArmedAtRef.current = now;
-    entryLastGrowthAtRef.current = now;
     autoFollowModeRef.current = "following";
     pendingResetPinRef.current = true;
     setJumpButtonVisible(false);
@@ -725,6 +718,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           messages: AgentMessage[];
           entryIds: string[];
           hasMoreBefore?: boolean;
+          totalMessageCount?: number;
         };
       };
       if (sessionIdRef.current !== sid) return false;
@@ -750,7 +744,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }).messages);
       entryIdsRef.current = nextEntryIds;
       setEntryIds(nextEntryIds);
-      const more = d.context.hasMoreBefore === true;
+      const more = d.context.hasMoreBefore === true
+        || (typeof d.context.totalMessageCount === "number"
+          && d.context.totalMessageCount > nextEntryIds.length);
       hasMoreBeforeRef.current = more;
       setHasMoreBefore(more);
       return true;
@@ -1832,6 +1828,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [opts.chatInputRef, isReadOnly, addNotice]);
 
+  /** 将队列中全部消息（含 follow-up）按引导方式重新入队；可选 extraMessage 并入队尾。 */
+  const handleSendQueueAsSteer = useCallback(async (extraMessage?: string) => {
+    if (isReadOnly) return;
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    try {
+      const trimmed = typeof extraMessage === "string" ? extraMessage.trim() : "";
+      const result = await sendAgentCommand<{ steering?: string[]; followUp?: string[] }>(sid, {
+        type: "flush_queue_as_steer",
+        ...(trimmed ? { message: trimmed } : {}),
+      });
+      // SSE 会推 queue_update；本地先同步，避免按钮连点。
+      setQueuedMessages({
+        steering: [...(result?.steering ?? [])],
+        followUp: [...(result?.followUp ?? [])],
+      });
+    } catch (e) {
+      console.error("Failed to send queue as steer:", e);
+      addNotice({ type: "error", message: "Failed to send queued messages as steer" });
+    }
+  }, [isReadOnly, addNotice]);
+
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     // 只读会话：set_thinking_level 会写会话状态，拦截。
     if (isReadOnly) return;
@@ -2047,17 +2065,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => container.removeEventListener("scroll", onScroll);
   }, [scrollContainerEl, applyAutoFollowMode, updateJumpButtonVisibility]);
 
-  // agent/bash 结束后的 settle 窗口：覆盖高亮、图片等滞后重排。
+  // agent/bash 结束后的 settle 窗口 + 双 rAF 补钉：
+  // 结束瞬间 process group 从「扁平流式」切到折叠结构、streaming 槽卸除，高度会突变；
+  // 若只 pin 一次且过早，视口会停在中间，表现为「滚动条向上跳很长」。
   useEffect(() => {
     const busy = agentRunning || bashRunning;
     if (wasSessionBusyRef.current && !busy) {
       runSettleUntilRef.current = Date.now() + RUN_SETTLE_MS;
+      if (autoFollowModeRef.current === "following") {
+        requestAnimationFrame(() => {
+          pinToBottom("instant");
+          requestAnimationFrame(() => {
+            if (autoFollowModeRef.current === "following") pinToBottom("instant");
+          });
+        });
+      }
     }
     wasSessionBusyRef.current = busy;
-  }, [agentRunning, bashRunning]);
+  }, [agentRunning, bashRunning, pinToBottom]);
 
-  // 内容尺寸监听：仅 following 且（运行中 / settle 窗口 / entry-stick）时 instant 钉底。
-  // ResizeObserver 回调在 paint 前触发，钉底不产生可见跳动；released 时只更新按钮。
+  // 内容尺寸监听：following 时布局变化即 instant 钉底（与 chat-auto-follow 注释一致）。
+  // 不再仅限 busy/settle/entry——agent 结束后的滞后重排也要补钉；released 时只更新按钮。
+  // ResizeObserver 回调在 paint 前触发，钉底不产生可见跳动。
   // 依赖 scrollContainerEl，不因 messages.length 断开重绑。
   useEffect(() => {
     const container = scrollContainerEl;
@@ -2065,7 +2094,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const content = container.firstElementChild;
     const onResize = () => {
       const now = Date.now();
-      if (entryStickArmedAtRef.current !== null) entryLastGrowthAtRef.current = now;
       if (autoFollowModeRef.current !== "following") {
         updateJumpButtonVisibility();
         return;
@@ -2076,10 +2104,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         updateJumpButtonVisibility();
         return;
       }
-      const busy = agentRunningRef.current || bashRunningRef.current;
-      const settling = now < runSettleUntilRef.current;
-      const entryActive = isEntryStickActive(now, entryStickArmedAtRef.current, entryLastGrowthAtRef.current);
-      if (busy || settling || entryActive) pinToBottom("instant");
+      pinToBottom("instant");
       updateJumpButtonVisibility();
     };
     const observer = new ResizeObserver(onResize);
@@ -2088,8 +2113,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => observer.disconnect();
   }, [scrollContainerEl, pinToBottom, updateJumpButtonVisibility]);
 
-  // DOM 就绪后的 instant pin：发送消息 / 分支重置（pending*）与初次打开会话
-  // （following + entry-stick）。following 期间的后续增长全部由 ResizeObserver 负责。
+  // DOM 就绪后的 instant pin：发送消息 / 分支重置 / end-pin / 初次打开。
+  // following 期间后续增长由 ResizeObserver 负责。
   // 依赖 messages（非仅 length）：分支切换条数不变时仍能消费 pendingResetPinRef。
   useEffect(() => {
     if (messages.length === 0) return;
@@ -2103,9 +2128,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (autoFollowModeRef.current === "following") pinToBottom("instant");
     } else if (!initialScrollDoneRef.current) {
       initialScrollDoneRef.current = true;
-      const now = Date.now();
-      entryStickArmedAtRef.current = now;
-      entryLastGrowthAtRef.current = now;
       pinToBottom("instant");
     }
     updateJumpButtonVisibility();
@@ -2174,7 +2196,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     loadOlderHistory,
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
-    handleRecallQueue,
+    handleRecallQueue, handleSendQueueAsSteer,
     handleBuiltinSlashCommand,
     // REFACTOR-DEAD: handleToolPresetChange 已注释（P0c 工具不收窄）。
     handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,

@@ -25,8 +25,8 @@ export const REAL_BOTTOM_TOLERANCE_PX = 1;
 export const ENTRY_STICK_QUIET_MS = 600;
 /** entry-stick 硬上限：再慢的资源也不无限钉底。 */
 export const ENTRY_STICK_MAX_MS = 8_000;
-/** agent/bash 结束后仍允许钉底的收尾窗口（覆盖高亮、图片等滞后重排）。 */
-export const RUN_SETTLE_MS = 300;
+/** agent/bash 结束后仍允许钉底的收尾窗口（覆盖 process group 重排、流式槽卸除、高亮/图片等滞后布局）。 */
+export const RUN_SETTLE_MS = 1_500;
 /** 平滑程序化滚动（扩展卡片、回到底部）期间，scroll 事件不参与状态判定。 */
 export const PROGRAMMATIC_SMOOTH_IGNORE_MS = 700;
 /** 内容高度超出视口这么多才算「可滚动」，小于此不显示回到底部按钮。 */

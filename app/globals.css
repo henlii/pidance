@@ -1468,10 +1468,23 @@ span.linenumber {
   position: relative;
   display: flex;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
+  align-self: stretch;
   flex-direction: column;
   flex-shrink: 0;
   border-left: 1px solid var(--border);
   background: var(--bg-panel);
+  overflow: hidden;
+}
+/* AppShell 外层壳 + ChangesPanel 内层同 class 时：内层吃满高度，避免内容区只剩标题一行。 */
+.changes-panel > .changes-panel {
+  flex: 1 1 auto;
+  width: 100% !important;
+  min-width: 0 !important;
+  height: 100%;
+  min-height: 0;
+  border-left: none;
 }
 .changes-panel-content {
   display: grid;
@@ -1692,9 +1705,23 @@ span.linenumber {
   .app-top-bar {
     height: 44px;
   }
-  .app-top-bar > button {
+  /* 仅图标按钮固定 44×44；用量统计按钮需容纳文字，不能套同一宽度。 */
+  .app-top-bar > button:not(.app-top-bar-stats) {
     width: 44px !important;
     height: 44px !important;
+  }
+  .app-top-bar-stats {
+    min-width: 0;
+    max-width: min(48vw, 168px);
+    height: 44px !important;
+    padding: 0 8px !important;
+    gap: 4px !important;
+    overflow: hidden;
+  }
+  .app-top-bar-stats > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .workspace-header {
     height: 44px;

@@ -6,6 +6,7 @@ import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
 import { PluginsConfig } from "./PluginsConfig";
 import { AgentDefaultsConfig } from "./AgentDefaultsConfig";
+import { logoutUiSession } from "./UiLoginGate";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n, type Locale } from "@/lib/i18n";
@@ -37,6 +38,8 @@ interface SettingsViewProps {
 /** 设置页 id → 本地化标签 key：nav 按钮、对话框标题与 section aria-label 共用同一映射。 */
 function settingsPageLabelKey(id: SettingsPageId) {
   switch (id) {
+    case "general":
+      return "common_general";
     case "appearance":
       return "common_appearance";
     case "models":
@@ -118,6 +121,107 @@ function SegmentedChoice<T extends string>({
             </button>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+/** 设置 → 通用：UI 会话登录管理（服务器密码门禁）。 */
+function GeneralPage() {
+  const { t } = useI18n();
+  const [status, setStatus] = useState<{
+    passwordRequired: boolean;
+    authenticated: boolean;
+  } | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/auth/ui-session", {
+          method: "GET",
+          credentials: "same-origin",
+          cache: "no-store",
+        });
+        const data = (await res.json().catch(() => ({}))) as {
+          authenticated?: boolean;
+          passwordRequired?: boolean;
+        };
+        if (cancelled) return;
+        setStatus({
+          passwordRequired: Boolean(data.passwordRequired),
+          authenticated: Boolean(data.authenticated),
+        });
+        setFailed(false);
+      } catch {
+        if (!cancelled) {
+          setFailed(true);
+          setStatus(null);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const sectionTitle: React.CSSProperties = {
+    fontSize: 12,
+    fontWeight: 600,
+    color: "var(--text)",
+    marginBottom: 8,
+  };
+
+  let statusLabel = t("common_loading");
+  if (failed) statusLabel = t("general_loginCheckFailed");
+  else if (status) {
+    if (!status.passwordRequired) statusLabel = t("general_loginNotRequired");
+    else if (status.authenticated) statusLabel = t("general_loginAuthenticated");
+    else statusLabel = t("general_loginNotAuthenticated");
+  }
+
+  const canLogout = Boolean(status?.passwordRequired && status.authenticated);
+
+  return (
+    <div className="settings-page-content">
+      <div style={{ marginBottom: 22 }}>
+        <div style={sectionTitle}>{t("general_loginSection")}</div>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 12, maxWidth: 480 }}>
+          {t("general_loginHint")}
+        </div>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>{t("general_loginStatus")}</div>
+        <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 14, lineHeight: 1.5 }}>{statusLabel}</div>
+        {canLogout && (
+          <>
+            <button
+              type="button"
+              disabled={loggingOut}
+              onClick={() => {
+                setLoggingOut(true);
+                void logoutUiSession();
+              }}
+              style={{
+                minHeight: 32,
+                padding: "0 14px",
+                borderRadius: 7,
+                border: "1px solid var(--border)",
+                background: "var(--bg-panel)",
+                color: "var(--text)",
+                cursor: loggingOut ? "not-allowed" : "pointer",
+                fontSize: 12,
+                fontWeight: 600,
+                opacity: loggingOut ? 0.65 : 1,
+              }}
+            >
+              {t("auth_logout")}
+            </button>
+            <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-dim)", maxWidth: 420, lineHeight: 1.45 }}>
+              {t("general_logoutHint")}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -340,6 +444,8 @@ export function SettingsView({ cwd, sessionId, onClose, onModelsChanged, onAuthS
       return <NeedsProjectHint hint={activePageInfo.unavailableHint!} />;
     }
     switch (activePageInfo.id) {
+      case "general":
+        return <GeneralPage />;
       case "appearance":
         return <AppearancePage />;
       case "models":

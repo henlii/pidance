@@ -37,6 +37,7 @@ import {
   CHANGES_PANEL_WIDTH_DEFAULT,
   CHANGES_PANEL_WIDTH_MAX,
   CHANGES_PANEL_WIDTH_MIN,
+  CHANGES_PANEL_WIDTH_OPEN_MIN,
   RIGHT_PANEL_WIDTH_DEFAULT,
   SIDEBAR_WIDTH_DEFAULT,
   SIDEBAR_WIDTH_MAX,
@@ -50,7 +51,6 @@ import {
   saveSidebarWidth,
 } from "@/lib/ui-preferences";
 import { useI18n } from "@/lib/i18n";
-import { logoutUiSession } from "@/components/UiLoginGate";
 import { hydrateSessionById } from "@/lib/session-hydrate";
 import {
   createNewSessionIntent,
@@ -760,6 +760,12 @@ function AppShellInner() {
     setActiveFileTabId(tabId);
     setSecondaryPanelMode(mode);
     applyChangesPanelOpen(true);
+    // 打开文件时抬升编辑区宽度，避免默认过窄只剩「一小条」。
+    setChangesPanelWidth((prev) => {
+      const next = clampChangesPanelWidth(Math.max(prev, CHANGES_PANEL_WIDTH_OPEN_MIN));
+      if (next !== prev) saveChangesPanelPreferences({ width: next });
+      return next;
+    });
     // 文件详情属于二级右栏；一级右栏保持导航，聊天主区始终可见。
     // 移动端右栏为全屏 overlay 抽屉：关闭会话侧栏避免三层覆盖。
     if (isMobile) {
@@ -913,7 +919,7 @@ function AppShellInner() {
         onSessionDeleted={handleSessionDeleted}
         optimisticSessions={optimisticPendingSessions}
       />
-      {/* 底部 Settings / About：同规格图标按钮（24×24），不显示永久文字标签 */}
+      {/* 底部 Settings / About：同规格图标按钮（24×24），不显示永久文字标签。登录管理在 设置 → 通用。 */}
       <div style={{ padding: "6px 8px", flexShrink: 0, display: "flex", alignItems: "center", gap: 4 }}>
         <button
           type="button"
@@ -938,20 +944,6 @@ function AppShellInner() {
             <circle cx="12" cy="12" r="10" />
             <path d="M12 16v-4" />
             <path d="M12 8h.01" />
-          </svg>
-        </button>
-        <button
-          type="button"
-          onClick={() => { void logoutUiSession(); }}
-          data-tooltip={t("auth_logout")}
-          aria-label={t("auth_logout")}
-          className="sidebar-icon-btn tooltip-up"
-          style={{ marginLeft: "auto" }}
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-            <polyline points="16 17 21 12 16 7" />
-            <line x1="21" y1="12" x2="9" y2="12" />
           </svg>
         </button>
       </div>
@@ -1109,7 +1101,10 @@ function AppShellInner() {
               const pct = contextUsage.percent;
               if (pct !== null && pct > 90) ctxColor = "var(--status-danger)";
               else if (pct !== null && pct > 70) ctxColor = "var(--status-warning)";
-              ctxStr = pct !== null ? `${pct.toFixed(0)}% / ${fmt(contextUsage.contextWindow)}` : `? / ${fmt(contextUsage.contextWindow)}`;
+              // 手机顶栏空间紧：只显示百分比；完整「pct / window」放 tooltip。
+              ctxStr = pct !== null
+                ? (isMobile ? `${pct.toFixed(0)}%` : `${pct.toFixed(0)}% / ${fmt(contextUsage.contextWindow)}`)
+                : (isMobile ? "?" : `? / ${fmt(contextUsage.contextWindow)}`);
             }
 
             const tooltipParts: string[] = [];
@@ -1133,19 +1128,22 @@ function AppShellInner() {
                 onClick={openSessionInfoTab}
                 title={tooltip || t("app_sessionInfo")}
                 data-tooltip={tooltip || t("app_sessionInfo")}
-                className="instant-tooltip"
+                className="instant-tooltip app-top-bar-stats"
                 aria-label={t("app_sessionInfo")}
                 aria-pressed={infoTabActive}
                 style={{
                   marginLeft: "auto",
-                  display: "flex", alignItems: "center", gap: 10,
-                  paddingLeft: 12,
-                  paddingRight: 12,
+                  display: "flex", alignItems: "center", gap: isMobile ? 4 : 10,
+                  paddingLeft: isMobile ? 8 : 12,
+                  paddingRight: isMobile ? 8 : 12,
                   height: "100%",
+                  minWidth: 0,
+                  maxWidth: isMobile ? "48vw" : undefined,
+                  overflow: "hidden",
                   background: infoTabActive ? "var(--bg-selected)" : "none",
                   border: "none",
                   borderTop: infoTabActive ? "2px solid var(--accent)" : "2px solid transparent",
-                  fontSize: 11, color: "var(--text-muted)",
+                  fontSize: isMobile ? 12 : 11, color: "var(--text-muted)",
                   whiteSpace: "nowrap", cursor: "pointer",
                   fontVariantNumeric: "tabular-nums",
                   transition: "color 0.1s, background 0.1s",
@@ -1282,7 +1280,7 @@ function AppShellInner() {
       </div>
 
       {changesPanelOpen && (
-        <aside className="changes-panel" style={{ width: changesPanelWidth }} aria-label={t("changes_title")}>
+        <aside className="changes-panel" style={{ width: changesPanelWidth, height: "100%", minHeight: 0, display: "flex", flexDirection: "column" }} aria-label={t("changes_title")}>
           <div
             className={`changes-panel-resize-handle${changesPanelDragging ? " dragging" : ""}`}
             role="separator"
@@ -1300,7 +1298,7 @@ function AppShellInner() {
             onKeyDown={handleChangesPanelResizeKeyDown}
             onDoubleClick={() => applyChangesPanelWidth(CHANGES_PANEL_WIDTH_DEFAULT)}
           />
-          <ChangesPanel open={changesPanelOpen} width={changesPanelWidth} onWidthChange={applyChangesPanelWidth} cwd={activeCwd} isMobile={isMobile} mobileReady={mobileWorkspaceReady} tabs={fileTabs} activeTabId={activeFileTabId ?? ""} onSelectTab={(tabId) => { setPendingCloseTabId(null); setActiveFileTabId(tabId); }} onCloseTab={handleCloseFileTab} onCloseAllTabs={handleCloseAllFileTabs} pendingCloseTabLabel={pendingCloseTabId ? fileTabs.find((tab) => tab.id === pendingCloseTabId)?.label ?? null : null} onSaveAndClose={() => void handleSaveAndClose()} onDiscardAndClose={handleDiscardAndClose} onCancelClose={() => setPendingCloseTabId(null)} activeMode={secondaryPanelMode} gitAffectedPaths={gitAffectedPaths} fileViewerContent={activeFileTab?.filePath ? <div style={{ height: "100%", overflow: "hidden" }}><FileViewer filePath={activeFileTab.filePath} cwd={activeCwd ?? undefined} sourceSessionId={activeFileTab.sourceSessionId} writable={activeFileTab.writable === true} buffer={activeFileTab.bufferKey ? getBuffer(fileEditorState, activeFileTab.bufferKey) : undefined} dispatchBuffer={dispatchFileEditorAction} onSave={activeFileTab.bufferKey ? () => saveFileBuffer(activeFileTab.bufferKey!) : undefined} gitAffectedPaths={gitAffectedPaths} onOpenFile={(filePath) => handleOpenFile(filePath, getFileName(filePath), activeFileTab.sourceSessionId, activeFileTab.writable === true)} /></div> : null} />
+          <ChangesPanel open={changesPanelOpen} width={changesPanelWidth} onWidthChange={applyChangesPanelWidth} cwd={activeCwd} isMobile={isMobile} mobileReady={mobileWorkspaceReady} tabs={fileTabs} activeTabId={activeFileTabId ?? ""} onSelectTab={(tabId) => { setPendingCloseTabId(null); setActiveFileTabId(tabId); }} onCloseTab={handleCloseFileTab} onCloseAllTabs={handleCloseAllFileTabs} pendingCloseTabLabel={pendingCloseTabId ? fileTabs.find((tab) => tab.id === pendingCloseTabId)?.label ?? null : null} onSaveAndClose={() => void handleSaveAndClose()} onDiscardAndClose={handleDiscardAndClose} onCancelClose={() => setPendingCloseTabId(null)} activeMode={secondaryPanelMode} gitAffectedPaths={gitAffectedPaths} fileViewerContent={activeFileTab?.filePath ? <div style={{ flex: "1 1 auto", minHeight: 0, height: "100%", overflow: "hidden", display: "flex", flexDirection: "column" }}><FileViewer filePath={activeFileTab.filePath} cwd={activeCwd ?? undefined} sourceSessionId={activeFileTab.sourceSessionId} writable={activeFileTab.writable === true} buffer={activeFileTab.bufferKey ? getBuffer(fileEditorState, activeFileTab.bufferKey) : undefined} dispatchBuffer={dispatchFileEditorAction} onSave={activeFileTab.bufferKey ? () => saveFileBuffer(activeFileTab.bufferKey!) : undefined} gitAffectedPaths={gitAffectedPaths} onOpenFile={(filePath) => handleOpenFile(filePath, getFileName(filePath), activeFileTab.sourceSessionId, activeFileTab.writable === true)} /></div> : null} />
         </aside>
       )}
 

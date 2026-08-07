@@ -96,7 +96,8 @@ const RunningTimeContext = createContext<{ startedAt: ReadonlyMap<string, number
 // 统一侧栏树几何：指示器固定在 gutter，每深入一层只增加一个 14px 步进；
 // 行内容从 BASE_LEFT 开始。叶子行仍渲染透明指示器槽，避免内容横向跳动。
 const SIDEBAR_GUTTER = 6;
-const SIDEBAR_INDICATOR_SLOT = 16;
+/** 图标列槽位：需容纳运行中圆环（约 18px）与折叠箭头。 */
+const SIDEBAR_INDICATOR_SLOT = 20;
 const SIDEBAR_INDICATOR_GAP = 6;
 const SIDEBAR_DEPTH_STEP = 14;
 // 文字起点 = gutter + 指示器槽位 + 间距（图标/chevron 与文字相邻，同 openchamber）。
@@ -1287,30 +1288,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             >
               <SearchIcon size={18} />
             </SidebarIconButton>
-            <div style={{ position: "relative", display: "flex" }}>
-              <SidebarIconButton
-                label={t("sidebar_archive")}
-                active={archiveViewOpen}
-                expanded={archiveViewOpen}
-                onClick={toggleArchiveView}
-              >
-                <ArchiveIcon size={18} />
-              </SidebarIconButton>
-              {archivedCount > 0 && (
-                <span
-                  title={t("archive_viewCount", { count: archivedCount })}
-                  style={{
-                    position: "absolute", top: -3, right: -3, zIndex: 1,
-                    minWidth: 15, height: 15, padding: "0 4px", boxSizing: "border-box",
-                    borderRadius: 999, background: "var(--accent)", color: "#fff",
-                    fontSize: 9, fontWeight: 700, lineHeight: "15px", textAlign: "center",
-                    pointerEvents: "none",
-                  }}
-                >
-                  {archivedCount > 99 ? "99+" : archivedCount}
-                </span>
-              )}
-            </div>
+            <SidebarIconButton
+              label={t("sidebar_archive")}
+              active={archiveViewOpen}
+              expanded={archiveViewOpen}
+              onClick={toggleArchiveView}
+            >
+              <ArchiveIcon size={18} />
+            </SidebarIconButton>
             <div ref={displayMenuRef} style={{ position: "relative" }}>
               <SidebarIconButton
                 label={t("sidebar_displayOptions")}
@@ -2154,7 +2139,7 @@ function ProjectSection({
         </span>
         {projectHasRunning && (
           <span aria-hidden="true" style={{ position: "absolute", left: sidebarIndicatorLeft(0), top: "50%", display: "flex", width: SIDEBAR_INDICATOR_SLOT, height: 20, alignItems: "center", justifyContent: "center", transform: "translateY(-50%)", pointerEvents: "none" }}>
-            <RunningSessionIndicator size={14} />
+            <RunningSessionIndicator size={18} />
           </span>
         )}
         <PathLabel
@@ -2466,7 +2451,7 @@ function WorktreeGroupSection({
         </span>
         {groupHasRunning && (
           <span aria-hidden="true" style={{ position: "absolute", left: sidebarIndicatorLeft(0), top: "50%", display: "flex", width: SIDEBAR_INDICATOR_SLOT, height: 20, alignItems: "center", justifyContent: "center", transform: "translateY(-50%)", pointerEvents: "none" }}>
-            <RunningSessionIndicator size={14} />
+            <RunningSessionIndicator size={18} />
           </span>
         )}
         <PathLabel
@@ -2914,7 +2899,7 @@ function SessionItem({
           {/* 运行中：圆环套在图标列（与折叠/项目图标同槽位，居中，旋转动画）。 */}
           {isRunning && (
             <span aria-hidden="true" style={{ position: "absolute", left: sidebarIndicatorLeft(depth), top: "50%", display: "flex", width: SIDEBAR_INDICATOR_SLOT, height: 20, alignItems: "center", justifyContent: "center", transform: "translateY(-50%)", pointerEvents: "none" }}>
-              <RunningSessionIndicator size={14} />
+              <RunningSessionIndicator size={18} />
             </span>
           )}
           <div style={{ flex: 1, minWidth: 0 }}>
