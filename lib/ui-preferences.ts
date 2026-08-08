@@ -113,6 +113,8 @@ export interface SidebarPreferences {
   projectAliases: ProjectAliases;
   /** 已关闭项目根路径：仅从侧栏隐藏，不删除任何目录/会话/Git 数据。 */
   closedProjectRoots: string[];
+  /** 用户主动添加的项目根路径：无会话也持续显示（空项目可新建会话）。 */
+  addedProjectRoots: string[];
   /** 桌面侧栏宽度（px）；损坏/越界值解析时 clamp。 */
   sidebarWidth: number;
   /** 右侧内容面板开/关；图标栏不受此偏好影响并始终常驻。 */
@@ -128,13 +130,13 @@ export interface SidebarPreferences {
   /** 文件树按 cwd 记忆的展开路径与滚动位置。 */
   fileExplorerState: FileExplorerState;
 }
-
 export const DEFAULT_SIDEBAR_PREFERENCES: SidebarPreferences = {
   displayMode: "standard",
   collapsedProjectRoots: [],
   collapsedWorktreePaths: [],
   projectAliases: {},
   closedProjectRoots: [],
+  addedProjectRoots: [],
   sidebarWidth: SIDEBAR_WIDTH_DEFAULT,
   rightPanelOpen: false,
   rightPanelWidth: RIGHT_PANEL_WIDTH_DEFAULT,
@@ -199,6 +201,8 @@ export function parseSidebarPreferences(raw: unknown): SidebarPreferences {
     collapsedWorktreePaths: parsePathList(record.collapsedWorktreePaths),
     projectAliases: parseProjectAliases(record.projectAliases),
     closedProjectRoots: parsePathList(record.closedProjectRoots),
+    // 用户主动添加的项目：旧数据无该字段 → 空列表。
+    addedProjectRoots: parsePathList(record.addedProjectRoots),
     // 旧数据缺字段时 clamp 非数字 → 默认 300；越界/损坏一律钳入 [min, max]。
     sidebarWidth: clampSidebarWidth(record.sidebarWidth),
     // 旧数据无右栏字段：右栏默认关闭、宽度默认。
@@ -220,6 +224,7 @@ export function serializeSidebarPreferences(prefs: SidebarPreferences): string {
     collapsedWorktreePaths: prefs.collapsedWorktreePaths,
     projectAliases: prefs.projectAliases,
     closedProjectRoots: prefs.closedProjectRoots,
+    addedProjectRoots: prefs.addedProjectRoots,
     sidebarWidth: clampSidebarWidth(prefs.sidebarWidth),
     rightPanelOpen: parseRightPanelOpen(prefs.rightPanelOpen),
     rightPanelWidth: clampRightPanelWidth(prefs.rightPanelWidth),

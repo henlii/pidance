@@ -57,6 +57,8 @@ export interface BuildSidebarTreeOptions {
   knownWorktrees?: KnownWorktree[];
   /** 全部已知项目的 worktree 快照；用于补齐未选中项目的空 worktree 分组。 */
   knownWorktreesByProject?: Readonly<Record<string, readonly KnownWorktree[]>>;
+  /** 用户主动添加的项目根（持久化）：无会话也持续显示为空项目行。 */
+  addedProjectRoots?: readonly string[];
 }
 
 interface SessionBucket {
@@ -129,6 +131,18 @@ export function buildSidebarTree(
       if (!bucket.worktrees.has(worktree.path)) {
         bucket.worktrees.set(worktree.path, { sessions: [], branch: worktree.branch });
       }
+    }
+  }
+
+  // 选中的空项目（无会话、无 worktree，刚通过「添加项目」加入）：创建空桶，
+  // 让项目行可见并可开始新会话（渲染层已支持空态占位）。
+  if (selectedRoot && !projectBuckets.has(selectedRoot)) {
+    projectBuckets.set(selectedRoot, { main: [], worktrees: new Map() });
+  }
+  // 用户主动添加的项目：即使无会话、未被选中也持续显示（项目独立于会话存在）。
+  for (const root of options.addedProjectRoots ?? []) {
+    if (!projectBuckets.has(root)) {
+      projectBuckets.set(root, { main: [], worktrees: new Map() });
     }
   }
 

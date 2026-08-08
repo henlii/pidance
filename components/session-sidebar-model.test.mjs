@@ -151,6 +151,27 @@ test("无会话的 selectedCwd 也必须显示为可用项目项（置顶）", a
   assert.equal(tree[0].latestActivity, "");
 });
 
+test("addedProjectRoots：无会话且未被选中的项目也持续显示（项目独立于会话）", async () => {
+  const { buildSidebarTree } = await jiti.import("./session-sidebar-model.ts");
+  const existing = session("a", { cwd: "/repo-a", projectRoot: "/repo-a" });
+  const tree = buildSidebarTree([existing], {
+    selectedCwd: "/repo-a",
+    selectedProjectRoot: "/repo-a",
+    addedProjectRoots: ["/empty-project", "/repo-a"],
+  });
+  // 两个项目都显示：有会话的 /repo-a + 空项目 /empty-project
+  assert.equal(tree.length, 2);
+  const empty = tree.find((p) => p.root === "/empty-project");
+  assert.ok(empty, "添加过的空项目必须显示");
+  assert.equal(empty.mainTree.length, 0);
+  assert.equal(empty.worktrees.length, 0);
+  assert.equal(empty.latestActivity, "");
+  // 与 selectedCwd 无关：切走选中后空项目仍在
+  const other = buildSidebarTree([existing], { addedProjectRoots: ["/empty-project"] });
+  assert.equal(other.length, 2);
+  assert.ok(other.find((p) => p.root === "/empty-project"));
+});
+
 test("selectedCwd 属于已有项目的空 worktree：knownWorktrees 补齐空分组", async () => {
   const { buildSidebarTree } = await jiti.import("./session-sidebar-model.ts");
   const main = session("m", { cwd: "/repo", projectRoot: "/repo" });

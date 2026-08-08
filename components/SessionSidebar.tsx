@@ -661,6 +661,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       const resolvedCwd = data.cwd ?? path;
       // 重复添加：已打开项目仅切换选中；已关闭项目移除关闭标记后恢复。
       const root = projectRootFor(resolvedCwd) ?? resolvedCwd;
+      // 持久化「主动添加的项目」：即使无会话也持续显示（项目独立于会话）。
+      updatePrefs((prev) =>
+        prev.addedProjectRoots.includes(root)
+          ? prev
+          : { ...prev, addedProjectRoots: [...prev.addedProjectRoots, root] },
+      );
       restoreClosedProject(root);
       selectCwd(resolvedCwd, root);
       closeCustomPathPanel();
@@ -975,8 +981,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     [worktreeSnapshots],
   );
   const sidebarTree = useMemo(
-    () => buildSidebarTree(allSessions, { selectedCwd, selectedProjectRoot: selectedProject, knownWorktreesByProject }),
-    [allSessions, selectedCwd, selectedProject, knownWorktreesByProject],
+    () => buildSidebarTree(allSessions, { selectedCwd, selectedProjectRoot: selectedProject, knownWorktreesByProject, addedProjectRoots: prefs.addedProjectRoots }),
+    [allSessions, selectedCwd, selectedProject, knownWorktreesByProject, prefs.addedProjectRoots],
   );
   // 会话 id → 树节点映射（含 children）：最近区行用与项目树相同的
   // SessionTreeItem 渲染，折叠/展开行为完全一致（共享 collapsedSessionIds）。
