@@ -1,9 +1,3 @@
-import {
-  SessionManager,
-  buildContextEntries as piBuildContextEntries,
-  buildSessionContext as piBuildSessionContext,
-  getAgentDir,
-} from "@earendil-works/pi-coding-agent";
 import { closeSync, openSync, readSync, statSync } from "fs";
 import { normalize as normalizePath } from "path";
 import type { AgentMessage, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
@@ -17,7 +11,6 @@ import {
   type SessionCacheRecord,
   type DiscoveryCacheRecord,
 } from "./session-metadata-cache";
-import type { SessionEntry as PiSessionEntry } from "@earendil-works/pi-coding-agent";
 import { normalizeToolCalls } from "./normalize";
 import {
   PIDANCE_ACTIVITY_CUSTOM_TYPE,
@@ -28,8 +21,19 @@ import { projectObservationalMemory, type ObservationalMemoryView } from "./om-l
 import { projectWorkspaceHistory, type WorkspaceHistoryView } from "./workspace-history";
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { discoverSubagentSessions } from "./subagent-sessions";
+import { getAgentDir } from "./pi-paths";
+import { openSessionFile } from "./session-file";
 
 export { getAgentDir };
+
+/** 本地 entry 形状（不再依赖 pi-coding-agent 类型） */
+type PiSessionEntry = {
+  id: string;
+  type: string;
+  parentId?: string | null;
+  message?: unknown;
+  [key: string]: unknown;
+};
 
 export function markExistingSubagentRelation(
   session: SessionInfo,
@@ -399,7 +403,7 @@ export function readSessionHeader(filePath: string): SessionHeader | null {
 }
 
 export function getSessionEntries(filePath: string): SessionEntry[] {
-  const entries = SessionManager.open(filePath).getEntries();
+  const entries = openSessionFile(filePath).getEntries();
   return entries as unknown as SessionEntry[];
 }
 
@@ -425,9 +429,9 @@ export type LiveSessionReadSource = {
 };
 
 /**
- * 选择 sessions GET 的权威 SessionManager：
- * - 有存活的 live RPC wrapper 时用其 inner.sessionManager（含 navigateTree 后的内存 leaf）
- * - 否则 SessionManager.open(filePath)
+ * 选择 sessions GET 的权威读视图：
+ * - 有存活 live 且含 inner.sessionManager 时用 live（inprocess 遗留）
+ * - 否则 openSessionFile（自有 JSONL，不依赖 pi npm）
  * 不 start 新会话、不 mutate live 状态。
  */
 export function resolveSessionManagerForRead(options: {
@@ -436,11 +440,50 @@ export function resolveSessionManagerForRead(options: {
   openFromDisk?: (filePath: string) => SessionManagerReadView;
 }): SessionManagerReadView {
   const live = options.liveSession;
-  if (live?.isAlive()) {
+  if (live?.isAlive() && live.inner?.sessionManager) {
     return live.inner.sessionManager;
   }
-  const open = options.openFromDisk ?? ((path: string) => SessionManager.open(path) as unknown as SessionManagerReadView);
+  const open =
+    options.openFromDisk ??
+    ((path: string) => {
+      const sm = openSessionFile(path);
+      // SessionFile 无 getTree：用 entries 拼浅树
+      return {
+        getEntries: () => sm.getEntries(),
+        getLeafId: () => sm.getLeafId(),
+        getTree: () => buildShallowTreeFromEntries(sm.getEntries()),
+        getHeader: () => sm.getHeader(),
+        getSessionName: () => sm.getSessionName(),
+      } as SessionManagerReadView;
+    });
   return open(options.filePath);
+}
+
+/** 从扁平 entries 建浅树（parentId 链），供导航投影 */
+function buildShallowTreeFromEntries(
+  entries: Array<{ id: string; type: string; parentId?: string | null; [k: string]: unknown }>,
+): Array<{ entry: { id: string; type: string }; children: unknown[]; label?: string }> {
+  const byId = new Map<string, { entry: { id: string; type: string }; children: unknown[]; label?: string }>();
+  const roots: Array<{ entry: { id: string; type: string }; children: unknown[]; label?: string }> = [];
+  for (const e of entries) {
+    if (!e?.id) continue;
+    byId.set(e.id, { entry: { id: e.id, type: e.type }, children: [] });
+  }
+  for (const e of entries) {
+    if (!e?.id) continue;
+    const node = byId.get(e.id)!;
+    if (e.type === "label" && typeof e.label === "string" && typeof e.targetId === "string") {
+      const target = byId.get(e.targetId as string);
+      if (target) target.label = e.label as string;
+    }
+    const parentId = e.parentId;
+    if (parentId && byId.has(parentId)) {
+      byId.get(parentId)!.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+  return roots;
 }
 
 /**
@@ -639,41 +682,113 @@ export function projectTreeForResponse<T extends {
   return projectedRoots;
 }
 
+/**
+ * 从 entries 构建 root→leaf 路径（不依赖 pi npm）。
+ * leafId 缺省时取文件中最后一条有 id 的 entry。
+ */
+function buildSessionPathLocal(
+  entries: SessionEntry[],
+  leafId?: string | null,
+): SessionEntry[] {
+  // 显式 null leaf → 空路径（无活动分支）
+  if (leafId === null) return [];
+
+  const byId = new Map<string, SessionEntry>();
+  let lastId: string | null = null;
+  for (const e of entries) {
+    if (e?.id) {
+      byId.set(e.id, e);
+      lastId = e.id;
+    }
+  }
+  // undefined → 回退文件末 entry；string → 指定 leaf
+  let current: string | null | undefined = leafId !== undefined ? leafId : lastId;
+  const path: SessionEntry[] = [];
+  const guard = new Set<string>();
+  while (current && !guard.has(current)) {
+    guard.add(current);
+    const entry = byId.get(current);
+    if (!entry) break;
+    path.unshift(entry);
+    current = (entry as { parentId?: string | null }).parentId ?? null;
+  }
+  return path;
+}
+
+/**
+ * 压缩感知的可见 entry 列表（对齐 pi buildContextEntries）。
+ */
+function buildContextEntriesLocal(
+  entries: SessionEntry[],
+  leafId?: string | null,
+): SessionEntry[] {
+  const path = buildSessionPathLocal(entries, leafId);
+  let compaction: (SessionEntry & { firstKeptEntryId?: string }) | null = null;
+  for (const entry of path) {
+    if (entry.type === "compaction") {
+      compaction = entry as SessionEntry & { firstKeptEntryId?: string };
+    }
+  }
+  if (!compaction) return path;
+  const compactionIdx = path.findIndex((e) => e.id === compaction!.id);
+  if (compactionIdx < 0) return path;
+  const contextEntries: SessionEntry[] = [compaction];
+  let foundFirstKept = false;
+  for (let i = 0; i < compactionIdx; i++) {
+    const entry = path[i];
+    if (entry.id === compaction.firstKeptEntryId) foundFirstKept = true;
+    if (foundFirstKept) contextEntries.push(entry);
+  }
+  contextEntries.push(...path.slice(compactionIdx + 1));
+  return contextEntries;
+}
+
+function getSessionContextSettingsLocal(path: SessionEntry[]): {
+  thinkingLevel?: string;
+  model?: { provider?: string; modelId?: string; id?: string };
+} {
+  let thinkingLevel: string | undefined;
+  let model: { provider?: string; modelId?: string; id?: string } | undefined;
+  for (const e of path) {
+    if (e.type === "thinking_level_change" && typeof (e as { thinkingLevel?: string }).thinkingLevel === "string") {
+      thinkingLevel = (e as { thinkingLevel: string }).thinkingLevel;
+    }
+    if (e.type === "model_change") {
+      const m = e as { provider?: string; modelId?: string };
+      if (m.provider && m.modelId) {
+        model = { provider: m.provider, modelId: m.modelId, id: m.modelId };
+      }
+    }
+  }
+  return { thinkingLevel, model };
+}
+
 export function buildSessionContext(
   entries: SessionEntry[],
   leafId?: string | null,
   options: { deferThinking?: boolean; deferToolResultImages?: boolean } = {},
 ): SessionContext {
-  const byId = new Map<string, SessionEntry>();
-  for (const e of entries) byId.set(e.id, e);
+  const path = buildSessionPathLocal(entries, leafId);
+  const settings = getSessionContextSettingsLocal(path);
+  const contextEntries = buildContextEntriesLocal(entries, leafId);
 
-  const piEntries = entries as unknown as PiSessionEntry[];
-  const piCtx = piBuildSessionContext(piEntries, leafId, byId as unknown as Map<string, PiSessionEntry>);
-
-  const contextEntries = piBuildContextEntries(
-    piEntries,
-    leafId,
-    byId as unknown as Map<string, PiSessionEntry>,
-  );
-
-  // Convert the SDK-selected context entries and their IDs together. This keeps
-  // fork/navigation targets aligned while preserving pi's compaction ordering.
+  // Convert the selected context entries and their IDs together. This keeps
+  // fork/navigation targets aligned while preserving compaction ordering.
   const messages: AgentMessage[] = [];
   const entryIds: string[] = [];
   for (const entry of contextEntries) {
-    const localEntry = entry as unknown as SessionEntry;
-    const m = entryToUiMessage(localEntry, options);
+    const m = entryToUiMessage(entry, options);
     if (m) {
       messages.push(m);
-      entryIds.push(localEntry.id);
+      entryIds.push(entry.id);
     }
   }
 
   return {
     messages,
     entryIds,
-    thinkingLevel: piCtx.thinkingLevel,
-    model: piCtx.model,
+    thinkingLevel: settings.thinkingLevel ?? "off",
+    model: settings.model as SessionContext["model"],
   };
 }
 

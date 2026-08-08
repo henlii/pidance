@@ -15,7 +15,7 @@
 
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "./pi-paths";
 import type { SessionHeader, SessionInfo } from "./types";
 
 export interface ArchiveRecord {

@@ -17,7 +17,7 @@ import { createReadStream } from "fs";
 import { readdir, stat } from "fs/promises";
 import { readFileSync, writeFileSync, existsSync, renameSync } from "fs";
 import { join } from "path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "./pi-paths";
 
 export interface CachedSessionInfo {
 	id: string;

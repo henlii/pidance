@@ -5,13 +5,13 @@
  * 仅投影当前导出分支上的合法 pidance.activity。
  */
 
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   isPidanceActivityEntry,
   parseActivityData,
   type SessionActivity,
 } from "./session-activity";
 import { SessionExportError } from "./session-export";
+import { openSessionFile } from "./session-file";
 
 /** 单条可渲染的 activity（已校验）。 */
 export type ActivityExportItem = {
@@ -88,7 +88,7 @@ export function collectSessionFileActivities(
   filePath: string,
   options: CollectBranchActivitiesOptions = {},
 ): ActivityExportItem[] {
-  const sm = SessionManager.open(filePath);
+  const sm = openSessionFile(filePath);
   return collectBranchActivities(sm, options);
 }
 
@@ -227,6 +227,6 @@ export function projectSessionFileActivitiesIntoExportHtml(
   filePath: string,
   options: ProjectActivitiesIntoExportHtmlOptions = {},
 ): string {
-  const sm = SessionManager.open(filePath);
+  const sm = openSessionFile(filePath);
   return projectActivitiesIntoExportHtml(html, sm, options);
 }

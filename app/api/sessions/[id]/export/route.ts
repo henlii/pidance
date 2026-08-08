@@ -2,9 +2,8 @@ import { randomUUID } from "crypto";
 import { execFile } from "child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { basename, dirname, join } from "path";
+import { basename, join } from "path";
 import { promisify } from "util";
-import { fileURLToPath, pathToFileURL } from "url";
 import { NextResponse } from "next/server";
 import { projectSessionFileActivitiesIntoExportHtml } from "@/lib/session-activity-export";
 import {
@@ -20,23 +19,6 @@ const execFileAsync = promisify(execFile);
 
 export const runtime = "nodejs";
 
-type PiCodingAgentModule = {
-  getPackageDir: () => string;
-};
-
-type ExportHtmlModule = {
-  exportFromFile: (inputPath: string, outputPath: string) => Promise<string>;
-};
-
-async function getPiPackageDir(): Promise<string | null> {
-  try {
-    const { getPackageDir } = (await import("@earendil-works/pi-coding-agent")) as PiCodingAgentModule;
-    return getPackageDir();
-  } catch {
-    return null;
-  }
-}
-
 function encodeHeaderValue(value: string): string {
   return encodeURIComponent(value).replace(/[!'()*]/g, (ch) =>
     `%${ch.charCodeAt(0).toString(16).toUpperCase()}`
@@ -49,39 +31,28 @@ function getContentDisposition(fileName: string, inline: boolean): string {
   return `${disposition}; filename="${fallback}"; filename*=UTF-8''${encodeHeaderValue(fileName)}`;
 }
 
-async function getPiCliPath(): Promise<string | null> {
-  const candidates = new Set<string>();
-  const packageDir = await getPiPackageDir();
-
-  if (packageDir) {
-    candidates.add(join(packageDir, "dist", "cli.js"));
-  }
-
+/**
+ * 解析外部 pi CLI：优先 PATH 上的 `pi`，其次常见安装路径。
+ * 不再依赖 @earendil-works/pi-coding-agent npm 包。
+ */
+async function resolvePiBinary(): Promise<string | null> {
   try {
-    const resolver = (import.meta as ImportMeta & {
-      resolve?: (specifier: string) => string | Promise<string>;
-    }).resolve;
-    if (typeof resolver === "function") {
-      const indexUrl = await resolver("@earendil-works/pi-coding-agent");
-      candidates.add(join(dirname(fileURLToPath(indexUrl)), "cli.js"));
-    }
+    const { stdout } = await execFileAsync("which", ["pi"], {
+      timeout: 5_000,
+      env: process.env,
+    });
+    const path = stdout.trim().split("\n")[0]?.trim();
+    if (path && existsSync(path)) return path;
   } catch {
-    // Next.js production bundles can strip import.meta.resolve.
+    /* PATH 无 pi */
   }
-
-  candidates.add(
-    join(
-      process.cwd(),
-      "node_modules",
-      "@earendil-works",
-      "pi-coding-agent",
-      "dist",
-      "cli.js"
-    )
-  );
-
+  const candidates = [
+    join(process.env.HOME || "", ".nvm/versions/node", process.version, "bin/pi"),
+    "/usr/local/bin/pi",
+    join(process.env.HOME || "", ".local/bin/pi"),
+  ];
   for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
+    if (candidate && existsSync(candidate)) return candidate;
   }
   return null;
 }
@@ -223,27 +194,21 @@ function patchExportHtml(html: string): string {
 }
 
 async function exportSession(filePath: string, outputPath: string): Promise<void> {
-  const cliPath = await getPiCliPath();
-  if (cliPath) {
-    await execFileAsync(process.execPath, [cliPath, "--export", filePath, outputPath], {
-      cwd: process.cwd(),
-      timeout: 30_000,
-      env: {
-        ...process.env,
-        PI_OFFLINE: "1",
-        PI_SKIP_VERSION_CHECK: "1",
-      },
-      maxBuffer: 1024 * 1024,
-    });
-    return;
+  // 只用外部 pi CLI（PATH 或常见安装路径），不加载 pi npm 包
+  const piBin = await resolvePiBinary();
+  if (!piBin) {
+    throw new Error("pi CLI not found on PATH; install pi to export HTML sessions");
   }
-
-  const packageDir = await getPiPackageDir();
-  if (!packageDir) throw new Error("pi CLI not found");
-
-  const exporterUrl = pathToFileURL(join(packageDir, "dist", "core", "export-html", "index.js")).href;
-  const { exportFromFile } = (await import(exporterUrl)) as ExportHtmlModule;
-  await exportFromFile(filePath, outputPath);
+  await execFileAsync(piBin, ["--export", filePath, outputPath], {
+    cwd: process.cwd(),
+    timeout: 30_000,
+    env: {
+      ...process.env,
+      PI_OFFLINE: "1",
+      PI_SKIP_VERSION_CHECK: "1",
+    },
+    maxBuffer: 1024 * 1024,
+  });
 }
 
 export async function GET(

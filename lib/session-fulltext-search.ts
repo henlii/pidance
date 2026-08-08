@@ -9,7 +9,7 @@
 import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "./pi-paths";
 
 export type SessionSearchSource = "fts" | "jsonl" | "none";
 

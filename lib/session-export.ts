@@ -1,8 +1,5 @@
 import { basename } from "path";
-import {
-  CURRENT_SESSION_VERSION,
-  SessionManager,
-} from "@earendil-works/pi-coding-agent";
+import { SESSION_VERSION as CURRENT_SESSION_VERSION, openSessionFile } from "./session-file";
 
 /** 与 AgentSession.exportToJsonl 对齐的分支导出错误。 */
 export class SessionExportError extends Error {
@@ -89,7 +86,7 @@ export function exportSessionFileToJsonl(
   filePath: string,
   options: BuildSessionBranchJsonlOptions = {},
 ): string {
-  const sm = SessionManager.open(filePath);
+  const sm = openSessionFile(filePath);
   return buildSessionBranchJsonl(sm, options);
 }
 

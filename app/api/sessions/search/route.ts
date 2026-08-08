@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { searchSessionsFulltext } from "@/lib/session-fulltext-search";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@/lib/pi-paths";
 import { filterSessionIdsByArchiveScope, listArchiveRecords, realArchiveFs } from "@/lib/session-archive";
 import { listAllSessions } from "@/lib/session-reader";
 

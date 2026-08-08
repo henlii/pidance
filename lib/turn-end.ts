@@ -10,17 +10,22 @@
  * compaction / model_change 等），因此 `navigate_tree(turnEnd)` 在 Pi 中
  * 走「精确设 leaf」语义（user 目标才会退到 parent）。
  */
-import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+/** 最小 entry 形状（不依赖 pi npm） */
+export type TurnEndEntry = {
+	id: string;
+	type?: string;
+	message?: { role?: string };
+};
 
 /**
  * 计算轮末 entry id。
  *
- * @param path root→leaf 顺序的当前分支路径（SessionManager.getBranch 返回顺序）
+ * @param path root→leaf 顺序的当前分支路径
  * @param selectedAssistantId 被点击的 assistant entry id（必须在 path 上）
  * @returns turnEnd entry id；selectedAssistantId 不在 path 上时返回原值（调用方应自行校验）
  */
 export function computeTurnEnd(
-	path: readonly SessionEntry[],
+	path: readonly TurnEndEntry[],
 	selectedAssistantId: string,
 ): string {
 	const idx = path.findIndex((entry) => entry.id === selectedAssistantId);
@@ -37,11 +42,11 @@ export function computeTurnEnd(
 }
 
 /** 判断 entry 是否为 user 消息（供调用方前置校验「assistant 锚点」）。 */
-export function isUserMessageEntry(entry: SessionEntry): boolean {
+export function isUserMessageEntry(entry: TurnEndEntry): boolean {
 	return entry.type === "message" && entry.message?.role === "user";
 }
 
 /** 判断 entry 是否为 assistant 消息。 */
-export function isAssistantMessageEntry(entry: SessionEntry): boolean {
+export function isAssistantMessageEntry(entry: TurnEndEntry): boolean {
 	return entry.type === "message" && entry.message?.role === "assistant";
 }

@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   resolveSessionPath,
   resolveSessionIdByPath,
@@ -11,6 +10,8 @@ import {
   listAllSessions,
   buildSessionNavigationSnapshot,
 } from "@/lib/session-reader";
+import { openSessionFile } from "@/lib/session-file";
+import { clearLeafSidecar } from "@/lib/session-leaf-sidecar";
 import {
   parseContextLimitParam,
   sliceContextTail,
@@ -106,8 +107,15 @@ export async function PATCH(
     if (!filePath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
-    const sm = SessionManager.open(filePath);
-    sm.appendSessionInfo(name.trim());
+    // 单写者：live 会话走外部 pi 的 set_session_name（pi 自管写盘）；
+    // 无 live 时才由 Pidance 磁盘写入（不会与外部进程并发写同一 JSONL）。
+    const live = sessionService.getLive(id);
+    if (live?.isAlive()) {
+      await live.send({ type: "set_session_name", name: name.trim() });
+    } else {
+      const sm = openSessionFile(filePath);
+      sm.appendSessionInfo(name.trim());
+    }
     invalidateSessionListCache();
     return NextResponse.json({ ok: true });
   } catch (error) {
@@ -161,6 +169,7 @@ export async function DELETE(
 
     sessionService.destroy(id);
     unlinkSync(filePath);
+    clearLeafSidecar(filePath);
     const parentRoot = resolve(filePath.slice(0, -6));
     const skippedSubagents = deleteValidatedSubagents(verifiedChildren, parentRoot, invalidateSessionPathCache);
     invalidateSessionPathCache(id);
