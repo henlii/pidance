@@ -47,7 +47,7 @@
     "start": "next start -p 31415",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "node --test lib/*.test.mjs components/*.test.mjs hooks/*.test.mjs bin/*.test.mjs",
+    "test": "node --test lib/*.test.mjs lib/pi-runtime/*.test.mjs components/*.test.mjs hooks/*.test.mjs bin/*.test.mjs",
     "verify:render-bridge": "node scripts/verify-subagent-render-bridge.mjs",
     "test:browser": "node --test scripts/browser-regression.test.mjs",
     "check": "npm run typecheck && npm run lint && npm run test",
@@ -56,15 +56,14 @@
     "release:check": "npm run check && npm run build && npm run release:audit"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "0.81.1",
-    "@earendil-works/pi-ai": "0.81.1",
-    "@earendil-works/pi-coding-agent": "0.81.1",
-    "@earendil-works/pi-tui": "0.81.1",
     "lucide-react": "^0.562.0",
     "next": "16.2.11",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "undici": "8.5.0"
+  },
+  "optionalDependencies": {
+    "@earendil-works/pi-coding-agent": "0.81.1"
   },
   "devDependencies": {
     "@lobehub/icons": "^5.6.0",

@@ -154,7 +154,19 @@ function buildUnitContent(nodeBin, nextCli, passwordSource) {
 		`Environment=PATH=/root/.nvm/versions/node/v24.18.0/bin:/root/.pi/agent/bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin`,
 		`Environment=NODE_OPTIONS=--max-old-space-size=3072`,
 		`Environment=PIDANCE_DIST_DIR=.next-public`,
+		// 默认只用外部 pi（rpc）；仅显式 inprocess 才写回进程内
+		`Environment=PIDANCE_AGENT_RUNTIME=${process.env.PIDANCE_AGENT_RUNTIME === "inprocess" ? "inprocess" : "rpc"}`,
 	];
+	if (process.env.PIDANCE_PI_RUNTIME) {
+		lines.push(`Environment=PIDANCE_PI_RUNTIME=${process.env.PIDANCE_PI_RUNTIME}`);
+	}
+	// 默认不启用 bundled fallback；只有显式 =1 才写入
+	if (process.env.PIDANCE_PI_RUNTIME_FALLBACK_BUNDLED === "1") {
+		lines.push(`Environment=PIDANCE_PI_RUNTIME_FALLBACK_BUNDLED=1`);
+	}
+	if (process.env.PI_SUBAGENT_PI_BINARY) {
+		lines.push(`Environment=PI_SUBAGENT_PI_BINARY=${process.env.PI_SUBAGENT_PI_BINARY}`);
+	}
 	// 非回环监听必须带认证密码（P0 fail-closed：0.0.0.0 无密码拒绝部署/启动）
 	if (!isLoopbackHostname(host)) {
 		if (passwordSource?.kind === "env") {

@@ -4,11 +4,8 @@ import { readFileSync } from "fs";
 import { join } from "path";
 
 const { version } = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf8")) as { version: string };
-let piVersion = "unknown";
-try {
-  const piPkgPath = join(__dirname, "node_modules/@earendil-works/pi-coding-agent/package.json");
-  piVersion = (JSON.parse(readFileSync(piPkgPath, "utf8")) as { version: string }).version;
-} catch { /* package not found, use default */ }
+// 产品默认只用外部 pi；不再读 npm 包版本
+const piVersion = process.env.NEXT_PUBLIC_PI_VERSION || "external";
 
 // 31416 持续测试构建（PIDANCE_DIST_DIR=.next-public）与正式/发布构建（默认 .next）分流。
 const isLocalTestDist = process.env.PIDANCE_DIST_DIR === ".next-public";
@@ -28,10 +25,6 @@ const nextConfig: NextConfig = {
   },
   serverExternalPackages: [
     "undici",
-    "@earendil-works/pi-coding-agent",
-    "@earendil-works/pi-agent-core",
-    "@earendil-works/pi-ai",
-    "@earendil-works/pi-tui",
   ],
   // 仅 webpack 路径使用（`next build --webpack` / 发布）。Turbopack 忽略本回调，
   // 依赖 serverExternalPackages + 原生 node: 处理。

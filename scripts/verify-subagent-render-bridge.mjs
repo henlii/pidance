@@ -11,6 +11,9 @@
  *
  * 用法：node scripts/verify-subagent-render-bridge.mjs
  * 依赖：~/.pi/agent/npm/node_modules/pi-subagents（本地已安装，非测试依赖）。
+ * 注意：本脚本是开发期验证工具，alias 到工作区 node_modules 的 @earendil-works
+ * 包（optionalDependencies 安装时存在）；不在生产/测试路径中，不参与 SDK
+ * allowlist 门禁（见 lib/sdk-import-allowlist.test.mjs）。
  */
 import { createJiti } from "jiti";
 import { createRequire } from "node:module";
