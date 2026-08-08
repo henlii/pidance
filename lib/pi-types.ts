@@ -1,10 +1,29 @@
-import type {
-  AgentSessionEvent,
-  SessionManager,
-  SettingsManager,
-  SlashCommandInfo,
-  Theme,
-} from "@earendil-works/pi-coding-agent";
+/** 本地结构类型（不依赖 pi npm） */
+export type AgentSessionEvent = { type: string; [key: string]: unknown };
+export type SessionManagerLike = {
+  getSessionFile?: () => string | undefined;
+  getSessionId?: () => string;
+  getCwd?: () => string;
+  getLeafId?: () => string | null;
+  [key: string]: unknown;
+};
+export type SettingsManagerLike = {
+  getDefaultProvider?: () => string | undefined;
+  getDefaultModel?: () => string | undefined;
+  flush?: () => void | Promise<void>;
+  [key: string]: unknown;
+};
+export type SlashCommandInfo = {
+  name: string;
+  description?: string;
+  sourceInfo?: { source?: string; scope?: string };
+  [key: string]: unknown;
+};
+export type Theme = {
+  fg?: (...args: unknown[]) => string;
+  bg?: (...args: unknown[]) => string;
+  [key: string]: unknown;
+};
 
 export interface ContextUsage {
   percent: number | null;
@@ -136,8 +155,8 @@ export interface AgentSessionLike {
   readonly autoRetryEnabled: boolean;
   readonly model: ModelLike | undefined;
   readonly modelRuntime: { getModel: (provider: string, modelId: string) => ModelLike | undefined };
-  readonly sessionManager: SessionManager;
-  readonly settingsManager: SettingsManager;
+  readonly sessionManager: SessionManagerLike;
+  readonly settingsManager: SettingsManagerLike;
   readonly agent: { state?: { systemPrompt?: string; thinkingLevel?: string; messages?: unknown[] } };
   readonly extensionRunner: ExtensionRunnerLike;
   readonly promptTemplates: readonly PromptTemplateLike[];
