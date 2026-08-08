@@ -2,25 +2,22 @@
  * 项目信任的服务端边界：把 Pi 的 `trust.json` 存储与 `defaultProjectTrust`
  * 设置接到 Deck，判定顺序由 `project-trust-model.ts` 的纯函数负责。
  *
- * 只使用 SDK 公开导出（`ProjectTrustStore`、`hasTrustRequiringProjectResources`、
- * `SettingsManager`、`getAgentDir`）；写入一律经 `ProjectTrustStore`，它自带
- * 文件锁与 schema 校验，Deck 不自行拼 JSON 写 Pi 的原生文件。
+ * 自管 trust.json / settings.json（不依赖 pi npm 的 ProjectTrustStore /
+ * SettingsManager）；写入经本地 ProjectTrustStore（原子写 + schema 校验）。
  */
 
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { getAgentDir } from "./pi-paths";
+import { getAllowedFileRoots, isFilePathAllowed } from "./file-access";
+import { readDefaultProjectTrustFromDisk } from "./settings-store";
 import {
-  getAgentDir,
   hasTrustRequiringProjectResources,
   ProjectTrustStore,
-  SettingsManager,
-} from "@earendil-works/pi-coding-agent";
-import { getAllowedFileRoots, isFilePathAllowed } from "./file-access";
+} from "./trust-store";
 import {
   buildProjectTrustUpdates,
   decideProjectTrust,
-  isDefaultProjectTrust,
   type DefaultProjectTrustSetting,
   type ProjectTrustChoice,
   type ProjectTrustDecisionList,
@@ -56,19 +53,9 @@ export function getProjectTrustParent(cwd: string): string | null {
   return parent === canonical ? null : parent;
 }
 
-/**
- * 读取全局 `defaultProjectTrust`。以 projectTrusted=false 构造 SettingsManager，
- * 保证读取这个设置本身绝不会顺带加载未信任项目的 `.pi/settings.json`。
- */
+/** 读取全局 `defaultProjectTrust`（只读 settings.json，不加载项目 settings）。 */
 function readDefaultProjectTrust(agentDir: string): DefaultProjectTrustSetting {
-  try {
-    const manager = SettingsManager.create(homedir(), agentDir, { projectTrusted: false });
-    const value = manager.getDefaultProjectTrust();
-    return isDefaultProjectTrust(value) ? value : "ask";
-  } catch {
-    // 设置文件损坏不应阻塞会话创建：回退到 Pi 的默认值。
-    return "ask";
-  }
+  return readDefaultProjectTrustFromDisk(agentDir);
 }
 
 function readTrustEntry(agentDir: string, canonicalCwd: string): ProjectTrustEntryInfo | null {

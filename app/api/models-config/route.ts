@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { join } from "path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@/lib/pi-paths";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import {
   getSanitizedModelsConfig,

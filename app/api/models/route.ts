@@ -1,13 +1,18 @@
+/**
+ * GET /api/models — 自管 models.json + settings + auth-store（不依赖 ModelRuntime）。
+ * 仅列出用户 models.json 中的自定义 provider 模型。
+ */
+
 import { stat } from "fs/promises";
-import { join, resolve } from "path";
+import { resolve } from "path";
+import { getAuthPath, getModelsPath, getSettingsPath } from "@/lib/pi-paths";
+import { isProviderConfigured } from "@/lib/auth-store";
+import { loadModelsWithCache, type ModelsData } from "@/lib/models-cache";
 import {
-  createAgentSessionServices,
-  getAgentDir,
-  ModelRuntime,
-  type SettingsManager,
-} from "@earendil-works/pi-coding-agent";
-import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
-import { getOrCreateModelRuntime, loadModelsWithCache, type ModelsData } from "@/lib/models-cache";
+  buildModelsDataFromDisk,
+  listModelsFromModelsJson,
+} from "@/lib/models-catalog";
+import { loadSettingsFile } from "@/lib/settings-store";
 
 export const dynamic = "force-dynamic";
 
@@ -15,11 +20,13 @@ const modelNameCollator = new Intl.Collator(undefined, { numeric: true, sensitiv
 
 function compareModelEntries(
   a: { id: string; name: string; provider: string },
-  b: { id: string; name: string; provider: string }
+  b: { id: string; name: string; provider: string },
 ): number {
-  return modelNameCollator.compare(a.name || a.id, b.name || b.id)
-    || modelNameCollator.compare(a.provider, b.provider)
-    || modelNameCollator.compare(a.id, b.id);
+  return (
+    modelNameCollator.compare(a.name || a.id, b.name || b.id) ||
+    modelNameCollator.compare(a.provider, b.provider) ||
+    modelNameCollator.compare(a.id, b.id)
+  );
 }
 
 const THINKING_SUFFIXES = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -39,58 +46,69 @@ function filterByExactEnabledModels<T extends { id: string; provider: string }>(
   if (!enabledModels || enabledModels.length === 0) return available;
 
   const refs = new Set(enabledModels.map(stripThinkingSuffix).filter(Boolean));
-  const visible = available.filter((m) => refs.has(`${m.provider}/${m.id}`) || refs.has(m.id));
+  const visible = available.filter(
+    (m) => refs.has(`${m.provider}/${m.id}`) || refs.has(m.id),
+  );
   return visible.length > 0 ? visible : available;
 }
 
-async function loadModels(cwd: string): Promise<ModelsData> {
-  const nameMap = new Map<string, string>();
-  let modelList: { id: string; name: string; provider: string }[] = [];
-  let defaultModel: { provider: string; modelId: string } | null = null;
-  const thinkingLevels: Record<string, string[]> = {};
-  const thinkingLevelMaps: Record<string, Record<string, string | null>> = {};
-  // providerId → 是否已有可用凭据（AuthStorage key / runtime / models.json / 环境变量）。
-  // 未认证且无环境凭据的 provider 模型在 UI 中灰显，避免用户选择必然失败的模型。
-  const authConfigured: Record<string, boolean> = {};
+async function loadModels(_cwd: string): Promise<ModelsData> {
+  const modelsPath = getModelsPath();
+  const settingsPath = getSettingsPath();
+  const authPath = getAuthPath();
+  const settings = loadSettingsFile(settingsPath);
+  const enabledModels = Array.isArray(settings.enabledModels)
+    ? (settings.enabledModels as string[])
+    : undefined;
 
-  const agentDir = getAgentDir();
-  // 进程级复用 ModelRuntime（按 agentDir 键控）：模型运行时只依赖 agentDir
-  // 下的 auth.json / models.json，与 cwd 无关；settingsManager / resourceLoader
-  // 仍由 SDK 按 cwd 新建（cwd-bound 语义不可省）。配置变更经
-  // invalidateModelsCache() 失效后重建。
-  const modelRuntime = await getOrCreateModelRuntime(agentDir, () =>
-    ModelRuntime.create({
-      authPath: join(agentDir, "auth.json"),
-      modelsPath: join(agentDir, "models.json"),
-    }),
-  );
-  const services = await createAgentSessionServices({ cwd, agentDir, modelRuntime });
-  const available = await services.modelRuntime.getAvailable();
-  const settings: SettingsManager = services.settingsManager;
-  const enabledModels = settings.getEnabledModels();
-  const visible = filterByExactEnabledModels(available, enabledModels);
-  modelList = visible.map((m: { id: string; name: string; provider: string }) => ({
-    id: m.id,
-    name: m.name,
-    provider: m.provider,
-  })).sort(compareModelEntries);
-  for (const m of visible) {
-    const key = `${m.provider}:${m.id}`;
-    nameMap.set(key, m.name);
-    thinkingLevels[key] = getSupportedThinkingLevels(m);
-    if (m.thinkingLevelMap) thinkingLevelMaps[key] = m.thinkingLevelMap;
+  const catalog = listModelsFromModelsJson(modelsPath);
+  const authConfigured: Record<string, boolean> = {};
+  for (const m of catalog) {
     if (authConfigured[m.provider] === undefined) {
-      authConfigured[m.provider] = modelRuntime.getProviderAuthStatus(m.provider).configured;
+      authConfigured[m.provider] = isProviderConfigured(m.provider, {
+        authPath,
+        modelsPath,
+      });
     }
   }
 
-  const provider = settings.getDefaultProvider();
-  const modelId = settings.getDefaultModel();
-  if (provider && modelId && visible.some((m) => m.provider === provider && m.id === modelId)) {
-    defaultModel = { provider, modelId };
+  const base = buildModelsDataFromDisk({
+    modelsPath,
+    settingsPath,
+    authConfigured,
+  });
+
+  // enabledModels 过滤
+  const available = base.modelList;
+  const visible = filterByExactEnabledModels(available, enabledModels);
+  const visibleKeys = new Set(visible.map((m) => `${m.provider}:${m.id}`));
+
+  const models: Record<string, string> = {};
+  const thinkingLevels: Record<string, string[]> = {};
+  const thinkingLevelMaps: Record<string, Record<string, string | null>> = {};
+  for (const m of visible) {
+    const key = `${m.provider}:${m.id}`;
+    models[key] = base.models[key] ?? m.name;
+    if (base.thinkingLevels[key]) thinkingLevels[key] = base.thinkingLevels[key];
+    if (base.thinkingLevelMaps[key]) thinkingLevelMaps[key] = base.thinkingLevelMaps[key];
   }
 
-  return { models: Object.fromEntries(nameMap), modelList, defaultModel, thinkingLevels, thinkingLevelMaps, authConfigured };
+  let defaultModel = base.defaultModel;
+  if (
+    defaultModel &&
+    !visibleKeys.has(`${defaultModel.provider}:${defaultModel.modelId}`)
+  ) {
+    defaultModel = null;
+  }
+
+  return {
+    models,
+    modelList: [...visible].sort(compareModelEntries),
+    defaultModel,
+    thinkingLevels,
+    thinkingLevelMaps,
+    authConfigured: base.authConfigured,
+  };
 }
 
 const EMPTY_MODELS: ModelsData = {

@@ -1,8 +1,27 @@
-import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { invalidateModelsCache } from "@/lib/models-cache";
 
 export const dynamic = "force-dynamic";
+
+/** OAuth 交互提示（本地类型，不依赖 pi-ai；字段按运行时收窄） */
+type AuthPrompt = {
+  type: string;
+  message?: string;
+  placeholder?: string;
+  options?: Array<{ id: string; label: string }>;
+};
+
+type AuthEvent = {
+  type: string;
+  message?: string;
+  url?: string;
+  instructions?: string;
+  userCode?: string;
+  verificationUri?: string;
+  intervalSeconds?: number;
+  expiresInSeconds?: number;
+};
+
+import { OAUTH_PROVIDER_IDS } from "@/lib/oauth-providers";
 
 // In-memory registry: loginToken -> resolve/reject for the manualCodeInput promise
 declare global {
@@ -59,12 +78,39 @@ export async function GET(
 
   const stream = new ReadableStream({
     async start(controller) {
-      const modelRuntime = await ModelRuntime.create();
-      if (!modelRuntime.getProvider(provider)?.auth.oauth) {
+      if (!OAUTH_PROVIDER_IDS.has(provider)) {
         send(controller, { type: "error", message: `Unknown provider: ${provider}` });
         controller.close();
         return;
       }
+      // OAuth：可选依赖 @earendil-works/pi-coding-agent（动态 import）。
+      // 未安装时引导用户改用 API Key；完整自管 OAuth 为后续项。
+      let ModelRuntime: {
+        create: () => Promise<{
+          login: (
+            provider: string,
+            kind: string,
+            opts: {
+              prompt: (p: AuthPrompt) => Promise<string>;
+              notify: (e: AuthEvent) => void;
+              signal: AbortSignal;
+            },
+          ) => Promise<unknown>;
+        }>;
+      };
+      try {
+        const mod = await import("@earendil-works/pi-coding-agent");
+        ModelRuntime = mod.ModelRuntime as typeof ModelRuntime;
+      } catch {
+        send(controller, {
+          type: "error",
+          message:
+            "OAuth 登录需要可选依赖 @earendil-works/pi-coding-agent；也可在设置中用 API Key（/api/auth/api-key）",
+        });
+        controller.close();
+        return;
+      }
+      const modelRuntime = await ModelRuntime.create();
 
       const registry = getCallbackRegistry();
       const activeTokens = new Set<string>();

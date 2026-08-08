@@ -1,5 +1,3 @@
-import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-
 export interface ModelsData {
   models: Record<string, string>;
   modelList: { id: string; name: string; provider: string }[];
@@ -16,10 +14,10 @@ interface ModelsCacheState {
   generation: number;
 }
 
-/** 进程级 ModelRuntime 复用缓存（按 agentDir 键控，见 getOrCreateModelRuntime）。 */
+/** 进程级 runtime 复用缓存（按 agentDir 键控；T 由调用方注入，不绑 pi npm）。 */
 interface ModelRuntimeCacheState {
   /** agentDir → 创建中的 Promise（复用中 / 创建失败自动移除） */
-  runtimes: Map<string, Promise<ModelRuntime>>;
+  runtimes: Map<string, Promise<unknown>>;
 }
 
 declare global {
@@ -61,13 +59,13 @@ function getModelRuntimeCacheState(): ModelRuntimeCacheState {
  * 时 invalidateModelsCache() 清空本缓存，下次请求重建；创建失败自动移除
  * 以便重试；并发请求共享同一个创建 Promise（in-flight 去重）。
  */
-export function getOrCreateModelRuntime(
+export function getOrCreateModelRuntime<T>(
   agentDir: string,
-  create: () => Promise<ModelRuntime>,
-): Promise<ModelRuntime> {
+  create: () => Promise<T>,
+): Promise<T> {
   const state = getModelRuntimeCacheState();
   const existing = state.runtimes.get(agentDir);
-  if (existing) return existing;
+  if (existing) return existing as Promise<T>;
 
   const creating = Promise.resolve().then(create);
   // 只在创建失败时移除（成功保留供复用）；catch 返回的新 Promise 正常 resolve，
@@ -75,7 +73,7 @@ export function getOrCreateModelRuntime(
   creating.catch(() => {
     if (state.runtimes.get(agentDir) === creating) state.runtimes.delete(agentDir);
   });
-  state.runtimes.set(agentDir, creating);
+  state.runtimes.set(agentDir, creating as Promise<unknown>);
   return creating;
 }
 

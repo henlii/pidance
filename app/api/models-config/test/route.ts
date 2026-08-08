@@ -1,9 +1,11 @@
+/**
+ * POST /api/models-config/test — 用纯 HTTP 探测模型连通性（不依赖 ModelRuntime / completeSimple）。
+ */
+
 import { NextResponse } from "next/server";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
+import { existsSync, readFileSync } from "fs";
 import { join } from "path";
-import { completeSimple, type AssistantMessage } from "@earendil-works/pi-ai/compat";
-import { getAgentDir, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@/lib/pi-paths";
 import { resolveModelSecrets, resolveProviderSecrets } from "@/lib/models-config-service";
 
 export const dynamic = "force-dynamic";
@@ -27,7 +29,9 @@ function readServerProvider(providerName: string): Record<string, unknown> | und
   try {
     const modelsPath = join(getAgentDir(), "models.json");
     if (!existsSync(modelsPath)) return undefined;
-    const parsed = JSON.parse(readFileSync(modelsPath, "utf8")) as { providers?: Record<string, unknown> };
+    const parsed = JSON.parse(readFileSync(modelsPath, "utf8")) as {
+      providers?: Record<string, unknown>;
+    };
     const provider = parsed.providers?.[providerName];
     return isRecord(provider) ? provider : undefined;
   } catch {
@@ -35,107 +39,245 @@ function readServerProvider(providerName: string): Record<string, unknown> | und
   }
 }
 
-function getAssistantText(message: AssistantMessage): string {
-  return message.content
-    .filter((block) => block.type === "text")
-    .map((block) => block.text)
-    .join("");
+function resolveApiKey(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const trimmed = value.trim();
+  const envMatch = trimmed.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/);
+  if (envMatch) {
+    const fromEnv = process.env[envMatch[1]];
+    return fromEnv && fromEnv.length > 0 ? fromEnv : undefined;
+  }
+  return trimmed;
+}
+
+function asHeaders(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (typeof v === "string") out[k] = v;
+  }
+  return out;
+}
+
+type ProbeResult = {
+  ok: boolean;
+  status?: number;
+  responseText?: string;
+  error?: string;
+};
+
+/**
+ * 按 provider.api 发最小探测请求。
+ * 支持 openai-completions / openai-responses / anthropic-messages / google-generative-ai。
+ */
+async function probeModel(options: {
+  api: string;
+  baseUrl: string;
+  modelId: string;
+  apiKey: string;
+  headers: Record<string, string>;
+  signal: AbortSignal;
+}): Promise<ProbeResult> {
+  const { api, baseUrl, modelId, apiKey, headers, signal } = options;
+  const base = baseUrl.replace(/\/+$/, "");
+  const commonHeaders: Record<string, string> = {
+    "content-type": "application/json",
+    ...headers,
+  };
+
+  let url: string;
+  let body: unknown;
+  let authHeaders: Record<string, string>;
+
+  if (api === "anthropic-messages" || api === "anthropic") {
+    url = `${base}/v1/messages`;
+    authHeaders = {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      ...commonHeaders,
+    };
+    body = {
+      model: modelId,
+      max_tokens: 16,
+      messages: [{ role: "user", content: "Reply with OK only." }],
+    };
+  } else if (api === "google-generative-ai" || api === "google") {
+    url = `${base}/v1beta/models/${encodeURIComponent(modelId)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    authHeaders = { ...commonHeaders };
+    body = {
+      contents: [{ role: "user", parts: [{ text: "Reply with OK only." }] }],
+      generationConfig: { maxOutputTokens: 16 },
+    };
+  } else if (api === "openai-responses" || api === "responses") {
+    url = `${base}/responses`;
+    authHeaders = { authorization: `Bearer ${apiKey}`, ...commonHeaders };
+    body = {
+      model: modelId,
+      input: "Reply with OK only.",
+      max_output_tokens: 16,
+    };
+  } else {
+    // openai-completions 及默认 chat completions
+    url = `${base}/chat/completions`;
+    authHeaders = { authorization: `Bearer ${apiKey}`, ...commonHeaders };
+    body = {
+      model: modelId,
+      messages: [{ role: "user", content: "Reply with OK only." }],
+      max_tokens: 16,
+    };
+  }
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: authHeaders,
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  const status = response.status;
+  const text = await response.text();
+  if (!response.ok) {
+    return {
+      ok: false,
+      status,
+      error: text.slice(0, 500) || `HTTP ${status}`,
+    };
+  }
+
+  let responseText = "";
+  try {
+    const json = JSON.parse(text) as Record<string, unknown>;
+    if (Array.isArray(json.choices) && isRecord(json.choices[0])) {
+      const msg = json.choices[0].message;
+      if (isRecord(msg) && typeof msg.content === "string") responseText = msg.content;
+      else if (typeof json.choices[0].text === "string") responseText = json.choices[0].text;
+    } else if (typeof json.output_text === "string") {
+      responseText = json.output_text;
+    } else if (Array.isArray(json.content)) {
+      responseText = json.content
+        .filter((b): b is { type?: string; text?: string } => isRecord(b) && typeof b.text === "string")
+        .map((b) => b.text as string)
+        .join("");
+    } else if (Array.isArray(json.candidates) && isRecord(json.candidates[0])) {
+      const content = json.candidates[0].content;
+      if (isRecord(content) && Array.isArray(content.parts)) {
+        responseText = content.parts
+          .filter((p): p is { text?: string } => isRecord(p) && typeof p.text === "string")
+          .map((p) => p.text as string)
+          .join("");
+      }
+    }
+    if (!responseText) responseText = text.slice(0, 300);
+  } catch {
+    responseText = text.slice(0, 300);
+  }
+
+  return { ok: true, status, responseText: responseText.slice(0, 300) };
 }
 
 export async function POST(req: Request) {
-  let tempDir: string | undefined;
-
   try {
-    const body = await req.json() as { providerName?: unknown; provider?: unknown; model?: unknown };
+    const body = (await req.json()) as {
+      providerName?: unknown;
+      provider?: unknown;
+      model?: unknown;
+    };
     const providerName = typeof body.providerName === "string" ? body.providerName.trim() : "";
-    if (!providerName) return NextResponse.json({ ok: false, error: "providerName is required" }, { status: 400 });
-    if (!isRecord(body.provider)) return NextResponse.json({ ok: false, error: "provider is required" }, { status: 400 });
-    if (!isRecord(body.model)) return NextResponse.json({ ok: false, error: "model is required" }, { status: 400 });
+    if (!providerName) {
+      return NextResponse.json({ ok: false, error: "providerName is required" }, { status: 400 });
+    }
+    if (!isRecord(body.provider)) {
+      return NextResponse.json({ ok: false, error: "provider is required" }, { status: 400 });
+    }
+    if (!isRecord(body.model)) {
+      return NextResponse.json({ ok: false, error: "model is required" }, { status: 400 });
+    }
 
     const modelId = typeof body.model.id === "string" ? body.model.id.trim() : "";
-    if (!modelId) return NextResponse.json({ ok: false, error: "Model ID is required" }, { status: 400 });
+    if (!modelId) {
+      return NextResponse.json({ ok: false, error: "Model ID is required" }, { status: 400 });
+    }
 
-    tempDir = mkdtempSync(join(tmpdir(), "pidance-model-test-"));
-    const modelsPath = join(tempDir, "models.json");
-
-    // 客户端 apiKey 缺失/掩码（"***"）时回退到服务器现值；headers 同样按
-    // 保留/更新语义合并（掩码键保留服务器值），保证测试用真实凭据跑通。
+    // 客户端 apiKey 缺失/掩码（"***"）时回退到服务器现值
     const serverProvider = readServerProvider(providerName);
     const providerBase: Record<string, unknown> = { ...(body.provider as Record<string, unknown>) };
-    delete providerBase.models; // 被测模型单独处理，不沿用客户端 models 列表
+    delete providerBase.models;
     const providerResolved = resolveProviderSecrets(providerBase, serverProvider);
     const serverModel = (Array.isArray(serverProvider?.models) ? serverProvider.models : []).find(
       (entry) => isRecord(entry) && entry.id === modelId,
     );
-    const modelResolved: Record<string, unknown> = { ...(body.model as Record<string, unknown>), id: modelId };
+    const modelResolved: Record<string, unknown> = {
+      ...(body.model as Record<string, unknown>),
+      id: modelId,
+    };
     resolveModelSecrets(modelResolved, isRecord(serverModel) ? serverModel : undefined);
 
-    writeFileSync(modelsPath, JSON.stringify({
-      providers: {
-        [providerName]: {
-          ...providerResolved,
-          models: [modelResolved],
-        },
-      },
-    }, null, 2), "utf8");
-
-    const modelRuntime = await ModelRuntime.create({ modelsPath });
-    const loadError = modelRuntime.getError();
-    if (loadError) return NextResponse.json({ ok: false, error: loadError });
-
-    const model = modelRuntime.getModel(providerName, modelId);
-    if (!model) return NextResponse.json({ ok: false, error: `Model not found: ${providerName}/${modelId}` });
-
-    const resolved = await modelRuntime.getAuth(model);
-    if (!resolved?.auth.apiKey) {
+    const apiKey =
+      resolveApiKey(modelResolved.apiKey) ??
+      resolveApiKey(providerResolved.apiKey);
+    if (!apiKey) {
       return NextResponse.json({ ok: false, error: `No API key found for "${providerName}"` });
     }
 
+    const baseUrl =
+      (typeof modelResolved.baseUrl === "string" && modelResolved.baseUrl) ||
+      (typeof providerResolved.baseUrl === "string" && providerResolved.baseUrl) ||
+      "";
+    if (!baseUrl) {
+      return NextResponse.json({ ok: false, error: "baseUrl is required" }, { status: 400 });
+    }
+
+    const api =
+      (typeof modelResolved.api === "string" && modelResolved.api) ||
+      (typeof providerResolved.api === "string" && providerResolved.api) ||
+      "openai-completions";
+
+    const headers = {
+      ...asHeaders(providerResolved.headers),
+      ...asHeaders(modelResolved.headers),
+    };
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS);
-    let status: number | undefined;
     const startedAt = Date.now();
 
     try {
-      const message = await completeSimple(model, {
-        messages: [{
-          role: "user",
-          content: "Reply with OK only.",
-          timestamp: Date.now(),
-        }],
-      }, {
-        apiKey: resolved.auth.apiKey,
-        headers: resolved.auth.headers,
-        maxTokens: 16,
-        timeoutMs: TEST_TIMEOUT_MS,
-        maxRetries: 0,
-        cacheRetention: "none",
+      const result = await probeModel({
+        api,
+        baseUrl,
+        modelId,
+        apiKey,
+        headers,
         signal: controller.signal,
-        onResponse: (response) => { status = response.status; },
       });
-
       const latencyMs = Date.now() - startedAt;
-      if (message.stopReason === "error" || message.stopReason === "aborted") {
+      if (!result.ok) {
         return NextResponse.json({
           ok: false,
-          error: message.errorMessage ?? (controller.signal.aborted ? "Test timed out" : "Model returned an error"),
+          error: result.error ?? (controller.signal.aborted ? "Test timed out" : "Model returned an error"),
           latencyMs,
-          status,
+          status: result.status,
         });
       }
-
       return NextResponse.json({
         ok: true,
         latencyMs,
-        status,
-        responseText: getAssistantText(message).slice(0, 300),
+        status: result.status,
+        responseText: result.responseText ?? "",
       });
     } finally {
       clearTimeout(timeout);
     }
   } catch (error) {
-    return NextResponse.json({ ok: false, error: errorMessage(error) }, { status: 500 });
-  } finally {
-    if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+    const aborted =
+      (error instanceof Error && error.name === "AbortError") ||
+      (typeof error === "object" &&
+        error !== null &&
+        "name" in error &&
+        (error as { name?: string }).name === "AbortError");
+    return NextResponse.json(
+      { ok: false, error: aborted ? "Test timed out" : errorMessage(error) },
+      { status: aborted ? 200 : 500 },
+    );
   }
 }

@@ -1,7 +1,7 @@
 import { readdirSync } from "fs";
 import { homedir } from "os";
 import path from "path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "./pi-paths";
 import { getAdditionalAllowedRoots, normalizeSlashes } from "./allowed-roots";
 import { getChatAttachmentsDir } from "./chat-attachments";
 import { listAllSessions } from "./session-reader";

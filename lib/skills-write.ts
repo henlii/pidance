@@ -20,7 +20,7 @@ import { closeSync, lstatSync, readFileSync, realpathSync, renameSync, statSync,
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "./pi-paths";
 import { loadSkillsWithInstallInfo } from "./skills-service";
 import { openRegularFileReadonly } from "./file-read";
 import { isUsableProjectPath, resolveProjectTrustedForSession } from "./project-trust";

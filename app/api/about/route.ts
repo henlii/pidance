@@ -2,19 +2,27 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { NextResponse } from "next/server";
 import { buildAboutInfo } from "@/lib/about-info";
+import { buildRuntimeInfo } from "@/lib/pi-runtime/runtime-info";
 
-/** 优先读已安装 pi-coding-agent 的真实 version，再回退 package.json 依赖声明。 */
-function readInstalledPiSdkVersion(): string | null {
+function attachRuntimeFields<T extends {
+  piSdkVersion: string | null;
+  runtimePiVersion?: string | null;
+  agentRuntimeMode?: "inprocess" | "rpc";
+  runtimePath?: string | null;
+  runtimeCompatible?: boolean;
+}>(info: T): T {
   try {
-    const raw = readFileSync(
-      join(process.cwd(), "node_modules/@earendil-works/pi-coding-agent/package.json"),
-      "utf8",
-    );
-    const pkg = JSON.parse(raw) as { version?: unknown };
-    return typeof pkg.version === "string" && pkg.version.trim() ? pkg.version.trim() : null;
+    const rt = buildRuntimeInfo(process.env, process.cwd());
+    info.agentRuntimeMode = rt.agentRuntimeMode;
+    info.runtimePiVersion = rt.runtime.version;
+    info.runtimePath = rt.runtime.path;
+    info.runtimeCompatible = rt.runtime.compatible;
+    // piSdkVersion 展示外部 runtime 版本（不再读 npm 包）
+    if (rt.runtime.version) info.piSdkVersion = rt.runtime.version;
   } catch {
-    return null;
+    // best-effort
   }
+  return info;
 }
 
 export async function GET() {
@@ -22,21 +30,18 @@ export async function GET() {
     const raw = readFileSync(join(process.cwd(), "package.json"), "utf8");
     const pkg: unknown = JSON.parse(raw);
     const info = buildAboutInfo(pkg);
-    const installed = readInstalledPiSdkVersion();
-    if (installed) info.piSdkVersion = installed;
-    return NextResponse.json(info);
+    return NextResponse.json(attachRuntimeFields(info), {
+      headers: { "Cache-Control": "no-store" },
+    });
   } catch {
     const fallback = buildAboutInfo({
       name: "@henlii/pidance",
       version: process.env.NEXT_PUBLIC_APP_VERSION || "0.0.0",
-      dependencies: {
-        "@earendil-works/pi-coding-agent": process.env.NEXT_PUBLIC_PI_VERSION || "0.81.1",
-      },
       homepage: "https://github.com/henlii/pidance#readme",
       repository: { type: "git", url: "git+https://github.com/henlii/pidance.git" },
     });
-    const installed = readInstalledPiSdkVersion();
-    if (installed) fallback.piSdkVersion = installed;
-    return NextResponse.json(fallback);
+    return NextResponse.json(attachRuntimeFields(fallback), {
+      headers: { "Cache-Control": "no-store" },
+    });
   }
 }

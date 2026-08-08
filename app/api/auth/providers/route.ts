@@ -1,33 +1,28 @@
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+/**
+ * OAuth provider 列表（自管，不依赖 ModelRuntime）。
+ * 内置 OAuth 源固定为已知集合；loggedIn 读 auth-store。
+ */
+
+import { getCredential } from "@/lib/auth-store";
+import { OAUTH_PROVIDERS } from "@/lib/oauth-providers";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const modelRuntime = await ModelRuntime.create();
-  const credentials = await modelRuntime.listCredentials();
-  const loggedInProviders = new Set(
-    credentials.filter((credential) => credential.type === "oauth").map((credential) => credential.providerId),
-  );
-  const providers = modelRuntime.getProviders().filter((provider) => provider.auth.oauth);
-
-  const EXCLUDED = new Set(["anthropic"]);
-  const DISPLAY_NAMES: Record<string, string> = {
-    "openai-codex": "ChatGPT Plus/Pro",
-    "github-copilot": "GitHub Copilot",
-  };
-
-  const result = await Promise.all(
-    providers
-      .filter((p) => !EXCLUDED.has(p.id))
-      .map(async (p) => {
-        return {
-          id: p.id,
-          name: DISPLAY_NAMES[p.id] ?? p.name,
-          usesCallbackServer: false,
-          loggedIn: loggedInProviders.has(p.id),
-        };
-      })
-  );
+  const result = OAUTH_PROVIDERS.map((p) => {
+    const credential = getCredential(p.id);
+    const loggedIn =
+      credential !== undefined &&
+      (credential.type === "oauth" ||
+        ("access" in credential && typeof credential.access === "string") ||
+        ("refresh" in credential && typeof credential.refresh === "string"));
+    return {
+      id: p.id,
+      name: p.name,
+      usesCallbackServer: false,
+      loggedIn,
+    };
+  });
 
   return Response.json({ providers: result });
 }

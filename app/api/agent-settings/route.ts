@@ -2,12 +2,12 @@
  * GET  /api/agent-settings?cwd=<optional>
  * PUT  /api/agent-settings  body: AgentSettingsPatch 白名单
  *
- * 经 SettingsManager 公开 getter/setter + flush；不直接写 settings.json。
- * 全局作用域；cwd 仅用于构造 SettingsManager（项目信任上下文）。
+ * 自管全局 settings.json（GlobalSettingsStore）；不依赖 SettingsManager。
+ * 全局作用域；cwd 仅用于解析 projectTrusted 展示字段。
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@/lib/pi-paths";
 import { homedir } from "node:os";
 import {
   applyAgentSettingsPatch,
@@ -16,12 +16,13 @@ import {
   type AgentSettingsView,
 } from "@/lib/agent-settings";
 import { resolveProjectTrustedForSession } from "@/lib/project-trust";
+import { GlobalSettingsStore } from "@/lib/settings-store";
 
 export type { AgentSettingsPatch, AgentSettingsView } from "@/lib/agent-settings";
 
 export const dynamic = "force-dynamic";
 
-function createManager(cwd: string | null): SettingsManager {
+function createManager(cwd: string | null): GlobalSettingsStore {
   const agentDir = getAgentDir();
   const workDir = cwd && cwd.trim() ? cwd : homedir();
   let projectTrusted = false;
@@ -30,7 +31,7 @@ function createManager(cwd: string | null): SettingsManager {
   } catch {
     projectTrusted = false;
   }
-  return SettingsManager.create(workDir, agentDir, { projectTrusted });
+  return GlobalSettingsStore.create(workDir, agentDir, { projectTrusted });
 }
 
 export async function GET(req: NextRequest) {

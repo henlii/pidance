@@ -5,8 +5,8 @@ import { SkillWriteError, toggleSkillDisableModelInvocation } from "@/lib/skills
 export const dynamic = "force-dynamic";
 
 // GET /api/skills?cwd=<path>
-// Uses DefaultResourceLoader (same logic as AgentSession startup) so settings.json
-// skill paths, package skills, and .agents/skills directories are all included.
+// 自管磁盘发现（lib/skill-discovery.ts）：agentDir/skills、~/.agents/skills、
+// 项目 .pi/skills 与 .agents/skills（需项目信任）、settings.json skills 路径。
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const cwd = searchParams.get("cwd");
