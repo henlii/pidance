@@ -21,11 +21,11 @@ const {
   canSubmitInlineSelect,
   isOtherOptionLabel,
   shouldAppendOtherOption,
-  InlineExtensionCard,
-} = await jiti.import("./InlineExtensionCard.tsx");
+  ExtensionDialog,
+} = await jiti.import("./ExtensionDialog.tsx");
 const { I18nProvider } = await jiti.import("../lib/i18n.tsx");
 
-const sourcePath = fileURLToPath(new URL("./InlineExtensionCard.tsx", import.meta.url));
+const sourcePath = fileURLToPath(new URL("./ExtensionDialog.tsx", import.meta.url));
 const source = readFileSync(sourcePath, "utf8");
 
 function request(method, fields = {}) {
@@ -43,7 +43,7 @@ function renderCard(props) {
     React.createElement(
       I18nProvider,
       null,
-      React.createElement(InlineExtensionCard, props),
+      React.createElement(ExtensionDialog, props),
     ),
   );
 }

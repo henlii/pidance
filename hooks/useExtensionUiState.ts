@@ -5,7 +5,6 @@ import {
   clearExtensionUiRequest,
   createEmptyExtensionUiState,
   type ExtensionUiDialogRequest,
-  type ExtensionUiInlineRequest,
   type ExtensionUiCustomRequest,
   type ExtensionUiState,
 } from "@/lib/extension-ui-bridge";
@@ -18,10 +17,12 @@ export type { ExtensionUiDialogRequest, ExtensionUiCustomRequest } from "@/lib/e
  * extension UI 展示状态（#17 D5c 自 useAgentSession 抽出的第一刀，纯移动）。
  * 持有阻塞请求队列在 React 侧的投影 state、镜像 ref 与三个更新回调；
  * useAgentSession 解构后所有既有使用点保持零改动。
+ *
+ * 对齐 TUI：阻塞请求（select/confirm/input/editor）一律弹窗承载（dialog），
+ * 无内联卡片形态。
  */
 export function useExtensionUiState() {
   const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
-  const [extensionInlineRequest, setExtensionInlineRequest] = useState<ExtensionUiInlineRequest | null>(null);
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
@@ -35,7 +36,6 @@ export function useExtensionUiState() {
   const commitExtensionUiState = useCallback((next: ExtensionUiState) => {
     extensionUiStateRef.current = next;
     setExtensionDialog(next.dialog);
-    setExtensionInlineRequest(next.inlineRequest ?? null);
     setExtensionCustomUi(next.customUi);
     setExtensionStatuses(next.statuses);
     setExtensionWidgets(next.widgets);
@@ -55,7 +55,6 @@ export function useExtensionUiState() {
 
   return {
     extensionDialog,
-    extensionInlineRequest,
     extensionCustomUi,
     extensionStatuses,
     extensionWidgets,

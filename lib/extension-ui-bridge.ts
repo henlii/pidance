@@ -5,20 +5,17 @@ import type {
 } from "./types";
 
 export type ExtensionUiDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" }>;
-export type ExtensionUiInlineRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" }>;
 export type ExtensionUiBlockingRequest = ExtensionUiDialogRequest;
 export type ExtensionUiCustomRequest = Extract<ExtensionUiRequest, { method: "custom" }>;
 export type ExtensionUiNoticeType = "info" | "success" | "warning" | "error";
 
 export interface ExtensionUiState {
-  /** 队首投影：长 select / editor；与 inlineRequest 互斥 */
+  /** 队首投影：阻塞请求（select/confirm/input/editor）弹窗承载（对齐 TUI modal） */
   dialog: ExtensionUiDialogRequest | null;
-  /** 队首投影：短 select / confirm / input */
-  inlineRequest?: ExtensionUiInlineRequest | null;
   customUi: ExtensionUiCustomRequest | null;
   statuses: ExtensionStatusItem[];
   widgets: ExtensionWidgetItem[];
-  /** 阻塞请求 FIFO 内部队列；dialog/inline 始终由队首投影 */
+  /** 阻塞请求 FIFO 内部队列；dialog 始终由队首投影 */
   blockingQueue: ExtensionUiBlockingRequest[];
 }
 
@@ -27,7 +24,6 @@ export function createEmptyExtensionUiState(
 ): ExtensionUiState {
   return {
     dialog: null,
-    inlineRequest: null,
     customUi: partial?.customUi ?? null,
     statuses: partial?.statuses ?? [],
     widgets: partial?.widgets ?? [],
@@ -35,44 +31,21 @@ export function createEmptyExtensionUiState(
   };
 }
 
-export function isShortSelectOptions(options: readonly string[]): boolean {
-  if (options.length < 1 || options.length > 8) return false;
-  const trimmedOptions = options.map((option) => option.trim());
-  return trimmedOptions.every((option) => option.length > 0 && option.length <= 80)
-    && trimmedOptions.reduce((total, option) => total + option.length, 0) <= 320;
-}
-
-export function isShortSelectRequest(request: ExtensionUiRequest): request is Extract<ExtensionUiRequest, { method: "select" }> {
-  return request.method === "select" && isShortSelectOptions(request.options);
-}
-
 function isBlockingMethod(method: ExtensionUiRequest["method"]): method is ExtensionUiBlockingRequest["method"] {
   return method === "select" || method === "confirm" || method === "input" || method === "editor";
-}
-
-/** 队首是否走 inline 承载（OpenChamber 风格：全部内联卡片，不弹窗） */
-export function isInlineBlockingRequest(request: ExtensionUiBlockingRequest): request is ExtensionUiInlineRequest {
-  return request.method === "select"
-    || request.method === "confirm"
-    || request.method === "input"
-    || request.method === "editor";
 }
 
 function getBlockingQueue(state: ExtensionUiState): ExtensionUiBlockingRequest[] {
   return state.blockingQueue ?? [];
 }
 
-/** 由队列队首投影 dialog / inlineRequest，保证二者互斥 */
+/** 由队列队首投影 dialog（对齐 TUI：全部阻塞请求弹窗承载）。 */
 export function projectBlockingHead(queue: readonly ExtensionUiBlockingRequest[]): {
   dialog: ExtensionUiDialogRequest | null;
-  inlineRequest: ExtensionUiInlineRequest | null;
 } {
   const head = queue[0];
-  if (!head) return { dialog: null, inlineRequest: null };
-  if (isInlineBlockingRequest(head)) {
-    return { dialog: null, inlineRequest: head };
-  }
-  return { dialog: head, inlineRequest: null };
+  if (!head) return { dialog: null };
+  return { dialog: head };
 }
 
 function withProjectedQueue(
@@ -84,7 +57,6 @@ function withProjectedQueue(
     ...state,
     blockingQueue: queue,
     dialog: projected.dialog,
-    inlineRequest: projected.inlineRequest,
   };
 }
 
@@ -96,9 +68,6 @@ export function clearExtensionUiRequest(state: ExtensionUiState, requestId: stri
   const queue = getBlockingQueue(state);
   if (queue.length === 0) {
     // 兼容无队列但投影槽仍残留的旧态
-    if (state.inlineRequest?.id === requestId) {
-      return { ...state, inlineRequest: null, blockingQueue: [] };
-    }
     if (state.dialog?.id === requestId) {
       return { ...state, dialog: null, blockingQueue: [] };
     }
@@ -113,11 +82,10 @@ export function clearExtensionUiRequest(state: ExtensionUiState, requestId: stri
 /** 清空全部阻塞投影与队列（会话切换 / 卸载）；不碰 custom/status/widget */
 export function clearAllExtensionUiBlocking(state: ExtensionUiState): ExtensionUiState {
   const queue = getBlockingQueue(state);
-  if (queue.length === 0 && !state.dialog && !state.inlineRequest) return state;
+  if (queue.length === 0 && !state.dialog) return state;
   return {
     ...state,
     dialog: null,
-    inlineRequest: null,
     blockingQueue: [],
   };
 }

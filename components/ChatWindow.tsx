@@ -9,7 +9,7 @@ import { composeChatPlan, type ChatRenderItem } from "@/lib/chat-compositor";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
-import { InlineExtensionCard } from "./InlineExtensionCard";
+import { ExtensionDialog } from "./ExtensionDialog";
 import { NewSessionGuide } from "./NewSessionGuide";
 import { TodoPanel } from "./TodoPanel";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
@@ -172,7 +172,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionInlineRequest, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput,
+    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput,
     todos,
     isAutoModelSelection,
     agentPhase, toolExecutionSnapshots,
@@ -194,39 +194,17 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   });
   const sessionBusy = agentRunning || bashRunning;
   const [todosCollapsed, setTodosCollapsed] = useState(true);
-  const [expiredInlineRequestId, setExpiredInlineRequestId] = useState<string | null>(null);
-  const inlineExtensionCardRef = useRef<HTMLDivElement>(null);
   const todoCollapseScope = session?.id ?? (effectiveNewSessionCwd ? `new:${effectiveNewSessionCwd}` : "new-session");
   // Todo 展开状态只属于当前聊天视图；切换会话后恢复默认折叠。
   useEffect(() => {
     setTodosCollapsed(true);
   }, [todoCollapseScope]);
 
-  // expiresAt 到达：按 id 从 FIFO 清理并推进；不发送 extension_ui_response（服务端 timeout 自结算）。
-  useEffect(() => {
-    setExpiredInlineRequestId(null);
-    const requestId = extensionInlineRequest?.id;
-    const expiresAt = extensionInlineRequest?.expiresAt;
-    if (!requestId || typeof expiresAt !== "number" || !Number.isFinite(expiresAt)) return;
+  // 阻塞弹窗（dialog）expiresAt 到达：按 id 从 FIFO 清理并推进；不发送
+  // extension_ui_response（服务端 timeout 自结算）。
 
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const scheduleExpiry = () => {
-      const remaining = expiresAt - Date.now();
-      if (remaining <= 0) {
-        setExpiredInlineRequestId(requestId);
-        dismissExtensionUiRequest(requestId);
-        return;
-      }
-      timer = setTimeout(scheduleExpiry, Math.min(remaining, 2_147_483_647));
-    };
-    scheduleExpiry();
-
-    return () => {
-      if (timer !== undefined) clearTimeout(timer);
-    };
-  }, [extensionInlineRequest?.id, extensionInlineRequest?.expiresAt, dismissExtensionUiRequest]);
-
-  // dialog 队首过期同样按 id 清理推进；不伪造协议响应。
+  // 阻塞弹窗（dialog）expiresAt 到达：按 id 从 FIFO 清理并推进；不发送
+  // extension_ui_response（服务端 timeout 自结算）。
   useEffect(() => {
     const requestId = extensionDialog?.id;
     const expiresAt = extensionDialog?.expiresAt;
@@ -247,28 +225,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
       if (timer !== undefined) clearTimeout(timer);
     };
   }, [extensionDialog?.id, extensionDialog?.expiresAt, dismissExtensionUiRequest]);
-
-  // 扩展请求不会改变 messages.length，因此补充一次受阅读位置约束的末端滚动。
-  // 用户若已向上阅读、卡片距离视口较远，则保持当前位置不动。
-  useEffect(() => {
-    if (!extensionInlineRequest?.id) return;
-    const frame = requestAnimationFrame(() => {
-      const container = scrollContainerRef.current;
-      const card = inlineExtensionCardRef.current;
-      if (!container || !card) return;
-
-      const containerRect = container.getBoundingClientRect();
-      const cardRect = card.getBoundingClientRect();
-      const distanceBelowViewport = cardRect.top - containerRect.bottom;
-      const nearbyThreshold = Math.min(180, container.clientHeight * 0.3);
-      if (distanceBelowViewport <= nearbyThreshold) {
-        // 标记程序化 smooth 窗口：这次滚动不覆盖用户的 released 状态。
-        notifyProgrammaticSmooth();
-        card.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      }
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [extensionInlineRequest?.id, scrollContainerRef, notifyProgrammaticSmooth]);
 
   // Register the abort handler for the global Esc shortcut
   useEffect(() => {
@@ -595,6 +551,16 @@ const chatPlan = composeChatPlan({
         </div>
       ) : (
       <>
+      {/* 扩展阻塞请求弹窗（对齐 TUI modal；固定视口覆盖层） */}
+      {extensionDialog && (
+        <ExtensionDialog
+          request={extensionDialog}
+          disabled={isReadOnly || !sessionIdRef.current}
+          onRespond={(response) => {
+            void respondToExtensionUi(extensionDialog, response);
+          }}
+        />
+      )}
       <div className="relative flex flex-1 overflow-hidden">
         <div
           style={{
@@ -620,8 +586,7 @@ const chatPlan = composeChatPlan({
         >
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div style={{ maxWidth: 760, margin: "0 auto" }}>
-              <ExtensionStatusBar statuses={extensionStatuses} />
-              <ExtensionWidgets widgets={aboveEditorWidgets} />
+            {/* 状态条与 aboveEditor widget 已移至输入区（对齐 TUI footer/editor 布局） */}
 
             {(() => {
               const toolResultsMap = new Map<string, ToolResultMessage>();
@@ -749,21 +714,7 @@ const chatPlan = composeChatPlan({
               />
             )}
 
-            {extensionInlineRequest && (
-              <div ref={inlineExtensionCardRef}>
-                <InlineExtensionCard
-                  request={extensionInlineRequest}
-                  disabled={
-                    isReadOnly
-                    || !sessionIdRef.current
-                    || expiredInlineRequestId === extensionInlineRequest.id
-                  }
-                  onRespond={(response) => {
-                    void respondToExtensionUi(extensionInlineRequest, response);
-                  }}
-                />
-              </div>
-            )}
+            {/* 扩展阻塞请求改为弹窗承载（对齐 TUI），不再内联进消息流。 */}
 
             {/* OpenChamber 风格底部常驻 spacer（桌面 10vh / 移动 40px）：给末端留呼吸感，
                 取代旧的 agentRunning 整视口占位——跟随钉底由 useAgentSession 的自动跟随负责。 */}
@@ -796,6 +747,20 @@ const chatPlan = composeChatPlan({
       </div>
 
       <div className="relative">
+        {/* aboveEditor widget（对齐 TUI：紧贴输入框上方） */}
+        <div
+          style={{
+            padding: `0 ${CHAT_COLUMN_PADDING}px`,
+            paddingRight: isMobile ? CHAT_COLUMN_PADDING : CHAT_INPUT_RIGHT_PADDING,
+          }}
+        >
+          <div style={{ maxWidth: 820, margin: "0 auto" }}>
+            <ExtensionWidgets widgets={aboveEditorWidgets} />
+          </div>
+        </div>
+        {todoPanelElement}
+        {chatInputElement}
+        {/* belowEditor widget + footer 状态条（对齐 TUI：输入框下方） */}
         <div
           style={{
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
@@ -804,10 +769,9 @@ const chatPlan = composeChatPlan({
         >
           <div style={{ maxWidth: 820, margin: "0 auto" }}>
             <ExtensionWidgets widgets={belowEditorWidgets} />
+            <ExtensionStatusBar statuses={extensionStatuses} />
           </div>
         </div>
-        {todoPanelElement}
-        {chatInputElement}
       </div>
       </>
       )}

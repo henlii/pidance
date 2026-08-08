@@ -25,7 +25,7 @@ import {
   clearExtensionUiRequest,
   projectBlockingHead,
 } from "@/lib/extension-ui-bridge";
-import type { ExtensionUiInlineRequest, ExtensionUiBlockingRequest } from "@/lib/extension-ui-bridge";
+import type { ExtensionUiBlockingRequest } from "@/lib/extension-ui-bridge";
 import { useExtensionUiState, type ExtensionUiDialogRequest, type ExtensionUiCustomRequest } from "@/hooks/useExtensionUiState";
 import { useNoticeState } from "@/hooks/useNoticeState";
 import { parseTodos } from "@/lib/todo-parser";
@@ -372,7 +372,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
   // extension UI 展示状态（#17 D5c）：5 state + ref + 3 更新回调已抽至 useExtensionUiState。
   const {
-    extensionDialog, extensionInlineRequest, extensionCustomUi, extensionStatuses, extensionWidgets,
+    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets,
     extensionUiStateRef, commitExtensionUiState, patchExtensionUiState, dismissExtensionUiRequest,
   } = useExtensionUiState();
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
@@ -921,7 +921,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [capabilities.canConnectEvents]);
 
   const respondToExtensionUi = useCallback(async (
-    request: ExtensionUiDialogRequest | ExtensionUiInlineRequest,
+    request: ExtensionUiDialogRequest,
     response: { value: string } | { confirmed: boolean } | { cancelled: true },
   ) => {
     if (!capabilities.canSendSessionCommands) return;
@@ -2159,7 +2159,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     liveNoticeActivities,
     dismissNotice,
     toggleNoticePin,
-    extensionDialog, extensionInlineRequest, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput,
+    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput,
     todos,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,
