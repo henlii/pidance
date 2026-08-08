@@ -17,7 +17,6 @@ import { attachCustomRenderedLines, preserveCustomRenderedLines } from "@/lib/cu
 import type { SessionActivity } from "@/lib/session-activity";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { BranchActions } from "@/lib/branch-bookmarks";
-import type { ToolEntry } from "@/lib/tool-presets";
 import { createEventStreamManager, type EventStreamManager, type EventStreamConnectionResult } from "@/lib/event-stream-manager";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import {
@@ -33,6 +32,7 @@ import { parseTodos } from "@/lib/todo-parser";
 import { getSessionCapabilities } from "@/components/session-capabilities";
 import { useSessionCommands } from "@/hooks/useSessionCommands";
 import { resolveDisplayModel, settleModelOverride } from "@/lib/model-selection";
+import { useI18n } from "@/lib/i18n";
 import {
   PROGRAMMATIC_SMOOTH_IGNORE_MS,
   RUN_SETTLE_MS,
@@ -205,7 +205,8 @@ const PROMPT_SETTLE_POLL_MS = 600;
 const PROMPT_SETTLE_MAX_MS = 20_000;
 const AGENT_STATE_RECONCILE_MS = 15_000;
 const BASH_STATE_RECONCILE_MS = 1_000;
-const EVENT_STREAM_CONNECT_TIMEOUT_MS = 5_000;
+// 外部 pi 冷启动（fork 会话首次启动进程）可超 5s；15s 覆盖启动窗口。
+const EVENT_STREAM_CONNECT_TIMEOUT_MS = 15_000;
 // 只有明确向上的键才构成 release 意图；向下滚动的键交给 scroll 几何判定恢复跟随。
 const RELEASE_KEYS = new Set(["ArrowUp", "PageUp", "Home"]);
 
@@ -307,6 +308,7 @@ type SlashCommandsResponse = {
 };
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
+  const { t } = useI18n();
   const {
     session, newSessionCwd, newSessionIntentId, onAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
@@ -800,15 +802,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [notifyAutoFollowBranchReset]);
 
-  const loadTools = useCallback(async (sid: string) => {
-    // 只读会话：get_tools 会经 /api/agent 启动 AgentSession，跳过。
-    // P0c：tool preset 下线后不再推断 preset；保留 get_tools 探测以维持会话工具状态一致性。
+  const loadTools = useCallback(async (_sid: string) => {
+    // 外部 Pi RPC 无 get_tools；工具由会话启动 allow-list 控制，无需探测。
     if (isReadOnly) return;
-    try {
-      await sendAgentCommand<ToolEntry[]>(sid, { type: "get_tools" });
-    } catch (e) {
-      console.error("Failed to load tools:", e);
-    }
   }, [isReadOnly]);
 
   const promoteNewSession = useCallback((messageCount = 0, firstMessage = "(no messages)") => {
@@ -1267,6 +1263,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         addNotice({
           type: "error",
           message: (event.error as string | undefined) ?? "Extension command failed",
+        });
+        break;
+      case "leaf_drift":
+        // 外部 Pi 无法恢复非末尾分支：明确提示，避免静默把后续消息挂到错误分支。
+        addNotice({
+          type: "warning",
+          message: t("session_leafDrift"),
         });
         break;
       case "message_start":
@@ -1799,55 +1802,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleAbortCompaction = useCallback(async () => {
     // 只读会话不存在进行中的 compact，拦截。
     if (isReadOnly) return;
-    const sid = sessionIdRef.current;
-    if (!sid) return;
-    try {
-      await sendAgentCommand(sid, { type: "abort_compaction" });
-    } catch (e) {
-      console.error("Failed to abort compaction:", e);
-    }
-  }, [isReadOnly]);
+    // Pi 0.83 RPC 无 abort_compaction；不发未知命令。
+    addNotice({
+      type: "warning",
+      message: "当前外部 Pi runtime 不支持中止压缩（abort_compaction）",
+    });
+  }, [isReadOnly, addNotice]);
 
   const handleRecallQueue = useCallback(async () => {
     // 只读会话没有队列（state 从不加载），拦截。
     if (isReadOnly) return;
-    const sid = sessionIdRef.current;
-    if (!sid) return;
-    try {
-      const result = await sendAgentCommand<{ steering?: string[]; followUp?: string[] }>(sid, { type: "clear_queue" });
-      // clearQueue also emits an empty queue_update, but that only reaches us
-      // while SSE is connected — clear locally so idle recalls update the UI.
-      setQueuedMessages({ steering: [], followUp: [] });
-      const texts = [...(result?.steering ?? []), ...(result?.followUp ?? [])];
-      if (texts.length > 0) {
-        opts.chatInputRef?.current?.prependText(texts.join("\n\n"));
-      }
-    } catch (e) {
-      console.error("Failed to recall queued messages:", e);
-      addNotice({ type: "error", message: "Failed to recall queued messages" });
-    }
-  }, [opts.chatInputRef, isReadOnly, addNotice]);
+    // 无 clear_queue 时无法从远程取出并清空；仅提示，避免双发。
+    addNotice({
+      type: "warning",
+      message: "当前外部 Pi runtime 不支持清空/取回队列（clear_queue）",
+    });
+  }, [isReadOnly, addNotice]);
 
   /** 将队列中全部消息（含 follow-up）按引导方式重新入队；可选 extraMessage 并入队尾。 */
-  const handleSendQueueAsSteer = useCallback(async (extraMessage?: string) => {
+  const handleSendQueueAsSteer = useCallback(async (_extraMessage?: string) => {
     if (isReadOnly) return;
-    const sid = sessionIdRef.current;
-    if (!sid) return;
-    try {
-      const trimmed = typeof extraMessage === "string" ? extraMessage.trim() : "";
-      const result = await sendAgentCommand<{ steering?: string[]; followUp?: string[] }>(sid, {
-        type: "flush_queue_as_steer",
-        ...(trimmed ? { message: trimmed } : {}),
-      });
-      // SSE 会推 queue_update；本地先同步，避免按钮连点。
-      setQueuedMessages({
-        steering: [...(result?.steering ?? [])],
-        followUp: [...(result?.followUp ?? [])],
-      });
-    } catch (e) {
-      console.error("Failed to send queue as steer:", e);
-      addNotice({ type: "error", message: "Failed to send queued messages as steer" });
-    }
+    addNotice({
+      type: "warning",
+      message: "当前外部 Pi runtime 不支持将队列重入队为引导（flush_queue_as_steer）",
+    });
   }, [isReadOnly, addNotice]);
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {

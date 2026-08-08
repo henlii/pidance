@@ -7,7 +7,7 @@
 import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "./pi-paths";
 import { allowFileRoot, normalizeSlashes } from "./file-access";
 
 export const CHAT_ATTACHMENTS_DIR_NAME = "pidance-attachments";

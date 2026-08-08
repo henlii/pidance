@@ -8,9 +8,14 @@ export interface AboutInfo {
   piSdkVersion: string | null;
   homepage: string | null;
   repository: string | null;
+  /** 外部 RPC runtime 版本；inprocess 时与 piSdkVersion 同或 null */
+  runtimePiVersion?: string | null;
+  /** inprocess | rpc */
+  agentRuntimeMode?: "inprocess" | "rpc";
+  runtimePath?: string | null;
+  runtimeCompatible?: boolean;
 }
 
-const PI_SDK_DEP = "@earendil-works/pi-coding-agent";
 const DEFAULT_NAME = "Pidance";
 
 /** 将 package.json 的 repository 字段规范为 https 浏览 URL。 */
@@ -61,17 +66,11 @@ export function buildAboutInfo(pkg: unknown): AboutInfo {
 
   const repository = normalizeRepositoryUrl(record.repository);
 
-  let piSdkVersion: string | null = null;
-  const deps = record.dependencies;
-  if (deps && typeof deps === "object") {
-    const v = (deps as Record<string, unknown>)[PI_SDK_DEP];
-    if (typeof v === "string" && v.trim()) piSdkVersion = v.trim().replace(/^[\^~]/, "");
-  }
-
+  // 不再从 package.json dependencies 读 pi npm 版本（产品默认只用外部 pi）
   return {
     name: displayName,
     version,
-    piSdkVersion,
+    piSdkVersion: null,
     homepage,
     repository,
   };

@@ -760,6 +760,11 @@ function TextBlock({ block, isStreaming, cwd, onOpenFile }: { block: TextContent
   return <MarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{block.text}</MarkdownBody>;
 }
 
+/** 思考 / 工具明细默认最大高度：超出在块内滚动，避免会话视口被无限撑高。 */
+const STREAM_BLOCK_MAX_HEIGHT = 320;
+/** 距块底多少 px 内视为仍跟随；用户上滚超出后停止自动向下。 */
+const STREAM_BLOCK_FOLLOW_TOLERANCE_PX = 24;
+
 function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
   block: ThinkingContent;
   duration?: number;
@@ -772,6 +777,12 @@ function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const followBodyRef = useRef(true);
+
+  const bodyText = loading
+    ? t("message_thinkingLoading")
+    : error ?? (block.deferred ? content : block.thinking);
 
   const toggle = async () => {
     const nextExpanded = !expanded;
@@ -793,6 +804,13 @@ function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
     }
   };
 
+  // 展开后内容增长时块内自动向下；用户上滚后停止，滚回底部再恢复。
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!expanded || !body || !followBodyRef.current) return;
+    body.scrollTop = body.scrollHeight;
+  }, [expanded, bodyText]);
+
   return (
     <div
       style={{
@@ -804,6 +822,7 @@ function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
     >
       <button
         onClick={() => void toggle()}
+        aria-expanded={expanded}
         style={{
           display: "flex",
           alignItems: "center",
@@ -825,6 +844,13 @@ function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
       </button>
       {expanded && (
         <div
+          ref={bodyRef}
+          tabIndex={0}
+          onScroll={(event) => {
+            const body = event.currentTarget;
+            followBodyRef.current =
+              body.scrollHeight - body.scrollTop - body.clientHeight <= STREAM_BLOCK_FOLLOW_TOLERANCE_PX;
+          }}
           style={{
             padding: "8px 10px",
             color: error ? "var(--error-text)" : "var(--text-muted)",
@@ -833,9 +859,12 @@ function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
             whiteSpace: "pre-wrap",
             background: "var(--bg-panel)",
             borderTop: "1px solid var(--border)",
+            maxHeight: STREAM_BLOCK_MAX_HEIGHT,
+            overflow: "auto",
+            overscrollBehavior: "contain",
           }}
         >
-          {loading ? t("message_thinkingLoading") : error ?? (block.deferred ? content : block.thinking)}
+          {bodyText}
         </div>
       )}
     </div>
@@ -892,7 +921,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId }: {
     const output = outputRef.current;
     if (!expanded || !output || !followOutputRef.current) return;
     output.scrollTop = output.scrollHeight;
-  }, [expanded, snapshot?.output, snapshot?.renderedLines]);
+  }, [expanded, snapshot?.output, snapshot?.renderedLines, renderedLiveLines]);
 
   // 展开工具卡且 details 被首屏剥离时，按 toolCallId 补全 diff/patch
   useEffect(() => {
@@ -973,7 +1002,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId }: {
       {expanded && command && (
         <div style={{ padding: "8px 10px", borderTop: `1px solid color-mix(in srgb, ${statusColor} 22%, var(--border))`, background: "var(--bg-subtle)" }}>
           <div style={{ marginBottom: 4, color: "var(--text-dim)", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em" }}>{t("message_toolCommand")}</div>
-          <code style={{ display: "block", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{command}</code>
+          <code style={{ display: "block", maxHeight: STREAM_BLOCK_MAX_HEIGHT, overflow: "auto", overscrollBehavior: "contain", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{command}</code>
         </div>
       )}
 
@@ -989,8 +1018,9 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId }: {
             color: "var(--text-muted)",
             fontSize: 12,
             lineHeight: 1.5,
-            maxHeight: 240,
+maxHeight: STREAM_BLOCK_MAX_HEIGHT,
             overflow: "auto",
+            overscrollBehavior: "contain",
             background: "var(--bg-subtle)",
             borderTop: `1px solid color-mix(in srgb, ${statusColor} 20%, var(--border))`,
             display: "flex",
@@ -1018,9 +1048,9 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId }: {
             tabIndex={0}
             onScroll={(event) => {
               const output = event.currentTarget;
-              followOutputRef.current = output.scrollHeight - output.scrollTop - output.clientHeight <= 24;
+              followOutputRef.current = output.scrollHeight - output.scrollTop - output.clientHeight <= STREAM_BLOCK_FOLLOW_TOLERANCE_PX;
             }}
-            style={{ margin: 0, padding: "4px 10px 10px", maxHeight: 320, overflow: "auto", overscrollBehavior: "contain", color: renderedLiveLines || snapshot.output ? "var(--text-muted)" : "var(--text-dim)", background: "var(--tool-bg)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
+            style={{ margin: 0, padding: "4px 10px 10px", maxHeight: STREAM_BLOCK_MAX_HEIGHT, overflow: "auto", overscrollBehavior: "contain", color: renderedLiveLines || snapshot.output ? "var(--text-muted)" : "var(--text-dim)", background: "var(--tool-bg)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
           >{renderedLiveLines ? renderAnsiLines(renderedLiveLines, "tool-live") : snapshot.output || t("message_toolWaitingOutput")}</pre>
         </div>
       )}
@@ -1076,7 +1106,7 @@ function AnsiToolLines({ lines, statusColor }: { lines: string[]; statusColor: s
   return (
     <pre
       tabIndex={0}
-      style={{ margin: 0, padding: "8px 10px", maxHeight: 320, overflow: "auto", borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--bg-subtle)", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
+      style={{ margin: 0, padding: "8px 10px", maxHeight: STREAM_BLOCK_MAX_HEIGHT, overflow: "auto", overscrollBehavior: "contain", borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--bg-subtle)", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
     >
       {renderAnsiLines(lines, "tool-rendered")}
     </pre>

@@ -24,6 +24,9 @@ type AboutViewState = {
   piSdkVersion?: string;
   homepage?: string;
   repository?: string;
+  runtimePiVersion?: string | null;
+  agentRuntimeMode?: "inprocess" | "rpc";
+  runtimeCompatible?: boolean;
 };
 
 function pickVersion(...candidates: Array<string | null | undefined>): string {
@@ -63,6 +66,9 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
           piSdkVersion: data.piSdkVersion || prev.piSdkVersion || envVersion("NEXT_PUBLIC_PI_VERSION"),
           homepage: data.homepage || prev.homepage,
           repository: data.repository || prev.repository,
+          runtimePiVersion: data.runtimePiVersion ?? prev.runtimePiVersion,
+          agentRuntimeMode: data.agentRuntimeMode ?? prev.agentRuntimeMode,
+          runtimeCompatible: data.runtimeCompatible ?? prev.runtimeCompatible,
         }));
       } catch {
         // best-effort：保留 env 版本
@@ -76,13 +82,15 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
   const githubUrl = info.repository ?? info.homepage ?? "https://github.com/henlii/pidance";
   const deckVersion = pickVersion(info.version, envVersion("NEXT_PUBLIC_APP_VERSION"));
   const piVersion = pickVersion(info.piSdkVersion, envVersion("NEXT_PUBLIC_PI_VERSION"));
+  const runtimeVersion = pickVersion(info.runtimePiVersion, info.piSdkVersion);
+  const runtimeMode = info.agentRuntimeMode ?? "inprocess";
 
   return (
     <ViewportDialog
       open={open}
       onClose={onClose}
       title={t("about_title")}
-      width={340}
+      width={360}
       closeLabel={t("close")}
       contentPadding="20px 22px 22px"
     >
@@ -125,6 +133,13 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
           >
             <div>{t("about_version", { version: deckVersion })}</div>
             <div>{t("about_piSdkVersion", { version: piVersion })}</div>
+            <div>{t("about_runtimeMode", { mode: runtimeMode })}</div>
+            {runtimeMode === "rpc" && (
+              <div>{t("about_runtimePiVersion", { version: runtimeVersion })}</div>
+            )}
+            {runtimeMode === "rpc" && info.runtimeCompatible === false && (
+              <div style={{ color: "var(--text-muted)" }}>{t("about_runtimeIncompatible")}</div>
+            )}
           </div>
         </div>
 

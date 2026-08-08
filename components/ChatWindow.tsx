@@ -23,6 +23,7 @@ import {
   captureScrollDistance,
   getNextVisibleCount,
   getVisibleRenderWindow,
+  growVisibleCountOnAppend,
   resolveHistoryLoadAction,
   restoreScrollTop,
   shouldShowHistorySentinel,
@@ -274,15 +275,18 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     registerAbortHandler(sessionBusy ? handleAbort : null);
   }, [sessionBusy, handleAbort]);
 
-  // --- Lazy-load historical messages ---
+// --- Lazy-load historical messages ---
   // 1) 客户端 visibleCount：已加载消息内只渲染末 N 条
   // 2) 服务端 hasMoreBefore：滚到顶时 loadOlderHistory prepend 更旧页（OpenChamber 风格）
+  // 3) 尾部追加时同步增大 visibleCount，避免自动跟随时 startIndex 前移卸载更早消息
   const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const prevScrollDistanceRef = useRef<number | null>(null);
-  // 会话切换时重置可见窗口
+  const prevPlanTotalRef = useRef<number | null>(null);
+  // 会话切换时重置可见窗口与计划长度种子
   useEffect(() => {
     setVisibleCount(VISIBLE_PAGE_SIZE);
+    prevPlanTotalRef.current = null;
   }, [session?.id]);
 
   // IntersectionObserver on the sentinel div at the top of the message list.
@@ -383,12 +387,25 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   const liveSlot = streamState.isStreaming && streamState.streamingMessage
     ? { message: streamState.streamingMessage, isActive: true }
     : undefined;
-  const chatPlan = composeChatPlan({
+const chatPlan = composeChatPlan({
     messages,
     isStreaming: streamState.isStreaming,
     agentOrBashRunning: sessionBusy,
     liveSlot,
   });
+  // 计划变长（流式追加 / 新消息）时补齐 visibleCount，防止固定窗口把更早项卸出 DOM。
+  // 切换会话时 prev 为 null，只播种不增长，保持首屏末 N 条。
+  useEffect(() => {
+    const nextTotal = chatPlan.length;
+    const prevTotal = prevPlanTotalRef.current;
+    if (prevTotal === null) {
+      prevPlanTotalRef.current = nextTotal;
+      return;
+    }
+    if (nextTotal === prevTotal) return;
+    setVisibleCount((current) => growVisibleCountOnAppend(current, prevTotal, nextTotal));
+    prevPlanTotalRef.current = nextTotal;
+  }, [chatPlan.length]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   const messageCwd = session?.cwd ?? effectiveNewSessionCwd ?? undefined;

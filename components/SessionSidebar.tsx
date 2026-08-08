@@ -2743,8 +2743,7 @@ function SessionItem({
     setConfirmDelete(true);
   }, [capabilities.canDelete]);
 
-  const handleDeleteConfirm = useCallback(async (e: React.MouseEvent) => {
-    e.stopPropagation();
+const handleDeleteConfirm = useCallback(async () => {
     // 确认态期间能力若变化，仍不得发 DELETE。
     if (!capabilities.canDelete) {
       setConfirmDelete(false);
@@ -2760,20 +2759,20 @@ function SessionItem({
     }
   }, [session.id, onDeleted, capabilities.canDelete]);
 
-  const handleDeleteCancel = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleDeleteCancel = useCallback(() => {
     setConfirmDelete(false);
   }, []);
 
-  // Fixed-height outer wrapper — content swaps in place so the list never reflows
+// Fixed-height outer wrapper — content swaps in place so the list never reflows
   const compact = displayMode === "compact";
   const ITEM_HEIGHT = compact ? 30 : 40;
 
   return (
+    <>
     <div
       className="sidebar-row"
       data-sidebar-depth={depth}
-      onClick={confirmDelete || renaming ? undefined : onClick}
+      onClick={renaming ? undefined : onClick}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => { setHovered(false); }}
       style={{
@@ -2786,56 +2785,16 @@ function SessionItem({
         paddingLeft: sidebarRowPaddingLeft(depth),
         paddingRight: 8,
         borderRadius: 6,
-        cursor: confirmDelete || renaming ? "default" : "pointer",
-        background: confirmDelete
-          ? "var(--status-danger-bg)"
-          : isSelected ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",
-        borderLeft: confirmDelete
-          ? "2px solid var(--status-danger)"
-          : isSelected ? "2px solid var(--accent)" : "2px solid transparent",
+        cursor: renaming ? "default" : "pointer",
+        background: isSelected ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",
+        borderLeft: isSelected ? "2px solid var(--accent)" : "2px solid transparent",
         transition: "background 0.15s ease, color 0.15s ease",
         opacity: deleting ? 0.5 : 1,
         gap: 6,
         overflow: "hidden",
       }}
     >
-      {confirmDelete ? (
-        /* ── Delete confirmation: same height, two flat buttons ── */
-        <>
-          <div style={{ flex: 1, minWidth: 0, fontSize: compact ? 11 : 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {t("sidebar_deleteSession")} <span style={{ fontWeight: 600 }}>&ldquo;{title.slice(0, 22)}{title.length > 22 ? "…" : ""}&rdquo;</span>?
-          </div>
-          <div style={{ display: "flex", gap: 5, flexShrink: 0 }}>
-            <button
-              onClick={handleDeleteConfirm}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
-                height: compact ? 22 : 26, padding: "0 10px",
-                background: "var(--status-danger)", border: "none",
-                borderRadius: 6, color: "#fff",
-                cursor: "pointer", fontSize: compact ? 11 : 12, fontWeight: 600,
-                whiteSpace: "nowrap",
-              }}
-            >
-              <TrashIcon size={11} />
-              {t("sidebar_deleteSession")}
-            </button>
-            <button
-              onClick={handleDeleteCancel}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                height: compact ? 22 : 26, padding: "0 10px",
-                background: "var(--bg)", border: "1px solid var(--border)",
-                borderRadius: 6, color: "var(--text-muted)",
-                cursor: "pointer", fontSize: compact ? 11 : 12, fontWeight: 500,
-                whiteSpace: "nowrap",
-              }}
-            >
-              {t("sidebar_cancel")}
-            </button>
-          </div>
-        </>
-      ) : renaming ? (
+      {renaming ? (
         /* ── Rename: input fills the same row ── */
         <input
           ref={inputRef}
@@ -2975,5 +2934,22 @@ function SessionItem({
         </>
       )}
     </div>
+    <ViewportDialog
+      open={confirmDelete}
+      onClose={handleDeleteCancel}
+      title={t("sidebar_deleteSession")}
+      description={t("sidebar_deleteConfirm", { name: title })}
+      width={400}
+      closeLabel={t("dialog_close")}
+      actions={
+        <>
+          <DialogButton onClick={handleDeleteCancel}>{t("sidebar_cancel")}</DialogButton>
+          <DialogButton danger onClick={() => void handleDeleteConfirm()}>
+            {t("sidebar_deleteSession")}
+          </DialogButton>
+        </>
+      }
+    />
+    </>
   );
 }

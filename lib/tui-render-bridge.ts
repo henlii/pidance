@@ -14,8 +14,142 @@
  * 打包进产物（无绝对路径），再按 Theme 构造签名解析 vars/colors 构造。
  */
 
-import { Theme } from "@earendil-works/pi-coding-agent";
 import darkThemeJson from "./pi-themes/dark.json" with { type: "json" };
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const h = hex.replace("#", "");
+  const full =
+    h.length === 3
+      ? h
+          .split("")
+          .map((c) => c + c)
+          .join("")
+      : h;
+  const n = Number.parseInt(full, 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+function fgAnsi(color: string | number, mode: "truecolor" | "256color"): string {
+  if (color === "") return "\x1b[39m";
+  if (typeof color === "number") return `\x1b[38;5;${color}m`;
+  if (typeof color === "string" && color.startsWith("#")) {
+    if (mode === "truecolor") {
+      const { r, g, b } = hexToRgb(color);
+      return `\x1b[38;2;${r};${g};${b}m`;
+    }
+    return `\x1b[38;5;7m`;
+  }
+  throw new Error(`Invalid color value: ${String(color)}`);
+}
+
+function bgAnsi(color: string | number, mode: "truecolor" | "256color"): string {
+  if (color === "") return "\x1b[49m";
+  if (typeof color === "number") return `\x1b[48;5;${color}m`;
+  if (typeof color === "string" && color.startsWith("#")) {
+    if (mode === "truecolor") {
+      const { r, g, b } = hexToRgb(color);
+      return `\x1b[48;2;${r};${g};${b}m`;
+    }
+    return `\x1b[48;5;0m`;
+  }
+  throw new Error(`Invalid color value: ${String(color)}`);
+}
+
+/**
+ * 本地 Theme（不依赖 pi-coding-agent）：fg/bg 输出 ANSI，语义对齐官方 Theme。
+ */
+export class Theme {
+  readonly name?: string;
+  private readonly fgAnsiMap = new Map<string, string>();
+  private readonly bgAnsiMap = new Map<string, string>();
+  private readonly mode: "truecolor" | "256color";
+
+  constructor(
+    fgColors: Record<string, string | number>,
+    bgColors: Record<string, string | number>,
+    mode: "truecolor" | "256color" = "truecolor",
+    options?: { name?: string },
+  ) {
+    this.mode = mode;
+    this.name = options?.name;
+    const colors = {
+      ...fgColors,
+      thinkingMax: fgColors.thinkingMax ?? fgColors.thinkingXhigh,
+    };
+    for (const [key, value] of Object.entries(colors)) {
+      this.fgAnsiMap.set(key, fgAnsi(value, mode));
+    }
+    for (const [key, value] of Object.entries(bgColors)) {
+      this.bgAnsiMap.set(key, bgAnsi(value, mode));
+    }
+  }
+
+  fg(color: string, text: string): string {
+    const ansi = this.fgAnsiMap.get(color);
+    if (!ansi) throw new Error(`Unknown theme color: ${color}`);
+    return `${ansi}${text}\x1b[39m`;
+  }
+
+  bg(color: string, text: string): string {
+    const ansi = this.bgAnsiMap.get(color);
+    if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
+    return `${ansi}${text}\x1b[49m`;
+  }
+
+  bold(text: string): string {
+    return `\x1b[1m${text}\x1b[22m`;
+  }
+
+  italic(text: string): string {
+    return `\x1b[3m${text}\x1b[23m`;
+  }
+
+  underline(text: string): string {
+    return `\x1b[4m${text}\x1b[24m`;
+  }
+
+  inverse(text: string): string {
+    return `\x1b[7m${text}\x1b[27m`;
+  }
+
+  strikethrough(text: string): string {
+    return `\x1b[9m${text}\x1b[29m`;
+  }
+
+  getFgAnsi(color: string): string {
+    const ansi = this.fgAnsiMap.get(color);
+    if (!ansi) throw new Error(`Unknown theme color: ${color}`);
+    return ansi;
+  }
+
+  getBgAnsi(color: string): string {
+    const ansi = this.bgAnsiMap.get(color);
+    if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
+    return ansi;
+  }
+
+  getColorMode(): "truecolor" | "256color" {
+    return this.mode;
+  }
+
+  getThinkingBorderColor(level: string): (str: string) => string {
+    const map: Record<string, string> = {
+      off: "thinkingOff",
+      minimal: "thinkingMinimal",
+      low: "thinkingLow",
+      medium: "thinkingMedium",
+      high: "thinkingHigh",
+      xhigh: "thinkingXhigh",
+      max: "thinkingMax",
+    };
+    const key = map[level] ?? "thinkingOff";
+    return (str) => this.fg(key, str);
+  }
+
+  getBashModeBorderColor(): (str: string) => string {
+    return (str) => this.fg("bashMode", str);
+  }
+}
 
 /** 固定渲染宽度；前端按 pre-wrap 展示。 */
 export const RENDER_WIDTH = 100;
@@ -122,12 +256,7 @@ function createThemeFromJson(themeJson: ThemeJson): Theme {
     if (BG_COLOR_KEYS.has(key)) bgColors[key] = resolved;
     else fgColors[key] = resolved;
   }
-  return new Theme(
-    fgColors as ConstructorParameters<typeof Theme>[0],
-    bgColors as ConstructorParameters<typeof Theme>[1],
-    "truecolor",
-    { name: themeJson.name },
-  );
+  return new Theme(fgColors, bgColors, "truecolor", { name: themeJson.name });
 }
 
 // 模块级缓存：undefined = 尚未加载；null = 加载失败（安全回退，不再重试）。

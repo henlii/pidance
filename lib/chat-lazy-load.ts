@@ -14,6 +14,25 @@ export function getNextVisibleCount(currentVisibleCount: number, pageSize = VISI
 }
 
 /**
+ * 渲染列表尾部追加时同步增大 visibleCount。
+ * 固定窗口在自动跟随时会随 total 增长把 startIndex 前移，卸载更早消息；
+ * 用户只能滚到顶再加载，且继续跟随会再次把它们挤出窗口。
+ * 追加时把增量补进 visibleCount，保持 startIndex 不因尾部增长而前移。
+ */
+export function growVisibleCountOnAppend(
+  visibleCount: number,
+  previousTotal: number,
+  nextTotal: number,
+): number {
+  if (!Number.isFinite(visibleCount) || !Number.isFinite(previousTotal) || !Number.isFinite(nextTotal)) {
+    return visibleCount;
+  }
+  if (nextTotal <= previousTotal) return visibleCount;
+  const safeVisible = Math.max(0, visibleCount);
+  return safeVisible + (nextTotal - previousTotal);
+}
+
+/**
  * 顶部哨兵是否应挂载：本地还有未渲染条，或服务端还有更旧页。
  * 仅看 localHasMore 会在 visibleCount ≥ 已加载条数时卸掉哨兵，导致第二次起无法再拉历史。
  */

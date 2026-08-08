@@ -4,21 +4,21 @@ import { useCallback, useEffect, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { displayCwd } from "@/lib/project-context";
-import { formatRelativeTime, TrashIcon, XIcon } from "./session-sidebar/display";
+import { DialogButton, formatRelativeTime, TrashIcon, XIcon } from "./session-sidebar/display";
+import { ViewportDialog } from "./ui/ViewportDialog";
 import {
   archiveFailureKind,
   archiveRowTitle,
   deleteSessionPermanently,
   restoreSession,
   sortArchivedSessions,
-  toggleDeleteConfirm,
   type ArchiveActionResult,
 } from "@/lib/session-archive-client";
 
 /**
  * 归档视图（侧栏内视图）：
  * - 归档会话列表按 archivedAt 降序，行含标题 / 项目 / 归档日期；
- * - 「恢复」与「永久删除」（行内二次确认）动作；
+ * - 「恢复」与「永久删除」（弹窗二次确认）动作；
  * - 动作成功后统一回调 onRefresh 重新拉 /api/sessions（含 archivedSessions/archivedCount）；
  * - 打开归档会话只读浏览：后续版本（首版仅列表 + 恢复 + 删除）。
  */
@@ -92,7 +92,12 @@ export function ArchiveView({
     }
   }, [busyId, onRefresh, t, failureLabel]);
 
-  const rows = sortArchivedSessions(sessions);
+const rows = sortArchivedSessions(sessions);
+  const confirmSession = confirmDeleteId.sessionId
+    ? rows.find((s) => s.id === confirmDeleteId.sessionId) ?? null
+    : null;
+  const confirmTitle = confirmSession ? archiveRowTitle(confirmSession) : "";
+  const confirmBusy = confirmSession ? busyId === confirmSession.id : false;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -150,7 +155,6 @@ export function ArchiveView({
         )}
         {rows.map((session) => {
           const title = archiveRowTitle(session);
-          const confirming = confirmDeleteId.sessionId === session.id;
           const busy = busyId === session.id;
           return (
             <div
@@ -163,70 +167,82 @@ export function ArchiveView({
                 margin: "1px 6px",
                 padding: "7px 8px",
                 borderRadius: 6,
-                background: confirming ? "var(--status-danger-bg)" : "transparent",
+                background: "transparent",
                 opacity: busy ? 0.5 : 1,
               }}
             >
-              {confirming ? (
-                <>
-                  <span style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {t("archive_deleteConfirm")}
-                  </span>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void handleDelete(session)}
-                    style={{ padding: "3px 9px", background: "var(--status-danger)", border: "none", borderRadius: 5, color: "#fff", fontSize: 11, fontWeight: 600, cursor: busy ? "not-allowed" : "pointer", flexShrink: 0 }}
-                  >
-                    {busy ? t("archive_deleting") : t("archive_deleteConfirmButton")}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => setConfirmDeleteId((cur) => toggleDeleteConfirm(cur, session.id))}
-                    style={{ padding: "3px 9px", background: "var(--bg-hover)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-muted)", fontSize: 11, cursor: busy ? "not-allowed" : "pointer", flexShrink: 0 }}
-                  >
-                    {t("archive_deleteCancel")}
-                  </button>
-                </>
-              ) : (
-                <>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div
-                      title={title}
-                      style={{ fontSize: 12, fontWeight: 500, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", lineHeight: 1.4 }}
-                    >
-                      {title}
-                    </div>
-                    <div style={{ fontSize: 10.5, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", lineHeight: 1.4, marginTop: 1 }}>
-                      {displayCwd(session.cwd, homeDir)} · {t("archive_archivedAt", { date: formatRelativeTime(session.archivedAt ?? session.modified, t) })}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void handleRestore(session)}
-                    title={t("archive_restore")}
-                    style={{ padding: "3px 9px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text)", fontSize: 11, cursor: busy ? "not-allowed" : "pointer", flexShrink: 0 }}
-                  >
-                    {busy ? t("archive_restoring") : t("archive_restore")}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => setConfirmDeleteId((cur) => toggleDeleteConfirm(cur, session.id))}
-                    title={t("archive_delete")}
-                    aria-label={t("archive_delete")}
-                    style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: "none", border: "none", borderRadius: 5, color: "var(--text-dim)", cursor: busy ? "not-allowed" : "pointer", flexShrink: 0 }}
-                  >
-                    <TrashIcon size={13} />
-                  </button>
-                </>
-              )}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div
+                  title={title}
+                  style={{ fontSize: 12, fontWeight: 500, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", lineHeight: 1.4 }}
+                >
+                  {title}
+                </div>
+                <div style={{ fontSize: 10.5, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", lineHeight: 1.4, marginTop: 1 }}>
+                  {displayCwd(session.cwd, homeDir)} · {t("archive_archivedAt", { date: formatRelativeTime(session.archivedAt ?? session.modified, t) })}
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void handleRestore(session)}
+                title={t("archive_restore")}
+                style={{ padding: "3px 9px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text)", fontSize: 11, cursor: busy ? "not-allowed" : "pointer", flexShrink: 0 }}
+              >
+                {busy ? t("archive_restoring") : t("archive_restore")}
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setConfirmDeleteId({ sessionId: session.id })}
+                title={t("archive_delete")}
+                aria-label={t("archive_delete")}
+                style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: "none", border: "none", borderRadius: 5, color: "var(--text-dim)", cursor: busy ? "not-allowed" : "pointer", flexShrink: 0 }}
+              >
+                <TrashIcon size={13} />
+              </button>
             </div>
           );
         })}
       </div>
+
+      <ViewportDialog
+        open={confirmSession !== null}
+        onClose={() => {
+          if (confirmBusy) return;
+          setConfirmDeleteId({ sessionId: null });
+        }}
+        title={t("archive_delete")}
+        description={confirmSession ? (
+          <>
+            <div style={{ fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>{confirmTitle}</div>
+            <div>{t("archive_deleteConfirm")}</div>
+          </>
+        ) : t("archive_deleteConfirm")}
+        width={400}
+        closeLabel={t("dialog_close")}
+        closeOnBackdrop={!confirmBusy}
+        closeOnEsc={!confirmBusy}
+        actions={
+          <>
+            <DialogButton
+              disabled={confirmBusy}
+              onClick={() => setConfirmDeleteId({ sessionId: null })}
+            >
+              {t("archive_deleteCancel")}
+            </DialogButton>
+            <DialogButton
+              danger
+              disabled={confirmBusy || !confirmSession}
+              onClick={() => {
+                if (confirmSession) void handleDelete(confirmSession);
+              }}
+            >
+              {confirmBusy ? t("archive_deleting") : t("archive_deleteConfirmButton")}
+            </DialogButton>
+          </>
+        }
+      />
     </div>
   );
 }

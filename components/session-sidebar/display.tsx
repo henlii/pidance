@@ -427,13 +427,15 @@ export function ChevronButton({ collapsed, label, left, onClick }: {
 
 // ── 弹窗按钮 ──────────────────────────────────────────────────────────────
 
-/** 弹窗按钮：primary 为主操作（accent 填充白字），其余为次级（描边）。 */
-export function DialogButton({ primary = false, disabled = false, onClick, children }: {
+/** 弹窗按钮：primary 为主操作（accent 填充白字），danger 为危险操作（红底白字），其余为次级（描边）。 */
+export function DialogButton({ primary = false, danger = false, disabled = false, onClick, children }: {
   primary?: boolean;
+  danger?: boolean;
   disabled?: boolean;
   onClick: (e: React.MouseEvent) => void;
   children: ReactNode;
 }) {
+  const filled = primary || danger;
   return (
     <button
       type="button"
@@ -447,13 +449,13 @@ export function DialogButton({ primary = false, disabled = false, onClick, child
         height: 30,
         padding: "0 14px",
         flexShrink: 0,
-        background: primary ? "var(--accent)" : "var(--bg)",
-        border: primary ? "none" : "1px solid var(--border)",
+        background: danger ? "var(--status-danger)" : primary ? "var(--accent)" : "var(--bg)",
+        border: filled ? "none" : "1px solid var(--border)",
         borderRadius: 7,
-        color: primary ? "#fff" : "var(--text-muted)",
+        color: filled ? "#fff" : "var(--text-muted)",
         cursor: disabled ? "not-allowed" : "pointer",
         fontSize: 12,
-        fontWeight: primary ? 600 : 500,
+        fontWeight: filled ? 600 : 500,
         opacity: disabled ? 0.55 : 1,
         whiteSpace: "nowrap",
       }}
