@@ -401,6 +401,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleAgentEventRef = useRef<((event: AgentEvent, eventRunId?: number) => void) | null>(null);
   const handleFollowUpRef = useRef<(message: string, images?: AttachedImage[]) => Promise<void>>(async () => {});
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<boolean> | undefined>(undefined);
+  /** ask-user 两步协议暂存：select 的 Other 输入内容，自动响应随后到来的 input 请求 */
+  const pendingOtherInputRef = useRef<string | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   // ── OpenChamber 风格自动跟随（纯状态机见 lib/chat-auto-follow.ts）──────────
   // 唯一 scrollTop 写入方是本控制器的 pinToBottom；明确例外：顶部懒加载 prepend
@@ -945,10 +947,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     commitExtensionUiState(nextState);
     if (!sid) return;
     try {
+      // ask-user 两步协议：select 的 Other（手动输入）提交时，插件期望收到
+      // 选项里的哨兵文本（如 "4. Type something"），随后再发 input 请求收内容。
+      // 用户输入内容暂存，自动响应后续 input；select 响应发哨兵，避免插件把
+      // 自由文本当选项解析失败而放弃（表现为"已放弃提问"+工具卡到超时）。
+      let effectiveResponse = response;
+      if (
+        request.method === "select" &&
+        "value" in response &&
+        typeof response.value === "string" &&
+        request.options?.length &&
+        !request.options.includes(response.value)
+      ) {
+        pendingOtherInputRef.current = response.value;
+        effectiveResponse = { value: request.options[request.options.length - 1] };
+      }
       await sendAgentCommand(sid, {
         type: "extension_ui_response",
         id: request.id,
-        ...response,
+        ...effectiveResponse,
       });
       // OpenChamber 语义：取消问题块 = 终止当前执行（agent 阻塞在扩展请求上）。
       // 防护：若取消响应期间 agent 已自行停止（或用户已先停止），不再补发 abort，
@@ -1016,6 +1033,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   });
 
   const handleExtensionUiRequest = useCallback((request: ExtensionUiRequest) => {
+    // ask-user 两步协议：select Other 提交后插件会发 input 请求收内容——
+    // 用暂存内容自动响应（不渲染弹窗），用户只需输入一次。
+    const pendingOther = pendingOtherInputRef.current;
+    if (request.method === "input" && pendingOther != null && request.id) {
+      pendingOtherInputRef.current = null;
+      const sid = sessionIdRef.current;
+      if (sid) {
+        sendAgentCommand(sid, {
+          type: "extension_ui_response",
+          id: request.id,
+          value: pendingOther,
+        }).catch((e) => console.error("Failed to auto-respond input:", e));
+      }
+      return;
+    }
     const result = applyExtensionUiRequest(extensionUiStateRef.current, request);
     commitExtensionUiState(result.state);
     for (const effect of result.effects) {

@@ -646,7 +646,10 @@ export class ExternalRpcSession {
         if (command.value !== undefined) payload.value = command.value;
         if (command.confirmed !== undefined) payload.confirmed = command.confirmed;
         if (command.cancelled !== undefined) payload.cancelled = command.cancelled;
-        await proc.request(payload);
+        // Pi 0.83 对 extension_ui_response 不回响应（fire-and-forget）：
+        // 用 notify 不等响应，否则 30s 超时且本地 pending 不消费 →
+        // 重载后阻塞请求重现、会话卡在扩展请求上。
+        proc.notify(payload);
         if (id) this.pendingUiRequests.delete(id);
         return null;
       }

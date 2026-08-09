@@ -189,8 +189,10 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
   const otherLabel = t("extension_other");
   const appendOther = request.method === "select"
     && shouldAppendOtherOption(request.options, otherLabel);
+  // ask-user 等场景：存在 Other/Type something 选项时只保留手动输入项
+  // （用户直接输入回答，不再显示冗余预设选项）；其余 select 原样展示。
   const selectOptions = request.method === "select"
-    ? (appendOther ? [...request.options, otherLabel] : request.options)
+    ? (appendOther ? [otherLabel] : request.options)
     : [];
   const selectSubmission = getInlineSelectSubmission(scopedSelect);
   const selectCanSubmit = selectSubmission !== null;

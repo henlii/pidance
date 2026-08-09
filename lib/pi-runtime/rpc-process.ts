@@ -254,6 +254,30 @@ export class PiRpcProcess {
   }
 
   /** 发送命令并在 success 时返回 data，否则抛错。 */
+
+  /**
+   * 发送命令但不等待响应（fire-and-forget）。
+   * Pi 0.83 对部分命令不回响应（如 extension_ui_response）：request 会等到
+   * 30s 超时才抛错，且调用方无法及时消费本地状态（重载后阻塞请求重现）。
+   */
+  notify(command: RpcCommand): void {
+    const child = this.process;
+    const stdin = child?.stdin;
+    if (!child || !stdin) throw new Error("Client not started");
+    if (this.exitError) throw this.exitError;
+    if (child.exitCode !== null) {
+      throw (
+        this.exitError ??
+        new Error(`Agent process exited (code=${child.exitCode}). Stderr: ${this.stderr}`)
+      );
+    }
+    if (stdin.destroyed || !stdin.writable) {
+      throw new Error(`Agent process stdin is not writable. Stderr: ${this.stderr}`);
+    }
+    // fire-and-forget：原样发送（不等响应，无需 RPC 请求 id；
+    // command.id 保留调用方语义——如 extension_ui_response 的扩展请求 id）
+    stdin.write(serializeJsonLine(command));
+  }
   async request<T = unknown>(command: RpcCommand): Promise<T> {
     const response = await this.send(command);
     if (!response.success) {

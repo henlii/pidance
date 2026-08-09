@@ -145,8 +145,9 @@ test("SSR select：option 为暂存按钮含 aria-pressed，底部 Submit/Cancel
   });
 
   assert.ok(html.includes("aria-pressed="));
-  assert.ok(html.includes("一"));
-  assert.ok(html.includes("二"));
+  // 含 Other 时只保留手动输入项（Type something），预设选项隐藏
+  assert.ok(!html.includes("一"));
+  assert.ok(!html.includes("二"));
   // locale Other 附加
   assert.ok(html.includes("Other") || html.includes("其他"));
   assert.ok(html.includes("extension_submit") === false);
