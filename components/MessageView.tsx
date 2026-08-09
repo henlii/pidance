@@ -737,7 +737,7 @@ function BlockView({ block, toolResults, toolExecutionMap, isStreaming, streamin
     return <TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} />;
   }
   if (block.type === "thinking") {
-    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} />;
+    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} isStreaming={isStreaming} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} />;
   }
   if (block.type === "toolCall") {
     const tc = block as ToolCallContent;
@@ -765,34 +765,38 @@ const STREAM_BLOCK_MAX_HEIGHT = 320;
 /** 距块底多少 px 内视为仍跟随；用户上滚超出后停止自动向下。 */
 const STREAM_BLOCK_FOLLOW_TOLERANCE_PX = 24;
 
-function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
+function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, blockIndex }: {
   block: ThinkingContent;
   duration?: number;
+  /** 所在消息正在流式生成：思考块默认展开、流式结束自动折叠 */
+  isStreaming?: boolean;
   sessionId?: string;
   entryId?: string;
   blockIndex: number;
 }) {
   const { t } = useI18n();
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(isStreaming ?? false);
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const followBodyRef = useRef(true);
 
+  // 流式开始展开（默认可见），流式结束折叠；用户手动 toggle 在流式状态不变时不打扰
+  useEffect(() => {
+    setExpanded(isStreaming ?? false);
+  }, [isStreaming]);
   const bodyText = loading
     ? t("message_thinkingLoading")
     : error ?? (block.deferred ? content : block.thinking);
 
-  const toggle = async () => {
-    const nextExpanded = !expanded;
-    setExpanded(nextExpanded);
-    if (!nextExpanded || !block.deferred || content !== null) return;
+  // deferred 思考内容按需加载（点击展开或流式中默认展开均触发）
+  const loadIfDeferred = async () => {
+    if (!block.deferred || content !== null || loading) return;
     if (!sessionId || !entryId) {
       setError(t("message_thinkingUnavailable"));
       return;
     }
-
     setLoading(true);
     setError(null);
     try {
@@ -802,6 +806,17 @@ function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
     } finally {
       setLoading(false);
     }
+  };
+
+  useEffect(() => {
+    if (expanded) void loadIfDeferred();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅展开状态变化时触发
+  }, [expanded]);
+
+  const toggle = async () => {
+    const nextExpanded = !expanded;
+    setExpanded(nextExpanded);
+    if (nextExpanded && block.deferred && content === null) await loadIfDeferred();
   };
 
   // 展开后内容增长时块内自动向下；用户上滚后停止，滚回底部再恢复。
