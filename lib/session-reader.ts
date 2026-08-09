@@ -17,8 +17,6 @@ import {
   activityToUiMessage,
   parseActivityData,
 } from "./session-activity";
-import { projectObservationalMemory, type ObservationalMemoryView } from "./om-ledger";
-import { projectWorkspaceHistory, type WorkspaceHistoryView } from "./workspace-history";
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { discoverSubagentSessions } from "./subagent-sessions";
 import { getAgentDir } from "./pi-paths";
@@ -499,8 +497,6 @@ export function buildSessionNavigationSnapshot(
   context: SessionContext;
   header: SessionHeader | null | undefined;
   sessionName: string | undefined;
-  observationalMemory: ObservationalMemoryView | null;
-  workspaceHistory: WorkspaceHistoryView | null;
 } {
   const entries = sm.getEntries() as SessionEntry[];
   const leafId = resolveNavigationLeafId(
@@ -511,8 +507,6 @@ export function buildSessionNavigationSnapshot(
     stripLabelMetadataNodes(sm.getTree() as Parameters<typeof stripLabelMetadataNodes>[0]),
   );
   const context = buildSessionContext(entries, leafId, options);
-  const observationalMemory = projectObservationalMemory(entries, leafId);
-  const workspaceHistory = projectWorkspaceHistory(entries, leafId);
   return {
     entries,
     leafId,
@@ -520,8 +514,6 @@ export function buildSessionNavigationSnapshot(
     context,
     header: sm.getHeader(),
     sessionName: sm.getSessionName(),
-    observationalMemory,
-    workspaceHistory,
   };
 }
 
