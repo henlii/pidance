@@ -691,9 +691,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (liveState.thinkingLevel !== undefined) setThinkingLevel((liveState.thinkingLevel as ThinkingLevelOption) ?? "auto");
           if (liveState.extensionStatuses !== undefined) patchExtensionUiState({ statuses: liveState.extensionStatuses ?? [] });
           if (liveState.extensionWidgets !== undefined) patchExtensionUiState({ widgets: liveState.extensionWidgets ?? [] });
-          if (liveState.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(liveState.queuedMessages));
+          if (liveState.queuedMessages !== undefined) {
+            setQueuedMessages({
+              steering: normalizeQueuedMessages(liveState.queuedMessages).steering,
+              followUp: [...localFollowUpRef.current],
+            });
+          }
         } else if (!agentState.running) {
-          setQueuedMessages({ steering: [], followUp: [] });
+          setQueuedMessages({ steering: [], followUp: [...localFollowUpRef.current] });
         }
         return agentState;
       } catch (e) {
@@ -1093,7 +1098,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (state.isCompacting !== undefined) setIsCompacting(state.isCompacting);
     if (state.extensionStatuses !== undefined) patchExtensionUiState({ statuses: state.extensionStatuses ?? [] });
     if (state.extensionWidgets !== undefined) patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
-    if (state.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(state.queuedMessages));
+    if (state.queuedMessages !== undefined) {
+      setQueuedMessages({
+        steering: normalizeQueuedMessages(state.queuedMessages).steering,
+        followUp: [...localFollowUpRef.current],
+      });
+    }
   }, [patchExtensionUiState]);
 
   /**
@@ -1225,7 +1235,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // would otherwise leave the "Stop compaction" UI stuck. No state
       // (wrapper destroyed) means nothing is compacting.
       setIsCompacting(state?.isCompacting ?? false);
-      setQueuedMessages(normalizeQueuedMessages(state?.queuedMessages));
+      setQueuedMessages({
+        steering: normalizeQueuedMessages(state?.queuedMessages).steering,
+        followUp: [...localFollowUpRef.current],
+      });
       const busy = data.running && state
         && (state.isStreaming || state.isPromptRunning || state.isCompacting);
       if (busy || !agentRunningRef.current) return;
@@ -2002,7 +2015,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             if (agentState.state.thinkingLevel !== undefined) setThinkingLevel((agentState.state.thinkingLevel as ThinkingLevelOption) ?? "auto");
             if (agentState.state.extensionStatuses !== undefined) patchExtensionUiState({ statuses: agentState.state.extensionStatuses ?? [] });
             if (agentState.state.extensionWidgets !== undefined) patchExtensionUiState({ widgets: agentState.state.extensionWidgets ?? [] });
-            if (agentState.state.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(agentState.state.queuedMessages));
+            if (agentState.state.queuedMessages !== undefined) {
+              setQueuedMessages({
+                steering: normalizeQueuedMessages(agentState.state.queuedMessages).steering,
+                followUp: [...localFollowUpRef.current],
+              });
+            }
             // 切回会话时恢复阻塞中的问题块（服务端权威队列）。
             if (Array.isArray(agentState.state.pendingExtensionRequests)) {
               const queue = (agentState.state.pendingExtensionRequests as AgentEvent[])

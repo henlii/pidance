@@ -979,8 +979,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         if (isMobile) return;
         e.preventDefault();
         const modifier = e.ctrlKey || e.metaKey;
-        const queueCount =
-          (queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0);
+        const queueCount = queuedMessages?.followUp.length ?? 0;
         // 无内容 + follow-up 队列非空：Enter 即整队合并引导发送（Codex 风格）
         const followUpCount = queuedMessages?.followUp.length ?? 0;
         const hasInputText = Boolean(value.trim()) || hasReadyUploads;
@@ -1250,8 +1249,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }}
       />
       <div style={{ maxWidth: 820, margin: "0 auto" }}>
-        {/* Queued steering / follow-up messages (delivered by pi on upcoming turns) */}
-        {((queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0)) > 0 && (
+        {/* Queued follow-up messages（steering 即时投递，不在队列块显示） */}
+        {(queuedMessages?.followUp.length ?? 0) > 0 && (
           <div style={{
             marginBottom: 8,
             border: "1px solid var(--border)",
@@ -1273,7 +1272,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 textTransform: "uppercase",
                 letterSpacing: 0.4,
               }}>
-                {t("input_queued", { count: (queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0) })}
+                {t("input_queued", { count: queuedMessages?.followUp.length ?? 0 })}
               </span>
               <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
                 {onSendQueueAsSteer && (
@@ -1349,8 +1348,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 )}
               </div>
             </div>
-            {queuedMessages?.steering.map((text, i) => (
-              <QueuedMessageRow key={`steer-${i}`} kind="steer" text={text} />
+            {queuedMessages?.followUp.map((text, i) => (
+              <QueuedMessageRow key={`followup-${i}`} kind="follow-up" text={text} />
             ))}
             {queuedMessages?.followUp.map((text, i) => (
               <QueuedMessageRow key={`followup-${i}`} kind="follow-up" text={text} />
