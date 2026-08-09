@@ -17,6 +17,7 @@ import { attachCustomRenderedLines, preserveCustomRenderedLines } from "@/lib/cu
 import type { SessionActivity } from "@/lib/session-activity";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { BranchActions } from "@/lib/branch-bookmarks";
+import { mergeFollowUpForSteer, joinQueueForRecall } from "@/lib/queue-merge";
 import { createEventStreamManager, type EventStreamManager, type EventStreamConnectionResult } from "@/lib/event-stream-manager";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import {
@@ -376,6 +377,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     extensionUiStateRef, commitExtensionUiState, patchExtensionUiState, dismissExtensionUiRequest,
   } = useExtensionUiState();
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
+  // 本地 follow-up 队列（Codex 风格：发送入队、引导/取回消费）。
+  // 外部 Pi 无 clear_queue RPC，队列自管才能支持“整队合并引导发送”而不双发。
+  const [localFollowUpQueue, setLocalFollowUpQueue] = useState<string[]>([]);
+  const localFollowUpRef = useRef<string[]>([]);
+  const updateLocalFollowUp = useCallback((next: string[]) => {
+    localFollowUpRef.current = next;
+    setLocalFollowUpQueue(next);
+    // 展示层 followUp 始终以本地队列为准（Pi 队列不再使用 follow_up RPC）
+    setQueuedMessages((prev) => ({ ...prev, followUp: next }));
+  }, []);
   // 分支切换/总结进行中：树节点、发送与再次导航全部暂停，避免与 navigateTree 并发写。
   const [branchBusy, setBranchBusy] = useState(false);
 
@@ -388,6 +399,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const branchBusyRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
   const handleAgentEventRef = useRef<((event: AgentEvent, eventRunId?: number) => void) | null>(null);
+  const handleFollowUpRef = useRef<(message: string, images?: AttachedImage[]) => Promise<void>>(async () => {});
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<boolean> | undefined>(undefined);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   // ── OpenChamber 风格自动跟随（纯状态机见 lib/chat-auto-follow.ts）──────────
@@ -1378,9 +1390,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "queue_update":
+        // followUp 以本地队列为准（Pidance 自管）；steering 仍来自 Pi 进程队列
         setQueuedMessages({
           steering: [...((event.steering as string[] | undefined) ?? [])],
-          followUp: [...((event.followUp as string[] | undefined) ?? [])],
+          followUp: [...localFollowUpRef.current],
         });
         break;
       case "auto_retry_start":
@@ -1769,35 +1782,53 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (isReadOnly) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
+    if (behavior === "followUp") {
+      await handleFollowUpRef.current(message, images);
+      return;
+    }
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     try {
       await sendAgentCommand(sid, {
-        type: "prompt",
+        type: "steer",
         message,
-        streamingBehavior: behavior,
         ...(piImages?.length ? { images: piImages } : {}),
       });
     } catch (e) {
-      console.error("Failed to queue prompt:", e);
+      console.error("Failed to steer:", e);
     }
   }, [isReadOnly]);
 
+  /**
+   * follow-up 发送（Codex 风格）：agent 运行中入本地队列（不调 follow_up RPC，
+   * 否则引导合并后进程队列仍会投递导致双发）；空闲时直接 prompt（等效发送）。
+   * 图片附件不排队（本地队列仅文本），有图时直接 prompt 发送。
+   */
   const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[]) => {
     // 只读会话：follow-up 会写 session 文件，拦截。
     if (isReadOnly) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
-    const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-    try {
-      await sendAgentCommand(sid, {
-        type: "follow_up",
-        message,
-        ...(piImages?.length ? { images: piImages } : {}),
-      });
-    } catch (e) {
-      console.error("Failed to follow up:", e);
+    const text = message.trim();
+    if (!text) return;
+    if (images?.length || !agentRunningRef.current) {
+      // 有图或空闲：直接 prompt（空闲时无“结束后投递”语义）
+      const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+      try {
+        await sendAgentCommand(sid, {
+          type: "prompt",
+          message: text,
+          ...(piImages?.length ? { images: piImages } : {}),
+        });
+      } catch (e) {
+        console.error("Failed to send prompt:", e);
+      }
+      return;
     }
-  }, [isReadOnly]);
+    updateLocalFollowUp([...localFollowUpRef.current, text]);
+  }, [isReadOnly, updateLocalFollowUp]);
+
+  // 供 handlePromptWithStreamingBehavior（定义在前）引用最新 handleFollowUp
+  handleFollowUpRef.current = handleFollowUp;
 
   const handleAbortCompaction = useCallback(async () => {
     // 只读会话不存在进行中的 compact，拦截。
@@ -1812,21 +1843,34 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleRecallQueue = useCallback(async () => {
     // 只读会话没有队列（state 从不加载），拦截。
     if (isReadOnly) return;
-    // 无 clear_queue 时无法从远程取出并清空；仅提示，避免双发。
-    addNotice({
-      type: "warning",
-      message: "当前外部 Pi runtime 不支持清空/取回队列（clear_queue）",
-    });
-  }, [isReadOnly, addNotice]);
+    const items = localFollowUpRef.current;
+    if (items.length === 0) return;
+    // 取回：队列内容回填输入框（TUI queue restore 语义），清空本地队列。
+    opts.chatInputRef?.current?.prependText(joinQueueForRecall(items));
+    updateLocalFollowUp([]);
+  }, [isReadOnly, updateLocalFollowUp, opts.chatInputRef]);
 
-  /** 将队列中全部消息（含 follow-up）按引导方式重新入队；可选 extraMessage 并入队尾。 */
-  const handleSendQueueAsSteer = useCallback(async (_extraMessage?: string) => {
+  /** 引导发送：本地 follow-up 队列（+ 可选 extra）合并为一条 steer 消息，成功后清空。 */
+  const handleSendQueueAsSteer = useCallback(async (extraMessage?: string) => {
     if (isReadOnly) return;
-    addNotice({
-      type: "warning",
-      message: "当前外部 Pi runtime 不支持将队列重入队为引导（flush_queue_as_steer）",
-    });
-  }, [isReadOnly, addNotice]);
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    const merged = mergeFollowUpForSteer(localFollowUpRef.current, extraMessage);
+    if (!merged) return;
+    try {
+      if (agentRunningRef.current) {
+        // 运行中：steer（打断当前思考，立即引导）
+        await sendAgentCommand(sid, { type: "steer", message: merged });
+      } else {
+        // 空闲：Pi 的 steer 只入进程队列不唤醒；用 prompt 立即发起新回合
+        await sendAgentCommand(sid, { type: "prompt", message: merged });
+      }
+      updateLocalFollowUp([]);
+    } catch (e) {
+      console.error("Failed to send queue as steer:", e);
+      addNotice({ type: "error", message: String(e instanceof Error ? e.message : e) });
+    }
+  }, [isReadOnly, updateLocalFollowUp, addNotice]);
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     // 只读会话：set_thinking_level 会写会话状态，拦截。

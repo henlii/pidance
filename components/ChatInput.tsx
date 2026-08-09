@@ -574,9 +574,16 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const handleSend = useCallback(async () => {
     const base = value.trim();
     if (!base && !attachedImages.length && !hasReadyUploads) return;
+    onAudioUnlock?.();
+    // 运行中（流式）：纯文本点击发送默认以 follow_up 方式入本地队列（Codex 风格，
+    // 引导按钮/空回车合并消费）；有附件或非流式走下方正常发送。
+    if (isStreaming && !attachedImages.length && !hasReadyUploads && onPromptWithStreamingBehavior) {
+      clearInput();
+      onPromptWithStreamingBehavior(base, "followUp", undefined);
+      return;
+    }
     if (isStreaming) return;
     if (hasUploading) return; // 等上传完成
-    onAudioUnlock?.();
     // 纯文本/命令：点击即乐观清空（外部 pi 预检/冷启动可能数秒，不必等确认）；
     // 失败路径由 useAgentSession 经 insertIfEmpty 恢复（此处覆盖同步 false 返回）。
     // 有附件时不乐观清空：发送失败恢复图片成本高，保持确认后清空。
@@ -974,6 +981,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         const modifier = e.ctrlKey || e.metaKey;
         const queueCount =
           (queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0);
+        // 无内容 + follow-up 队列非空：Enter 即整队合并引导发送（Codex 风格）
+        const followUpCount = queuedMessages?.followUp.length ?? 0;
+        const hasInputText = Boolean(value.trim()) || hasReadyUploads;
+        if (!modifier && !hasInputText && followUpCount > 0 && onSendQueueAsSteer) {
+          flushQueueAsSteer();
+          return;
+        }
         if (modifier && queueCount > 0 && onSendQueueAsSteer) {
           flushQueueAsSteer();
           return;
