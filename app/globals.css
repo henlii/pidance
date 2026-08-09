@@ -1229,9 +1229,11 @@ span.linenumber {
   flex-shrink: 0;
 }
 .guide-select {
-  /* 项目/分支选择固定宽度（不再随内容伸缩）；溢出省略。 */
-  width: 200px;
-  max-width: 200px;
+  /* 项目/分支选择固定宽度（不再随内容伸缩）；溢出省略。
+     桌面 160px 紧凑；移动端由媒体查询改 flex 均分一行。 */
+  width: 160px;
+  max-width: 160px;
+  min-width: 0;
   border: none;
   background: transparent;
   color: var(--text);
@@ -1292,6 +1294,24 @@ span.linenumber {
 .guide-worktree-error {
   font-size: 11;
   color: var(--danger, #e5484d);
+}
+
+/* 移动端：项目/分支下拉一行均分（不换行），宽度自适应；新建工作树按钮不压缩。 */
+@media (max-width: 640px) {
+  .guide-selectors {
+    flex-wrap: nowrap;
+  }
+  .guide-selector {
+    flex: 1;
+    min-width: 0;
+  }
+  .guide-select {
+    width: 100%;
+    max-width: none;
+  }
+  .guide-new-worktree-btn {
+    flex-shrink: 0;
+  }
 }
 
 /* toggle 开启态（搜索/菜单展开） */
