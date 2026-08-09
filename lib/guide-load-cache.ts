@@ -18,10 +18,12 @@ export interface GuideProject {
   latest: number;
 }
 
-/** 聚合会话列表（含 cwd/created/modified）为「最近项目」列表，按最新活动降序取前 limit。 */
+/** 聚合会话列表（含 cwd/created/modified）为「最近项目」列表，按最新活动降序取前 limit。
+ * extraRoots：用户主动添加的项目根（无会话也展示，count=0），不在会话列表中时补入。 */
 export function aggregateGuideProjects(
   sessions: ReadonlyArray<{ cwd?: string; created?: string; modified?: string }>,
   limit = 12,
+  extraRoots: readonly string[] = [],
 ): GuideProject[] {
   const byCwd = new Map<string, { count: number; latest: number }>();
   for (const s of sessions) {
@@ -36,10 +38,14 @@ export function aggregateGuideProjects(
     if (ts > entry.latest) entry.latest = ts;
     byCwd.set(s.cwd, entry);
   }
-  return [...byCwd.entries()]
+  const projects = [...byCwd.entries()]
     .map(([cwd, v]) => ({ cwd, count: v.count, latest: v.latest }))
     .sort((a, b) => b.latest - a.latest)
     .slice(0, limit);
+  const known = new Set(projects.map((p) => p.cwd));
+  // 无会话的已添加项目：置顶便于刚添加即可见（与侧栏空项目置顶语义一致）。
+  const extra = extraRoots.filter((root) => !known.has(root)).map((cwd) => ({ cwd, count: 0, latest: 0 }));
+  return extra.length > 0 ? [...extra, ...projects].slice(0, limit) : projects;
 }
 
 /** 解析持久化目标 cwd 归属的项目：先精确匹配项目根，再最长前缀匹配（工作树路径）。无匹配返回 null。 */

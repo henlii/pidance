@@ -10,9 +10,10 @@
  * - 分支下拉：选定项目后加载其 git 工作树（主工作树分组 + 工作树分组；/api/worktrees）
  * - 非 git 项目：无分支选择器，选项目即设为目标（OpenChamber 语义）
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Folder, GitBranch, Plus } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
+import { loadSidebarPreferences } from "@/lib/ui-preferences";
 import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
 import type { SessionInfo } from "@/lib/types";
 import {
@@ -105,13 +106,16 @@ export function NewSessionGuide({ targetCwd, onTargetChange }: Props) {
     hydrateWorktreeCache(worktreeCacheRef.current, readPersistedWorktrees());
   }, []);
 
+  // 项目下拉合并「主动添加的项目」（无会话也展示，可直接发起会话）。
+  const addedProjectRoots = useMemo(() => loadSidebarPreferences().addedProjectRoots, []);
+
   useEffect(() => {
     let cancelled = false;
     // 先读本地缓存（localStorage，与 SessionSidebar 共享）：秒渲染最近项目，
     // 后台 fetch 刷新后覆盖（stale-while-revalidate）；拉取失败保留旧列表。
     const cached = loadCachedSessionList();
     if (cached && cached.length > 0) {
-      const sorted = aggregateGuideProjects(cached);
+      const sorted = aggregateGuideProjects(cached, 12, addedProjectRoots);
       setProjects(sorted);
       setLoadingProjects(false);
       restoreTargetRef.current(sorted);
@@ -122,7 +126,7 @@ export function NewSessionGuide({ targetCwd, onTargetChange }: Props) {
         const data = (await res.json()) as { sessions?: SessionInfo[] };
         const sessions = data.sessions ?? [];
         saveCachedSessionList(sessions);
-        const sorted = aggregateGuideProjects(sessions);
+        const sorted = aggregateGuideProjects(sessions, 12, addedProjectRoots);
         if (!cancelled) {
           setProjects(sorted);
           restoreTargetRef.current(sorted);
@@ -137,7 +141,7 @@ export function NewSessionGuide({ targetCwd, onTargetChange }: Props) {
       cancelled = true;
     };
     // 仅 mount 时执行（targetCwd 的后续变化由分支选择链路处理）
-  }, []);
+  }, [addedProjectRoots]);
 
   const loadWorktrees = useCallback((cwd: string): Promise<void> => {
     setSelectedCwd(cwd);
