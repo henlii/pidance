@@ -8,6 +8,7 @@
 import { dirname } from "node:path";
 import { openSessionFile, SessionFile } from "../session-file";
 import { clearLeafSidecar, readLeafSidecar } from "../session-leaf-sidecar";
+import { recordRunningStartedAt, clearRunningStartedAt } from "../running-state";
 import {
   normalizeActivityInput,
   parseAppendActivityCommand,
@@ -178,11 +179,14 @@ export class ExternalRpcSession {
     switch (event.type) {
       case "agent_start":
         this.streaming = true;
+        // 记录真实开始时间：刷新后前端从 /api/sessions 恢复运行计时
+        recordRunningStartedAt(this.realSessionId, Date.now());
         this.notifyRunning();
         break;
       case "agent_end":
         this.streaming = false;
         this.promptRunning = false;
+        clearRunningStartedAt(this.realSessionId);
         this.options.onSessionListInvalidate?.();
         // 对话已推进：sidecar 导航意图被实际对话位置取代，清除避免下次 open
         // 回退到过期 leaf（外部 pi append 不写 sidecar）。

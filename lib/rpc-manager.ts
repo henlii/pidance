@@ -167,6 +167,10 @@ export function subscribeRunningSessions(listener: (ids: string[]) => void): () 
   return () => { listeners.delete(listener); };
 }
 
+// running session 的真实开始时间（agent_start 记录；刷新后前端据此恢复计时）。
+// 实现见 lib/running-state.ts（独立模块避免循环依赖）。
+export { recordRunningStartedAt, clearRunningStartedAt, getRunningStartedAt } from "./running-state";
+
 let lastRunningSnapshot = "";
 
 /**

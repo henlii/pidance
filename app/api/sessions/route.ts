@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { sessionService } from "@/lib/session-service";
+import { getRunningStartedAt } from "@/lib/running-state";
 
 /**
  * GET /api/sessions[?scope=active|archived|all]
@@ -16,17 +17,17 @@ export async function GET(req: Request) {
     const runningSessionIds = sessionService.getRunningIds();
     if (scope === "archived") {
       const sessions = await sessionService.listArchivedSessions();
-      return NextResponse.json({ sessions, runningSessionIds });
+      return NextResponse.json({ sessions, runningSessionIds, runningStartedAt: Object.fromEntries(getRunningStartedAt()) });
     }
     if (scope === "all") {
       const sessions = await sessionService.listAllSessions();
-      return NextResponse.json({ sessions, runningSessionIds });
+      return NextResponse.json({ sessions, runningSessionIds, runningStartedAt: Object.fromEntries(getRunningStartedAt()) });
     }
     if (scope !== null && scope !== "active") {
       return NextResponse.json({ error: `Invalid scope: ${scope}` }, { status: 400 });
     }
     const { sessions, archivedSessions, archivedCount } = await sessionService.listSessions();
-    return NextResponse.json({ sessions, archivedSessions, archivedCount, runningSessionIds });
+    return NextResponse.json({ sessions, archivedSessions, archivedCount, runningSessionIds, runningStartedAt: Object.fromEntries(getRunningStartedAt()) });
   } catch (error) {
     return NextResponse.json(
       { error: String(error) },

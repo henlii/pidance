@@ -289,7 +289,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       // 卸载后不得 setState。
       if (!mountedRef.current || !shouldApplySessionListResponse(gen, sessionListFetchGenRef.current)) return;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[]; archivedSessions?: SessionInfo[]; archivedCount?: number };
+      const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[]; runningStartedAt?: Record<string, number>; archivedSessions?: SessionInfo[]; archivedCount?: number };
       if (!mountedRef.current || !shouldApplySessionListResponse(gen, sessionListFetchGenRef.current)) return;
       setServerSessions(data.sessions);
       serverSessionsRef.current = data.sessions;
@@ -313,6 +313,20 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       // live it owns this state, so a slow fetch can't revive a stale snapshot.
       if (!sseAuthoritativeRef.current) {
         setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+      }
+      // 服务端真实开始时间播种：刷新后运行计时不从头重算（first-seen 仅在无记录时生效）
+      if (data.runningStartedAt) {
+        setRunningStartedAt((prev) => {
+          const next = new Map(prev);
+          let changed = false;
+          for (const [id, ts] of Object.entries(data.runningStartedAt ?? {})) {
+            if (!next.has(id) && typeof ts === "number") {
+              next.set(id, ts);
+              changed = true;
+            }
+          }
+          return changed ? next : prev;
+        });
       }
       // Drop unread markers for sessions that no longer exist (e.g. deleted).
       // pending 仍在的 id 不得因 stale server 列表被清掉。
@@ -352,6 +366,15 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     initialLoadDone.current = true;
     loadSessions(isFirst);
   }, [loadSessions, refreshKey]);
+
+  // 会话列表自动刷新：30s 轮询静默拉取（新会话/删除/归档跨刷新可见），
+  // 替代已移除的手动刷新按钮。
+  useEffect(() => {
+    const timer = setInterval(() => {
+      loadSessions(false);
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, [loadSessions]);
 
   // 真实 id 乐观 upsert（多条）：立即进入 pending map，不等全量列表。
   // 父层以 id map/list 传入；单槽覆盖会丢尚未回流的其它真实 session。
@@ -1354,14 +1377,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 </div>
               </AnimatedDropdown>
             </div>
-            <SidebarIconButton
-              label={t("sidebar_refresh")}
-              done={sessionRefreshDone}
-              onClick={() => loadSessions(false)}
-            >
-              {sessionRefreshDone ? <CheckIcon size={16} /> : <RefreshIcon size={16} />}
-            </SidebarIconButton>
-          </div>
+            {/* 刷新按钮已移除：会话列表 30s 自动刷新（见下方轮询 effect） */}
+        </div>
         </div>
 
         {/* 搜索行：第二行展示、自动聚焦、Esc 先清空再关闭；范围覆盖全部项目。
