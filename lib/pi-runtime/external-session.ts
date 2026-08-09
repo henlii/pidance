@@ -22,8 +22,6 @@ import {
   projectRpcAgentState,
   type QueuedMessagesSnapshot,
 } from "./project-rpc-state";
-import { stripAnsi } from "../ansi";
-
 export type ExternalEventListener = (event: AssemblerAgentEvent) => void;
 
 export type NavigationActions = {
@@ -253,7 +251,7 @@ export class ExternalRpcSession {
           : typeof event.text === "string"
             ? event.text
             : "";
-      if (text) this.extensionStatuses.set(key, stripAnsi(text));
+      if (text) this.extensionStatuses.set(key, text);
       else this.extensionStatuses.delete(key);
       return;
     }
@@ -272,8 +270,9 @@ export class ExternalRpcSession {
       else {
         this.extensionWidgets.set(key, {
           // setStatus/setWidget 是纯文本 UI；清洗 ANSI 防乱码（mcp/scout 插件带颜色码）
+          // 原文存储（含 ANSI 颜色码）；渲染层 parseAnsiLine 解析成彩色 span
           lines: Array.isArray(rawLines)
-            ? rawLines.map((l) => (typeof l === "string" ? stripAnsi(l) : l))
+            ? rawLines.filter((l): l is string => typeof l === "string")
             : [],
           placement:
             event.widgetPlacement === "belowEditor" ? "belowEditor" : "aboveEditor",

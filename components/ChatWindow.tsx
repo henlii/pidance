@@ -845,7 +845,9 @@ function ExtensionStatusBar({ statuses }: { statuses: Array<{ key: string; text:
           }}
         >
           <span style={{ color: "var(--accent)", fontFamily: "var(--font-mono)", fontSize: 11 }}>{status.key}</span>
-          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{status.text}</span>
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {renderAnsiLine(status.text, `status-${status.key}`)}
+          </span>
         </div>
       ))}
     </div>
