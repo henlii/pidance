@@ -2,6 +2,7 @@ import { existsSync } from "fs";
 import { allowFileRoot } from "./file-access";
 import { getAgentDir } from "./pi-paths";
 import { openSessionFile, SessionFile } from "./session-file";
+import { clearLeafSidecar } from "./session-leaf-sidecar";
 import {
   getRpcSession,
   getRunningRpcSessionIds,
@@ -440,9 +441,15 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         if (!filePath) throw new Error("Session not found");
         const sessionManager = openSessionFile(filePath);
         const oldLeafId = sessionManager.getLeafId();
-        // 目标是磁盘文件末尾 = 外部 pi 默认 leaf：无导航语义，不写 sidecar
-        // （避免 UI 同步当前 leaf 时固化过期值）。
-        if (trimmedId === oldLeafId || trimmedId === sessionManager.getLastEntryId()) return { cancelled: false };
+        // 目标 = 当前 leaf：无导航语义，不写 sidecar（避免固化无变化值）
+        if (trimmedId === oldLeafId) return { cancelled: false };
+        // 目标 = 文件末尾（外部 pi 默认 leaf）：清除过期 sidecar。
+        // 只跳过写入会残留旧分支指针，下次磁盘 open 恢复旧 leaf，
+        // 导航到最新分支的意图丢失（UI 弹回旧分支）。
+        if (trimmedId === sessionManager.getLastEntryId()) {
+          clearLeafSidecar(filePath);
+          return { cancelled: false };
+        }
         if (!sessionManager.getEntry(trimmedId)) throw new Error(`Entry ${trimmedId} not found`);
         try {
           sessionManager.branch(trimmedId);
@@ -462,8 +469,15 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       deps.getRpcSession(sessionId)?.destroy();
       const sessionManager = openSessionFile(filePath);
       const oldLeafId = sessionManager.getLeafId();
-      // 目标是磁盘文件末尾 = 外部 pi 默认 leaf：无导航语义，不写 sidecar
-      if (trimmedId === oldLeafId || trimmedId === sessionManager.getLastEntryId()) return { cancelled: false };
+      // 目标 = 当前 leaf：无导航语义，不写 sidecar（避免固化无变化值）
+      if (trimmedId === oldLeafId) return { cancelled: false };
+      // 目标 = 文件末尾（外部 pi 默认 leaf）：清除过期 sidecar。
+      // 只跳过写入会残留旧分支指针，下次磁盘 open 恢复旧 leaf，
+      // 导航到最新分支的意图丢失（UI 弹回旧分支）。
+      if (trimmedId === sessionManager.getLastEntryId()) {
+        clearLeafSidecar(filePath);
+        return { cancelled: false };
+      }
       if (!sessionManager.getEntry(trimmedId)) throw new Error(`Entry ${trimmedId} not found`);
       try {
         sessionManager.branch(trimmedId);

@@ -716,9 +716,13 @@ export class ExternalRpcSession {
           if (!sessionManager.getEntry(targetId)) {
             throw new Error(`Entry ${targetId} not found`);
           }
-          // 目标是文件末尾 = 外部 pi 默认 leaf：无导航语义，不写 sidecar
           if (sessionManager.getLastEntryId() !== targetId) {
             sessionManager.branch(targetId);
+          } else {
+            // 目标是文件末尾 = 外部 pi 默认 leaf：清除过期 sidecar。
+            // 只跳过写入会残留旧分支指针，下次磁盘 open 恢复旧 leaf，
+            // 导航到最新分支的意图丢失（UI 弹回旧分支）。
+            clearLeafSidecar(this.realSessionFile);
           }
           this.options.onSessionListInvalidate?.();
           return { cancelled: false };
