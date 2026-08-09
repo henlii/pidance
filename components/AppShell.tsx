@@ -29,6 +29,7 @@ import {
 import { buildAtMentionText, buildFileAtMentionsText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
+import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
 import type { BranchActions } from "@/lib/branch-bookmarks";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -680,16 +681,14 @@ function AppShellInner() {
 
     // 无论是否仍选中当前 intent：乐观 upsert 进侧栏 multi-pending。
     upsertOptimisticPending(session);
+    // 立即并入本地缓存：刷新后 SWR 秒渲染新会话（不等 fetch），避免"新会话消失"
+    const cached = loadCachedSessionList();
+    if (cached) {
+      const merged = [session, ...cached.filter((s) => s.id !== session.id)].slice(0, 50);
+      saveCachedSessionList(merged);
+    }
     // 仅 session list 刷新；不得带动 worktree preload generation。
     setRefreshKey((k) => k + 1);
-
-    if (!promote) return;
-
-    selectedSessionIdRef.current = session.id;
-    setSelectedSession(session);
-    // 创建成功后 intent 可保留至用户另开新会话/选中其它；hydrate 用 intent 门禁。
-    hydrateSelectedSession(session.id, { intentId: intentId ?? newSessionIntentRef.current?.id });
-    router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
   }, [router, hydrateSelectedSession, upsertOptimisticPending]);
 
   const handleAgentEnd = useCallback(() => {
