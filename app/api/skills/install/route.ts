@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { runNpx } from "@/lib/npx";
-import { resolveProjectTrustedForSession } from "@/lib/project-trust";
 
 export const dynamic = "force-dynamic";
 
@@ -18,12 +17,6 @@ export async function POST(req: Request) {
       const projectCwd = cwd?.trim();
       if (!projectCwd) {
         return NextResponse.json({ error: "cwd required for project install" }, { status: 400 });
-      }
-      if (!resolveProjectTrustedForSession(projectCwd)) {
-        return NextResponse.json(
-          { error: "Project resources must be trusted before installing project skills" },
-          { status: 403 },
-        );
       }
     }
     const args = ["skills", "add", pkg.trim(), "-y", "--agent", "pi"];

@@ -42,7 +42,7 @@ import {
 import { getSessionCapabilities } from "./session-capabilities";
 import { useProjectActions, useProjectIdentity } from "./ProjectProvider";
 import { ViewportDialog } from "./ui/ViewportDialog";
-import { ProjectTrustBadge, ProjectTrustDialog, useProjectTrust, type ProjectTrustEntry } from "./ProjectTrust";
+
 import { useI18n } from "@/lib/i18n";
 import { loadUnreadSessionIds, saveUnreadSessionIds } from "@/lib/unread-sessions-storage";
 import {
@@ -1052,56 +1052,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     [openTree, normalizedSessionQuery, prefs.projectAliases, fulltextMatchIds, fulltextModeActive],
   );
 
-  // 项目信任：按未经搜索过滤的项目根 + 非主 worktree 路径查询，
-  // 避免输入搜索词时反复重取；决策后立即重取以刷新徽章。
-  // 主项目与 worktree 各自对应自身 cwd，不混用。
-  // 额外查询当前实际 selectedCwd：会话 cwd 可能是项目根子目录，
-  // 需与 AgentSession / 自动提示使用同一信任目标（useProjectTrust 内部已去重）。
-  const trustRoots = useMemo(() => {
-    const roots: string[] = [];
-    for (const project of openTree) {
-      roots.push(project.root);
-      for (const group of project.worktrees) {
-        roots.push(group.path);
-      }
-    }
-    if (selectedCwd) roots.push(selectedCwd);
-    return roots;
-  }, [openTree, selectedCwd]);
-  const { entries: trustEntries, refresh: refreshTrust } = useProjectTrust(trustRoots);
-  const [trustDialogRoot, setTrustDialogRoot] = useState<string | null>(null);
-  // 「本次连续选择该 cwd 期间已手动关闭未决提示」的记录：只对当前 cwd 生效，
-  // 切换 cwd 即清零（不持久化、不跨刷新）。避免 rerender/refresh 后反复自动弹窗。
-  const trustAutoDismissedCwdRef = useRef<string | null>(null);
-  const prevSelectedCwdRef = useRef<string | null>(selectedCwd);
-
-  // 切换活动项目：关闭旧项目的信任对话框，并允许新 cwd（或之后切回）重新自动提示。
-  // 必须声明在自动打开 effect 之前，保证同一批提交里先关旧、再开新。
-  useEffect(() => {
-    if (prevSelectedCwdRef.current === selectedCwd) return;
-    prevSelectedCwdRef.current = selectedCwd;
-    trustAutoDismissedCwdRef.current = null;
-    setTrustDialogRoot(null);
-  }, [selectedCwd]);
-
-  // 自动提示仅针对当前活动 cwd：entry 已加载且仍未决时打开决策对话框。
-  // 不扫描历史项目；函数式更新保证已打开（如徽章手动打开其它项目）的对话框不被抢占；
-  // 异步响应只可能把对话框设为当前 selectedCwd，旧 cwd 不会复活。
-  useEffect(() => {
-    if (!selectedCwd) return;
-    if (trustAutoDismissedCwdRef.current === selectedCwd) return;
-    const entry = trustEntries.get(selectedCwd);
-    if (!entry || !entry.status.needsDecision) return;
-    setTrustDialogRoot((current) => current ?? selectedCwd);
-  }, [selectedCwd, trustEntries]);
-
-  // entry 消失（目录被删、决策已在别处完成）时安全关闭，避免残留 root 日后复活。
-  useEffect(() => {
-    if (trustDialogRoot !== null && !trustEntries.get(trustDialogRoot)) {
-      setTrustDialogRoot(null);
-    }
-  }, [trustDialogRoot, trustEntries]);
-
   /** 全文命中深链：按 id 打开已加载会话；列表尚未包含时忽略（refresh 后可再点）。 */
   const openSessionById = useCallback((sessionId: string) => {
     const target = allSessions.find((s) => s.id === sessionId);
@@ -1650,8 +1600,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             onToggleWorktree={toggleWorktreeCollapse}
             onNewSession={handleNewSession}
             onSelectSession={handleSelectSessionFromList}
-            trustEntries={trustEntries}
-            onOpenTrust={(cwd) => setTrustDialogRoot(cwd)}
             menuOpen={openProjectMenuRoot === project.root}
             onMenuOpenChange={(open) => setOpenProjectMenuRoot(open ? project.root : null)}
             onEditProject={() => handleOpenEditProject(project.root)}
@@ -1696,17 +1644,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
        </>
       )}
 
-      {/* 项目信任决策：写入 ~/.pi/agent/trust.json，只影响此后新建的 AgentSession。 */}
-      <ProjectTrustDialog
-        open={trustDialogRoot !== null}
-        entry={trustDialogRoot !== null ? trustEntries.get(trustDialogRoot) ?? null : null}
-        onClose={() => {
-          // 手动关闭未决提示后，本次连续选择该 cwd 期间不再自动弹；切换 cwd 即失效。
-          if (trustDialogRoot !== null) trustAutoDismissedCwdRef.current = trustDialogRoot;
-          setTrustDialogRoot(null);
-        }}
-        onDecided={refreshTrust}
-      />
 
       {/* 添加项目弹窗：总是经 ViewportDialog，不直接拉起原生选择器；
           「选择目录」仅填充输入，提交仍走 /api/cwd/validate。 */}

@@ -1,6 +1,6 @@
 /**
  * 自管 settings.json（不依赖 SettingsManager）。
- * 全局：~/.pi/agent/settings.json；项目：<cwd>/.pi/settings.json（仅在 projectTrusted 时合并）。
+ * 全局：~/.pi/agent/settings.json；项目：<cwd>/.pi/settings.json（总是合并）。
  */
 
 import {
@@ -76,16 +76,15 @@ function deepMergeSettings(base: SettingsObject, overlay: SettingsObject): Setti
 
 /**
  * 合并全局 +（可选）项目 settings。
- * projectTrusted=false 时不读项目文件（对齐 SDK 信任门禁）。
  */
 export function loadMergedSettings(
   cwd: string | null | undefined,
-  options: { agentDir?: string; projectTrusted?: boolean } = {},
+  options: { agentDir?: string } = {},
 ): SettingsObject {
   const agentDir = options.agentDir ?? getAgentDir();
   const globalPath = join(resolve(agentDir), "settings.json");
   const global = loadSettingsFile(globalPath);
-  if (!cwd || options.projectTrusted === false) return global;
+  if (!cwd) return global;
   const project = loadSettingsFile(getProjectSettingsPath(cwd));
   return deepMergeSettings(global, project);
 }
@@ -105,25 +104,16 @@ function asQueueMode(value: unknown, fallback: QueueMode): QueueMode {
 export class GlobalSettingsStore implements AgentSettingsWriter {
   private global: SettingsObject;
   private readonly globalPath: string;
-  private readonly projectTrusted: boolean;
   private dirty = false;
 
-  constructor(options: { agentDir?: string; projectTrusted?: boolean } = {}) {
+  constructor(options: { agentDir?: string } = {}) {
     const agentDir = options.agentDir ?? getAgentDir();
     this.globalPath = join(resolve(agentDir), "settings.json");
     this.global = loadSettingsFile(this.globalPath);
-    this.projectTrusted = options.projectTrusted ?? false;
   }
 
-  static create(
-    _cwd: string | null | undefined,
-    agentDir?: string,
-    options?: { projectTrusted?: boolean },
-  ): GlobalSettingsStore {
-    return new GlobalSettingsStore({
-      agentDir,
-      projectTrusted: options?.projectTrusted,
-    });
+  static create(_cwd: string | null | undefined, agentDir?: string): GlobalSettingsStore {
+    return new GlobalSettingsStore({ agentDir });
   }
 
   /** 当前生效视图：仅全局（agent-settings 产品为 scope:global） */
@@ -173,14 +163,6 @@ export class GlobalSettingsStore implements AgentSettingsWriter {
     };
   }
 
-  isProjectTrusted(): boolean {
-    return this.projectTrusted;
-  }
-
-  getDefaultProjectTrust(): "ask" | "always" | "never" {
-    const v = this.global.defaultProjectTrust;
-    return v === "ask" || v === "always" || v === "never" ? v : "ask";
-  }
 
   getPackages(): unknown {
     return this.global.packages;
@@ -371,20 +353,6 @@ export function listDisabledPackageKeys(options: {
   return disabled;
 }
 
-/** 仅读 defaultProjectTrust（不构造完整 store 也可） */
-export function readDefaultProjectTrustFromDisk(agentDir?: string): "ask" | "always" | "never" {
-  try {
-    const path = agentDir
-      ? join(resolve(agentDir), "settings.json")
-      : getSettingsPath();
-    const data = loadSettingsFile(path);
-    const v = data.defaultProjectTrust;
-    if (v === "ask" || v === "always" || v === "never") return v;
-    return "ask";
-  } catch {
-    return "ask";
-  }
-}
 
 /** 类型收窄：GlobalSettingsStore 满足 AgentSettingsReader */
 export function asAgentSettingsReader(store: GlobalSettingsStore): AgentSettingsReader {

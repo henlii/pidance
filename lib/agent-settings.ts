@@ -42,7 +42,6 @@ export interface AgentSettingsView {
   };
   /** 写入生效的作用域说明 */
   scope: "global";
-  projectTrusted: boolean;
 }
 
 /** PUT 白名单：仅这些键可写 */
@@ -208,7 +207,6 @@ export interface AgentSettingsReader {
   getFollowUpMode(): QueueMode;
   getCompactionSettings(): { enabled: boolean; reserveTokens: number; keepRecentTokens: number };
   getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number };
-  isProjectTrusted(): boolean;
 }
 
 export function projectAgentSettingsView(manager: AgentSettingsReader): AgentSettingsView {
@@ -222,7 +220,6 @@ export function projectAgentSettingsView(manager: AgentSettingsReader): AgentSet
     compaction: manager.getCompactionSettings(),
     retry: manager.getRetrySettings(),
     scope: "global",
-    projectTrusted: manager.isProjectTrusted(),
   };
 }
 

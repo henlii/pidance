@@ -4,7 +4,7 @@
  * 全部为纯函数，方便 node:test 定向覆盖。
  */
 
-export type SettingsPageId = "general" | "appearance" | "models" | "defaults" | "skills" | "plugins" | "trust";
+export type SettingsPageId = "general" | "appearance" | "models" | "defaults" | "skills" | "plugins";
 
 export interface SettingsPageInfo {
   id: SettingsPageId;
@@ -18,7 +18,7 @@ export interface SettingsPageInfo {
 }
 
 // general / appearance / models / defaults / trust 无 cwd 也可看全局；skills/plugins 需要项目。
-const PAGE_ORDER: SettingsPageId[] = ["general", "appearance", "models", "defaults", "skills", "plugins", "trust"];
+const PAGE_ORDER: SettingsPageId[] = ["general", "appearance", "models", "defaults", "skills", "plugins"];
 
 /** 无 cwd 提示：保留导航项，内容区显示具体指引，不静默隐藏。 */
 const PAGE_NO_CWD_HINT: Partial<Record<SettingsPageId, "skills" | "plugins">> = { skills: "skills", plugins: "plugins" };

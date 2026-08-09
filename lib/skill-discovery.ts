@@ -6,7 +6,7 @@
  * 扫描根（按序合并去重，先扫描到的同名技能优先）：
  * 1. <agentDir>/skills
  * 2. <homeDir>/.agents/skills
- * 3. 若 projectTrusted：<cwd>/.pi/skills、<cwd>/.agents/skills，
+ * 3. 项目：<cwd>/.pi/skills、<cwd>/.agents/skills，
  *    以及从 cwd 向上到 git 仓库根（或文件系统根）的祖先 .agents/skills
  *    （排除用户全局 ~/.agents/skills，避免与第 2 条重复扫描）
  * 4. settings.json 的 skills 数组若为路径列表：额外扫描这些路径（文件或目录，
@@ -44,7 +44,6 @@ export interface SkillDiscoveryResult {
 export interface SkillDiscoveryOptions {
   cwd: string;
   agentDir: string;
-  projectTrusted: boolean;
   /** 用户 home 目录，测试时可注入；缺省 homedir()。 */
   homeDir?: string;
 }
@@ -243,15 +242,16 @@ function readSettingsSkills(settingsPath: string): string[] {
  * collision 诊断；同一物理文件（含 symlink 别名）只保留一份。
  */
 export function discoverSkills(options: SkillDiscoveryOptions): SkillDiscoveryResult {
-  const { cwd, agentDir, projectTrusted } = options;
+  const { cwd, agentDir } = options;
   const homeDir = options.homeDir ?? homedir();
 
   const userRoots = [join(agentDir, "skills"), join(homeDir, ".agents", "skills")];
-  const projectRoots: string[] = [];
-  if (projectTrusted) {
-    projectRoots.push(join(cwd, ".pi", "skills"), join(cwd, ".agents", "skills"));
-    projectRoots.push(...collectAncestorAgentsSkillDirs(cwd, homeDir));
-  }
+  // 项目技能目录总是发现（信任门禁已移除）
+  const projectRoots = [
+    join(cwd, ".pi", "skills"),
+    join(cwd, ".agents", "skills"),
+    ...collectAncestorAgentsSkillDirs(cwd, homeDir),
+  ];
 
   const skillMap = new Map<string, SkillInfo>();
   const realPathSet = new Set<string>();

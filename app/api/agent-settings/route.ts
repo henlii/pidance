@@ -15,7 +15,6 @@ import {
   projectAgentSettingsView,
   type AgentSettingsView,
 } from "@/lib/agent-settings";
-import { resolveProjectTrustedForSession } from "@/lib/project-trust";
 import { GlobalSettingsStore } from "@/lib/settings-store";
 
 export type { AgentSettingsPatch, AgentSettingsView } from "@/lib/agent-settings";
@@ -25,13 +24,7 @@ export const dynamic = "force-dynamic";
 function createManager(cwd: string | null): GlobalSettingsStore {
   const agentDir = getAgentDir();
   const workDir = cwd && cwd.trim() ? cwd : homedir();
-  let projectTrusted = false;
-  try {
-    projectTrusted = resolveProjectTrustedForSession(workDir);
-  } catch {
-    projectTrusted = false;
-  }
-  return GlobalSettingsStore.create(workDir, agentDir, { projectTrusted });
+  return GlobalSettingsStore.create(workDir, agentDir);
 }
 
 export async function GET(req: NextRequest) {
@@ -86,4 +79,4 @@ export async function PUT(req: NextRequest) {
     );
   }
 }
-
+

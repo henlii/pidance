@@ -61,8 +61,6 @@ import {
   bumpGroupVisibleCount,
   resetGroupVisibleCount,
 } from "../session-sidebar-state";
-import type { ProjectTrustEntry } from "../ProjectTrust";
-import { ProjectTrustBadge } from "../ProjectTrust";
 
 // 侧栏树几何（与 SessionSidebar 主文件同源复制；改动须两处同步或上移到 display）。
 const SIDEBAR_GUTTER = 6;
@@ -95,8 +93,6 @@ function ProjectSection({
   onMenuOpenChange,
   onEditProject,
   onCloseProject,
-  trustEntries,
-  onOpenTrust,
   onRenamed,
   onSessionDeleted,
   onToggleCollapse,
@@ -139,8 +135,6 @@ function ProjectSection({
   onEditProject: () => void;
   onCloseProject: () => void;
   /** 项目根与各 worktree path → 信任状态；缺失则不显示徽章 */
-  trustEntries: Map<string, ProjectTrustEntry>;
-  onOpenTrust: (cwd: string) => void;
   onRenamed: () => void;
   onSessionDeleted: (id: string) => void;
   onToggleCollapse: (sessionId: string) => void;
@@ -167,7 +161,6 @@ function ProjectSection({
   const hasSessions = project.mainTree.length > 0 || project.worktrees.some((group) => group.tree.length > 0);
   // 显示名优先 alias；title 仍保留真实 root 路径（见行 title 属性）。
   const projectName = projectAliases[project.root] ?? displayCwd(project.root, homeDir);
-  const trustEntry = trustEntries.get(project.root) ?? null;
   const collapseLabel = collapsed
     ? t("sidebar_expandProjectNamed", { project: projectName })
     : t("sidebar_collapseProjectNamed", { project: projectName });
@@ -229,13 +222,6 @@ function ProjectSection({
             fontFamily: "var(--font-mono)",
           }}
         />
-        {trustEntry && (
-          <ProjectTrustBadge
-            status={trustEntry.status}
-            projectName={projectName}
-            onClick={() => onOpenTrust(project.root)}
-          />
-        )}
         <SidebarIconButton
           label={t("sidebar_newSessionIn", { project: projectName })}
           hoverReveal
@@ -329,8 +315,6 @@ function ProjectSection({
               visibleCount={getGroupVisibleCount(groupVisibleCounts, `worktree:${group.path}`)}
               onShowMore={() => onShowMore(`worktree:${group.path}`)}
               onShowFewer={() => onShowFewer(`worktree:${group.path}`)}
-              trustEntry={trustEntries.get(group.path) ?? null}
-              onOpenTrust={() => onOpenTrust(group.path)}
               worktreeActions={worktreeActions}
               confirmRemove={wtConfirmRemove === group.path}
               onRequestRemove={() => onRequestRemoveWorktree(group.path)}
@@ -429,8 +413,6 @@ function WorktreeGroupSection({
   visibleCount,
   onShowMore,
   onShowFewer,
-  trustEntry,
-  onOpenTrust,
   worktreeActions,
   confirmRemove,
   onRequestRemove,
@@ -457,9 +439,6 @@ function WorktreeGroupSection({
   visibleCount: number;
   onShowMore: () => void;
   onShowFewer: () => void;
-  /** 该 worktree 检出的信任状态；读取失败或不适用时为 null（不显示徽章） */
-  trustEntry: ProjectTrustEntry | null;
-  onOpenTrust: () => void;
   worktreeActions: WorktreeActions | null;
   confirmRemove: boolean;
   onRequestRemove: () => void;
@@ -542,9 +521,6 @@ function WorktreeGroupSection({
           }}
         />
         {groupHasRunning && <RunningSessionIndicator size={10} />}
-        {trustEntry && (
-          <ProjectTrustBadge status={trustEntry.status} projectName={label} onClick={onOpenTrust} />
-        )}
         <SidebarIconButton
           label={t("sidebar_newSessionIn", { project: label })}
           hoverReveal

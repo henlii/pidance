@@ -6,14 +6,12 @@
  */
 
 import { getAgentDir } from "./pi-paths";
-import { resolveProjectTrustedForSession } from "./project-trust";
 import { discoverSkills } from "./skill-discovery";
 import { annotateSkillsWithInstallInfo } from "./skill-lock";
 
 export async function loadSkillsWithInstallInfo(cwd: string) {
   const agentDir = getAgentDir();
-  const projectTrusted = resolveProjectTrustedForSession(cwd, agentDir);
-  const { skills, diagnostics } = discoverSkills({ cwd, agentDir, projectTrusted });
+  const { skills, diagnostics } = discoverSkills({ cwd, agentDir });
   return {
     skills: annotateSkillsWithInstallInfo(skills, { cwd, agentDir }),
     diagnostics,

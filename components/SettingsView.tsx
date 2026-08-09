@@ -10,7 +10,6 @@ import { logoutUiSession } from "./UiLoginGate";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n, type Locale } from "@/lib/i18n";
-import type { ProjectTrustDecisionList, ProjectTrustStatus } from "@/lib/project-trust-model";
 import {
   SETTINGS_PAGE_STORAGE_KEY,
   getSettingsPages,
@@ -50,7 +49,6 @@ function settingsPageLabelKey(id: SettingsPageId) {
       return "common_skills";
     case "plugins":
       return "common_plugins";
-    case "trust":
       return "common_trust";
   }
 }
@@ -267,146 +265,6 @@ function AppearancePage() {
   );
 }
 
-/**
- * 项目信任只读视图：展示 defaultProjectTrust 回退行为、当前项目的生效状态，
- * 以及 ~/.pi/agent/trust.json 中已保存的全部决策。修改入口只在侧栏项目行，
- * 避免同一个写操作出现在两处。
- */
-function TrustPage({ cwd }: { cwd: string | null }) {
-  const { t } = useI18n();
-  const [list, setList] = useState<ProjectTrustDecisionList | null>(null);
-  const [current, setCurrent] = useState<ProjectTrustStatus | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch("/api/project-trust");
-        if (!res.ok) throw new Error(String(res.status));
-        const data = (await res.json()) as ProjectTrustDecisionList;
-        if (!cancelled) setList(data);
-      } catch {
-        if (!cancelled) setFailed(true);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    // cwd 切换时先清空，避免在 GET 返回前残留旧项目状态。
-    setCurrent(null);
-    if (!cwd) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch(`/api/project-trust?cwd=${encodeURIComponent(cwd)}`);
-        if (!res.ok) return;
-        const data = (await res.json()) as { statuses?: { cwd: string; status: ProjectTrustStatus }[] };
-        if (!cancelled) setCurrent(data.statuses?.[0]?.status ?? null);
-      } catch {
-        // 当前项目状态读不到时只隐藏该区块，不影响下方决策列表。
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [cwd]);
-
-  const defaultLabel =
-    list?.defaultProjectTrust === "always"
-      ? t("trust_defaultAlways")
-      : list?.defaultProjectTrust === "never"
-        ? t("trust_defaultNever")
-        : t("trust_defaultAsk");
-
-  const sectionTitle: React.CSSProperties = { fontSize: 12, fontWeight: 600, color: "var(--text)", marginBottom: 8 };
-  const mono: React.CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 11.5, wordBreak: "break-all" };
-
-  return (
-    <div className="settings-page-content">
-      <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 18 }}>
-        {t("trust_appliesNextSession")}
-      </div>
-
-      <div style={{ marginBottom: 22 }}>
-        <div style={sectionTitle}>{t("trust_defaultLabel")}</div>
-        <div style={{ fontSize: 12.5, color: "var(--text-muted)" }}>
-          {list ? defaultLabel : failed ? t("trust_loadFailed") : t("common_loading")}
-        </div>
-        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>{t("trust_defaultHint")}</div>
-      </div>
-
-      {current && (
-        <div style={{ marginBottom: 22 }}>
-          <div style={sectionTitle}>{t("trust_currentProject")}</div>
-          <div style={{ ...mono, color: "var(--text-muted)" }}>{current.cwd}</div>
-          <div style={{ fontSize: 12.5, color: "var(--text)", marginTop: 6 }}>
-            {!current.requiresTrust
-              ? t("trust_noGate")
-              : current.needsDecision
-                ? t("trust_badgeUndecidedTitle")
-                : current.trusted
-                  ? t("trust_badgeTrustedTitle")
-                  : t("trust_badgeUntrustedTitle")}
-          </div>
-          {current.inherited && current.storedPath && (
-            <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
-              {t("trust_inheritedFrom", { path: current.storedPath })}
-            </div>
-          )}
-        </div>
-      )}
-
-      <div style={sectionTitle}>{t("trust_decisionsTitle")}</div>
-      {failed || list?.error ? (
-        <div style={{ fontSize: 12, color: "var(--status-danger)" }}>
-          {t("trust_loadFailed")}
-          {list?.error ? `: ${list.error}` : ""}
-        </div>
-      ) : !list ? (
-        <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{t("common_loading")}</div>
-      ) : list.decisions.length === 0 ? (
-        <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{t("trust_decisionsEmpty")}</div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {list.decisions.map((entry) => (
-            <div
-              key={entry.path}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                padding: "7px 10px",
-                border: "1px solid var(--border)",
-                borderRadius: 8,
-                background: "var(--bg-panel)",
-              }}
-            >
-              <span style={{ ...mono, flex: 1, color: "var(--text)" }}>{entry.path}</span>
-              <span
-                style={{
-                  flexShrink: 0,
-                  fontSize: 10.5,
-                  padding: "1px 7px",
-                  borderRadius: 999,
-                  border: `1px solid ${entry.decision ? "var(--border)" : "color-mix(in srgb, var(--status-danger) 40%, var(--border))"}`,
-                  color: entry.decision ? "var(--text-dim)" : "var(--status-danger)",
-                }}
-              >
-                {entry.decision ? t("trust_decisionTrusted") : t("trust_decisionDistrusted")}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-      <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 12, lineHeight: 1.6 }}>{t("trust_readOnlyHint")}</div>
-    </div>
-  );
-}
-
 export function SettingsView({ cwd, sessionId, onClose, onModelsChanged, onAuthStateChange, onPluginsReloaded, initialPage }: SettingsViewProps) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
@@ -456,8 +314,6 @@ export function SettingsView({ cwd, sessionId, onClose, onModelsChanged, onAuthS
         return <SkillsConfig embedded cwd={cwd!} onClose={onClose} />;
       case "plugins":
         return <PluginsConfig embedded cwd={cwd!} sessionId={sessionId} onClose={onClose} onReloaded={onPluginsReloaded} />;
-      case "trust":
-        return <TrustPage cwd={cwd} />;
     }
   };
 

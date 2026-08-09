@@ -16,6 +16,16 @@
  *    编辑严格限定文件开头 `---\n...\n---` 区间，正文中的同名示例文本绝不触碰。
  */
 
+/** cwd 必须是存在的目录（路径有效性校验；信任门禁已移除）。 */
+function isUsableProjectPath(cwd: string): boolean {
+  if (!cwd || typeof cwd !== "string") return false;
+  try {
+    return statSync(cwd).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 import { closeSync, lstatSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -23,7 +33,7 @@ import { randomUUID } from "node:crypto";
 import { getAgentDir } from "./pi-paths";
 import { loadSkillsWithInstallInfo } from "./skills-service";
 import { openRegularFileReadonly } from "./file-read";
-import { isUsableProjectPath, resolveProjectTrustedForSession } from "./project-trust";
+
 import type { SkillInfo } from "./api-types";
 
 export class SkillWriteError extends Error {
@@ -38,14 +48,12 @@ const KEY = "disable-model-invocation";
 
 interface SkillWriteDeps {
   loadSkills: (cwd: string) => Promise<{ skills: SkillInfo[] }>;
-  resolveProjectTrusted: (cwd: string) => boolean;
   agentDir: string;
   homeDir: string;
 }
 
 const defaultDeps: SkillWriteDeps = {
   loadSkills: (cwd) => loadSkillsWithInstallInfo(cwd),
-  resolveProjectTrusted: (cwd) => resolveProjectTrustedForSession(cwd),
   agentDir: getAgentDir(),
   homeDir: homedir(),
 };
@@ -222,9 +230,6 @@ export async function toggleSkillDisableModelInvocation(
   }
   const source = classifySkillSource(filePath, realTarget, cwd, deps);
   if (source === "denied") throw new SkillWriteError("forbidden", "skill source is not writable (package/temporary or symlink escape)");
-  if (source === "project" && !deps.resolveProjectTrusted(cwd)) {
-    throw new SkillWriteError("forbidden", "project is not trusted");
-  }
 
   // 4. 词法链逐级 symlink 拒绝（含词法技能根自身；根之上不查）。
   assertNoSymlinkInChain(filePath, skillRoots(cwd, deps));
