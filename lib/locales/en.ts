@@ -536,6 +536,7 @@ export const en = {
   workspace_refreshGitStatus: "Refresh Git status",
   markdown_previewAfterStreaming: "Preview available after streaming", markdown_showSource: "Show Mermaid source", markdown_preview: "Preview Mermaid diagram", markdown_source: "Source", markdown_invalidMermaid: "Invalid Mermaid diagram", markdown_renderingMermaid: "Rendering Mermaid diagram", markdown_copied: "copied", markdown_copy: "copy",
   branches: "Branches", branches_noSession: "No active session", branches_empty: "This session has no branches", branches_assistant: "[assistant]", dialog_close: "Close",
+  branches_currentPosition: 'Current position: fork point (no message sent yet)',
   // phase4 review fixes
   sidebar_worktreeOpenRoot: "Open the repository root to manage worktrees.",
   sidebar_worktreeGitOnly: "Worktrees are available in Git repository roots.",

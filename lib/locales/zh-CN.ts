@@ -535,6 +535,7 @@ export const zhCN: Record<TranslationKey, string> = {
   workspace_refreshFiles: "刷新文件",
   workspace_refreshGitStatus: "刷新 Git 状态",
   markdown_previewAfterStreaming: "流式输出完成后才能预览", markdown_showSource: "显示 Mermaid 源码", markdown_preview: "预览 Mermaid 图表", markdown_source: "源码", markdown_invalidMermaid: "Mermaid 图表无效", markdown_renderingMermaid: "正在渲染 Mermaid 图表", markdown_copied: "已复制", markdown_copy: "复制", branches: "分支", branches_noSession: "没有活动会话", branches_empty: "此会话没有分支", branches_assistant: "[助手]", dialog_close: "关闭",
+  branches_currentPosition: '当前位置：分叉点（未发送新消息）',
   // phase4 review fixes
   sidebar_worktreeOpenRoot: "请打开仓库根目录以管理工作树。",
   sidebar_worktreeGitOnly: "工作树仅在 Git 仓库根目录可用。",

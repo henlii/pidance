@@ -99,6 +99,33 @@ function hasBranch(nodes: SessionTreeNode[]): boolean {
   return false;
 }
 
+/**
+ * 当前 leaf 是否位于文件末尾（树中为叶子节点）。
+ * 分叉/导航后未发送新消息时 leaf 指向有后继的节点（非末尾）——
+ * 此时分支面板也要显示树，体现当前位置并可切回主分支。
+ */
+/** 子树内查找目标：找到返回是否文件末尾；未找到返回 null（继续其它兄弟）。 */
+function leafEndForTarget(
+  nodes: SessionTreeNode[],
+  targetId: string,
+): boolean | null {
+  for (const node of nodes) {
+    if (node.entry.id === targetId) return node.children.length === 0;
+    if (node.compressedEntryIds?.includes(targetId)) {
+      // leaf 在压缩链中 = 导航到链内位置（分叉/编辑点，未发送）；
+      // 文件末尾是保留节点自身（node.entry），不在压缩链里。
+      return false;
+    }
+    const sub = leafEndForTarget(node.children, targetId);
+    if (sub !== null) return sub;
+  }
+  return null;
+}
+
+function isLeafAtTreeEnd(nodes: SessionTreeNode[], targetId: string): boolean {
+  return leafEndForTarget(nodes, targetId) ?? true;
+}
+
 function BookmarkIcon({ size = 10 }: { size?: number }) {
   return (
     <svg
@@ -142,7 +169,11 @@ function TreeNodeView({ node, activePathIds, activeLeafId, depth, isLast, parent
   const { node: rep, skipped } = compress(node, preserveRoot);
   const isActive = activePathIds.has(rep.entry.id);
   const isOnPath = activePathIds.has(node.entry.id) || activePathIds.has(rep.entry.id);
-  const isCurrentLeaf = rep.entry.id === activeLeafId || !!rep.compressedEntryIds?.includes(activeLeafId ?? "");
+  // 当前 leaf 仅在节点代表点（entry 本身或压缩链末）时才算当前；
+  // 分叉未发送（leaf 在链中非末）时节点可点击 → 切到链末 = 主分支
+  // 当前 leaf 仅在节点代表点（entry 本身）时才算当前；压缩链中的 leaf
+  // （分叉/编辑点未发送）非当前 → 节点可点击，切到链末 = 主分支
+  const isCurrentLeaf = rep.entry.id === activeLeafId;
   const bookmark = getBranchNodeBookmark(rep.label);
   const rawLabel = getLabel(rep.entry);
   const fallbackLabel = rawLabel === "[assistant]" ? assistantLabel : rawLabel;
@@ -739,7 +770,9 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
   const handleNodeActivate = useCallback((rep: SessionTreeNode) => {
     if (actionsBusy) return;
     const targetId = rep.entry.id;
-    const isCurrentLeaf = targetId === activeLeafId || !!rep.compressedEntryIds?.includes(activeLeafId ?? "");
+    // 与 TreeNodeView 一致：leaf 在压缩链中非链末（分叉未发送）时不算当前，可点击切到链末
+    // 与 TreeNodeView 一致：leaf 在压缩链中（分叉未发送）非当前，可点击切到链末 = 主分支
+    const isCurrentLeaf = targetId === activeLeafId;
     if (isCurrentLeaf) {
       // 点击当前叶不触发切换；若选择器开着则收起。
       setSwitchTargetId(null);
@@ -800,9 +833,11 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
     );
   }, [switchTargetId, canWrite, chooserMode, pendingMode, actionsBusy, switchError, customFocus, runSwitch, t]);
 
+  // 分叉/导航后未发送（leaf 不在文件末尾）也显示树：体现当前位置并可切回主分支
+  const leafAtEnd = activeLeafId ? isLeafAtTreeEnd(tree, activeLeafId) : true;
   const noBranchReason = !hasSession
     ? t("branches_noSession")
-    : !hasBranch(tree) && !bookmarksExist
+    : !hasBranch(tree) && !bookmarksExist && leafAtEnd
       ? t("branches_empty")
       : null;
 
@@ -811,35 +846,48 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
   // 压缩链吞掉；其 children 仍按原规则压缩，分支切换语义不变。
   const rows = tree.length > 0 ? [tree[0]] : [];
   const hasContent = !noBranchReason && rows.length > 0;
+  // 分叉/导航后未发送：leaf 不在文件末尾 → 面板顶部显示当前位置指示
+  const showCurrentPosition = panel && !leafAtEnd && !noBranchReason;
   const assistantLabel = t("branches_assistant");
   const bookmarkAria = t("branches_bookmarkAria");
 
-  const panelContent = hasContent ? (
-    <div style={{ padding: "4px 12px 8px 12px", maxHeight: 260, overflowY: "auto" }}>
-      {rows.map((row, idx) => (
-        <TreeNodeView
-          key={row.entry.id}
-          node={row}
-          activePathIds={activePathIds}
-          activeLeafId={activeLeafId}
-          depth={0}
-          isLast={idx === rows.length - 1}
-          parentLines={[]}
-          onActivate={handleNodeActivate}
-          assistantLabel={assistantLabel}
-          bookmarkAria={bookmarkAria}
-          switchable={canWrite}
-          switchTargetId={switchTargetId}
-          chooserFor={chooserFor}
-          disabled={actionsBusy}
-          preserveRoot
-        />
-      ))}
+  const positionHint = showCurrentPosition ? (
+    <div style={{ padding: "4px 12px 2px 12px", fontSize: 11, color: "var(--text-dim)" }}>
+      {t("branches_currentPosition")}
     </div>
-  ) : (
-    <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
-      {noBranchReason}
-    </div>
+  ) : null;
+
+  const panelContent = (
+    <>
+      {positionHint}
+      {hasContent ? (
+        <div style={{ padding: "4px 12px 8px 12px", maxHeight: 260, overflowY: "auto" }}>
+          {rows.map((row, idx) => (
+            <TreeNodeView
+              key={row.entry.id}
+              node={row}
+              activePathIds={activePathIds}
+              activeLeafId={activeLeafId}
+              depth={0}
+              isLast={idx === rows.length - 1}
+              parentLines={[]}
+              onActivate={handleNodeActivate}
+              assistantLabel={assistantLabel}
+              bookmarkAria={bookmarkAria}
+              switchable={canWrite}
+              switchTargetId={switchTargetId}
+              chooserFor={chooserFor}
+              disabled={actionsBusy}
+              preserveRoot
+            />
+          ))}
+        </div>
+      ) : (
+        <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
+          {noBranchReason}
+        </div>
+      )}
+    </>
   );
 
   const bookmarkFooter = canWrite && activeLeafId ? (

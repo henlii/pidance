@@ -465,7 +465,23 @@ function buildShallowTreeFromEntries(
   const roots: Array<{ entry: { id: string; type: string }; children: unknown[]; label?: string }> = [];
   for (const e of entries) {
     if (!e?.id) continue;
-    byId.set(e.id, { entry: { id: e.id, type: e.type }, children: [] });
+    const entry: { id: string; type: string; message?: unknown } = { id: e.id, type: e.type };
+    // 磁盘浅树补消息摘要（SDK getTree 的 label 等价物）：分支侧栏节点可辨认。
+    // 仅保留 text 块，避免把图片/大工具结果带进树。
+    if (e.type === "message" && "message" in e) {
+      const msg = (e as { message?: { role?: string; content?: unknown } }).message;
+      if (msg && typeof msg.content === "object" && msg.content !== null) {
+        const content = Array.isArray(msg.content)
+          ? (msg.content as Array<{ type?: string; text?: string }>)
+            .filter((b) => b.type === "text" && typeof b.text === "string")
+            .map((b) => ({ type: "text" as const, text: b.text }))
+          : msg.content;
+        entry.message = { role: msg.role, content };
+      } else {
+        entry.message = msg;
+      }
+    }
+    byId.set(e.id, { entry, children: [] });
   }
   for (const e of entries) {
     if (!e?.id) continue;
