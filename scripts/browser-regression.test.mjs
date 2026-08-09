@@ -77,17 +77,32 @@ function findButton(refs, keyword) {
   return null;
 }
 
+
+/** 页面内登录：检测到密码框则填入密码登录（真实用户路径，不依赖 header 注入）。 */
+async function ensureAuthed() {
+  if (!PASSWORD) return;
+  const refs = await snapshotRefs();
+  const pwdRef = Object.entries(refs).find(([, i]) => i?.name === "密码")?.[0];
+  if (!pwdRef) return; // 已认证
+  await ab(["fill", pwdRef, PASSWORD, "--session", SESSION], { json: false });
+  const refs2 = await snapshotRefs();
+  const loginRef = Object.entries(refs2).find(([, i]) => i?.role === "button" && i?.name === "登录")?.[0];
+  if (loginRef) await ab(["click", loginRef, "--session", SESSION], { json: false });
+  await new Promise((r) => setTimeout(r, 2500));
+}
+
 let bootOk = false;
 
 before(async () => {
-  // 启动独立 session 打开主页（带 Basic Auth header）。
-  const args = ["open", URL_BASE, "--session", SESSION];
-  if (AUTH_HEADER.Authorization) args.push("--headers", JSON.stringify(AUTH_HEADER));
-  const res = await ab(args, { json: false }).catch((e) => `ERR:${e.message}`);
-  // 等待首屏渲染
-  await new Promise((r) => setTimeout(r, 3500));
-  const text = await snapshotText("-i");
-  bootOk = text.includes("Pidance") || text.includes("添加项目") || text.includes("选择项目");
+  // 启动独立 session 打开主页（带 Basic Auth header）；首屏慢时重试。
+  await ab(["open", URL_BASE, "--session", SESSION], { json: false }).catch((e) => `ERR:${e.message}`);
+  await ensureAuthed();
+  bootOk = false;
+  for (let attempt = 0; attempt < 3 && !bootOk; attempt += 1) {
+    await new Promise((r) => setTimeout(r, 4000));
+    const text = await snapshotText();
+    bootOk = text.includes("Pidance") || text.includes("添加项目") || text.includes("选择项目");
+  }
 });
 
 after(async () => {
@@ -135,11 +150,15 @@ test("用例2：会话 kebab 菜单可打开", async () => {
     await ab(["click", "@e14", "--session", SESSION], { json: false }).catch(() => {});
     await new Promise((r) => setTimeout(r, 600));
   }
-  const refs2 = await snapshotRefs();
-  const kebabRef2 = Object.entries(refs2).find(
-    ([, info]) => info?.role === "button" && (info.name ?? "").includes("会话操作"),
-  )?.[0];
-  assert.ok(kebabRef2, `未找到会话 kebab 按钮。refs: ${Object.entries(refs2).slice(0, 8).map(([r, i]) => `${r}:${i?.name}`).join(" | ")}`);
+  let kebabRef2 = null;
+  for (let attempt = 0; attempt < 3 && !kebabRef2; attempt += 1) {
+    const refsN = await snapshotRefs();
+    kebabRef2 = Object.entries(refsN).find(
+      ([, info]) => info?.role === "button" && (info.name ?? "").includes("会话操作"),
+    )?.[0] ?? null;
+    if (!kebabRef2 && attempt < 2) await new Promise((r) => setTimeout(r, 1000));
+  }
+  assert.ok(kebabRef2, "未找到会话 kebab 按钮（重试 3 次后仍无）");
   await ab(["click", kebabRef2, "--session", SESSION], { json: false });
   await new Promise((r) => setTimeout(r, 700));
   const menuText = await snapshotText("-i");
@@ -164,10 +183,12 @@ test("用例3：打开会话并确认工具卡片渲染完整", async () => {
 });
 
 test("用例4：硬刷新后页面仍可加载且不报错", async () => {
-  await ab(["reload", "--session", SESSION], { json: false }).catch(() => {});
-  await new Promise((r) => setTimeout(r, 3500));
-  const text = await snapshotText("-i");
-  assert.ok(text.includes("Pidance") || text.includes("添加项目"), "硬刷新后主页未加载");
+  // reload 会丢 Basic Auth header 落到登录页；用带认证的重新导航模拟硬刷新。
+  await ab(["open", URL_BASE, "--session", SESSION], { json: false }).catch(() => {});
+  await ensureAuthed();
+  await new Promise((r) => setTimeout(r, 2500));
+  const text = await snapshotText();
+  assert.ok(text.includes("Pidance") || text.includes("添加项目") || text.includes("选择项目"), "硬刷新后页面未加载");
 });
 
 test("用例5：右栏 Git 更改面板可打开/关闭", async () => {
@@ -231,4 +252,54 @@ test("用例9：页面整体可交互（无渲染桥崩溃痕迹）", async () =
   assert.ok(!res.startsWith("ERR"), `页面 eval 失败（渲染桥/JS 崩溃）: ${res}`);
   const text = await snapshotText("-i");
   assert.ok(!text.includes("Application error") && !text.includes("Unhandled"), "页面存在未处理错误覆盖层");
+});
+
+test("用例10：无认证访问受保护 API → 401（认证门禁）", async () => {
+  // 服务端门禁：无认证请求 API 必须 401（浏览器 cookie 可能残留已登录态，
+  // 页面登录门不作为本用例断言；API 401 是确定性边界）。
+  const res = await fetch(`${URL_BASE}/api/runtime`, { redirect: "manual" });
+  assert.equal(res.status, 401, "无认证访问 /api/runtime 应返回 401");
+  // 页面仍可加载（登录门或已登录主页均合法）
+  await ab(["open", URL_BASE, "--session", SESSION], { json: false }).catch(() => {});
+  await new Promise((r) => setTimeout(r, 2000));
+  const text = await snapshotText();
+  assert.ok(text.includes("Pidance") || text.includes("密码"), "页面不可加载");
+  await ensureAuthed();
+});
+
+test("用例11：添加空项目 → 侧栏显示并可新建会话（项目独立于会话）", async () => {
+  const dir = `/tmp/pidance-e2e-${Date.now()}`;
+  const fs = await import("node:fs");
+  fs.mkdirSync(dir, { recursive: true });
+  try {
+    // 打开添加项目弹窗
+    await ab(["open", URL_BASE, "--session", SESSION], { json: false }).catch(() => {});
+    await ensureAuthed();
+    let addRef = null;
+    for (let attempt = 0; attempt < 3 && !addRef; attempt += 1) {
+      await new Promise((r) => setTimeout(r, 2500));
+      const refs = await snapshotRefs();
+      addRef = Object.entries(refs).find(([, i]) => i?.role === "button" && (i.name ?? "").includes("添加项目"))?.[0] ?? null;
+    }
+    assert.ok(addRef, "未找到添加项目按钮（重试 3 次后仍无）");
+    await ab(["click", addRef, "--session", SESSION], { json: false });
+    await new Promise((r) => setTimeout(r, 1200));
+    // 填路径 + Enter 浏览 + 添加
+    const refs2 = await snapshotRefs();
+    const inputRef = Object.entries(refs2).find(([, i]) => i?.name === "项目路径")?.[0];
+    assert.ok(inputRef, "未找到项目路径输入框");
+    await ab(["fill", inputRef, dir, "--session", SESSION], { json: false });
+    await ab(["press", "Enter", "--session", SESSION], { json: false });
+    await new Promise((r) => setTimeout(r, 1200));
+    const refs3 = await snapshotRefs();
+    const addBtn = Object.entries(refs3).find(([, i]) => i?.role === "button" && i?.name === "添加")?.[0];
+    assert.ok(addBtn, "添加按钮不可用（应先浏览路径）");
+    await ab(["click", addBtn, "--session", SESSION], { json: false });
+    await new Promise((r) => setTimeout(r, 1500));
+    const text = await snapshotText();
+    assert.ok(text.includes(dir), `空项目未显示在侧栏（dir=${dir}）`);
+    assert.ok(text.includes("暂无会话") || text.includes("新建会话"), "空项目缺少新建会话入口");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
