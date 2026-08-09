@@ -337,20 +337,22 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
 
+  const insertIfEmptyLocal = useCallback((text: string) => {
+    const ta = textareaRef.current;
+    const current = ta ? ta.value : value;
+    if (current.trim()) return;
+    setValue(text);
+    setAtQuery(null);
+    requestAnimationFrame(() => {
+      if (!ta) return;
+      ta.focus();
+      ta.style.height = "auto";
+      ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+    });
+  }, [value]);
+
   useImperativeHandle(ref, () => ({
-    insertIfEmpty(text: string) {
-      const ta = textareaRef.current;
-      const current = ta ? ta.value : value;
-      if (current.trim()) return;
-      setValue(text);
-      setAtQuery(null);
-      requestAnimationFrame(() => {
-        if (!ta) return;
-        ta.focus();
-        ta.style.height = "auto";
-        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-      });
-    },
+    insertIfEmpty: insertIfEmptyLocal,
     prependText(text: string) {
       if (!text.trim()) return;
       const ta = textareaRef.current;
@@ -575,19 +577,27 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (isStreaming) return;
     if (hasUploading) return; // 等上传完成
     onAudioUnlock?.();
+    // 纯文本/命令：点击即乐观清空（外部 pi 预检/冷启动可能数秒，不必等确认）；
+    // 失败路径由 useAgentSession 经 insertIfEmpty 恢复（此处覆盖同步 false 返回）。
+    // 有附件时不乐观清空：发送失败恢复图片成本高，保持确认后清空。
+    const hasAttachment = attachedImages.length > 0 || hasReadyUploads;
+    if (!hasAttachment) clearInput();
     if (!attachedImages.length && !hasReadyUploads && base.startsWith("/") && onBuiltinCommand) {
       const result = await onBuiltinCommand(base);
       if (result.handled) {
-        if (!result.error) clearInput();
+        if (result.error) insertIfEmptyLocal(base);
         return;
       }
     }
     const msg = composeMessageWithUploads(base);
-    // P0-1：仅在发送确认（消息已提交 / 未抛错）后清空 draft；
-    // 发送失败时 draft 由 useAgentSession 经 insertIfEmpty 恢复，此处保留不清。
     const submitted = await onSend(msg, attachedImages.length ? attachedImages : undefined);
-    if (submitted !== false) clearInput();
-  }, [value, attachedImages, hasReadyUploads, hasUploading, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, composeMessageWithUploads]);
+    if (submitted === false) {
+      // 发送被拒（branchBusy / 新会话失败等）：恢复草稿（仅纯文本可恢复）
+      if (!hasAttachment) insertIfEmptyLocal(base);
+      return;
+    }
+    if (hasAttachment) clearInput();
+  }, [value, attachedImages, hasReadyUploads, hasUploading, isStreaming, onBuiltinCommand, onSend, clearInput, insertIfEmptyLocal, onAudioUnlock, composeMessageWithUploads]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
