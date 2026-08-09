@@ -74,7 +74,14 @@ export function canSubmitInlineSelect(state: InlineSelectCardState): boolean {
 export function isOtherOptionLabel(label: string, localeOtherText: string): boolean {
   const normalized = label.trim().toLowerCase();
   const other = localeOtherText.trim().toLowerCase();
-  return normalized === other || normalized === "other" || normalized === "其它" || normalized === "其他";
+  // 识别 ask-user 等插件的 "N. Type something." 哨兵项（含编号前缀），避免重复附加
+  return (
+    normalized === other ||
+    normalized === "other" ||
+    normalized === "其它" ||
+    normalized === "其他" ||
+    normalized.includes("type something")
+  );
 }
 
 export function shouldAppendOtherOption(
@@ -191,8 +198,10 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
     && shouldAppendOtherOption(request.options, otherLabel);
   // ask-user 等场景：存在 Other/Type something 选项时只保留手动输入项
   // （用户直接输入回答，不再显示冗余预设选项）；其余 select 原样展示。
+  // 选项完整展示（预设选项 + Other/Type something 手动输入项）；
+  // 选中 Other 后显示输入框，提交内容经哨兵+自动 input 响应回到 agent（#28）
   const selectOptions = request.method === "select"
-    ? (appendOther ? [otherLabel] : request.options)
+    ? (appendOther ? [...request.options, otherLabel] : request.options)
     : [];
   const selectSubmission = getInlineSelectSubmission(scopedSelect);
   const selectCanSubmit = selectSubmission !== null;

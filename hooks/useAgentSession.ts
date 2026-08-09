@@ -960,7 +960,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         !request.options.includes(response.value)
       ) {
         pendingOtherInputRef.current = response.value;
-        effectiveResponse = { value: request.options[request.options.length - 1] };
+        // 哨兵 = 选项里自带的 Other 项（如 "4. Type something."）；无则用最后一项
+        const otherInOptions = request.options.find((o) => {
+          const l = o.trim().toLowerCase();
+          return l === "other" || l === "其它" || l === "其他" || l.includes("type something");
+        });
+        effectiveResponse = { value: otherInOptions ?? request.options[request.options.length - 1] };
       }
       await sendAgentCommand(sid, {
         type: "extension_ui_response",
