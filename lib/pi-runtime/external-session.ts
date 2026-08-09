@@ -22,6 +22,7 @@ import {
   projectRpcAgentState,
   type QueuedMessagesSnapshot,
 } from "./project-rpc-state";
+import { stripAnsi } from "../ansi";
 
 export type ExternalEventListener = (event: AssemblerAgentEvent) => void;
 
@@ -252,7 +253,7 @@ export class ExternalRpcSession {
           : typeof event.text === "string"
             ? event.text
             : "";
-      if (text) this.extensionStatuses.set(key, text);
+      if (text) this.extensionStatuses.set(key, stripAnsi(text));
       else this.extensionStatuses.delete(key);
       return;
     }
@@ -264,13 +265,16 @@ export class ExternalRpcSession {
           : typeof event.key === "string"
             ? event.key
             : "default";
-      const lines = Array.isArray(event.widgetLines)
+      const rawLines: unknown = Array.isArray(event.widgetLines)
         ? event.widgetLines
         : event.content;
-      if (lines == null) this.extensionWidgets.delete(key);
+      if (rawLines == null) this.extensionWidgets.delete(key);
       else {
         this.extensionWidgets.set(key, {
-          lines,
+          // setStatus/setWidget 是纯文本 UI；清洗 ANSI 防乱码（mcp/scout 插件带颜色码）
+          lines: Array.isArray(rawLines)
+            ? rawLines.map((l) => (typeof l === "string" ? stripAnsi(l) : l))
+            : [],
           placement:
             event.widgetPlacement === "belowEditor" ? "belowEditor" : "aboveEditor",
         });
