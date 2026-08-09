@@ -367,13 +367,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     loadSessions(isFirst);
   }, [loadSessions, refreshKey]);
 
-  // 会话列表自动刷新：30s 轮询静默拉取（新会话/删除/归档跨刷新可见），
-  // 替代已移除的手动刷新按钮。
+  // 会话列表刷新为事件驱动（新会话/agent_end/删除/fork 经 refreshKey 触发；
+  // 窗口重新聚焦时补一次），不做定时轮询（openchamber 同语义）。
   useEffect(() => {
-    const timer = setInterval(() => {
-      loadSessions(false);
-    }, 30_000);
-    return () => clearInterval(timer);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") loadSessions(false);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
   }, [loadSessions]);
 
   // 真实 id 乐观 upsert（多条）：立即进入 pending map，不等全量列表。
