@@ -220,6 +220,7 @@ ls /opt/pidance/current/node_modules/.bin/   # 仅 pidance，无 pi-web
 
 | 版本 | tgz sha256（前 8） | 部署日期 | 内容 | 验收 |
 |------|--------------------|----------|------|------|
+| `0.1.0-local-e69c4616-bbe54ec3` | bbe54ec3 | 2026-08-09 | 外部 Pi RPC 运行时收口（阶段 0-4）+ 扩展渲染层对齐 TUI + 项目独立会话 + 输入乐观清空 + D3/D4/D5（浏览器回归门禁 11 用例、兼容层退役、SessionSidebar 拆分） | 前后审计通过（含 credential 正则误报修复）；安装后 bin 仅 pidance（无 pi-web）；无认证 401 / 带认证 home/sessions/models/runtime 200；runtime rpc 0.83.0 compatible；浏览器登录/主界面/会话渲染正常；30141 未动 |
 | `0.1.0-local-708c08cf-4c2f1c72` | 4c2f1c72 | 2026-08-08 | 设置面板（SettingsView/settings-nav）、tool-execution-buffer AgentToolResult 文本提取、chat-lazy-load 懒加载、chat-auto-follow、i18n/样式、旧 logo 清理；lint 修复 ui-session prefer-const | 前后审计通过；安装后 bin 仅 pidance；/ 200；未认证 API 401（页内登录保护）；ui-session 状态正常；30141 PID 未变；31416 独立 |
 | `0.1.0-local-2e66db5-0f4d928d` | 0f4d928d | 2026-08-07 | #18 页内登录+UI 会话 Cookie；大会话 tail-first；文件树行菜单；31416 Turbopack 测试构建；toolResult 大 diff 剥离 | 无密码 API 401；Basic/Cookie 登录后 home/sessions/models 200；页面无 WWW-Authenticate；bin 仅 pidance；30141 PID 未变 |
 | `0.1.0-local-4e6743a-239da6fe` | 239da6fe | 2026-08-06 | 首发准备全量收口：review P0/P1 修复（非回环强制认证、files symlink 越界、models-config 密钥脱敏、归档全功能+前端、循环依赖/投影统一等）+ Chamber 主题/双主题/图标/tooltip/二级侧边栏 + 侧栏一竖排对齐、运行圆环旋转、最近区与项目树一致 | home/sessions 带密码 200，bin 仅 pidance（无 pi-web） |
