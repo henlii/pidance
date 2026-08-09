@@ -18,8 +18,6 @@ export interface GuideProject {
   latest: number;
 }
 
-/** 聚合会话列表（含 cwd/created/modified）为「最近项目」列表，按最新活动降序取前 limit。
- * extraRoots：用户主动添加的项目根（无会话也展示，count=0），不在会话列表中时补入。 */
 export function aggregateGuideProjects(
   sessions: ReadonlyArray<{ cwd?: string; created?: string; modified?: string }>,
   limit = 12,
@@ -27,16 +25,18 @@ export function aggregateGuideProjects(
 ): GuideProject[] {
   const byCwd = new Map<string, { count: number; latest: number }>();
   for (const s of sessions) {
-    if (!s.cwd) continue;
+    // worktree 会话归主项目（projectRoot 由会话列表解析，如侧栏分组）
+    const root = (s as { projectRoot?: string }).projectRoot ?? s.cwd;
+    if (!root) continue;
     const ts = s.modified
       ? Date.parse(s.modified)
       : s.created
         ? Date.parse(s.created)
         : 0;
-    const entry = byCwd.get(s.cwd) ?? { count: 0, latest: 0 };
+    const entry = byCwd.get(root) ?? { count: 0, latest: 0 };
     entry.count += 1;
     if (ts > entry.latest) entry.latest = ts;
-    byCwd.set(s.cwd, entry);
+    byCwd.set(root, entry);
   }
   const projects = [...byCwd.entries()]
     .map(([cwd, v]) => ({ cwd, count: v.count, latest: v.latest }))
@@ -54,6 +54,10 @@ export function resolveGuideTargetProject(
   targetCwd: string,
 ): string | null {
   if (projects.some((p) => p.cwd === targetCwd)) return targetCwd;
+  // worktree 路径（<root>-worktrees/<branch>）→ 主项目根；优先于前缀匹配
+  // （否则 /root 等祖先会把 worktree 路径抢走）
+  const match = targetCwd.match(/^(.+)-worktrees\/[^/]+$/);
+  if (match && projects.some((p) => p.cwd === match[1])) return match[1];
   const parent = projects
     .filter((p) => targetCwd.startsWith(p.cwd + "/"))
     .sort((a, b) => b.cwd.length - a.cwd.length)[0];

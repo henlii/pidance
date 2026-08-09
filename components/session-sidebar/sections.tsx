@@ -171,13 +171,7 @@ function ProjectSection({
   const collapseLabel = collapsed
     ? t("sidebar_expandProjectNamed", { project: projectName })
     : t("sidebar_collapseProjectNamed", { project: projectName });
-  // 聚合运行圆点：项目内（含各 worktree 组）任一会话运行中即显示；不显示单个时长。
-  const projectHasRunning = useMemo(() => {
-    const running = new Set([...runningSessionIds, ...subagentRunningIds]);
-    const anyRunning = (nodes: SessionDisplayNode[]): boolean =>
-      nodes.some((node) => running.has(node.session.id) || anyRunning(node.children));
-    return anyRunning(project.mainTree) || project.worktrees.some((group) => anyRunning(group.tree));
-  }, [project, runningSessionIds, subagentRunningIds]);
+  // 项目行运行中标记已移除（会话行各自显示运行圆点）
 
   return (
     <div>
@@ -225,11 +219,7 @@ function ProjectSection({
         <span aria-hidden="true" className="sidebar-indicator-icon" style={{ position: "absolute", left: sidebarIndicatorLeft(0), top: "50%", display: "flex", width: SIDEBAR_INDICATOR_SLOT, height: 20, alignItems: "center", justifyContent: "center", transform: "translateY(-50%)", color: "var(--text-dim)" }}>
           <FolderIcon size={13} />
         </span>
-        {projectHasRunning && (
-          <span aria-hidden="true" style={{ position: "absolute", left: sidebarIndicatorLeft(0), top: "50%", display: "flex", width: SIDEBAR_INDICATOR_SLOT, height: 20, alignItems: "center", justifyContent: "center", transform: "translateY(-50%)", pointerEvents: "none" }}>
-            <RunningSessionIndicator size={18} />
-          </span>
-        )}
+        {/* 项目行不显示运行中标记（会话行各自显示运行圆点） */}
         <PathLabel
           text={projectName}
           style={{
