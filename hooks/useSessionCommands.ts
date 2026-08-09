@@ -198,7 +198,7 @@ export function useSessionCommands(options: UseSessionCommandsOptions) {
    * cancelled（扩展拒绝）则完全不改 UI；成功才 replace 预填并刷新当前路径。
    * 真正分叉 = 用户随后发送新消息（在当前 leaf 下 append）。
    */
-  const handleBranchHere = useCallback(async (entryId: string) => {
+  const handleBranchHere = useCallback(async (entryId: string, text?: string) => {
     const gate = gateBranchAction({
       readOnly: isReadOnly,
       busy: agentRunningRef.current || bashRunningRef.current || branchBusyRef.current,
@@ -220,6 +220,11 @@ export function useSessionCommands(options: UseSessionCommandsOptions) {
         chatInputRef?.current,
         "replace",
       )) return;
+      // 外部 RPC 磁盘 navigate_tree 不返回 editorText；用传入的用户消息文本预填
+      // （「从此处分支」= 分支后把该消息填到输入框）
+      if (text?.trim()) {
+        chatInputRef?.current?.replaceText(text.trim());
+      }
       await loadSession(sid, false, false, true, true);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -232,7 +237,8 @@ export function useSessionCommands(options: UseSessionCommandsOptions) {
 
   /**
    * Assistant「基于此回答分支」（选项 B）：服务端计算 turnEnd（至下一条 user 前最后 entry），
-   * navigateTree(turnEnd) 精确设 leaf（turnEnd 恒非 user）。不预填。发送后长新枝。
+   * navigateTree(turnEnd) 精确设 leaf（turnEnd 恒非 user）。成功后将回答文本预填输入框
+   * （与 user 分叉的 editorText 预填语义对称）。发送后长新枝。
    */
   const handleBranchFromAssistant = useCallback(async (entryId: string) => {
     const gate = gateBranchAction({

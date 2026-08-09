@@ -191,7 +191,7 @@ interface Props {
   onOpenFile?: (filePath: string) => void;
   entryId?: string;
   /** 用户「从此处分支」：回到该消息之前（发送后形成新分支）。 */
-  onBranchHere?: (entryId: string) => void;
+  onBranchHere?: (entryId: string, text: string) => void;
   /** 用户「从此处开始新会话」：fork 到该消息之前，预填此消息文本。 */
   onNewSessionFromHere?: (entryId: string, text: string) => void;
   /** Assistant「基于此回答分支」：轮末锚点（选项 B），发送后长新枝。 */
@@ -286,7 +286,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onBranchHere, onNe
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
   entryId?: string;
-  onBranchHere?: (entryId: string) => void;
+  onBranchHere?: (entryId: string, text: string) => void;
   onNewSessionFromHere?: (entryId: string, text: string) => void;
   forking?: boolean;
 }) {
@@ -392,7 +392,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onBranchHere, onNe
             }}>
               {canBranchHere && (
                 <button
-                  onClick={() => { onBranchHere!(entryId!); }}
+                  onClick={() => { onBranchHere!(entryId!, content); }}
                   data-tooltip={t("message_branchHereTooltip")}
                   className="instant-tooltip"
                   aria-label={t("message_branchHere")}
