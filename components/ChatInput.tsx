@@ -1351,9 +1351,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             {queuedMessages?.followUp.map((text, i) => (
               <QueuedMessageRow key={`followup-${i}`} kind="follow-up" text={text} />
             ))}
-            {queuedMessages?.followUp.map((text, i) => (
-              <QueuedMessageRow key={`followup-${i}`} kind="follow-up" text={text} />
-            ))}
           </div>
         )}
         {/* Retry banner */}
