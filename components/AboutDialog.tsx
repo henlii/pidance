@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { AboutInfo } from "@/lib/about-info";
+import type { PidanceUpdateCheck } from "@/lib/pidance-update";
 import { useI18n } from "@/lib/i18n";
 import { ViewportDialog } from "./ui/ViewportDialog";
 
@@ -49,6 +50,10 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
     homepage: "https://github.com/henlii/pidance#readme",
     repository: "https://github.com/henlii/pidance",
   }));
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<PidanceUpdateCheck | null>(null);
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -78,6 +83,57 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
       cancelled = true;
     };
   }, [open]);
+
+
+  const runCheckUpdate = useCallback(async () => {
+    setUpdateChecking(true);
+    setUpdateMessage(null);
+    try {
+      const res = await fetch("/api/update/check", { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as PidanceUpdateCheck;
+      setUpdateInfo(data);
+      if (!data.updateAvailable) {
+        setUpdateMessage(t("about_upToDate", { version: data.currentVersion }));
+      } else {
+        setUpdateMessage(
+          t("about_updateAvailable", {
+            current: data.currentVersion,
+            latest: data.latestVersion ?? "?",
+          }),
+        );
+      }
+    } catch (e) {
+      setUpdateMessage(t("about_upgradeFailed", { message: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      setUpdateChecking(false);
+    }
+  }, [t]);
+
+  const runUpgrade = useCallback(async () => {
+    if (!updateInfo?.updateAvailable) return;
+    setUpdateBusy(true);
+    setUpdateMessage(null);
+    try {
+      const res = await fetch("/api/update/apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ version: updateInfo.latestVersion }),
+      });
+      const data = (await res.json()) as { ok?: boolean; status?: string; message?: string; targetVersion?: string | null };
+      if (data.ok && (data.status === "upgraded" || data.status === "already_latest")) {
+        setUpdateMessage(t("about_upgradeDone", { version: data.targetVersion ?? updateInfo.latestVersion ?? "" }));
+      } else if (data.status === "not_supported") {
+        setUpdateMessage(t("about_upgradeNotSupported"));
+      } else {
+        setUpdateMessage(t("about_upgradeFailed", { message: data.message || res.statusText }));
+      }
+    } catch (e) {
+      setUpdateMessage(t("about_upgradeFailed", { message: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      setUpdateBusy(false);
+    }
+  }, [t, updateInfo]);
 
   const githubUrl = info.repository ?? info.homepage ?? "https://github.com/henlii/pidance";
   const deckVersion = pickVersion(info.version, envVersion("NEXT_PUBLIC_APP_VERSION"));
@@ -141,6 +197,55 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
               <div style={{ color: "var(--text-muted)" }}>{t("about_runtimeIncompatible")}</div>
             )}
           </div>
+        </div>
+
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%", alignItems: "center" }}>
+          <button
+            type="button"
+            disabled={updateChecking || updateBusy}
+            onClick={() => { void runCheckUpdate(); }}
+            style={{
+              padding: "6px 14px",
+              borderRadius: 8,
+              border: "1px solid var(--border)",
+              background: "var(--bg-panel)",
+              color: "var(--text)",
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: updateChecking || updateBusy ? "wait" : "pointer",
+            }}
+          >
+            {updateChecking ? t("about_checkingUpdate") : t("about_checkUpdate")}
+          </button>
+          {updateMessage && (
+            <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5, maxWidth: 280 }}>
+              {updateMessage}
+              {updateInfo && !updateInfo.upgradeSupported && updateInfo.updateAvailable && (
+                <div style={{ marginTop: 4, color: "var(--text-dim)" }}>{t("update_bannerWorkspace")}</div>
+              )}
+            </div>
+          )}
+          {updateInfo?.updateAvailable && updateInfo.upgradeSupported && (
+            <button
+              type="button"
+              disabled={updateBusy}
+              onClick={() => { void runUpgrade(); }}
+              style={{
+                padding: "6px 14px",
+                borderRadius: 8,
+                border: "none",
+                background: "var(--accent)",
+                color: "#fff",
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: updateBusy ? "wait" : "pointer",
+                opacity: updateBusy ? 0.7 : 1,
+              }}
+            >
+              {updateBusy ? t("about_upgrading") : t("about_upgradeNow")}
+            </button>
+          )}
         </div>
 
         <a

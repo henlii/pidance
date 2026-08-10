@@ -14,6 +14,7 @@ import { SettingsView } from "./SettingsView";
 import { CommandPalette } from "./CommandPalette";
 import type { SettingsPageId } from "./settings-nav";
 import { AboutDialog } from "./AboutDialog";
+import { UpdateBanner } from "./UpdateBanner";
 import { BranchNavigator } from "./BranchNavigator";
 import { useTheme } from "@/hooks/useTheme";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -1375,6 +1376,7 @@ function AppShellInner() {
         onPluginsReloaded={() => setSessionKey((key) => key + 1)}
       />
     )}
+    <UpdateBanner />
     <AboutDialog open={aboutOpen} onClose={() => setAboutOpen(false)} />
     <CommandPalette
       open={paletteOpen}
