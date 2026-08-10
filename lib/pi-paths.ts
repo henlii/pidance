@@ -43,7 +43,7 @@ export function getSettingsPath(env: NodeJS.ProcessEnv = process.env): string {
 /**
  * cwd → 会话子目录名（与 pi getDefaultSessionDirPath 一致）：
  * `--` + 去前导斜杠 + `/` `\` `:` 换成 `-` + `--`
- * 例：/root/works/open/pidance → --root-works-open-pidance--
+ * 例：/home/user/project → --home-user-project--
  */
 export function encodeCwdForSessionDir(cwd: string): string {
   const resolved = cwd.replace(/\\/g, "/");

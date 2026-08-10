@@ -94,24 +94,12 @@ Additional acceptance checks:
 
 ```bash
 npm run verify:render-bridge  # real pi-subagents rendering bridge
-npm run test:browser          # browser regression against 31416 by default
+npm run test:browser          # browser regression (needs a running instance; default http://127.0.0.1:31416)
 ```
 
 Do **not** run `npm run build` or `next build` during everyday development: it writes to `.next/` and can disrupt the development server. Production builds belong in an isolated release checkout through `npm run release:check`.
 
-### Continuous test deployment (31416)
-
-After application code changes, deploy the current workspace to the isolated production-mode test service:
-
-```bash
-node .agents/skills/pidance-development/scripts/local-deploy.mjs restart
-```
-
-| Port | Purpose |
-| --- | --- |
-| **31415** | Pidance product default: CLI, stable installation, `npm run dev` / `npm start` |
-| **31416** | Continuous workspace test build in isolated `.next-public`; never public-proxied |
-| **30141** | Upstream pi-web; this repository never operates it |
+The default development and product port is **31415**. If you also run upstream [pi-web](https://github.com/agegr/pi-web) on the same machine, keep its own port and do not share processes or data directories with Pidance.
 
 ## Release process
 
@@ -141,8 +129,6 @@ Browser
 - [Release and package auditing](./docs/release.md)
 - [Interface design system](./docs/ui-redesign/README.md)
 - [Theme tokens](./docs/ui-redesign/theme-tokens.md)
-- [Chat architecture refactor](./docs/chat-refactor-plan.md)
-- [OpenChamber upgrade evaluation](./docs/openchamber-upgrade-evaluation-2026-08-05.md)
 
 ## Upstream and license
 

@@ -1,7 +1,7 @@
 /**
  * 归档状态存储与服务层（P0-2 归档功能）。
  *
- * 设计（对齐 docs/openchamber-upgrade-evaluation-2026-08-05.md 第 7 节）：
+ * 设计要点：
  * - 独立 sidecar 目录 `~/.pi/agent/pidance-archive/<session-id>.json`，版本 1；
  * - 绝不写 Pi `.jsonl`、不改 header/parentSession/fork/subagent 关系；
  * - 每会话单文件、同目录临时文件 + rename 原子写；

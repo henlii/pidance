@@ -99,13 +99,7 @@ npm install
 npm run dev
 ```
 
-本地开发端口为 [http://localhost:31415](http://localhost:31415)（Pidance 产品默认；`30141` 留给上游 pi-web）。
-
-| 端口 | 角色 |
-|------|------|
-| **31415** | 产品默认（`npm run dev` / `npm start` / CLI `pidance`） |
-| **31416** | 持续本地测试部署（`local-deploy.mjs`，Next dev，不对公网） |
-| **30141** | 上游 pi-web / 既有服务 — 禁止操作 |
+本地开发端口为 [http://localhost:31415](http://localhost:31415)。若同机还运行上游 [pi-web](https://github.com/agegr/pi-web)，请为其保留独立端口与数据目录，勿与 Pidance 混用。
 
 常用检查：
 

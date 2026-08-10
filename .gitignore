@@ -44,3 +44,6 @@ next-env.d.ts
 /.codegraph/
 .slim/deepwork/
 .pi-subagents
+
+# 本机运维/内部笔记（不上传）
+.local-ops/

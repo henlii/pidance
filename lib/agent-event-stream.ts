@@ -2,8 +2,8 @@
  * 服务端 SSE 事件投影纯函数（无 IO、无 React，node:test 可直接测）。
  *
  * 语义：把 AgentSession 的原始事件投影为发送给客户端的 SSE 事件。瘦身/丢弃规则
- * 对齐上游 0.8.6 事件流，但按 docs/chat-refactor-plan.md:151-154（P2）要求
- * **透传 tool_execution_update**（P4 客户端工具块渲染的前提，本阶段仅透传不渲染）。
+ * 对齐上游 0.8.6 事件流，并 **透传 tool_execution_update**
+ * （客户端工具块渲染的前提；投影层只透传不渲染）。
  *
  * 投影规则：
  * - turn_start / turn_end：客户端不消费，丢弃（返回 null）。

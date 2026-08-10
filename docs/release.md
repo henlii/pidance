@@ -71,7 +71,7 @@ npm run check && npm run build && npm run release:audit
   - 仅 `bin.pidance`，无 `pi-web`；
   - 无源码/测试/本地治理/密钥/dev cache 等禁入路径；
   - 对清单中每个可扫描文本文件做**完整**有界扫描（单文件与总预算超限、读取失败均 fail closed，禁止截断后通过）；
-  - 拒绝私钥标记、明显 credential 赋值、仓库/HOME 绝对路径、`100.99.31.21`、`192.168.*.*`（公开域名 `pidance.namixinxi.cn` 允许）。
+  - 拒绝私钥标记、明显 credential 赋值、仓库/HOME 绝对路径、硬编码内网主机与 `192.168.*.*` 地址。
 
 审计失败会列出具体路径与原因并以非零退出。**此时不要**继续 pack/publish。
 
@@ -195,61 +195,8 @@ npm view @henlii/pidance@0.1.0 version --registry https://registry.npmjs.org/
 
 - 对象存储 / R2 分发（后续议题）。
 - 开发机日常工作区直接 `npm run build` / `npm publish`。
+- 各环境自己的 systemd / 反代 / 安装目录布局（由运维方自管，不在本仓固化）。
 
-## 本地部署到正式位（不发 npm 包）
+## 安装与运行（发布后）
 
-不发公网包时，可将已审计 tgz 部署到正式安装位（/opt/pidance，31415）：
-
-> **安全门禁（P0）**：监听非回环地址（`0.0.0.0` / `::` / 局域网 IP）且未设置认证密码时，
-> `pidance` CLI 拒绝启动，middleware 也会对非回环请求返回 401。正式部署必须设置密码：
-> `PIDANCE_PASSWORD`（优先，兼容旧变量 `PI_WEB_PASSWORD`），例如
-> `Environment="PI_WEB_PASSWORD=..."`（或 drop-in `EnvironmentFile=/etc/pidance/secret.env`）。
-> 仅本机使用可省略密码并绑定回环（`--hostname 127.0.0.1`）。
-
-```bash
-# 1. 隔离 checkout（勿用日常工作区）
-git worktree add --detach /tmp/pidance-release-build HEAD
-cd /tmp/pidance-release-build
-npm ci --no-audit --no-fund --include=dev   # 本机 npm 全局 omit=dev，必须显式 --include=dev
-# 2. 质量门禁 + 构建 + 生成前审计
-node_modules/.bin/next build --webpack
-PIDANCE_RELEASE_SOURCE_ROOT=/root/works/open/pidance npm run release:audit
-# 3. 打包 + 生成后审计 + 哈希
-npm pack --ignore-scripts
-PIDANCE_RELEASE_SOURCE_ROOT=/root/works/open/pidance node scripts/audit-release-package.mjs --tgz henlii-pidance-0.1.0.tgz
-sha256sum henlii-pidance-0.1.0.tgz
-# 4. 归档 + 安装正式位
-VER=0.1.0-local-<commit8>-<sha8>
-cp henlii-pidance-0.1.0.tgz /opt/pidance/artifacts/pidance-$VER.tgz
-sha256sum /opt/pidance/artifacts/pidance-$VER.tgz > /opt/pidance/artifacts/pidance-$VER.tgz.sha256
-mkdir -p /opt/pidance/releases/$VER && cd /opt/pidance/releases/$VER
-# package.json：{"name": "$VER", "dependencies": {"@henlii/pidance": "file:../../artifacts/pidance-$VER.tgz"}}
-npm install --omit=dev
-ln -sfn /opt/pidance/releases/$VER /opt/pidance/current
-systemctl restart pidance.service
-# 5. 冒烟验收
-curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:31415/api/home   # 200
-curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:31415/api/sessions  # 200
-ls /opt/pidance/current/node_modules/.bin/   # 仅 pidance，无 pi-web
-```
-
-### 已部署记录
-
-| 版本 | tgz sha256（前 8） | 部署日期 | 内容 | 验收 |
-|------|--------------------|----------|------|------|
-| `0.1.1`（npm 官方包 `@henlii/pidance@0.1.1`） | —（CI 可信发布） | 2026-08-10 | 修复包：会话加载 HTTP 500（树投影递归栈溢出，stripLabelMetadataNodes 改迭代）；工具块刷新颜色从磁盘结果推导；bash 命令气泡刷新恢复（pendingBash 快照） | CI 自动发布（OIDC）；安装后 bin 仅 pidance；无认证 401 / 带认证 home/sessions 200；主会话（4600+ 条）加载 200（栈溢出修复验证）；runtime rpc 0.83.0；30141 未动 |
-| `0.1.0`（npm 官方包 `@henlii/pidance@0.1.0`） | 6d34e9ac | 2026-08-10 | 首个正式发布包安装：外部 Pi RPC 运行时 + 命令条目显示/压缩不折叠/滚动修复/系统提示词诚实文案（同 8b45878 产物，CI 可信发布） | 前后审计通过；npm 包与本地审计 tgz 下载比对 sha256 一致；安装后 bin 仅 pidance+pi（无 pi-web）；无认证 401 / 带认证 home/sessions/runtime 200；runtime rpc 0.83.0 compatible；30141 未动 |
-| `0.1.0-local-e69c4616-bbe54ec3` | bbe54ec3 | 2026-08-09 | 外部 Pi RPC 运行时收口（阶段 0-4）+ 扩展渲染层对齐 TUI + 项目独立会话 + 输入乐观清空 + D3/D4/D5（浏览器回归门禁 11 用例、兼容层退役、SessionSidebar 拆分） | 前后审计通过（含 credential 正则误报修复）；安装后 bin 仅 pidance（无 pi-web）；无认证 401 / 带认证 home/sessions/models/runtime 200；runtime rpc 0.83.0 compatible；浏览器登录/主界面/会话渲染正常；30141 未动 |
-| `0.1.0-local-708c08cf-4c2f1c72` | 4c2f1c72 | 2026-08-08 | 设置面板（SettingsView/settings-nav）、tool-execution-buffer AgentToolResult 文本提取、chat-lazy-load 懒加载、chat-auto-follow、i18n/样式、旧 logo 清理；lint 修复 ui-session prefer-const | 前后审计通过；安装后 bin 仅 pidance；/ 200；未认证 API 401（页内登录保护）；ui-session 状态正常；30141 PID 未变；31416 独立 |
-| `0.1.0-local-2e66db5-0f4d928d` | 0f4d928d | 2026-08-07 | #18 页内登录+UI 会话 Cookie；大会话 tail-first；文件树行菜单；31416 Turbopack 测试构建；toolResult 大 diff 剥离 | 无密码 API 401；Basic/Cookie 登录后 home/sessions/models 200；页面无 WWW-Authenticate；bin 仅 pidance；30141 PID 未变 |
-| `0.1.0-local-4e6743a-239da6fe` | 239da6fe | 2026-08-06 | 首发准备全量收口：review P0/P1 修复（非回环强制认证、files symlink 越界、models-config 密钥脱敏、归档全功能+前端、循环依赖/投影统一等）+ Chamber 主题/双主题/图标/tooltip/二级侧边栏 + 侧栏一竖排对齐、运行圆环旋转、最近区与项目树一致 | home/sessions 带密码 200，bin 仅 pidance（无 pi-web） |
-| `0.1.0-local-9c3fe02-6421a251` | 6421a251 | 2026-08-03 | P0–P5 会话系统重构收口（分支/新会话/去坞/右栏分屏/滚动跟随/流式同构/实时工具 UI）+ 侧栏交互对齐 openchamber（行点击折叠）+ 引导页项目/工作树缓存（含 localStorage 持久化） | A2 全路由带密码 200 / 无密码 401，bin 仅 pidance（无 pi-web） |
-| `0.1.0-local-1695fb3-d025b378` | d025b378 | 2026-08-01 | OpenChamber 交互改造批次（问题块内联/工具卡片/会话栏/子代理状态/引导页/命令面板/撤回坞等全部功能） | home/sessions/models 200，bin 仅 pidance |
-| `0.1.0-local-f1ec5da-a9994a5b` | a9994a5b | 2026-08-01 | 补包 public/（logo 等静态资源） | logo/home/sessions 200，bin 仅 pidance |
-| `0.1.0-local-cd2139e-3d2c2d97` | 3d2c2d97 | 2026-08-01 | OpenChamber 风格双下拉新会话引导 + globals.css 闭合修复 | 全路由 200（含 logo/worktrees/file-index/subagent-runs），bin 仅 pidance |
-| `0.1.0-local-8a67862-f8900ef5` | f8900ef5 | 2026-08-01 | 引导页对齐 OpenChamber draft-target 语义（选择不创建、localStorage 持久化恢复） | 全路由 200，bin 仅 pidance |
-| `0.1.0-local-1c8cf55-a8ad10bc` | a8ad10bc | 2026-08-01 | 工作区选择器对齐 OpenChamber worktreeNew（引导页内新建工作树 + finally 修复） | 全路由 200，bin 仅 pidance |
-| `0.1.0-local-7ba3a92-6e5b884c` | 6e5b884c | 2026-08-02 | 统一密码登录启用（middleware 安全层：Basic Auth + Host 白名单 + CSRF） | 无密码 401 / 带密码 200 / 恶意 Host 403 / 静态豁免，bin 仅 pidance |
-| `0.1.0-local-71e2ab8-b49c7e12` | b49c7e12 | 2026-08-01 | 添加项目弹窗目录预览（OpenChamber DirectoryExplorerDialog 语义：实时子目录列表 + git 仓库/分支检测，/api/cwd/browse） | 全路由 200（含 browse），bin 仅 pidance（无 pi-web） |
-
-陷阱：本机 shell 环境残留 `PORT=30141`（上游 pi-web 变量），裸跑 `pidance` CLI 会读取它而启动到 30141；systemd unit 显式 `--port 31415` 不受影响。
+用户侧安装见仓库 README（`npx` / `npm i -g`）。非回环监听必须设置 `PIDANCE_PASSWORD`（兼容 `PI_WEB_PASSWORD`）。产品默认端口 **31415**；勿与上游 pi-web 默认端口混淆。

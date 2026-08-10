@@ -7,8 +7,16 @@ const { version } = JSON.parse(readFileSync(join(__dirname, "package.json"), "ut
 // 产品默认只用外部 pi；不再读 npm 包版本
 const piVersion = process.env.NEXT_PUBLIC_PI_VERSION || "external";
 
-// 31416 持续测试构建（PIDANCE_DIST_DIR=.next-public）与正式/发布构建（默认 .next）分流。
+// 持续测试构建（PIDANCE_DIST_DIR=.next-public）与正式/发布构建（默认 .next）分流。
 const isLocalTestDist = process.env.PIDANCE_DIST_DIR === ".next-public";
+
+/** 开发态 allowedDevOrigins：默认仅本机；额外主机用环境变量配置，勿把内网 IP/私有域名写进仓库。 */
+function allowedDevOriginsFromEnv(raw: string | undefined): string[] {
+  const defaults = ["127.0.0.1"];
+  if (!raw?.trim()) return defaults;
+  const extra = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  return extra.length > 0 ? extra : defaults;
+}
 
 const nextConfig: NextConfig = {
   // 公网生产构建可设 PIDANCE_DIST_DIR=.next-public，避免污染 dev 的 .next
@@ -43,7 +51,7 @@ const nextConfig: NextConfig = {
     return config;
   },
   ...(process.env.NODE_ENV === "development"
-    ? { allowedDevOrigins: ["127.0.0.1", "192.168.*.*", "100.99.31.21", "pidance.namixinxi.cn"] }
+    ? { allowedDevOrigins: allowedDevOriginsFromEnv(process.env.PIDANCE_ALLOWED_DEV_ORIGINS) }
     : {}),
   async headers() {
     return [

@@ -94,24 +94,12 @@ npm run check     # typecheck + lint + 单元测试
 
 ```bash
 npm run verify:render-bridge  # 真实 pi-subagents 渲染桥
-npm run test:browser          # 浏览器回归，默认访问 31416
+npm run test:browser          # 浏览器回归（需已运行的实例，默认 http://127.0.0.1:31416）
 ```
 
 日常开发**不要**执行 `npm run build` 或 `next build`：它会写入 `.next/` 并干扰开发服务。正式构建只在隔离发布 checkout 中通过 `npm run release:check` 执行。
 
-### 持续测试部署（31416）
-
-每次应用代码修改完成后，将当前工作区部署到隔离的生产模式测试服务：
-
-```bash
-node .agents/skills/pidance-development/scripts/local-deploy.mjs restart
-```
-
-| 端口 | 用途 |
-| --- | --- |
-| **31415** | Pidance 产品默认：CLI、稳定安装版、`npm run dev` / `npm start` |
-| **31416** | 当前工作区持续测试版：`.next-public` 隔离生产构建，不对外反代 |
-| **30141** | 上游 pi-web；本仓绝不操作 |
+默认开发/产品端口为 **31415**。若同机还运行上游 [pi-web](https://github.com/agegr/pi-web)，请为其保留其自己的端口，勿与 Pidance 混用进程与数据目录。
 
 ## 发布
 
@@ -141,8 +129,6 @@ node .agents/skills/pidance-development/scripts/local-deploy.mjs restart
 - [发布与制品审计](./docs/release.md)
 - [界面设计与主题规范](./docs/ui-redesign/README.md)
 - [主题 Token](./docs/ui-redesign/theme-tokens.md)
-- [会话系统重构说明](./docs/chat-refactor-plan.md)
-- [OpenChamber 升级评估](./docs/openchamber-upgrade-evaluation-2026-08-05.md)
 
 ## 上游与许可
 

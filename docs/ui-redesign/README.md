@@ -1,6 +1,6 @@
 # Pidance UI 重做设计稿（OpenChamber v1.18.1 参考）
 
-本轮替换上一轮 Slate／Linen／Neon 三套方案。设计研究以本机 `/root/works/open/openchamber/packages/ui/src/` 的 v1.18.1 界面与当前主题文件为准，重点阅读了 `MainLayout.tsx`、`SessionNodeItem.tsx`、`ChatMessage.tsx`、`SettingsView.tsx`、`ArchiveView.tsx` 和 `openchamber-{light,dark}.json`，并核对了以下最新改动：
+本轮替换上一轮 Slate／Linen／Neon 三套方案。设计研究参考 OpenChamber v1.18.1 的界面与主题（`MainLayout`、`SessionNodeItem`、`ChatMessage`、`SettingsView`、`ArchiveView` 与 light/dark 主题文件），并核对了以下上游改动：
 
 - `e6802123`：深色底由近黑调整为更柔和的暖墨色 `#120f0e`，前景收敛为 `#c9c5ba`，选中态改为低彩暖灰。
 - `faa9c243`：会话运行状态由持续旋转图标改为静态圆点 + 轮次计时，降低列表噪声。
