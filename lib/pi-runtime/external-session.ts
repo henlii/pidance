@@ -421,6 +421,8 @@ export class ExternalRpcSession {
         }
         const proc = this.requireProcess();
         this.promptRunning = true;
+        // 与 agent_start 对称：prompt 已接受即记开始时间（冷启动后第一帧 running 也有时长种子）
+        recordRunningStartedAt(this.realSessionId, Date.now());
         this.notifyRunning();
         const payload: RpcCommand = {
           type: "prompt",
@@ -430,10 +432,13 @@ export class ExternalRpcSession {
         if (command.streamingBehavior) payload.streamingBehavior = command.streamingBehavior;
         try {
           await proc.request(payload);
+          // user 消息已落盘：失效列表内存缓存，侧栏刷新后按最后 user 时间重排
+          this.options.onSessionListInvalidate?.();
           // 成功接受后事件异步继续；prompt_done 在 agent_end 侧不强制
           return null;
         } catch (error) {
           this.promptRunning = false;
+          clearRunningStartedAt(this.realSessionId);
           this.notifyRunning();
           const errorMessage = error instanceof Error ? error.message : String(error);
           this.emit({ type: "prompt_error", errorMessage });

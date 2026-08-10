@@ -38,6 +38,8 @@ interface Props {
   /** 新会话引导页默认目标项目（入口解析的 cwd；null = 回落 localStorage 上次项目） */
   guideDefaultCwd?: string | null;
   onAgentEnd?: () => void;
+  /** agentRunning 变化（含冷启动前）→ 侧栏立即显示运行中 */
+  onAgentRunningChange?: (running: boolean, sessionId: string | null) => void;
   onSessionCreated?: (session: SessionInfo, intentId?: string | null) => void;
   /** fork/新会话成功后切换会话；prefill 为预填到新会话输入框的文本（draft 注入）。 */
   onSessionForked?: (newSessionId: string, prefill?: string) => void;
@@ -113,7 +115,7 @@ export function ProcessDetailsGroup({ messageCount, toolCallCount, children, t }
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -188,7 +190,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     handleBranchHere, handleBranchFromAssistant,
     handleNewSessionFromHere, handleNewSessionFromAnswer,
   } = useAgentSession({
-    session, newSessionCwd: effectiveNewSessionCwd, newSessionIntentId, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
+    session, newSessionCwd: effectiveNewSessionCwd, newSessionIntentId, onAgentEnd: wrappedOnAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
     isMobile,
   });

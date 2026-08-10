@@ -189,6 +189,8 @@ export interface UseAgentSessionOptions {
    */
   newSessionIntentId?: string | null;
   onAgentEnd?: () => void;
+  /** agentRunning 变化时通知父层（侧栏冷启动期即可显示运行中，不必等 SSE）。 */
+  onAgentRunningChange?: (running: boolean, sessionId: string | null) => void;
   onSessionCreated?: (session: SessionInfo, intentId?: string | null) => void;
   /** fork/新会话成功后切换会话；prefill 为预填到新会话输入框的文本（draft 注入）。 */
   onSessionForked?: (newSessionId: string, prefill?: string) => void;
@@ -316,7 +318,7 @@ type SlashCommandsResponse = {
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const { t } = useI18n();
   const {
-    session, newSessionCwd, newSessionIntentId, onAgentEnd, onSessionCreated, onSessionForked,
+    session, newSessionCwd, newSessionIntentId, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   } = opts;
 
@@ -397,6 +399,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
+  // 侧栏运行中指示：agentRunning 在 ensureEventsConnected 前已置位（冷启动窗口），
+  // 比 SSE running 更早，用于消除「发送后好几秒才显示运行中」。
+  useEffect(() => {
+    onAgentRunningChange?.(agentRunning, sessionIdRef.current ?? session?.id ?? null);
+  }, [agentRunning, session?.id, onAgentRunningChange]);
   const messagesSessionIdRef = useRef<string | null>(session?.id ?? null);
   const entryIdsRef = useRef<string[]>([]);
   const agentRunningRef = useRef(false);

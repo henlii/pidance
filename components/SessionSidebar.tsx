@@ -127,12 +127,14 @@ interface Props {
    * 内部按 id upsert 进 pending map，与 server 列表 merge。
    */
   optimisticSessions?: readonly SessionInfo[];
+  /** 当前聊天会话 agentRunning（含冷启动窗口，比 SSE 更早） */
+  clientRunningSessionId?: string | null;
 }
 
 
 // ── 主组件 ─────────────────────────────────────────────────────────────────
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, optimisticSessions }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, optimisticSessions, clientRunningSessionId }: Props) {
   const { t } = useI18n();
   const [serverSessions, setServerSessions] = useState<SessionInfo[]>([]);
   const serverSessionsRef = useRef<SessionInfo[]>([]);
@@ -180,6 +182,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const wtNewInputRef = useRef<HTMLInputElement>(null);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
+  // SSE running ∪ 当前聊天冷启动 agentRunning（发送瞬间即可显示运行中/时长）
+  const effectiveRunningSessionIds = useMemo(() => {
+    if (!clientRunningSessionId) return runningSessionIds;
+    if (runningSessionIds.has(clientRunningSessionId)) return runningSessionIds;
+    const next = new Set(runningSessionIds);
+    next.add(clientRunningSessionId);
+    return next;
+  }, [runningSessionIds, clientRunningSessionId]);
   // ── 归档（P0-2）：服务端返回的归档列表/计数 + Archive 视图开关 + 动作状态 ──
   const [archivedSessions, setArchivedSessions] = useState<SessionInfo[]>([]);
   const [archivedCount, setArchivedCount] = useState(0);
@@ -192,7 +202,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // ── P1-5 共享运行计时：1Hz ticker + first-seen 时间跟踪（见 RunningTimeContext）──
   const [runningNow, setRunningNow] = useState(() => Date.now());
   const [runningStartedAt, setRunningStartedAt] = useState<ReadonlyMap<string, number>>(() => new Map());
-  const hasRunningSessions = runningSessionIds.size > 0 || subagentRunningIds.size > 0;
+  const hasRunningSessions = effectiveRunningSessionIds.size > 0 || subagentRunningIds.size > 0;
   useEffect(() => {
     if (!hasRunningSessions) return;
     const timer = setInterval(() => setRunningNow(Date.now()), 1000);
@@ -202,9 +212,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     const now = Date.now();
     setRunningNow(now);
     setRunningStartedAt((prev) =>
-      trackRunningStartedAt(prev, [...runningSessionIds, ...subagentRunningIds], now),
+      trackRunningStartedAt(prev, [...effectiveRunningSessionIds, ...subagentRunningIds], now),
     );
-  }, [runningSessionIds, subagentRunningIds]);
+  }, [effectiveRunningSessionIds, subagentRunningIds]);
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
   // 搜索：查询与开关均为组件瞬时态，不写入偏好
   const [sessionQuery, setSessionQuery] = useState("");
@@ -517,8 +527,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [sessionRefreshDone, refreshSubagentRunning]);
   useEffect(() => {
     const previous = previousRunningSessionIdsRef.current;
-    const completedInBackground = [...previous].filter((id) => !runningSessionIds.has(id) && id !== selectedSessionId);
-    const newlyRunning = [...runningSessionIds];
+    const completedInBackground = [...previous].filter((id) => !effectiveRunningSessionIds.has(id) && id !== selectedSessionId);
+    const newlyRunning = [...effectiveRunningSessionIds].filter((id) => !previous.has(id));
 
     if (completedInBackground.length > 0 || newlyRunning.length > 0) {
       setUnreadSessionIds((prev) => {
@@ -529,8 +539,37 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       });
     }
 
-    previousRunningSessionIdsRef.current = runningSessionIds;
-  }, [runningSessionIds, selectedSessionId]);
+    // 新进入 running（含冷启动 clientRunning）：立刻乐观抬升 modified 并重排，
+    // 不等 agent_end / 列表轮询。不在此处 loadSessions——发送瞬间缓存可能仍旧。
+    if (newlyRunning.length > 0) {
+      const nowIso = new Date().toISOString();
+      setServerSessions((prev) => {
+        let changed = false;
+        const next = prev.map((s) => {
+          if (!newlyRunning.includes(s.id)) return s;
+          if (s.modified >= nowIso) return s;
+          changed = true;
+          return { ...s, modified: nowIso };
+        });
+        if (!changed) return prev;
+        const sorted = [...next].sort((a, b) => (a.modified < b.modified ? 1 : a.modified > b.modified ? -1 : 0));
+        serverSessionsRef.current = sorted;
+        saveCachedSessionList(sorted);
+        return sorted;
+      });
+    }
+
+    previousRunningSessionIdsRef.current = new Set(effectiveRunningSessionIds);
+  }, [effectiveRunningSessionIds, selectedSessionId]);
+
+  // SSE 确认 running（prompt 已接受并 invalidate 列表缓存）后再拉服务端列表对齐。
+  const prevSseRunningRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const prev = prevSseRunningRef.current;
+    const newlyFromSse = [...runningSessionIds].filter((id) => !prev.has(id));
+    prevSseRunningRef.current = new Set(runningSessionIds);
+    if (newlyFromSse.length > 0) void loadSessions(false);
+  }, [runningSessionIds, loadSessions]);
 
   useEffect(() => {
     if (!selectedSessionId) return;
@@ -1549,7 +1588,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                     key={s.id}
                     node={node}
                     selectedSessionId={selectedSessionId}
-                    runningSessionIds={runningSessionIds}
+                    runningSessionIds={effectiveRunningSessionIds}
                     subagentRunningIds={subagentRunningIds}
                     unreadSessionIds={unreadSessionIds}
                     onSelectSession={handleSelectSessionFromList}
@@ -1567,7 +1606,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                     key={s.id}
                     session={s}
                     isSelected={s.id === selectedSessionId}
-                    isRunning={runningSessionIds.has(s.id) || subagentRunningIds.has(s.id)}
+                    isRunning={effectiveRunningSessionIds.has(s.id) || subagentRunningIds.has(s.id)}
                     isUnread={unreadSessionIds.has(s.id)}
                     onClick={() => handleSelectSessionFromList(s)}
                     onRenamed={loadSessions}
@@ -1589,7 +1628,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             displayMode={displayMode}
             projectAliases={prefs.projectAliases}
             selectedSessionId={selectedSessionId}
-            runningSessionIds={runningSessionIds}
+            runningSessionIds={effectiveRunningSessionIds}
             subagentRunningIds={subagentRunningIds}
             unreadSessionIds={unreadSessionIds}
             collapsedProjectRoots={collapsedProjectRoots}

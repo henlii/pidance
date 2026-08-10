@@ -77,6 +77,8 @@ function AppShellInner() {
   );
   const [initialCwdError, setInitialCwdError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  /** 当前聊天会话的 agentRunning（含冷启动窗口）；侧栏合并进 running 集合 */
+  const [clientRunningSessionId, setClientRunningSessionId] = useState<string | null>(null);
   const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   /** 受影响文件路径集合（P1-3 diff 定向刷新）：
@@ -700,6 +702,10 @@ function AppShellInner() {
     setGitAffectedPaths(null);
   }, []);
 
+  const handleAgentRunningChange = useCallback((running: boolean, sessionId: string | null) => {
+    setClientRunningSessionId(running && sessionId ? sessionId : null);
+  }, []);
+
   const handleSessionForked = useCallback((newSessionId: string, prefill?: string) => {
     // fork/新会话成功后切换：预填文本直接注入新会话 draft（新 ChatWindow 挂载时同步读取）。
     if (prefill !== undefined) {
@@ -917,6 +923,7 @@ function AppShellInner() {
         refreshKey={refreshKey}
         onSessionDeleted={handleSessionDeleted}
         optimisticSessions={optimisticPendingSessions}
+        clientRunningSessionId={clientRunningSessionId}
       />
       {/* 底部 Settings / About：同规格图标按钮（24×24），不显示永久文字标签。登录管理在 设置 → 通用。 */}
       <div style={{ padding: "6px 8px", flexShrink: 0, display: "flex", alignItems: "center", gap: 4 }}>
@@ -1234,6 +1241,7 @@ function AppShellInner() {
                 newSessionIntentId={newSessionIntent?.id ?? null}
                 guideDefaultCwd={guideDefaultCwd}
                 onAgentEnd={handleAgentEnd}
+                onAgentRunningChange={handleAgentRunningChange}
                 onSessionCreated={handleSessionCreated}
                 onSessionForked={handleSessionForked}
                 modelsRefreshKey={modelsRefreshKey}
