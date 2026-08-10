@@ -653,7 +653,7 @@ function AssistantMessageView({
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {blockItems.map(({ block, originalIndex }) => (
-          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} toolResults={toolResults} toolExecutionMap={toolExecutionMap} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} toolsActive={toolsActive} />
+          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} toolResults={toolResults} toolExecutionMap={toolExecutionMap} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} toolsActive={toolsActive} startedAt={message.timestamp} />
         ))}
       </div>
 
@@ -742,7 +742,7 @@ function AssistantMessageView({
   );
 }
 
-function BlockView({ block, toolResults, toolExecutionMap, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex, toolsActive }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; toolExecutionMap?: Map<string, ToolExecutionSnapshot>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; toolsActive?: boolean }) {
+function BlockView({ block, toolResults, toolExecutionMap, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex, toolsActive, startedAt }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; toolExecutionMap?: Map<string, ToolExecutionSnapshot>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; toolsActive?: boolean; startedAt?: number }) {
   if (block.type === "text") {
     return <TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} />;
   }
@@ -760,9 +760,10 @@ function BlockView({ block, toolResults, toolExecutionMap, isStreaming, streamin
         snapshot={toolExecutionMap?.get(tc.toolCallId)}
         duration={duration}
         sessionId={sessionId}
-        // agent 运行中且该工具无 result（刷新后快照丢失）：推断执行中（保持运行色）。
-        // 快照仍是内存态权威；此推断只在无快照且 agent 活跃时生效，agent 空闲回落灰（诚实未知）。
+        // agent 运行中且该工具无 result（刷新后快照丢失）：推断执行中（运行色 + 实时时长）。
+        // startedAt = assistant 消息时间戳（工具开始近似）；快照仍是内存态权威。
         pending={!result && toolsActive === true}
+        startedAt={!result && toolsActive === true ? startedAt : undefined}
       />
     );
   }
