@@ -25,7 +25,7 @@ export interface CachedSessionInfo {
 	name?: string;
 	/** ISO 字符串（header.timestamp） */
 	created: string;
-	/** ISO 字符串（最后消息活动时间，回退 header.timestamp / mtime） */
+	/** ISO 字符串（最后 user 消息时间，回退 header.timestamp / mtime） */
 	modified: string;
 	messageCount: number;
 	firstMessage: string;
@@ -72,12 +72,12 @@ interface SessionFileHeader {
 }
 
 interface SessionMetadataCacheFile {
-	version: 1;
+	version: 2;
 	sessions: Record<string, SessionCacheRecord>;
 	discovery: Record<string, DiscoveryCacheRecord>;
 }
 
-const CACHE_VERSION = 1 as const;
+const CACHE_VERSION = 2 as const;
 const CACHE_FILE_NAME = "pidance-session-cache.json";
 /** 缓存写防抖：批量变更只落盘一次 */
 const SAVE_DEBOUNCE_MS = 1_500;
@@ -226,13 +226,14 @@ function isMessageWithContent(
 	);
 }
 
-function getMessageActivityTime(entry: {
+/** 列表排序用：仅统计 user 消息活动时间（assistant/toolResult 不抬升 modified）。 */
+function getUserMessageActivityTime(entry: {
 	message?: unknown;
 	timestamp?: string;
 }): number | undefined {
 	const message = entry.message;
 	if (!isMessageWithContent(message)) return undefined;
-	if (message.role !== "user" && message.role !== "assistant") return undefined;
+	if (message.role !== "user") return undefined;
 	const msgTimestamp = message.timestamp;
 	if (typeof msgTimestamp === "number") return msgTimestamp;
 	const t = new Date(entry.timestamp ?? "").getTime();
@@ -240,9 +241,10 @@ function getMessageActivityTime(entry: {
 }
 
 /**
- * 与 SDK buildSessionInfo 字段语义一致的轻量实现，但：
+ * 会话列表元数据轻量扫描：
  * - 不保留 allMessagesText（Pidance 列表不消费）；
- * - 流式逐行，不整文件进内存（12MB 会话也 OK）。
+ * - 流式逐行，不整文件进内存；
+ * - modified = 最后 user 消息时间（按用户最后发送排序）。
  * 返回 null 表示文件不是合法会话（无 header 或 header 类型错误）。
  */
 export async function scanSessionFileFast(
@@ -280,7 +282,7 @@ export async function scanSessionFileFast(
 			}
 			if (entry.type !== "message") continue;
 			messageCount++;
-			const activityTime = getMessageActivityTime(
+			const activityTime = getUserMessageActivityTime(
 				entry as { message?: unknown; timestamp?: string },
 			);
 			if (typeof activityTime === "number") {
