@@ -21,33 +21,47 @@ jobs:
         with:
           fetch-depth: 0
 
+      # 中性构建根：与本地发布（/tmp/pidance-release-build）一致，避免 GitHub
+      # runner 路径（/home/runner/...）被 webpack 嵌入产物触发敏感路径审计红线。
+      - name: 移动源码到中性构建根
+        run: mv "$GITHUB_WORKSPACE" /tmp/pidance-release-build
+        working-directory: /home/runner/work
+
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org/
 
       - name: 安装依赖（含 dev，构建与审计需要）
+        working-directory: /tmp/pidance-release-build
         run: npm ci --no-audit --no-fund --include=dev
 
       - name: 生产构建（webpack，隔离 .next）
+        working-directory: /tmp/pidance-release-build
         run: node_modules/.bin/next build --webpack
 
       - name: 生成前审计（pre-pack dry-run + 敏感扫描）
+        working-directory: /tmp/pidance-release-build
         run: npm run release:audit
 
       - name: 打包
+        working-directory: /tmp/pidance-release-build
         run: npm pack --ignore-scripts
 
       - name: 生成后审计（解析真实 tgz，fail closed）
+        working-directory: /tmp/pidance-release-build
         run: node scripts/audit-release-package.mjs --tgz henlii-pidance-${{ github.ref_name }}.tgz
 
       - name: 生成 SHA-256
+        working-directory: /tmp/pidance-release-build
         run: sha256sum henlii-pidance-${{ github.ref_name }}.tgz | tee henlii-pidance-${{ github.ref_name }}.tgz.sha256
 
       - name: 发布到 npm（OIDC provenance，官方源）
+        working-directory: /tmp/pidance-release-build
         run: npm publish henlii-pidance-${{ github.ref_name }}.tgz --access public --provenance --registry https://registry.npmjs.org/
 
       - name: 生成发布说明
+        working-directory: /tmp/pidance-release-build
         run: |
           echo "## v${{ github.ref_name }}" > release-notes.md
           echo "" >> release-notes.md
@@ -62,6 +76,7 @@ jobs:
       - name: 创建 GitHub Release（同一 tgz + sha256）
         env:
           GH_TOKEN: ${{ github.token }}
+        working-directory: /tmp/pidance-release-build
         run: |
           gh release create "${{ github.ref_name }}" \
             --repo "${{ github.repository }}" \
