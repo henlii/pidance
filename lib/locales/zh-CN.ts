@@ -743,4 +743,7 @@ export const zhCN: Record<TranslationKey, string> = {
   general_loginNotAuthenticated: "未登录",
   general_loginCheckFailed: "无法检查登录状态",
   general_logoutHint: "退出此设备的登录。之后需要再次输入服务器密码。",
+  general_updateSection: "更新",
+  general_updateHint: "开启后，每次打开页面会向 npm 查询是否有新版本，有更新时用消息条提示。关于中仍可手动检查。",
+  general_autoUpdateCheck: "打开页面时自动检测更新",
 };

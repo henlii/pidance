@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import type { PidanceUpdateCheck } from "@/lib/pidance-update";
+import { loadAutoUpdateCheck } from "@/lib/ui-preferences";
 
 type ApplyResult = {
   ok: boolean;
@@ -45,6 +46,8 @@ export function UpdateBanner() {
   const [resultMsg, setResultMsg] = useState<string | null>(null);
 
   useEffect(() => {
+    // 设置 → 通用：关闭自动检测时不请求、不弹条（关于里仍可手动检查）
+    if (!loadAutoUpdateCheck()) return;
     let cancelled = false;
     void (async () => {
       try {

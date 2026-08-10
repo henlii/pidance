@@ -10,6 +10,7 @@ import { logoutUiSession } from "./UiLoginGate";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n, type Locale } from "@/lib/i18n";
+import { loadAutoUpdateCheck, saveAutoUpdateCheck } from "@/lib/ui-preferences";
 import {
   SETTINGS_PAGE_STORAGE_KEY,
   getSettingsPages,
@@ -133,6 +134,11 @@ function GeneralPage() {
   } | null>(null);
   const [failed, setFailed] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [autoUpdateCheck, setAutoUpdateCheck] = useState(true);
+
+  useEffect(() => {
+    setAutoUpdateCheck(loadAutoUpdateCheck());
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -220,6 +226,36 @@ function GeneralPage() {
             </div>
           </>
         )}
+      </div>
+
+      <div style={{ marginBottom: 22 }}>
+        <div style={sectionTitle}>{t("general_updateSection")}</div>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 12, maxWidth: 480 }}>
+          {t("general_updateHint")}
+        </div>
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            fontSize: 13,
+            color: "var(--text)",
+            cursor: "pointer",
+            userSelect: "none",
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={autoUpdateCheck}
+            onChange={(e) => {
+              const next = e.target.checked;
+              setAutoUpdateCheck(next);
+              saveAutoUpdateCheck(next);
+            }}
+            style={{ width: 16, height: 16, accentColor: "var(--accent)" }}
+          />
+          <span>{t("general_autoUpdateCheck")}</span>
+        </label>
       </div>
     </div>
   );

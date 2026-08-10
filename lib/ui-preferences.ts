@@ -416,3 +416,45 @@ export function saveStreamingEnterAction(action: StreamingEnterAction): void {
   saveStreamingEnterActionToStorage(window.localStorage, action);
 }
 
+
+/** 打开页面是否自动检测 Pidance 更新（默认开启）。 */
+export const AUTO_UPDATE_CHECK_STORAGE_KEY = "pidance.autoUpdateCheck";
+export const DEFAULT_AUTO_UPDATE_CHECK = true;
+
+export function parseAutoUpdateCheck(value: unknown): boolean {
+  // 仅显式 false / "0" / "false" 关闭；缺省与脏数据保持开启
+  if (value === false || value === 0 || value === "0" || value === "false") return false;
+  return true;
+}
+
+export function loadAutoUpdateCheckFromStorage(storage: StorageLike): boolean {
+  try {
+    const raw = storage.getItem(AUTO_UPDATE_CHECK_STORAGE_KEY);
+    if (raw === null) return DEFAULT_AUTO_UPDATE_CHECK;
+    try {
+      return parseAutoUpdateCheck(JSON.parse(raw) as unknown);
+    } catch {
+      return parseAutoUpdateCheck(raw);
+    }
+  } catch {
+    return DEFAULT_AUTO_UPDATE_CHECK;
+  }
+}
+
+export function loadAutoUpdateCheck(): boolean {
+  if (typeof window === "undefined") return DEFAULT_AUTO_UPDATE_CHECK;
+  return loadAutoUpdateCheckFromStorage(window.localStorage);
+}
+
+export function saveAutoUpdateCheckToStorage(storage: StorageLike, enabled: boolean): void {
+  try {
+    storage.setItem(AUTO_UPDATE_CHECK_STORAGE_KEY, JSON.stringify(parseAutoUpdateCheck(enabled)));
+  } catch {
+    // 忽略存储配额 / 隐私模式错误
+  }
+}
+
+export function saveAutoUpdateCheck(enabled: boolean): void {
+  if (typeof window === "undefined") return;
+  saveAutoUpdateCheckToStorage(window.localStorage, enabled);
+}

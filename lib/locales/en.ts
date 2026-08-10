@@ -744,6 +744,9 @@ export const en = {
   general_loginNotAuthenticated: "Not signed in",
   general_loginCheckFailed: "Could not check sign-in status",
   general_logoutHint: "Sign out on this device. You will need the server password again.",
+  general_updateSection: "Updates",
+  general_updateHint: "When enabled, Pidance checks npm for a new version on page load and shows a notice if an update is available. You can still check manually in About.",
+  general_autoUpdateCheck: "Check for updates on page load",
 } as const;
 
 export type TranslationKey = keyof typeof en;
