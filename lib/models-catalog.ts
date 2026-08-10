@@ -59,15 +59,23 @@ export function listModelsFromModelsJson(modelsPath?: string): CatalogModel[] {
   return out;
 }
 
-/** 默认 thinking levels（无 pi-ai 时的保守集合） */
-const DEFAULT_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"];
+/**
+ * 与 pi-ai getSupportedThinkingLevels 对齐（源码核实）：
+ * - 非 reasoning → ["off"]
+ * - map[level] === null → 禁用
+ * - xhigh / max 仅当 map 显式给出（非 undefined）才可选
+ * - 其余级别缺省可用（omit = 走 Pi 默认映射）
+ */
+const EXTENDED_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
-function thinkingLevelsFor(model: CatalogModel): string[] {
-  if (model.thinkingLevelMap && Object.keys(model.thinkingLevelMap).length > 0) {
-    return Object.keys(model.thinkingLevelMap);
-  }
-  if (model.reasoning) return DEFAULT_THINKING_LEVELS;
-  return ["off"];
+export function thinkingLevelsFor(model: CatalogModel): string[] {
+  if (!model.reasoning) return ["off"];
+  return EXTENDED_THINKING_LEVELS.filter((level) => {
+    const mapped = model.thinkingLevelMap?.[level];
+    if (mapped === null) return false;
+    if (level === "xhigh" || level === "max") return mapped !== undefined;
+    return true;
+  });
 }
 
 /**
