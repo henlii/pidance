@@ -110,6 +110,23 @@ npx pidance --help || true
 
 冒烟失败则停止，**不要** publish。
 
+## 4.5 可信发布（GitHub Actions + OIDC，推荐）
+
+本仓已配置 `.github/workflows/release.yml`（**可信发布**）：`push v* tag` 触发 CI，
+在 GitHub runner 上完成隔离构建 → `release:audit` 前后审计 → `npm pack` →
+`release:audit:tgz` → `sha256sum` → `npm publish --provenance --access public
+--registry https://registry.npmjs.org/`（**OIDC 临时身份，无长期 token，账号 2FA 下
+无需 OTP**）→ `gh release create`（同一 tgz + sha256）。
+
+- **不使用 automation token**（完整发布权限、泄露风险高；npm 官方也建议自动化场景
+  改用可信发布）。
+- CI 发布流程与下方本地手动 publish 等效；本地步骤（构建/审计/冒烟）仍可用于
+  发布前的预检，但发布动作交给 CI。
+- npmjs.com 侧可在包发布后于包设置 → Access → **Trusted Publishing** 配置
+  GitHub repo 锁定（可选，进一步收紧为只允许该 repo 的 OIDC 发布）。
+- 重新触发：若 tag 已存在但 workflow 后才推送，删除远端 tag 重推即可
+  （`git push origin :refs/tags/v0.1.0` → 重建 annotated tag → `git push origin v0.1.0`）。
+
 ## 5. 正式发布到 npm（显式）
 
 仅在 tgz 已通过 post-pack 审计与安装冒烟后。**务必使用官方 registry**（勿依赖本机镜像默认值）：

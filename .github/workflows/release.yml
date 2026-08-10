@@ -1,0 +1,72 @@
+name: Release
+
+# 可信发布（npm Trusted Publishing / OIDC）：
+# push v* tag 触发 → 隔离构建 → 前后审计 → npm publish --provenance（无长期 token）→ GitHub Release（同一 tgz + sha256）。
+# 本地不执行任何自动 publish；审计失败即中止（fail closed）。
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # gh release create
+  id-token: write # npm OIDC provenance（不发 token）
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+
+      - name: 安装依赖（含 dev，构建与审计需要）
+        run: npm ci --no-audit --no-fund --include=dev
+
+      - name: 生产构建（webpack，隔离 .next）
+        run: node_modules/.bin/next build --webpack
+
+      - name: 生成前审计（pre-pack dry-run + 敏感扫描）
+        run: npm run release:audit
+
+      - name: 打包
+        run: npm pack --ignore-scripts
+
+      - name: 生成后审计（解析真实 tgz，fail closed）
+        run: node scripts/audit-release-package.mjs --tgz henlii-pidance-${{ github.ref_name }}.tgz
+
+      - name: 生成 SHA-256
+        run: sha256sum henlii-pidance-${{ github.ref_name }}.tgz | tee henlii-pidance-${{ github.ref_name }}.tgz.sha256
+
+      - name: 发布到 npm（OIDC provenance，官方源）
+        run: npm publish henlii-pidance-${{ github.ref_name }}.tgz --access public --provenance --registry https://registry.npmjs.org/
+
+      - name: 生成发布说明
+        run: |
+          echo "## v${{ github.ref_name }}" > release-notes.md
+          echo "" >> release-notes.md
+          echo "来自 \`git log\`（相对上一 tag）：" >> release-notes.md
+          echo '```' >> release-notes.md
+          PREV=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
+          if [ -n "$PREV" ]; then git log --oneline --no-decorate $PREV..HEAD | head -60; else git log --oneline --no-decorate -60 HEAD; fi >> release-notes.md
+          echo '```' >> release-notes.md
+          echo "" >> release-notes.md
+          echo "npm 包：\`@henlii/pidance@${{ github.ref_name }}\`（CLI 仅 \`pidance\`，端口 31415）" >> release-notes.md
+
+      - name: 创建 GitHub Release（同一 tgz + sha256）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --verify-tag \
+            --title "${{ github.ref_name }}" \
+            --notes-file release-notes.md \
+            henlii-pidance-${{ github.ref_name }}.tgz \
+            henlii-pidance-${{ github.ref_name }}.tgz.sha256
