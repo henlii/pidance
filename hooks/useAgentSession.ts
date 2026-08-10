@@ -275,6 +275,9 @@ function imageSignature(block: unknown): string {
   ].join(":");
 }
 
+/** steer 乐观消息本地标记（仅前端内存，不写盘；投递时按 key 去重替换）。 */
+type SteerOptimisticMessage = AgentMessage & { _steerOptimistic?: boolean };
+
 function userMessageKey(message: Partial<AgentMessage>): string {
   const content = (message as { content?: unknown }).content;
   if (typeof content === "string") return JSON.stringify({ text: content, images: [] });
@@ -1376,13 +1379,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const optimisticKey = optimisticUserMessageKeyRef.current;
           optimisticUserMessageKeyRef.current = null;
           setMessages((prev) => {
-            const last = prev[prev.length - 1];
+            // 投递的 steer 消息：删除本地乐观显示（同 key），避免双条
+            const withoutSteer = prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === deliveredKey));
+            const last = withoutSteer[withoutSteer.length - 1];
             if (optimisticKey && last?.role === "user" && userMessageKey(last) === optimisticKey) {
               return optimisticKey === deliveredKey
-                ? prev
-                : [...prev.slice(0, -1), delivered];
+                ? withoutSteer
+                : [...withoutSteer.slice(0, -1), delivered];
             }
-            return [...prev, delivered];
+            return [...withoutSteer, delivered];
           });
         } else if (completed) {
           messagesSessionIdRef.current = sessionIdRef.current;
@@ -1841,6 +1846,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     // 引导/队列投递后回到 following 并钉底（消息会直接出现在会话中）。
     notifyAutoFollowSend();
+    // 乐观显示：引导消息立即出现在会话中（不等当前命令执行完投递）。
+    // 仅前端显示，agent 运行逻辑不变（steer RPC 照常入 Pi 队列）；
+    // Pi 实际投递时按 key 删除本地乐观，避免双条。
+    const optimistic: SteerOptimisticMessage = {
+      role: "user",
+      content: images?.length ? message : message,
+      timestamp: Date.now(),
+      _steerOptimistic: true,
+    };
+    const optimisticKey = userMessageKey(optimistic);
+    setMessages((prev) => [...prev, optimistic]);
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     try {
       await sendAgentCommand(sid, {
@@ -1849,6 +1865,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ...(piImages?.length ? { images: piImages } : {}),
       });
     } catch (e) {
+      // 失败回滚乐观消息
+      setMessages((prev) => prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === optimisticKey)));
       console.error("Failed to steer:", e);
     }
   }, [isReadOnly, notifyAutoFollowSend]);
@@ -1941,6 +1959,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const merged = mergeFollowUpForSteer(localFollowUpRef.current, extraMessage);
     if (!merged) return;
     notifyAutoFollowSend();
+    // 乐观显示：合并后的引导消息立即出现在会话中（投递时按 key 去重）。
+    const optimistic: SteerOptimisticMessage = {
+      role: "user",
+      content: merged,
+      timestamp: Date.now(),
+      _steerOptimistic: true,
+    };
+    const optimisticKey = userMessageKey(optimistic);
+    setMessages((prev) => [...prev, optimistic]);
     try {
       if (agentRunningRef.current) {
         // 运行中：steer（打断当前思考，立即引导）
@@ -1951,6 +1978,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       updateLocalFollowUp([]);
     } catch (e) {
+      // 失败回滚乐观消息
+      setMessages((prev) => prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === optimisticKey)));
       console.error("Failed to send queue as steer:", e);
       addNotice({ type: "error", message: String(e instanceof Error ? e.message : e) });
     }
