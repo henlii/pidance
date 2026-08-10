@@ -77,6 +77,7 @@ export const en = {
   sidebar_selectProject: 'Select project',
   sidebar_searchSessions: 'Search sessions',
   sidebar_displayOptions: 'Display options',
+  sidebar_loadMoreRecent: 'Load more (+{count} · {shown}/{total})',
   sidebar_recentSessions: 'Recent',
   sidebar_standard: 'Standard',
   sidebar_compact: 'Compact',

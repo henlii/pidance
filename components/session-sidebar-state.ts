@@ -195,8 +195,12 @@ export function buildWorktreePreloadGeneration(wtRefreshKey: number): string {
 
 // ── 最近会话区 ─────────────────────────────────────────────────────────────
 
-/** 最近区默认展示的会话数。 */
-export const RECENT_SESSIONS_LIMIT = 5;
+/** 最近区候选池上限（按 modified 取最近 N 条）。 */
+export const RECENT_SESSIONS_LIMIT = 20;
+/** 最近区默认可见条数。 */
+export const RECENT_SESSIONS_INITIAL_VISIBLE = 5;
+/** 最近区每次「加载更多」追加条数。 */
+export const RECENT_SESSIONS_LOAD_MORE = 5;
 
 export interface DeriveRecentSessionsInput {
   /** 全量会话列表（服务端 + 乐观合并后）；排序语义由本函数内部保证。 */
@@ -205,13 +209,13 @@ export interface DeriveRecentSessionsInput {
   closedProjectRoots?: ReadonlySet<string>;
   /** 附加排除 id（如已删除、仅显示占位等）。 */
   excludeIds?: ReadonlySet<string>;
-  /** 展示条数上限；损坏/负数回退默认 5。 */
+  /** 展示条数上限；损坏/负数回退默认 RECENT_SESSIONS_LIMIT（20）。 */
   limit?: number;
 }
 
 /**
  * 最近会话派生（OpenChamber Recent zone 语义的纯逻辑版）：
- * 按 modified 降序取最近 N 个会话，作为项目列表上方的纯快捷入口。
+ * 按 modified 降序取最近 N 个会话（默认 N=20），作为项目列表上方的纯快捷入口。
  *
  * 排除规则：
  * - subagent 子会话（`session.subagent` 存在）——子会话只读、不参与最近区

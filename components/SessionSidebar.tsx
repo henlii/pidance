@@ -31,6 +31,9 @@ import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list
 import {
   bumpGroupVisibleCount,
   deriveRecentSessions,
+  RECENT_SESSIONS_LIMIT,
+  RECENT_SESSIONS_INITIAL_VISIBLE,
+  RECENT_SESSIONS_LOAD_MORE,
   getGroupVisibleCount,
   getVisibleTopLevelNodes,
   mergeOptimisticSessions,
@@ -267,6 +270,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   const displayMode = prefs.displayMode;
   const showRecentSessions = prefs.showRecentSessions;
+  // 最近区分页：池 20、默认显示 5、每次 +5
+  const [recentVisibleCount, setRecentVisibleCount] = useState(RECENT_SESSIONS_INITIAL_VISIBLE);
+
   const collapsedProjectRoots = useMemo(() => new Set(prefs.collapsedProjectRoots), [prefs.collapsedProjectRoots]);
   const collapsedWorktreePaths = useMemo(() => new Set(prefs.collapsedWorktreePaths), [prefs.collapsedWorktreePaths]);
   // 已关闭项目集合：仅影响侧栏可见性与自动选择，绝不触碰会话/目录/Git 数据
@@ -952,11 +958,19 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     updatePrefs((prev) => (prev.showRecentSessions === show ? prev : { ...prev, showRecentSessions: show }));
   }, [updatePrefs]);
 
-  /** 最近会话：按 modified 降序取 top 5；排除 subagent 子会话与已关闭项目。 */
+  /** 最近会话：按 modified 降序取 top 20 候选；UI 默认展示 5、每次加载更多 5。 */
   const recentSessions = useMemo(
-    () => deriveRecentSessions({ sessions: allSessions, closedProjectRoots: closedRoots }),
+    () => deriveRecentSessions({ sessions: allSessions, closedProjectRoots: closedRoots, limit: RECENT_SESSIONS_LIMIT }),
     [allSessions, closedRoots],
   );
+  // 池变短时收敛可见条数，避免 slice 空档
+  useEffect(() => {
+    setRecentVisibleCount((n) => {
+      if (recentSessions.length === 0) return RECENT_SESSIONS_INITIAL_VISIBLE;
+      return Math.min(Math.max(n, RECENT_SESSIONS_INITIAL_VISIBLE), recentSessions.length);
+    });
+  }, [recentSessions.length]);
+
 
   const handleNewSession = useCallback((targetCwd = selectedCwd) => {
     if (!targetCwd) return;
@@ -1580,7 +1594,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               {t("sidebar_recentSessions")}
             </div>
             {showRecentSessions && <div>
-              {recentSessions.map((s) => {
+              {recentSessions.slice(0, recentVisibleCount).map((s) => {
                 const node = sessionNodeById.get(s.id);
                 // 最近区行与项目树同一渲染：有子会话时折叠/展开显示子会话。
                 return node ? (
@@ -1617,6 +1631,31 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                   />
                 );
               })}
+              {recentVisibleCount < recentSessions.length && (
+                <button
+                  type="button"
+                  onClick={() => setRecentVisibleCount((n) => Math.min(n + RECENT_SESSIONS_LOAD_MORE, recentSessions.length))}
+                  style={{
+                    display: "block",
+                    width: "calc(100% - 12px)",
+                    margin: "2px 6px 4px",
+                    padding: "6px 8px",
+                    border: "1px solid var(--border)",
+                    borderRadius: 6,
+                    background: "transparent",
+                    color: "var(--text-dim)",
+                    cursor: "pointer",
+                    fontSize: 11,
+                    textAlign: "center",
+                  }}
+                >
+                  {t("sidebar_loadMoreRecent", {
+                    count: Math.min(RECENT_SESSIONS_LOAD_MORE, recentSessions.length - recentVisibleCount),
+                    shown: Math.min(recentVisibleCount, recentSessions.length),
+                    total: recentSessions.length,
+                  })}
+                </button>
+              )}
             </div>}
           </div>
         )}

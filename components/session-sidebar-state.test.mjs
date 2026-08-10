@@ -362,7 +362,7 @@ test("upsertCanonicalProjectWorktreeSnapshot：请求 root 不存在时 remove �
 
 // ── 最近会话区 ─────────────────────────────────────────────────────────────
 
-test("最近会话：按 modified 降序取 top N，默认 5；不修改输入数组", async () => {
+test("最近会话：按 modified 降序取 top N，默认 20；不修改输入数组", async () => {
   const m = await load();
   const list = [
     session("old", { modified: "2026-07-01T00:00:00.000Z" }),
@@ -373,7 +373,8 @@ test("最近会话：按 modified 降序取 top N，默认 5；不修改输入�
     session("sixth", { modified: "2026-07-04T00:00:00.000Z" }),
   ];
   const recent = m.deriveRecentSessions({ sessions: list });
-  assert.deepEqual(recent.map((s) => s.id), ["newest", "newer", "mid2", "mid", "sixth"]);
+  // 仅 6 条时默认 limit=20 返回全部 6 条（按 modified 降序）
+  assert.deepEqual(recent.map((s) => s.id), ["newest", "newer", "mid2", "mid", "sixth", "old"]);
   // 输入未被修改
   assert.equal(list.length, 6);
   // 自定义 limit
@@ -429,4 +430,7 @@ test("最近会话：excludeIds 与损坏 limit 容错", async () => {
   assert.deepEqual(m.deriveRecentSessions({ sessions: list, limit: 2.9 }).map((s) => s.id), ["a", "b"]);
   // 空输入安全空态
   assert.deepEqual(m.deriveRecentSessions({ sessions: [] }), []);
+  assert.equal(m.RECENT_SESSIONS_LIMIT, 20);
+  assert.equal(m.RECENT_SESSIONS_INITIAL_VISIBLE, 5);
+  assert.equal(m.RECENT_SESSIONS_LOAD_MORE, 5);
 });
