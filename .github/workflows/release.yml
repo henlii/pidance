@@ -62,9 +62,14 @@ jobs:
         working-directory: /tmp/pidance-release-build
         run: sha256sum henlii-pidance-${{ env.PKG_VERSION }}.tgz | tee henlii-pidance-${{ env.PKG_VERSION }}.tgz.sha256
 
-      - name: 发布到 npm（OIDC provenance，官方源）
+      - name: 发布到 npm（OIDC provenance，官方源；版本已存在则跳过）
         working-directory: /tmp/pidance-release-build
-        run: npm publish henlii-pidance-${{ env.PKG_VERSION }}.tgz --access public --provenance --registry https://registry.npmjs.org/
+        run: |
+          if npm view "@henlii/pidance@$PKG_VERSION" version --registry https://registry.npmjs.org/ >/dev/null 2>&1; then
+            echo "版本 $PKG_VERSION 已存在，跳过 publish（首次发布需手动 bootstrap）"
+          else
+            npm publish henlii-pidance-$PKG_VERSION.tgz --access public --provenance --registry https://registry.npmjs.org/
+          fi
 
       - name: 生成发布说明
         working-directory: /tmp/pidance-release-build
@@ -79,15 +84,19 @@ jobs:
           echo "" >> release-notes.md
           echo "npm 包：\`@henlii/pidance@${{ github.ref_name }}\`（CLI 仅 \`pidance\`，端口 31415）" >> release-notes.md
 
-      - name: 创建 GitHub Release（同一 tgz + sha256）
+      - name: 创建 GitHub Release（同一 tgz + sha256；已存在则跳过）
         env:
           GH_TOKEN: ${{ github.token }}
         working-directory: /tmp/pidance-release-build
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --repo "${{ github.repository }}" \
-            --verify-tag \
-            --title "${{ github.ref_name }}" \
-            --notes-file release-notes.md \
-            henlii-pidance-${{ env.PKG_VERSION }}.tgz \
-            henlii-pidance-${{ env.PKG_VERSION }}.tgz.sha256
+          if gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release ${{ github.ref_name }} 已存在，跳过"
+          else
+            gh release create "${{ github.ref_name }}" \
+              --repo "${{ github.repository }}" \
+              --verify-tag \
+              --title "${{ github.ref_name }}" \
+              --notes-file release-notes.md \
+              henlii-pidance-${{ env.PKG_VERSION }}.tgz \
+              henlii-pidance-${{ env.PKG_VERSION }}.tgz.sha256
+          fi
