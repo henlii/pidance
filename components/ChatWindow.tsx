@@ -900,6 +900,32 @@ function NoticeIconButton({ label, active = false, onClick, children }: { label:
   );
 }
 
+function noticeAccentColor(type: NoticeItem["type"]): string {
+  switch (type) {
+    case "error":
+      return "var(--error-text)";
+    case "warning":
+      return "var(--warning)";
+    case "success":
+      return "var(--success)";
+    default:
+      return "var(--accent)";
+  }
+}
+
+function noticeTypeLabelKey(type: NoticeItem["type"]): "notice_error" | "notice_warning" | "notice_success" | "notice_info" {
+  switch (type) {
+    case "error":
+      return "notice_error";
+    case "warning":
+      return "notice_warning";
+    case "success":
+      return "notice_success";
+    default:
+      return "notice_info";
+  }
+}
+
 function NoticeShelf({ notices, activities, onDismiss, onTogglePin, floating = false, align = "left" }: {
   notices: NoticeItem[];
   activities: PersistedActivityItem[];
@@ -911,20 +937,40 @@ function NoticeShelf({ notices, activities, onDismiss, onTogglePin, floating = f
   const { t } = useI18n();
   const [historyOpen, setHistoryOpen] = useState(false);
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
+  // 默认折叠：仅记录展开的 id；不在 state 中的视为折叠（逻辑层未改）
+  const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
   if (notices.length === 0 && activities.length === 0) return null;
   const orderedNotices = [...notices].sort((a, b) => Number(b.pinned) - Number(a.pinned));
   const visibleActivities = selectedRequestId ? activities.filter((item) => item.activity.requestId === selectedRequestId) : activities;
 
+  const toggleExpanded = (id: string) => {
+    setExpandedIds((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const copyNotice = async (notice: NoticeItem) => {
+    try {
+      await navigator.clipboard.writeText(notice.message);
+      setCopiedId(notice.id);
+      window.setTimeout(() => {
+        setCopiedId((current) => (current === notice.id ? null : current));
+      }, 1200);
+    } catch {
+      // 剪贴板不可用时静默失败，不改 notice 逻辑
+    }
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: align === "right" ? "flex-end" : "stretch", gap: 7, width: "100%", marginBottom: floating ? 0 : 10, pointerEvents: "auto" }}>
       {activities.length > 0 && (
-        <button type="button" onClick={() => { setSelectedRequestId(null); setHistoryOpen((open) => !open); }} aria-expanded={historyOpen} style={{ display: "flex", alignItems: "center", gap: 7, padding: "5px 9px", border: "1px solid var(--border)", borderRadius: 999, background: "var(--bg-panel)", color: "var(--text-muted)", cursor: "pointer", fontSize: 11 }}>
+        <button type="button" onClick={() => { setSelectedRequestId(null); setHistoryOpen((open) => !open); }} aria-expanded={historyOpen} style={{ display: "flex", alignItems: "center", gap: 7, padding: "5px 9px", border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-panel)", color: "var(--text-muted)", cursor: "pointer", fontSize: 11 }}>
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v6h6"/><path d="M12 7v5l3 2"/></svg>
           {t("notice_activityHistory", { count: activities.length })}
         </button>
       )}
       {historyOpen && (
-        <section aria-label={t("notice_activityHistoryTitle")} style={{ width: "min(100%, 620px)", maxHeight: 360, overflow: "auto", border: "1px solid var(--border)", borderRadius: 14, background: "var(--bg)", boxShadow: "0 16px 40px color-mix(in srgb, var(--text) 14%, transparent)" }}>
+        <section aria-label={t("notice_activityHistoryTitle")} style={{ width: "min(100%, 620px)", maxHeight: 360, overflow: "auto", border: "1px solid var(--border)", borderRadius: 12, background: "var(--bg)", boxShadow: "0 16px 40px color-mix(in srgb, var(--text) 14%, transparent)" }}>
           <div style={{ position: "sticky", top: 0, zIndex: 1, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "9px 10px 9px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
             <div>
               <div style={{ color: "var(--text)", fontSize: 12, fontWeight: 650 }}>{t("notice_activityHistoryTitle")}</div>
@@ -935,7 +981,7 @@ function NoticeShelf({ notices, activities, onDismiss, onTogglePin, floating = f
           {visibleActivities.length > 0 ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10 }}>
               {[...visibleActivities].reverse().map(({ key, activity, timestamp }) => (
-                <article key={key} style={{ border: "1px solid var(--border)", borderLeft: `3px solid ${activity.kind === "warning" || activity.kind === "error" ? "var(--warning)" : "var(--accent)"}`, borderRadius: 9, background: "var(--bg-panel)", padding: "9px 10px" }}>
+                <article key={key} style={{ border: "1px solid var(--border)", borderLeft: `3px solid ${activity.kind === "warning" || activity.kind === "error" ? "var(--warning)" : "var(--accent)"}`, borderRadius: 10, background: "var(--bg-panel)", padding: "9px 10px" }}>
                   <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 5 }}>
                     <span style={{ color: "var(--text)", fontSize: 12, fontWeight: 650 }}>{activity.title}</span>
                     {timestamp ? <time style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time> : null}
@@ -949,17 +995,90 @@ function NoticeShelf({ notices, activities, onDismiss, onTogglePin, floating = f
       )}
       {orderedNotices.map((notice) => {
         const important = notice.tier === "important";
-        const color = important ? "var(--warning)" : "var(--accent)";
+        const color = noticeAccentColor(notice.type);
+        const expanded = expandedIds[notice.id] === true;
+        const typeLabel = t(noticeTypeLabelKey(notice.type));
         return (
-          <div key={notice.id} className="notice-shelf-item" role={notice.type === "error" ? "alert" : "status"} style={{ display: "flex", alignItems: important ? "flex-start" : "center", gap: important ? 9 : 8, minHeight: important ? 76 : 42, borderRadius: important ? 14 : 999, border: important ? `1px solid color-mix(in srgb, ${color} 38%, var(--border))` : "1px solid var(--border)", borderLeft: important ? `3px solid ${color}` : undefined, background: important ? "var(--bg-panel)" : "var(--bg)", color: "var(--text-muted)", width: important ? "min(100%, 620px)" : "fit-content", maxWidth: "min(100%, 620px)", boxShadow: floating ? "0 12px 32px color-mix(in srgb, var(--text) 13%, transparent)" : "0 8px 24px color-mix(in srgb, var(--text) 8%, transparent)", fontSize: important ? 13 : 12, lineHeight: 1.55, transformOrigin: "top right", animation: notice.exiting ? "notice-shelf-out 0.18s ease-in forwards" : "notice-shelf-in 0.18s ease-out both", padding: important ? "10px 8px 10px 11px" : "6px 7px 6px 11px" }}>
-            <span style={{ width: 7, height: 7, borderRadius: "50%", background: color, flexShrink: 0, marginTop: important ? 6 : 0 }} />
-            <div style={{ minWidth: 0, flex: 1 }}>
-              {important && <div style={{ marginBottom: 3, color, fontFamily: "var(--font-mono)", fontSize: 10, fontWeight: 700, letterSpacing: 0.7, textTransform: "uppercase" }}>{t(notice.type === "error" ? "notice_error" : "notice_warning")}{notice.pinned ? ` · ${t("notice_pinned")}` : ""}</div>}
-              <div style={{ color: important ? "var(--text)" : "var(--text-muted)", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{notice.message}</div>
-              {important && notice.activityRecord && <button type="button" onClick={() => { setSelectedRequestId(notice.id); setHistoryOpen(true); }} style={{ marginTop: 7, padding: 0, border: "none", background: "transparent", color: "var(--accent)", cursor: "pointer", fontSize: 11, fontWeight: 600 }}>{t("notice_viewActivity")} →</button>}
+          <div
+            key={notice.id}
+            className="notice-shelf-item"
+            role={notice.type === "error" ? "alert" : "status"}
+            style={{
+              display: "flex",
+              alignItems: expanded ? "flex-start" : "center",
+              gap: 6,
+              minHeight: expanded ? (important ? 64 : 40) : 36,
+              borderRadius: 10,
+              border: `1px solid color-mix(in srgb, ${color} 42%, var(--border))`,
+              borderLeft: `3px solid ${color}`,
+              background: `color-mix(in srgb, ${color} ${important ? 12 : 8}%, var(--bg-panel))`,
+              color: "var(--text-muted)",
+              width: "min(100%, 620px)",
+              maxWidth: "min(100%, 620px)",
+              boxShadow: floating ? "0 12px 32px color-mix(in srgb, var(--text) 13%, transparent)" : "0 8px 24px color-mix(in srgb, var(--text) 8%, transparent)",
+              fontSize: important ? 13 : 12,
+              lineHeight: 1.45,
+              transformOrigin: "top right",
+              animation: notice.exiting ? "notice-shelf-out 0.18s ease-in forwards" : "notice-shelf-in 0.18s ease-out both",
+              padding: "5px 6px 5px 6px",
+            }}
+          >
+            <NoticeIconButton
+              label={expanded ? t("notice_collapse") : t("notice_expand")}
+              active={expanded}
+              onClick={() => toggleExpanded(notice.id)}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                {expanded
+                  ? <path d="m6 9 6 6 6-6" />
+                  : <path d="m9 6 6 6-6 6" />}
+              </svg>
+            </NoticeIconButton>
+            <div style={{ minWidth: 0, flex: 1, paddingTop: expanded ? 4 : 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                <span style={{ color, fontFamily: "var(--font-mono)", fontSize: 10, fontWeight: 700, letterSpacing: 0.6, textTransform: "uppercase", flexShrink: 0 }}>
+                  {typeLabel}{notice.pinned ? ` · ${t("notice_pinned")}` : ""}
+                </span>
+                {!expanded && (
+                  <span style={{ color: "var(--text-muted)", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+                    {notice.message.replace(/\s+/g, " ").trim()}
+                  </span>
+                )}
+              </div>
+              {expanded && (
+                <>
+                  <div style={{ marginTop: 4, color: important ? "var(--text)" : "var(--text-muted)", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{notice.message}</div>
+                  {important && notice.activityRecord && (
+                    <button
+                      type="button"
+                      onClick={() => { setSelectedRequestId(notice.id); setHistoryOpen(true); }}
+                      style={{ marginTop: 7, padding: 0, border: "none", background: "transparent", color: "var(--accent)", cursor: "pointer", fontSize: 11, fontWeight: 600 }}
+                    >
+                      {t("notice_viewActivity")} →
+                    </button>
+                  )}
+                </>
+              )}
             </div>
-            {important && <NoticeIconButton label={notice.pinned ? t("notice_unpin") : t("notice_pin")} active={notice.pinned} onClick={() => onTogglePin(notice.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill={notice.pinned ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m15 4 5 5-4 2-3 5-2 4-1-6-6-6 4-1 5-3 2-4Z"/><path d="m4 20 5-5"/></svg></NoticeIconButton>}
-            <NoticeIconButton label={t("notice_close")} onClick={() => onDismiss(notice.id)}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></NoticeIconButton>
+            <NoticeIconButton
+              label={copiedId === notice.id ? t("notice_copied") : t("notice_copy")}
+              active={copiedId === notice.id}
+              onClick={() => { void copyNotice(notice); }}
+            >
+              {copiedId === notice.id ? (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M20 6 9 17l-5-5" /></svg>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h10" /></svg>
+              )}
+            </NoticeIconButton>
+            {important && (
+              <NoticeIconButton label={notice.pinned ? t("notice_unpin") : t("notice_pin")} active={notice.pinned} onClick={() => onTogglePin(notice.id)}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill={notice.pinned ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m15 4 5 5-4 2-3 5-2 4-1-6-6-6 4-1 5-3 2-4Z" /><path d="m4 20 5-5" /></svg>
+              </NoticeIconButton>
+            )}
+            <NoticeIconButton label={t("notice_close")} onClick={() => onDismiss(notice.id)}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+            </NoticeIconButton>
           </div>
         );
       })}
