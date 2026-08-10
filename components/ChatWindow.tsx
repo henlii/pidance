@@ -624,6 +624,7 @@ const chatPlan = composeChatPlan({
                     cwd={messageCwd}
                     onOpenFile={onOpenFile}
                     isStreaming={isLive}
+                    toolsActive={sessionBusy}
                     entryId={isLive ? undefined : entryIds[idx]}
                     // 只读/忙碌：分支写入口一律不下发（hook 侧另有 guard）；
                     // live 项无 entryId、不参与分支 action。
