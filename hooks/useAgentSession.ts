@@ -1364,10 +1364,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "message_end": {
-        // Same late-event guard: after reconcile finished this run,
-        // loadSession already loaded this message from the session file —
-        // appending it again would duplicate it.
-        if (!agentRunningRef.current) break;
         const completed = event.message as AgentMessage | undefined;
         if (completed && completed.role === "user") {
           // Delivered steering/follow-up messages surface here as user
@@ -1376,20 +1372,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // optimistic bubble; later same-text queue deliveries must render.
           const delivered = normalizeToolCalls(completed);
           const deliveredKey = userMessageKey(delivered);
+          // 先删除本地乐观（同 key）——不受 running guard 限制：空闲 flush（prompt）
+          // 投递时前端 agentRunningRef 尚未置位，若被 guard 拦截则乐观残留、
+          // 重拉又追加 → 双条。
+          setMessages((prev) => prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === deliveredKey)));
+          // Same late-event guard: after reconcile finished this run,
+          // loadSession already loaded this message from the session file —
+          // appending it again would duplicate it.
+          if (!agentRunningRef.current) break;
           const optimisticKey = optimisticUserMessageKeyRef.current;
           optimisticUserMessageKeyRef.current = null;
           setMessages((prev) => {
-            // 投递的 steer 消息：删除本地乐观显示（同 key），避免双条
-            const withoutSteer = prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === deliveredKey));
-            const last = withoutSteer[withoutSteer.length - 1];
+            const last = prev[prev.length - 1];
             if (optimisticKey && last?.role === "user" && userMessageKey(last) === optimisticKey) {
               return optimisticKey === deliveredKey
-                ? withoutSteer
-                : [...withoutSteer.slice(0, -1), delivered];
+                ? prev
+                : [...prev.slice(0, -1), delivered];
             }
-            return [...withoutSteer, delivered];
+            return [...prev, delivered];
           });
         } else if (completed) {
+          // Same late-event guard: after reconcile finished this run,
+          // loadSession already loaded this message from the session file —
+          // appending it again would duplicate it.
+          if (!agentRunningRef.current) break;
           messagesSessionIdRef.current = sessionIdRef.current;
           const renderedMessage = attachCustomRenderedLines(
             completed,
