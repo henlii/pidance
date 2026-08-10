@@ -1375,23 +1375,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // 先删除本地乐观（同 key）——不受 running guard 限制：空闲 flush（prompt）
           // 投递时前端 agentRunningRef 尚未置位，若被 guard 拦截则乐观残留、
           // 重拉又追加 → 双条。
-          setMessages((prev) => prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === deliveredKey)));
+          const optimisticKey = optimisticUserMessageKeyRef.current;
+          optimisticUserMessageKeyRef.current = null;
+          setMessages((prev) => {
+            const withoutSteer = prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === deliveredKey));
+            // 列表已有同 key 的非乐观 user（磁盘已加载/迟到重放）→ 不追加，避免双条
+            const already = withoutSteer.some(
+              (m) => m.role === "user" && !(m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === deliveredKey,
+            );
+            if (already) return withoutSteer;
+            const last = withoutSteer[withoutSteer.length - 1];
+            if (optimisticKey && last?.role === "user" && userMessageKey(last) === optimisticKey) {
+              return optimisticKey === deliveredKey
+                ? withoutSteer
+                : [...withoutSteer.slice(0, -1), delivered];
+            }
+            return [...withoutSteer, delivered];
+          });
+        } else if (completed) {
           // Same late-event guard: after reconcile finished this run,
           // loadSession already loaded this message from the session file —
           // appending it again would duplicate it.
           if (!agentRunningRef.current) break;
-          const optimisticKey = optimisticUserMessageKeyRef.current;
-          optimisticUserMessageKeyRef.current = null;
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (optimisticKey && last?.role === "user" && userMessageKey(last) === optimisticKey) {
-              return optimisticKey === deliveredKey
-                ? prev
-                : [...prev.slice(0, -1), delivered];
-            }
-            return [...prev, delivered];
-          });
-        } else if (completed) {
           // Same late-event guard: after reconcile finished this run,
           // loadSession already loaded this message from the session file —
           // appending it again would duplicate it.
