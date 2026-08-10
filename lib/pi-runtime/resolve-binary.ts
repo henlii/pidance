@@ -1,21 +1,27 @@
 /**
  * 外部 Pi runtime 二进制解析。
  *
- * 顺序（与迁移规格一致）：
- * 1. PIDANCE_PI_RUNTIME 绝对路径（管理员显式）
- * 2. PATH 中的 `pi`
- * 3. 可选 fallback：Pidance 自带 node_modules CLI（仅当
- *    PIDANCE_PI_RUNTIME_FALLBACK_BUNDLED=1，默认关闭——不把 bundled 当可升级引擎）
+ * 顺序：
+ * 1. PIDANCE_PI_RUNTIME 绝对路径（管理员/环境显式，最高优先）
+ * 2. 用户配置 runtimeDir（~/.pi/agent/pidance-runtime.json；留空跳过）
+ * 3. 托管 slot ~/.pidance/runtimes/pi/current
+ * 4. PATH 中的 `pi`
+ * 5. 可选 fallback：Pidance 自带 node_modules CLI（仅当
+ *    PIDANCE_PI_RUNTIME_FALLBACK_BUNDLED=1，默认关闭）
  *
+ * 未解析到时返回 source=none，Pidance 仍可启动（Agent 功能不可用）。
  * 主 runtime 与 PI_SUBAGENT_PI_BINARY 应同源；见 configureRuntimeEnv。
  */
 
 import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { findPiBinaryInDir, readRuntimeConfig } from "../pidance-runtime-config";
+import { getAgentDir } from "../pi-paths";
 
 export type RuntimeBinarySource =
   | "configured-path"
+  | "config-dir"
   | "path"
   | "bundled-fallback"
   | "none";
@@ -102,6 +108,23 @@ export function resolveRuntimeBinary(
         version: readPiVersion(abs),
       };
     }
+  }
+
+  // 用户配置运行时目录（设置 → 通用；留空则不用）
+  try {
+    const cfg = readRuntimeConfig(getAgentDir(env));
+    if (cfg.runtimeDir) {
+      const fromDir = findPiBinaryInDir(cfg.runtimeDir, isRunnableFile);
+      if (fromDir) {
+        return {
+          path: fromDir,
+          source: "config-dir",
+          version: readPiVersion(fromDir),
+        };
+      }
+    }
+  } catch {
+    /* 配置损坏不阻塞 PATH 回退 */
   }
 
   // 托管 slot：~/.pidance/runtimes/pi/current（若存在）

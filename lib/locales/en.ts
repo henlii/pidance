@@ -747,6 +747,18 @@ export const en = {
   general_updateSection: "Updates",
   general_updateHint: "When enabled, Pidance checks npm for a new version on page load and shows a notice if an update is available. You can still check manually in About.",
   general_autoUpdateCheck: "Check for updates on page load",
+  general_runtimeSection: 'Pi runtime',
+  general_runtimeHint: 'Set a directory that contains the Pi CLI (bin/pi or dist/cli.js). Leave empty to use pi from PATH. Pidance still starts without Pi; agent features stay unavailable until a runtime is found.',
+  general_runtimeDir: 'Runtime directory',
+  general_runtimeDirPlaceholder: 'Empty = PATH (e.g. /opt/pi or global package dir)',
+  general_runtimeSave: 'Save runtime path',
+  general_runtimeSaving: 'Saving…',
+  general_runtimeSaved: 'Saved',
+  general_runtimeResolved: 'Resolved: {path} ({version})',
+  general_runtimeMissing: 'No Pi runtime resolved — agent features unavailable',
+  general_installPi: 'Install latest Pi (global npm)',
+  general_installingPi: 'Installing…',
+  general_installPiHint: 'Runs npm install -g @earendil-works/pi-coding-agent@latest and refreshes the runtime path.',
 } as const;
 
 export type TranslationKey = keyof typeof en;
