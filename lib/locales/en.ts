@@ -188,6 +188,10 @@ export const en = {
   chat_hideProcess: 'Hide process',
   chat_loadingSession: 'Loading session…',
   chat_loadEarlier: 'Load {count} earlier messages',
+
+
+
+
   chat_backToBottom: 'Back to bottom',
   chat_readOnlySession: 'Read-only session',
   chat_readOnlySessionDescription: "Browsing only: sending, steering, follow-ups, compaction, forking, and setting changes are disabled. Messages, files and session stats remain viewable.",
@@ -266,6 +270,7 @@ export const en = {
   message_toolStatusSuccess: 'Done',
   message_toolStatusError: 'Error',
   message_toolStatusCancelled: 'Cancelled',
+  message_command: "Command",
   message_compaction: 'Compaction',
   message_conversationCompacted: 'Conversation compacted',
   message_conversationCompactedDescription: 'Earlier messages were compacted to save context.',
@@ -460,7 +465,7 @@ export const en = {
   app_setupAddModel: "Add a model using the Settings button at the bottom",
   app_systemPromptReadOnlyHint: "System prompt is not available for read-only sessions.",
   app_systemPromptEmptyHint: "The system prompt is empty.",
-  app_systemPromptAfterMessageHint: "The system prompt will load after you send a message.",
+  app_systemPromptAfterMessageHint: "The external Pi runtime does not expose the system prompt (not part of the RPC protocol).",
   // sidebar
   sidebar_expandProjectNamed: "Expand {project}",
   sidebar_collapseProjectNamed: "Collapse {project}",

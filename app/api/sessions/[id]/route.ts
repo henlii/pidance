@@ -39,6 +39,7 @@ export async function GET(
       deferThinking: searchParams.has("deferThinking"),
       deferToolResultImages: searchParams.has("deferMedia"),
     });
+
     // tail/limit：首屏只返回最新 N 条，避免大会话整包下发；缺省不切片（兼容旧客户端）。
     const tailLimit = parseContextLimitParam(searchParams, DEFAULT_SESSION_TAIL_LIMIT);
     const context = tailLimit !== null
@@ -74,7 +75,6 @@ export async function GET(
       parentSessionId,
       ...(relation?.subagent ? { subagent: relation.subagent, readOnly: true as const } : {}),
     } : null;
-
     return NextResponse.json({
       sessionId: id,
       filePath,

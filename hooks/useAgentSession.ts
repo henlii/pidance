@@ -418,6 +418,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   /** agent 执行结束后的会话整体替换（流式形态 → 文件最终形态）完成时钉底一次；仅 following 时生效，released 阅读不拉回。 */
   const pendingEndPinRef = useRef(false);
   const lastScrollTopRef = useRef(0);
+  // 布局调整检测：clientHeight 变化（输入框变高/窗口 resize）触发的 scroll 事件
+  // 不是用户滚动，不得把 following 误判为 released（否则输入框回车后自动滚动停止）。
+  const lastClientHeightRef = useRef(0);
   const externalWriteUntilRef = useRef(0);
   const programmaticSmoothUntilRef = useRef(0);
   const runSettleUntilRef = useRef(0);
@@ -1715,6 +1718,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isNew, newSessionCwd, session?.cwd]);
 
+  // 命令条目持久化：斜杠命令成功后追加 pidance.command 到会话时间线（type:"custom"）。
+  // 写入失败静默（命令已执行成功，条目只是展示）。
+  const recordCommandEntry = useCallback(async (command: string, result?: string) => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    try {
+      await fetch(`/api/sessions/${encodeURIComponent(sid)}/command-entry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command, ok: true, result }),
+      });
+    } catch (e) {
+      console.error("Failed to record command entry:", e);
+    }
+  }, []);
+
   const handleBuiltinSlashCommand = useCallback(async (text: string): Promise<BuiltinSlashCommandResult> => {
     // 只读会话：内置 slash 命令（compact/reload/name/session/copy）全部走 RPC，拦截。
     if (isReadOnly) return { handled: false };
@@ -1749,6 +1768,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             ...(args ? { customInstructions: args } : {}),
           });
           setCompactResult(readCompactResult(result, "manual"));
+          await recordCommandEntry(`/compact${args ? ` ${args}` : ""}`, "Compacted context");
           if (await loadSession(sid, true)) promoteNewSession();
           return complete({ handled: true, message: "Compacted context" });
         }
@@ -1756,6 +1776,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         case "reload": {
           if (!sid) return complete({ handled: true, error: "No active session to reload" });
           await sendAgentCommand(sid, { type: "reload" });
+          await recordCommandEntry("/reload", "Reloaded session resources");
           await Promise.all([
             loadSession(sid, false, true),
             loadTools(sid),
@@ -1769,6 +1790,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (!sid) return complete({ handled: true, error: "No active session to name" });
           if (!args) return complete({ handled: true, error: "Usage: /name <name>" });
           await sendAgentCommand(sid, { type: "set_session_name", name: args });
+          await recordCommandEntry(`/name ${args}`, `Session renamed to ${args}`);
           if (await loadSession(sid)) promoteNewSession();
           return complete({ handled: true, message: `Session renamed to ${args}` });
         }
@@ -1779,6 +1801,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (stats) {
             setSessionStatsOverride(stats);
           }
+          await recordCommandEntry("/session", "Opened session stats");
+          await loadSession(sid);
           onSessionStatsPanelOpen?.();
           return complete({ handled: true, action: "openSessionStats" });
         }
@@ -1789,6 +1813,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const textToCopy = data?.text ?? "";
           if (!textToCopy) return complete({ handled: true, error: "No assistant message to copy" });
           await navigator.clipboard.writeText(textToCopy);
+          await recordCommandEntry("/copy", "Copied last assistant message");
+          await loadSession(sid);
           return complete({ handled: true, message: "Copied last assistant message" });
         }
 
@@ -1800,7 +1826,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (commandName === "compact") setIsCompacting(false);
     }
-  }, [addNotice, ensureNewSession, isCompacting, isNew, isReadOnly, loadModels, loadSession, loadSlashCommands, loadTools, promoteNewSession, onSessionStatsPanelOpen]);
+  }, [addNotice, ensureNewSession, isCompacting, isNew, isReadOnly, loadModels, loadSession, loadSlashCommands, loadTools, promoteNewSession, onSessionStatsPanelOpen, recordCommandEntry]);
 
   // Queued (undelivered) messages live in the queue panel only; the chat gets
   // the real user message when pi delivers it (user message_end event). An
@@ -1811,6 +1837,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (isReadOnly) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
+    // 引导/队列投递后回到 following 并钉底（消息会直接出现在会话中）。
+    notifyAutoFollowSend();
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     try {
       await sendAgentCommand(sid, {
@@ -1821,7 +1849,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       console.error("Failed to steer:", e);
     }
-  }, [isReadOnly]);
+  }, [isReadOnly, notifyAutoFollowSend]);
 
   const handlePromptWithStreamingBehavior = useCallback(async (
     message: string,
@@ -1862,6 +1890,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!text) return;
     if (images?.length || !agentRunningRef.current) {
       // 有图或空闲：直接 prompt（空闲时无“结束后投递”语义）
+      notifyAutoFollowSend();
       const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
       try {
         await sendAgentCommand(sid, {
@@ -1874,8 +1903,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       return;
     }
+    // 运行中入队：队列块出现在输入框上方，钉底让用户看到入队结果。
+    notifyAutoFollowSend();
     updateLocalFollowUp([...localFollowUpRef.current, text]);
-  }, [isReadOnly, updateLocalFollowUp]);
+  }, [isReadOnly, notifyAutoFollowSend, updateLocalFollowUp]);
 
   // 供 handlePromptWithStreamingBehavior（定义在前）引用最新 handleFollowUp
   handleFollowUpRef.current = handleFollowUp;
@@ -1907,6 +1938,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     const merged = mergeFollowUpForSteer(localFollowUpRef.current, extraMessage);
     if (!merged) return;
+    notifyAutoFollowSend();
     try {
       if (agentRunningRef.current) {
         // 运行中：steer（打断当前思考，立即引导）
@@ -1920,7 +1952,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       console.error("Failed to send queue as steer:", e);
       addNotice({ type: "error", message: String(e instanceof Error ? e.message : e) });
     }
-  }, [isReadOnly, updateLocalFollowUp, addNotice]);
+  }, [isReadOnly, notifyAutoFollowSend, updateLocalFollowUp, addNotice]);
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     // 只读会话：set_thinking_level 会写会话状态，拦截。
@@ -2125,6 +2157,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const nextTop = container.scrollTop;
       lastScrollTopRef.current = nextTop;
       if (now < externalWriteUntilRef.current || now < programmaticSmoothUntilRef.current) {
+        updateJumpButtonVisibility();
+        return;
+      }
+      // 布局调整（输入框变高、窗口尺寸变化）引起的 scroll 事件：仅刷新按钮，
+      // 不参与 following/released 状态判定。
+      const clientChanged = container.clientHeight !== lastClientHeightRef.current;
+      lastClientHeightRef.current = container.clientHeight;
+      if (clientChanged) {
         updateJumpButtonVisibility();
         return;
       }

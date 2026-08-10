@@ -11,6 +11,7 @@ import {
   type ActivityKind,
   type SessionActivity,
 } from "@/lib/session-activity";
+import { PIDANCE_COMMAND_CUSTOM_TYPE } from "@/lib/session-command-entry";
 import { getBranchSummaryFileMetadata } from "@/lib/branch-bookmarks";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isEmptyThinkingBlock } from "@/lib/message-display";
@@ -245,6 +246,10 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
   if (message.role === "custom") {
     if ((message as CustomMessage).customType === "compaction") {
       return <CompactionMessageView message={message as CustomMessage} />;
+    }
+
+    if ((message as CustomMessage).customType === PIDANCE_COMMAND_CUSTOM_TYPE) {
+      return <CommandMessageView message={message as CustomMessage} />;
     }
     if ((message as CustomMessage).customType === "branch_summary") {
       return <BranchSummaryMessageView message={message as CustomMessage} />;
@@ -1534,6 +1539,41 @@ function CompactionMessageView({ message }: { message: CustomMessage }) {
           <FileContextMetadata readFiles={parsedSummary.readFiles} modifiedFiles={parsedSummary.modifiedFiles} />
         </div>
       </div>
+    </div>
+  );
+}
+
+function CommandMessageView({ message }: { message: CustomMessage }) {
+  const { t } = useI18n();
+  const command = getMessageText(message.content);
+  const ok = (message.details as { ok?: boolean } | undefined)?.ok !== false;
+  const result = (message.details as { result?: string } | undefined)?.result;
+  const time = formatTime(message.timestamp);
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "6px 10px",
+          border: "1px solid var(--border)",
+          borderLeft: "2px solid var(--accent)",
+          borderRadius: 8,
+          background: "var(--bg-subtle)",
+        }}
+      >
+        <span style={{ color: "var(--text-dim)", fontSize: 10, whiteSpace: "nowrap" }}>{t("message_command")}</span>
+        <code style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text)", overflowWrap: "anywhere" }}>
+          {command}
+        </code>
+        {ok && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>✓</span>}
+        {!ok && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>✗</span>}
+        {time && <span style={{ color: "var(--text-dim)", fontSize: 10, whiteSpace: "nowrap" }}>{time}</span>}
+      </div>
+      {result && (
+        <div style={{ marginTop: 4, padding: "0 4px", color: "var(--text-muted)", fontSize: 12 }}>{result}</div>
+      )}
     </div>
   );
 }

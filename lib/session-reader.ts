@@ -1,6 +1,7 @@
 import { closeSync, openSync, readSync, statSync } from "fs";
 import { normalize as normalizePath } from "path";
 import type { AgentMessage, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
+import { PIDANCE_COMMAND_CUSTOM_TYPE, parseCommandEntryData } from "./session-command-entry";
 import {
   scanSessionFiles,
   scanSessionFileFast,
@@ -724,31 +725,12 @@ function buildSessionPathLocal(
 }
 
 /**
- * 压缩感知的可见 entry 列表（对齐 pi buildContextEntries）。
+ * 可见 entry 列表：返回完整链（含压缩前的旧消息）。
+ * 压缩（compact）不删除旧条目，Pidance 按完整历史正常显示；
+ * 与 Pi buildContextEntries（摘要+kept 截断）的差异是产品决策。
  */
-function buildContextEntriesLocal(
-  entries: SessionEntry[],
-  leafId?: string | null,
-): SessionEntry[] {
-  const path = buildSessionPathLocal(entries, leafId);
-  let compaction: (SessionEntry & { firstKeptEntryId?: string }) | null = null;
-  for (const entry of path) {
-    if (entry.type === "compaction") {
-      compaction = entry as SessionEntry & { firstKeptEntryId?: string };
-    }
-  }
-  if (!compaction) return path;
-  const compactionIdx = path.findIndex((e) => e.id === compaction!.id);
-  if (compactionIdx < 0) return path;
-  const contextEntries: SessionEntry[] = [compaction];
-  let foundFirstKept = false;
-  for (let i = 0; i < compactionIdx; i++) {
-    const entry = path[i];
-    if (entry.id === compaction.firstKeptEntryId) foundFirstKept = true;
-    if (foundFirstKept) contextEntries.push(entry);
-  }
-  contextEntries.push(...path.slice(compactionIdx + 1));
-  return contextEntries;
+function buildContextEntriesLocal(entries: SessionEntry[], leafId?: string | null): SessionEntry[] {
+  return buildSessionPathLocal(entries, leafId);
 }
 
 function getSessionContextSettingsLocal(path: SessionEntry[]): {
@@ -770,7 +752,6 @@ function getSessionContextSettingsLocal(path: SessionEntry[]): {
   }
   return { thinkingLevel, model };
 }
-
 export function buildSessionContext(
   entries: SessionEntry[],
   leafId?: string | null,
@@ -965,6 +946,18 @@ function entryToUiMessage(
       // 其它 customType（om / workspace-history 等）保持侧栏投影，不进聊天气泡。
       // 非法/未知 version 安全跳过。压缩语义跟随 piBuildContextEntries 可见集：
       // 被压缩掉的普通消息前的 activity 不复活。
+      if (entry.customType === PIDANCE_COMMAND_CUSTOM_TYPE) {
+        const command = parseCommandEntryData(entry.data);
+        if (!command) return null;
+        return {
+          role: "custom",
+          customType: PIDANCE_COMMAND_CUSTOM_TYPE,
+          content: command.command,
+          display: true,
+          details: { ok: command.ok, result: command.result },
+          timestamp: parseEntryTimestamp(entry.timestamp),
+        };
+      }
       if (entry.customType !== PIDANCE_ACTIVITY_CUSTOM_TYPE) return null;
       const activity = parseActivityData(entry.data);
       if (!activity) return null;

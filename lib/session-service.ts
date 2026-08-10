@@ -167,6 +167,15 @@ export type SessionService = {
     sessionId: string,
     input: SessionActivityInput,
   ): Promise<{ entryId: string; activity: SessionActivity }>;
+
+  /**
+   * 命令条目写入（pidance.command）：斜杠命令执行成功后追加到会话时间线。
+   * 与 appendActivity 同一单写者保护；type:"custom" 不进入 LLM 上下文。
+   */
+  appendCommandEntry(
+    sessionId: string,
+    input: { command: string; ok?: boolean; result?: string },
+  ): Promise<{ entryId: string; data: { command: string; ok: boolean; result?: string; version?: number } }>;
   createNew(options: CreateNewSessionOptions): Promise<CreateNewSessionResult>;
   getRunningIds(): string[];
   subscribeRunning(listener: (ids: string[]) => void): () => void;
@@ -361,6 +370,24 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       const entryId = manager.appendCustomEntry(PIDANCE_ACTIVITY_CUSTOM_TYPE, activity);
       deps.invalidateSessionListCache();
       return { entryId, activity };
+    },
+
+    async appendCommandEntry(sessionId, input) {
+      // 与 appendActivity 同一单写者模式：readOnly 拒绝、外部 RPC live 先停进程再写盘。
+      await requireWritableSession(sessionId, service.isReadOnly);
+      const live = service.getLive(sessionId);
+      if (live?.isAlive()) {
+        service.destroy(sessionId);
+      }
+      const filePath = await deps.resolveSessionPath(sessionId);
+      if (!filePath) throw new Error("Session not found");
+      const { normalizeCommandEntryData, PIDANCE_COMMAND_CUSTOM_TYPE } = await import("./session-command-entry");
+      const data = normalizeCommandEntryData(input);
+      if (!data.command) throw new Error("command is required");
+      const manager = openSessionFile(filePath);
+      const entryId = manager.appendCustomEntry(PIDANCE_COMMAND_CUSTOM_TYPE, data);
+      deps.invalidateSessionListCache();
+      return { entryId, data };
     },
 
     async createNew({ cwd, command }) {

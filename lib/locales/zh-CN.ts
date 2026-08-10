@@ -188,6 +188,10 @@ export const zhCN: Record<TranslationKey, string> = {
   chat_hideProcess: '折叠过程',
   chat_loadingSession: '正在加载会话…',
   chat_loadEarlier: '加载较早的 {count} 条消息',
+
+
+
+
   chat_backToBottom: '回到底部',
   chat_readOnlySession: '只读会话',
   chat_readOnlySessionDescription: "仅可浏览：发送、引导、追问、压缩、分叉与设置修改均已禁用；消息、文件与会话统计仍可查看。",
@@ -266,6 +270,7 @@ export const zhCN: Record<TranslationKey, string> = {
   message_toolStatusSuccess: '已完成',
   message_toolStatusError: '错误',
   message_toolStatusCancelled: '已取消',
+  message_command: "命令",
   message_compaction: '压缩',
   message_conversationCompacted: '对话已压缩',
   message_conversationCompactedDescription: '较早消息已压缩以节省上下文。',
@@ -460,7 +465,7 @@ export const zhCN: Record<TranslationKey, string> = {
   app_setupAddModel: "通过底部的设置按钮添加模型",
   app_systemPromptReadOnlyHint: "只读会话不提供系统提示词。",
   app_systemPromptEmptyHint: "系统提示词为空。",
-  app_systemPromptAfterMessageHint: "发送消息后将加载系统提示词。",
+  app_systemPromptAfterMessageHint: "外部 Pi 运行时未提供系统提示词（RPC 协议不含该字段）。",
   // sidebar
   sidebar_expandProjectNamed: "展开 {project}",
   sidebar_collapseProjectNamed: "折叠 {project}",
