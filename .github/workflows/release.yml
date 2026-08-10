@@ -46,23 +46,25 @@ jobs:
           PIDANCE_RELEASE_SOURCE_ROOT: ${{ github.workspace }}
         run: npm run release:audit
 
-      - name: 打包
+      - name: 打包（tgz 文件名用 package.json 版本，非 tag 名）
         working-directory: /tmp/pidance-release-build
-        run: npm pack --ignore-scripts
+        run: |
+          echo "PKG_VERSION=$(node -p "require('./package.json').version")" >> "$GITHUB_ENV"
+          npm pack --ignore-scripts
 
       - name: 生成后审计（解析真实 tgz，fail closed）
         working-directory: /tmp/pidance-release-build
         env:
           PIDANCE_RELEASE_SOURCE_ROOT: ${{ github.workspace }}
-        run: node scripts/audit-release-package.mjs --tgz henlii-pidance-${{ github.ref_name }}.tgz
+        run: node scripts/audit-release-package.mjs --tgz henlii-pidance-${{ env.PKG_VERSION }}.tgz
 
       - name: 生成 SHA-256
         working-directory: /tmp/pidance-release-build
-        run: sha256sum henlii-pidance-${{ github.ref_name }}.tgz | tee henlii-pidance-${{ github.ref_name }}.tgz.sha256
+        run: sha256sum henlii-pidance-${{ env.PKG_VERSION }}.tgz | tee henlii-pidance-${{ env.PKG_VERSION }}.tgz.sha256
 
       - name: 发布到 npm（OIDC provenance，官方源）
         working-directory: /tmp/pidance-release-build
-        run: npm publish henlii-pidance-${{ github.ref_name }}.tgz --access public --provenance --registry https://registry.npmjs.org/
+        run: npm publish henlii-pidance-${{ env.PKG_VERSION }}.tgz --access public --provenance --registry https://registry.npmjs.org/
 
       - name: 生成发布说明
         working-directory: /tmp/pidance-release-build
@@ -87,5 +89,5 @@ jobs:
             --verify-tag \
             --title "${{ github.ref_name }}" \
             --notes-file release-notes.md \
-            henlii-pidance-${{ github.ref_name }}.tgz \
-            henlii-pidance-${{ github.ref_name }}.tgz.sha256
+            henlii-pidance-${{ env.PKG_VERSION }}.tgz \
+            henlii-pidance-${{ env.PKG_VERSION }}.tgz.sha256
