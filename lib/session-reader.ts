@@ -566,21 +566,30 @@ export function stripLabelMetadataNodes<T extends {
   entry: { id: string; type: string };
   children: T[];
 }>(nodes: T[]): T[] {
-  const hoist = (children: T[]): T[] => {
-    const result: T[] = [];
-    for (const child of children) {
-      if (child.entry.type === "label") {
-        result.push(...hoist(child.children));
-      } else {
-        result.push({
-          ...child,
-          children: hoist(child.children),
-        });
+  // 迭代版后序遍历（显式栈）：label 元数据节点提升其子节点，其余原样保留。
+  // 递归版在超长线性链（数千层）下栈溢出（Maximum call stack size exceeded，
+  // 大会话加载 500）。兄弟顺序保持正序（入栈倒序、pop 正序）。
+  interface Frame { node: T; out: T[]; }
+  const rootOut: T[] = [];
+  const stack: Frame[] = [];
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    stack.push({ node: nodes[i], out: rootOut });
+  }
+  while (stack.length > 0) {
+    const { node, out } = stack.pop()!;
+    if (node.entry.type === "label") {
+      for (let i = node.children.length - 1; i >= 0; i--) {
+        stack.push({ node: node.children[i], out });
       }
+      continue;
     }
-    return result;
-  };
-  return hoist(nodes);
+    const childOut: T[] = [];
+    for (let i = node.children.length - 1; i >= 0; i--) {
+      stack.push({ node: node.children[i], out: childOut });
+    }
+    out.push({ ...node, children: childOut } as T);
+  }
+  return rootOut;
 }
 
 /** 有书签 label 的节点不得在投影中被压缩掉。 */

@@ -892,12 +892,14 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
 }
 
 
-function ToolCallBlock({ block, result, snapshot, duration, sessionId }: {
+function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending }: {
   block: ToolCallContent;
   result?: ToolResultMessage;
   snapshot?: ToolExecutionSnapshot;
   duration?: number;
   sessionId?: string;
+  /** 已知执行中但无快照（如刷新后恢复的 bash 气泡）；无快照时以此推导运行色。 */
+  pending?: boolean;
 }) {
   const { t } = useI18n();
   const [expandedOverride, setExpandedOverride] = useState<boolean | null>(null);
@@ -906,7 +908,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId }: {
   const [detailsLoading, setDetailsLoading] = useState(false);
   const outputRef = useRef<HTMLPreElement>(null);
   const followOutputRef = useRef(true);
-  const isRunning = snapshot?.status === "running";
+  const isRunning = snapshot?.status === "running" || pending === true;
   const expanded = expandedOverride ?? isRunning;
   const isEditTool = isEditToolName(block.toolName);
   // 首屏可能 deferredHeavy：展开后懒加载完整 details 再算 diff
@@ -922,7 +924,9 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId }: {
   const resultIsEmpty = resultText === null ? false : (resultText.trim() === "(no output)" || resultText.trim() === "");
   const isError = effectiveResult?.isError ?? false;
   const status = snapshot?.status;
-  const statusColor = getToolStatusColor(status, isError);
+  // 无快照时从磁盘结果推导：result 存在（非 error）即完成成功（刷新后保持绿色）；
+  // pending（bash 执行中恢复）推导运行色。快照仍是内存态权威（实时渲染）。
+  const statusColor = getToolStatusColor(status, isError, effectiveResult != null, pending);
   const command = getToolCommand(block, snapshot);
   const renderedCallLines = getRenderableAnsiLines(snapshot?.renderedCallLines ?? block.renderedCallLines);
   const renderedLiveLines = getRenderableAnsiLines(snapshot?.renderedLines);
@@ -1140,9 +1144,14 @@ const TOOL_STATUS_KEYS = {
   cancelled: "message_toolStatusCancelled",
 } as const;
 
-function getToolStatusColor(status: ToolExecutionStatus | undefined, resultIsError: boolean): string {
-  if (status === "running") return "var(--status-running)";
-  if (status === "success") return "var(--status-success)";
+function getToolStatusColor(
+  status: ToolExecutionStatus | undefined,
+  resultIsError: boolean,
+  hasResult = false,
+  pending = false,
+): string {
+  if (status === "running" || pending) return "var(--status-running)";
+  if (status === "success" || (hasResult && !resultIsError)) return "var(--status-success)";
   if (status === "error" || resultIsError) return "var(--status-danger)";
   if (status === "cancelled") return "var(--text-dim)";
   return "var(--text-muted)";
@@ -2144,7 +2153,7 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
 
   return (
     <div style={{ margin: "6px 0" }}>
-      <ToolCallBlock block={block} result={result} />
+      <ToolCallBlock block={block} result={result} pending={isPending} />
       {message.truncated && fullOutputUrl && (
         <div style={{ padding: "4px 10px", fontSize: 11, marginTop: -1 }}>
           {showFullButton && (
