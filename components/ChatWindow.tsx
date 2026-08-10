@@ -710,6 +710,8 @@ const chatPlan = composeChatPlan({
                   command: pendingBash.command,
                   output: "",
                   excludeFromContext: pendingBash.excludeFromContext,
+                  // 服务端记录的 bash 开始时间：刷新恢复后实时显示执行时长
+                  timestamp: pendingBash.startedAt,
                 } as BashExecutionMessage}
                 sessionId={session?.id ?? sessionIdRef.current ?? undefined}
               />

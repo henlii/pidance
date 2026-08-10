@@ -131,7 +131,7 @@ type AgentStateResponse = {
   isPromptRunning?: boolean;
   isBashRunning?: boolean;
   /** bash 执行中的命令快照（服务端 ExternalRpcSession 记录；刷新恢复用） */
-  pendingBash?: { command: string; excludeFromContext: boolean } | null;
+  pendingBash?: { command: string; excludeFromContext: boolean; startedAt: number } | null;
   isCompacting?: boolean;
   extensionStatuses?: ExtensionStatusItem[];
   extensionWidgets?: ExtensionWidgetItem[];
@@ -343,7 +343,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
   const [agentRunning, setAgentRunning] = useState(false);
   const [bashRunning, setBashRunning] = useState(false);
-  const [pendingBash, setPendingBash] = useState<{ command: string; excludeFromContext: boolean } | null>(null);
+  const [pendingBash, setPendingBash] = useState<{ command: string; excludeFromContext: boolean; startedAt: number } | null>(null);
   const [modelNames, setModelNames] = useState<Record<string, string>>({});
   const [modelList, setModelList] = useState<ModelEntry[]>([]);
   const [modelThinkingLevels, setModelThinkingLevels] = useState<Record<string, string[]>>({});
@@ -1603,7 +1603,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (agentRunningRef.current || bashRunningRef.current || branchBusyRef.current) return false;
     const inputText = `${excludeFromContext ? "!!" : "!"}${command}`;
     bashRunningRef.current = true;
-    setPendingBash({ command, excludeFromContext });
+    setPendingBash({ command, excludeFromContext, startedAt: Date.now() });
     setBashRunning(true);
     try {
       const sid = sessionIdRef.current ?? session?.id ?? await ensureNewSession();

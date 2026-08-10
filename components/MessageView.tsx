@@ -900,7 +900,7 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
 }
 
 
-function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending }: {
+function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, startedAt }: {
   block: ToolCallContent;
   result?: ToolResultMessage;
   snapshot?: ToolExecutionSnapshot;
@@ -908,6 +908,8 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending }
   sessionId?: string;
   /** 已知执行中但无快照（如刷新后恢复的 bash 气泡）；无快照时以此推导运行色。 */
   pending?: boolean;
+  /** 无快照时的执行开始时间（如 pendingBash 服务端快照）；pending 时实时计时。 */
+  startedAt?: number;
 }) {
   const { t } = useI18n();
   const [expandedOverride, setExpandedOverride] = useState<boolean | null>(null);
@@ -941,7 +943,9 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending }
   const renderedResultLines = getRenderableAnsiLines(snapshot?.renderedResultLines ?? effectiveResult?.renderedResultLines);
   const elapsedMs = snapshot
     ? Math.max(0, (snapshot.status === "running" ? now : (snapshot.endedAt ?? snapshot.startedAt)) - snapshot.startedAt)
-    : duration === undefined ? undefined : duration * 1000;
+    : startedAt !== undefined
+      ? (pending === true ? Math.max(0, now - startedAt) : duration === undefined ? Math.max(0, (now - startedAt)) : duration * 1000)
+      : duration === undefined ? undefined : duration * 1000;
 
   useEffect(() => {
     if (!isRunning) return;
@@ -2161,7 +2165,7 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
 
   return (
     <div style={{ margin: "6px 0" }}>
-      <ToolCallBlock block={block} result={result} pending={isPending} />
+      <ToolCallBlock block={block} result={result} pending={isPending} startedAt={isPending ? message.timestamp : undefined} />
       {message.truncated && fullOutputUrl && (
         <div style={{ padding: "4px 10px", fontSize: 11, marginTop: -1 }}>
           {showFullButton && (

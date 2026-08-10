@@ -39,7 +39,7 @@ export type ProjectedAgentState = {
 	/** 本地跟踪：RPC get_state 无此字段 */
 	isBashRunning: boolean;
 	/** 执行中的 bash 命令快照（非执行中为 null） */
-	pendingBash?: { command: string; excludeFromContext: boolean } | null;
+	pendingBash?: { command: string; excludeFromContext: boolean; startedAt: number } | null;
 	autoCompactionEnabled?: boolean;
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
@@ -72,7 +72,7 @@ export type ProjectRpcStateInput = {
 	isPromptRunning: boolean;
 	isBashRunning: boolean;
 	/** 执行中的 bash 命令快照（刷新恢复 pendingBash 用） */
-	pendingBash?: { command: string; excludeFromContext: boolean } | null;
+	pendingBash?: { command: string; excludeFromContext: boolean; startedAt: number } | null;
 	localStreaming?: boolean;
 	localCompacting?: boolean;
 	/** queue_update 跟踪；undefined = 不附带 queuedMessages */

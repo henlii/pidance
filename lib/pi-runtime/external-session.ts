@@ -68,7 +68,7 @@ export class ExternalRpcSession {
   private compacting = false;
   private bashRunning = false;
   /** 执行中的 bash 命令快照（刷新恢复 pendingBash 用）；非执行中为 null。 */
-  private bashCommand: { command: string; excludeFromContext: boolean } | null = null;
+  private bashCommand: { command: string; excludeFromContext: boolean; startedAt: number } | null = null;
   private realSessionId: string;
   private realSessionFile: string;
   private readonly idleTimeoutMs: number;
@@ -617,6 +617,7 @@ export class ExternalRpcSession {
         this.bashCommand = {
           command: typeof command.command === "string" ? command.command : String(command.command ?? ""),
           excludeFromContext: (command as { excludeFromContext?: unknown }).excludeFromContext === true,
+          startedAt: Date.now(),
         };
         this.notifyRunning();
         try {
