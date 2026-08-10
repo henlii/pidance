@@ -23,8 +23,11 @@ jobs:
 
       # 中性构建根：与本地发布（/tmp/pidance-release-build）一致，避免 GitHub
       # runner 路径（/home/runner/...）被 webpack 嵌入产物触发敏感路径审计红线。
+      # 原路径留 symlink：checkout/setup-node 的 post 清理步骤仍以它为 cwd。
       - name: 移动源码到中性构建根
-        run: mv "$GITHUB_WORKSPACE" /tmp/pidance-release-build
+        run: |
+          mv "$GITHUB_WORKSPACE" /tmp/pidance-release-build
+          ln -s /tmp/pidance-release-build "$GITHUB_WORKSPACE"
         working-directory: /home/runner/work
 
       - uses: actions/setup-node@v4
@@ -42,6 +45,8 @@ jobs:
 
       - name: 生成前审计（pre-pack dry-run + 敏感扫描）
         working-directory: /tmp/pidance-release-build
+        env:
+          PIDANCE_RELEASE_SOURCE_ROOT: /tmp/pidance-release-build
         run: npm run release:audit
 
       - name: 打包
@@ -50,6 +55,8 @@ jobs:
 
       - name: 生成后审计（解析真实 tgz，fail closed）
         working-directory: /tmp/pidance-release-build
+        env:
+          PIDANCE_RELEASE_SOURCE_ROOT: /tmp/pidance-release-build
         run: node scripts/audit-release-package.mjs --tgz henlii-pidance-${{ github.ref_name }}.tgz
 
       - name: 生成 SHA-256
