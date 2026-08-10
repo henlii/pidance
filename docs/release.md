@@ -237,6 +237,7 @@ ls /opt/pidance/current/node_modules/.bin/   # 仅 pidance，无 pi-web
 
 | 版本 | tgz sha256（前 8） | 部署日期 | 内容 | 验收 |
 |------|--------------------|----------|------|------|
+| `0.1.1`（npm 官方包 `@henlii/pidance@0.1.1`） | —（CI 可信发布） | 2026-08-10 | 修复包：会话加载 HTTP 500（树投影递归栈溢出，stripLabelMetadataNodes 改迭代）；工具块刷新颜色从磁盘结果推导；bash 命令气泡刷新恢复（pendingBash 快照） | CI 自动发布（OIDC）；安装后 bin 仅 pidance；无认证 401 / 带认证 home/sessions 200；主会话（4600+ 条）加载 200（栈溢出修复验证）；runtime rpc 0.83.0；30141 未动 |
 | `0.1.0`（npm 官方包 `@henlii/pidance@0.1.0`） | 6d34e9ac | 2026-08-10 | 首个正式发布包安装：外部 Pi RPC 运行时 + 命令条目显示/压缩不折叠/滚动修复/系统提示词诚实文案（同 8b45878 产物，CI 可信发布） | 前后审计通过；npm 包与本地审计 tgz 下载比对 sha256 一致；安装后 bin 仅 pidance+pi（无 pi-web）；无认证 401 / 带认证 home/sessions/runtime 200；runtime rpc 0.83.0 compatible；30141 未动 |
 | `0.1.0-local-e69c4616-bbe54ec3` | bbe54ec3 | 2026-08-09 | 外部 Pi RPC 运行时收口（阶段 0-4）+ 扩展渲染层对齐 TUI + 项目独立会话 + 输入乐观清空 + D3/D4/D5（浏览器回归门禁 11 用例、兼容层退役、SessionSidebar 拆分） | 前后审计通过（含 credential 正则误报修复）；安装后 bin 仅 pidance（无 pi-web）；无认证 401 / 带认证 home/sessions/models/runtime 200；runtime rpc 0.83.0 compatible；浏览器登录/主界面/会话渲染正常；30141 未动 |
 | `0.1.0-local-708c08cf-4c2f1c72` | 4c2f1c72 | 2026-08-08 | 设置面板（SettingsView/settings-nav）、tool-execution-buffer AgentToolResult 文本提取、chat-lazy-load 懒加载、chat-auto-follow、i18n/样式、旧 logo 清理；lint 修复 ui-session prefer-const | 前后审计通过；安装后 bin 仅 pidance；/ 200；未认证 API 401（页内登录保护）；ui-session 状态正常；30141 PID 未变；31416 独立 |
