@@ -130,6 +130,8 @@ type AgentStateResponse = {
   isStreaming?: boolean;
   isPromptRunning?: boolean;
   isBashRunning?: boolean;
+  /** bash 执行中的命令快照（服务端 ExternalRpcSession 记录；刷新恢复用） */
+  pendingBash?: { command: string; excludeFromContext: boolean } | null;
   isCompacting?: boolean;
   extensionStatuses?: ExtensionStatusItem[];
   extensionWidgets?: ExtensionWidgetItem[];
@@ -2037,6 +2039,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             if (agentState.state?.isBashRunning) {
               bashRunningRef.current = true;
               setBashRunning(true);
+              // 恢复执行中的 bash 命令气泡（pendingBash 不持久化，刷新后由服务端快照恢复）
+              if (agentState.state.pendingBash) {
+                setPendingBash(agentState.state.pendingBash);
+              }
               void waitForBashSettlement(session.id);
             }
           }

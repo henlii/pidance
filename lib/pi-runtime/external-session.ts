@@ -67,6 +67,8 @@ export class ExternalRpcSession {
   private streaming = false;
   private compacting = false;
   private bashRunning = false;
+  /** 执行中的 bash 命令快照（刷新恢复 pendingBash 用）；非执行中为 null。 */
+  private bashCommand: { command: string; excludeFromContext: boolean } | null = null;
   private realSessionId: string;
   private realSessionFile: string;
   private readonly idleTimeoutMs: number;
@@ -327,6 +329,7 @@ export class ExternalRpcSession {
       this.streaming = false;
       this.compacting = false;
       this.bashRunning = false;
+      this.bashCommand = null;
       this._alive = false;
       this.process = null;
       this.emit({
@@ -404,6 +407,7 @@ export class ExternalRpcSession {
     this.streaming = false;
     this.compacting = false;
     this.bashRunning = false;
+    this.bashCommand = null;
   }
 
   async send(command: Record<string, unknown>): Promise<unknown> {
@@ -477,6 +481,7 @@ export class ExternalRpcSession {
           fallbackSessionFile: this.realSessionFile,
           isPromptRunning: this.promptRunning,
           isBashRunning: this.bashRunning,
+          pendingBash: this.bashCommand,
           localStreaming: this.streaming,
           localCompacting: this.compacting,
           localQueue: this.hasQueueSnapshot ? this.localQueue : undefined,
@@ -609,6 +614,10 @@ export class ExternalRpcSession {
         }
         const proc = this.requireProcess();
         this.bashRunning = true;
+        this.bashCommand = {
+          command: typeof command.command === "string" ? command.command : String(command.command ?? ""),
+          excludeFromContext: (command as { excludeFromContext?: unknown }).excludeFromContext === true,
+        };
         this.notifyRunning();
         try {
           return await proc.request({
@@ -620,6 +629,7 @@ export class ExternalRpcSession {
           });
         } finally {
           this.bashRunning = false;
+          this.bashCommand = null;
           this.options.onSessionListInvalidate?.();
           this.notifyRunning();
         }
@@ -631,6 +641,7 @@ export class ExternalRpcSession {
           await proc.request({ type: "abort_bash" }).catch(() => undefined);
         }
         this.bashRunning = false;
+        this.bashCommand = null;
         this.notifyRunning();
         return null;
       }
