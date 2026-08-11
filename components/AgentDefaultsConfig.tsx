@@ -10,6 +10,7 @@ import {
 } from "@/lib/ui-preferences";
 import { readSoundEnabled, writeSoundEnabled } from "@/hooks/useAudio";
 import { SettingsJsonEditor } from "./SettingsJsonEditor";
+import { setServerPref, useServerPreferences } from "@/lib/server-preferences";
 
 interface AgentDefaultsConfigProps {
   cwd: string | null;
@@ -234,6 +235,12 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
   const [reloadKey, setReloadKey] = useState(0);
   /** 二级页：基础表单 / 原始 JSON */
   const [activeTab, setActiveTab] = useState<"basic" | "json">("basic");
+  /** 队列一次性投递开关（server prefs，跨客户端同步） */
+  const serverPrefsSnapshot = useServerPreferences();
+  const queueFlushAsOne = serverPrefsSnapshot.queueFlushAsOne === true;
+  const setQueueFlushAsOne = useCallback((v: boolean) => {
+    setServerPref("queueFlushAsOne", v);
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -572,6 +579,21 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
               />
               <div style={{ marginTop: -4, fontSize: 11, color: "var(--text-dim)", maxWidth: 420, lineHeight: 1.45 }}>
                 {t("defaults_completionSoundHint")}
+              </div>
+            </div>
+          </div>
+
+          {/* 队列 */}
+          <div style={blockStyle}>
+            <div style={sectionTitleStyle}>{t("defaults_queueSection")}</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <BooleanField
+                label={t("defaults_queueFlushAsOne")}
+                checked={queueFlushAsOne}
+                onChange={(v) => setQueueFlushAsOne(v)}
+              />
+              <div style={{ fontSize: 11, color: "var(--text-dim)", maxWidth: 420, lineHeight: 1.45 }}>
+                {t("defaults_queueFlushAsOneHint")}
               </div>
             </div>
           </div>

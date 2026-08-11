@@ -2404,10 +2404,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     autoFlushingQueueRef.current = true;
     void (async () => {
       try {
-        for (const text of queue) {
-          await sendAgentCommand(sid, { type: "prompt", message: text }).catch((e) => {
-            console.error("Failed to send queued message:", e);
+        // 一次性投递开关（settings 配置）：开启时合并所有队列消息为一条 prompt
+        const flushAsOne = getServerPref<boolean>("queueFlushAsOne") === true;
+        if (flushAsOne) {
+          await sendAgentCommand(sid, { type: "prompt", message: queue.join("\n\n") }).catch((e) => {
+            console.error("Failed to send queued messages:", e);
           });
+        } else {
+          for (const text of queue) {
+            await sendAgentCommand(sid, { type: "prompt", message: text }).catch((e) => {
+              console.error("Failed to send queued message:", e);
+            });
+          }
         }
         // 全部投递完成后清空本地与服务端队列
         updateLocalFollowUp([]);
