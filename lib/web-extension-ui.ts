@@ -273,15 +273,18 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       return undefined;
     },
     get theme() {
-      // 多数扩展只调 theme.fg/bg/… 上色；Web 无 TUI 时返回可调用 noop，避免 MCP 等初始化崩
-      const color = (text: string) => String(text ?? "");
+      // SDK Theme 签名：fg(name, text) / bold(text) 等。Web 无 TUI 上色，
+      // 但必须返回 text 本身，否则扩展把颜色名当内容（mcp status 曾变成 "accent"）
+      const passthrough = (text: string) => String(text ?? "");
+      const color = (name: unknown, text?: unknown) =>
+        text === undefined ? "" : String(text);
       return new Proxy(
-        { fg: color, bg: color, bold: color, dim: color, italic: color },
+        { fg: color, bg: color, bold: passthrough, dim: passthrough, italic: passthrough },
         {
           get(target, prop) {
             if (prop in target) return (target as Record<string | symbol, unknown>)[prop];
             if (prop === "then") return undefined;
-            return color;
+            return passthrough;
           },
         },
       ) as never;
