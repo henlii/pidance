@@ -7,6 +7,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import type { PluginPackageInfo, PluginsResponse } from "@/lib/api-types";
 import { shortenPath } from "@/lib/file-paths";
 import { useI18n } from "@/lib/i18n";
+import { getServerPref, setServerPref } from "@/lib/server-preferences";
 
 type PluginScope = PluginPackageInfo["scope"];
 type PluginAction = "install" | "remove" | "update" | "disable" | "enable";
@@ -428,6 +429,9 @@ function PackageDetail({
   actionError,
   actionMessage,
   sessionId,
+  updateInfo,
+  locked,
+  onToggleLock,
   onAction,
   onReloadSession,
 }: {
@@ -437,6 +441,9 @@ function PackageDetail({
   actionError: string | null;
   actionMessage: string | null;
   sessionId: string | null;
+  updateInfo: { latest: string | null; hasUpdate: boolean } | null;
+  locked: boolean;
+  onToggleLock: () => void;
   onAction: (action: PluginAction, pkg: PluginPackageInfo) => void;
   onReloadSession: () => void;
 }) {
@@ -497,6 +504,30 @@ function PackageDetail({
         </div>
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          {/* 锁定版本开关：锁定的不检查更新、隐藏升级按钮 */}
+          <label
+            title={t("plugins_lockVersionHint")}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 5,
+              fontSize: 11, color: "var(--text-muted)", cursor: "pointer",
+              padding: "4px 6px", borderRadius: 6, border: "1px solid var(--border)",
+            }}
+          >
+            <input type="checkbox" checked={locked} onChange={onToggleLock} />
+            {t("plugins_lockVersion")}
+          </label>
+          {updateInfo?.hasUpdate && (
+            <span
+              style={{
+                fontSize: 10, padding: "2px 6px", borderRadius: 999,
+                background: "color-mix(in srgb, var(--status-warning) 15%, transparent)",
+                color: "var(--status-warning)", fontWeight: 600,
+              }}
+            >
+              {t("plugins_updateAvailable", { latest: updateInfo.latest ?? "?" })}
+            </span>
+          )}
+          {!locked && (
           <button
             type="button"
             onClick={() => onAction("update", pkg)}
@@ -511,6 +542,7 @@ function PackageDetail({
               <CircleArrowUp size={13} aria-hidden />
             )}
           </button>
+          )}
           <button
             type="button"
             onClick={onReloadSession}
@@ -612,6 +644,55 @@ export function PluginsConfig({
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [addMode, setAddMode] = useState(false);
+  /** 插件更新检查结果（packageKey → 信息） */
+  const [pluginUpdates, setPluginUpdates] = useState<Record<string, { latest: string | null; hasUpdate: boolean }>>({});
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [updatingAll, setUpdatingAll] = useState(false);
+  /** 锁定版本（server prefs 持久化） */
+  const [locks, setLocks] = useState<Record<string, boolean>>(() => {
+    const raw = getServerPref<Record<string, boolean>>("pluginLocks");
+    return raw && typeof raw === "object" ? raw : {};
+  });
+  const toggleLock = useCallback((key: string) => {
+    setLocks((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      setServerPref("pluginLocks", next);
+      return next;
+    });
+  }, []);
+
+  /** 检查所有插件更新（锁定项跳过）。 */
+  const checkAllUpdates = useCallback(async () => {
+    if (!data) return;
+    const targets = data.packages.filter((p) => !locks[packageKey(p)]);
+    if (targets.length === 0) return;
+    setCheckingUpdates(true);
+    try {
+      const res = await fetch("/api/plugins/updates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          packages: targets.map((p) => ({ source: p.source, installed: p.version ?? p.configuredVersion ?? null })),
+        }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      const body = (await res.json()) as { updates?: Array<{ source: string; latest: string | null; hasUpdate: boolean }> };
+      const map: Record<string, { latest: string | null; hasUpdate: boolean }> = {};
+      for (const u of body.updates ?? []) {
+        const match = targets.find((p) => p.source === u.source);
+        if (match) map[packageKey(match)] = { latest: u.latest, hasUpdate: u.hasUpdate };
+      }
+      setPluginUpdates(map);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCheckingUpdates(false);
+    }
+  }, [data, locks]);
+
   const [installSource, setInstallSource] = useState("");
   const [installScope, setInstallScope] = useState<PluginScope>("global");
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -684,6 +765,26 @@ export function PluginsConfig({
       setBusyKey(null);
     }
   }, [cwd, t]);
+
+  /** 升级所有可更新插件（锁定项跳过）。 */
+  const upgradeAll = useCallback(async () => {
+    if (!data) return;
+    const updatable = data.packages.filter((p) => {
+      const key = packageKey(p);
+      return !locks[key] && pluginUpdates[key]?.hasUpdate;
+    });
+    if (updatable.length === 0) return;
+    setUpdatingAll(true);
+    try {
+      for (const pkg of updatable) {
+        await runAction("update", pkg);
+      }
+    } finally {
+      setUpdatingAll(false);
+      // 升级后刷新更新状态
+      void checkAllUpdates();
+    }
+  }, [data, locks, pluginUpdates, runAction, checkAllUpdates]);
 
   const installPlugin = useCallback(async () => {
     const source = installSource.trim();
@@ -944,6 +1045,39 @@ export function PluginsConfig({
               )}
             </div>
             <div style={{ padding: "8px 6px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
+              <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+                <button
+                  type="button"
+                  onClick={() => void checkAllUpdates()}
+                  disabled={checkingUpdates || !data}
+                  style={{
+                    flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+                    padding: "6px 4px", borderRadius: 5, border: "1px solid var(--border)",
+                    background: "var(--bg-panel)", color: "var(--text-muted)",
+                    cursor: checkingUpdates || !data ? "not-allowed" : "pointer",
+                    fontSize: 11, opacity: checkingUpdates || !data ? 0.5 : 1,
+                  }}
+                >
+                  {checkingUpdates ? <LoaderCircle size={12} className="animate-spin" aria-hidden /> : <RefreshCw size={12} aria-hidden />}
+                  {t("plugins_checkAllUpdates")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void upgradeAll()}
+                  disabled={updatingAll || Object.values(pluginUpdates).filter((u) => u.hasUpdate).length === 0}
+                  style={{
+                    flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+                    padding: "6px 4px", borderRadius: 5, border: "1px solid var(--accent)",
+                    background: "var(--accent)", color: "var(--accent-foreground)",
+                    cursor: updatingAll || Object.values(pluginUpdates).filter((u) => u.hasUpdate).length === 0 ? "not-allowed" : "pointer",
+                    fontSize: 11, fontWeight: 600,
+                    opacity: updatingAll || Object.values(pluginUpdates).filter((u) => u.hasUpdate).length === 0 ? 0.5 : 1,
+                  }}
+                >
+                  {updatingAll ? <LoaderCircle size={12} className="animate-spin" aria-hidden /> : <CircleArrowUp size={12} aria-hidden />}
+                  {t("plugins_upgradeAll")}
+                </button>
+              </div>
               <button
                 type="button"
                 onClick={() => {
@@ -1010,6 +1144,9 @@ export function PluginsConfig({
                 actionError={actionError}
                 actionMessage={actionMessage}
                 sessionId={sessionId}
+                updateInfo={pluginUpdates[packageKey(selectedPackage)] ?? null}
+                locked={Boolean(locks[packageKey(selectedPackage)])}
+                onToggleLock={() => toggleLock(packageKey(selectedPackage))}
                 onAction={runAction}
                 onReloadSession={reloadSession}
               />
