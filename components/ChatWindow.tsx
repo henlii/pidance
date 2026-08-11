@@ -202,6 +202,22 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     setTodosCollapsed(true);
   }, [todoCollapseScope]);
 
+  // 输入框下方 footer（belowEditor widgets + 状态条）折叠开关；跨刷新记忆
+  const [footerCollapsed, setFooterCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("pidance.footerCollapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("pidance.footerCollapsed", footerCollapsed ? "1" : "0");
+    } catch {
+      /* localStorage 不可用时仅内存生效 */
+    }
+  }, [footerCollapsed]);
+
   // 阻塞弹窗（dialog）expiresAt 到达：按 id 从 FIFO 清理并推进；不发送
   // extension_ui_response（服务端 timeout 自结算）。
 
@@ -773,8 +789,42 @@ const chatPlan = composeChatPlan({
           }}
         >
           <div style={{ maxWidth: 820, margin: "0 auto" }}>
-            <ExtensionWidgets widgets={belowEditorWidgets} />
-            <ExtensionStatusBar statuses={extensionStatuses} />
+            {/* 折叠按钮：位于输入框下方行首（模型选择正下方对应位置） */}
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: footerCollapsed ? 10 : 0 }}>
+              <button
+                type="button"
+                onClick={() => setFooterCollapsed((v) => !v)}
+                aria-expanded={!footerCollapsed}
+                aria-label={footerCollapsed ? t("footer_expand") : t("footer_collapse")}
+                title={footerCollapsed ? t("footer_expand") : t("footer_collapse")}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 22,
+                  height: 22,
+                  padding: 0,
+                  border: "1px solid var(--border)",
+                  borderRadius: 6,
+                  background: "var(--bg-panel)",
+                  color: "var(--text-dim)",
+                  cursor: "pointer",
+                  flexShrink: 0,
+                }}
+              >
+                {footerCollapsed ? (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+                ) : (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m6 15 6-6 6 6" /></svg>
+                )}
+              </button>
+            </div>
+            {!footerCollapsed && (
+              <>
+                <ExtensionWidgets widgets={belowEditorWidgets} />
+                <ExtensionStatusBar statuses={extensionStatuses} />
+              </>
+            )}
           </div>
         </div>
       </div>

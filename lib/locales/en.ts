@@ -401,6 +401,8 @@ export const en = {
   todo_toggle: 'Todos',
   todo_expand: 'Expand Todos',
   todo_collapse: 'Collapse Todos',
+  footer_expand: 'Expand footer',
+  footer_collapse: 'Collapse footer',
   todo_complete: 'complete',
   todo_active: "active",
   todo_priority: 'priority',

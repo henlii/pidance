@@ -435,6 +435,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // 布局调整检测：clientHeight 变化（输入框变高/窗口 resize）触发的 scroll 事件
   // 不是用户滚动，不得把 following 误判为 released（否则输入框回车后自动滚动停止）。
   const lastClientHeightRef = useRef(0);
+  const lastScrollHeightRef = useRef(0);
   const externalWriteUntilRef = useRef(0);
   const programmaticSmoothUntilRef = useRef(0);
   const runSettleUntilRef = useRef(0);
@@ -2275,6 +2276,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const clientChanged = container.clientHeight !== lastClientHeightRef.current;
       lastClientHeightRef.current = container.clientHeight;
       if (clientChanged) {
+        updateJumpButtonVisibility();
+        return;
+      }
+      // 内容收缩（思考块折叠、流式结束收缩）时浏览器会把 scrollTop clamp 上移；
+      // 这是布局变化不是用户滚动，不得把 following 判为 released，否则自动滚动停在中途。
+      const prevScrollHeight = lastScrollHeightRef.current;
+      lastScrollHeightRef.current = container.scrollHeight;
+      const shrinkClamped =
+        prevScrollHeight > container.scrollHeight &&
+        nextTop < previousTop &&
+        nextTop === Math.max(0, container.scrollHeight - container.clientHeight);
+      if (shrinkClamped) {
         updateJumpButtonVisibility();
         return;
       }

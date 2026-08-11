@@ -401,6 +401,8 @@ export const zhCN: Record<TranslationKey, string> = {
   todo_toggle: '待办事项',
   todo_expand: '展开待办事项',
   todo_collapse: '折叠待办事项',
+  footer_expand: '展开 footer',
+  footer_collapse: '折叠 footer',
   todo_complete: '完成',
   todo_active: "进行中",
   todo_priority: '优先级',
