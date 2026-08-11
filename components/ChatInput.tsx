@@ -4,7 +4,7 @@ import React, { useRef, useState, useCallback, useEffect, useId, useImperativeHa
 import { createPortal } from "react-dom";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft-store";
-import { getServerPref, setServerPref } from "@/lib/server-preferences";
+import { setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { hydrateDraftFromServer } from "@/lib/draft-store";
 import { ensureServerPrefsLoaded } from "@/lib/server-preferences";
 import {
@@ -396,13 +396,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     [thinkingLevelMaps],
   );
 
-  /** 缓存思考深度（服务端偏好，跨客户端）。 */
+  // 订阅服务端偏好，保证写缓存后列表立即刷新（不再读到过期 getServerPref 快照）
+  const serverPrefs = useServerPreferences();
+  /** 每模型独立缓存的思考深度；禁止回退到会话级 thinkingLevel（会串改其它模型显示）。 */
   const cachedThinkingLevel = useCallback(
     (provider: string, modelId: string): string | null => {
-      const v = getServerPref<string>(`thinkingLevel.${provider}:${modelId}`);
+      const v = serverPrefs[`thinkingLevel.${provider}:${modelId}`];
       return typeof v === "string" && v ? v : null;
     },
-    [],
+    [serverPrefs],
   );
 
   /** 选择思考深度：写缓存 + 应用（带深度切换模型）。 */
@@ -2133,7 +2135,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                           const blocked = authBlocked && !isActive;
                           const infoTitle = blocked ? t("models_authRequiredToViewModels") : modelInfoTitle(opt);
                           const cached = cachedThinkingLevel(opt.provider, opt.modelId);
-                          const currentLevel = cached ?? thinkingLevel ?? "auto";
+                          // 非当前模型：只显示该模型缓存，无缓存固定 auto（不吃会话级 thinkingLevel）
+                          // 当前模型：缓存优先，否则用会话级（刚选手动深度时尚未写缓存）
+                          const currentLevel = cached ?? (isActive ? (thinkingLevel ?? "auto") : "auto");
                           const levels = levelsForModel(opt.provider, opt.modelId);
                           const depthKey = `${opt.provider}:${opt.modelId}`;
                           const depthOpen = depthMenuFor === depthKey;
@@ -2150,8 +2154,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                                   // 键盘选择后焦点回 trigger；指针用户不受程序聚焦影响。
                                   modelButtonRef.current?.focus({ preventScroll: true });
                                   if (!isActive || isAutoModelSelection) {
-                                    // 点击模型项使用缓存思考深度（上次用的），无缓存用当前默认
-                                    onModelChange(opt.provider, opt.modelId, cached ?? thinkingLevel ?? null);
+                                    // 只用该模型缓存；无缓存 = auto，绝不把上一模型深度带过去
+                                    onModelChange(opt.provider, opt.modelId, cached ?? "auto");
                                   }
                                 }}
                                 style={{
