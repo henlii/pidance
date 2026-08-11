@@ -20,7 +20,16 @@ import {
   resolveSessionManagerForRead,
   type SessionManagerReadView,
 } from "./session-reader";
-import type { SessionActivity, SessionActivityInput } from "./session-activity";
+import {
+  normalizeActivityInput,
+  PIDANCE_ACTIVITY_CUSTOM_TYPE,
+  type SessionActivity,
+  type SessionActivityInput,
+} from "./session-activity";
+import {
+  normalizeCommandEntryData,
+  PIDANCE_COMMAND_CUSTOM_TYPE,
+} from "./session-command-entry";
 import { computeTurnEnd } from "./turn-end";
 import type { SessionInfo } from "./types";
 import { shouldInheritModel } from "./model-selection";
@@ -377,7 +386,6 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       }
       const filePath = await deps.resolveSessionPath(sessionId);
       if (!filePath) throw new Error("Session not found");
-      const { normalizeActivityInput, PIDANCE_ACTIVITY_CUSTOM_TYPE } = await import("./session-activity");
       const activity = normalizeActivityInput(input);
       const manager = openSessionFile(filePath);
       const entryId = manager.appendCustomEntry(PIDANCE_ACTIVITY_CUSTOM_TYPE, activity);
@@ -394,7 +402,6 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       }
       const filePath = await deps.resolveSessionPath(sessionId);
       if (!filePath) throw new Error("Session not found");
-      const { normalizeCommandEntryData, PIDANCE_COMMAND_CUSTOM_TYPE } = await import("./session-command-entry");
       const data = normalizeCommandEntryData(input);
       if (!data.command) throw new Error("command is required");
       const manager = openSessionFile(filePath);

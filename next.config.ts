@@ -33,6 +33,11 @@ const nextConfig: NextConfig = {
   },
   serverExternalPackages: [
     "undici",
+    // 同进程 SDK 必须走 Node require，禁止被 Turbopack/webpack 打包进 server chunk
+    "@earendil-works/pi-coding-agent",
+    "@earendil-works/pi-agent-core",
+    "@earendil-works/pi-ai",
+    "@earendil-works/pi-tui",
   ],
   // 仅 webpack 路径使用（`next build --webpack` / 发布）。Turbopack 忽略本回调，
   // 依赖 serverExternalPackages + 原生 node: 处理。

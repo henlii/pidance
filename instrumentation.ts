@@ -4,22 +4,17 @@ export async function register(): Promise<void> {
   const { configureHttpDispatcher } = await import("@/lib/http-dispatcher");
   configureHttpDispatcher();
 
-  // 默认只用外部 pi：主 runtime 与 PI_SUBAGENT_PI_BINARY 同源。
-  // 仅显式 inprocess 时回退到包内 CLI（兼容旧路径）。
-  const { getAgentRuntimeMode, configureRuntimeEnv } = await import("@/lib/pi-runtime");
-  if (getAgentRuntimeMode() === "inprocess") {
-    const { configurePiSubagentBinary } = await import("@/lib/pi-subagent-bridge");
-    configurePiSubagentBinary();
+  // 主 Agent 使用同进程 SDK；subagent 使用同一发布依赖内的 Pi CLI。
+  const { configurePiSubagentBinaryFromPackage } = await import(
+    "@/lib/pi-subagent-bridge"
+  );
+  const resolved = configurePiSubagentBinaryFromPackage();
+  if (resolved) {
+    console.log(`[pidance] subagent Pi CLI: ${resolved}`);
   } else {
-    const resolved = configureRuntimeEnv(process.env);
-    if (!resolved.path) {
-      console.error(
-        "[pidance] 未找到外部 Pi runtime（PIDANCE_PI_RUNTIME 或 PATH 中的 pi）。Agent 将无法启动。",
-      );
-    } else {
-      console.log(
-        `[pidance] 外部 Pi runtime: ${resolved.path} (${resolved.version ?? "?"} / ${resolved.source})`,
-      );
-    }
+    console.error(
+      "[pidance] 未解析到包内 Pi CLI（@earendil-works/pi-coding-agent/dist/cli.js）。subagent 可能失败。",
+    );
   }
+  console.log("[pidance] 主 Agent runtime: 同进程 Pi SDK 0.83.0");
 }
