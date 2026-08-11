@@ -3,14 +3,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import { THINKING_LEVELS, type AgentThinkingLevel } from "@/lib/agent-settings";
-import {
-  loadStreamingEnterAction,
-  saveStreamingEnterAction,
-  type StreamingEnterAction,
-} from "@/lib/ui-preferences";
-import { readSoundEnabled, writeSoundEnabled } from "@/hooks/useAudio";
 import { SettingsJsonEditor } from "./SettingsJsonEditor";
-import { setServerPref, useServerPreferences } from "@/lib/server-preferences";
 
 interface AgentDefaultsConfigProps {
   cwd: string | null;
@@ -226,8 +219,6 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
   const [raw, setRaw] = useState<SettingsObject | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [modelList, setModelList] = useState<Array<{ id: string; name: string; provider: string }>>([]);
-  const [streamingEnterDefault, setStreamingEnterDefault] = useState<StreamingEnterAction>("followUp");
-  const [soundEnabled, setSoundEnabled] = useState(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -235,19 +226,11 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
   const [reloadKey, setReloadKey] = useState(0);
   /** 二级页：基础表单 / 原始 JSON */
   const [activeTab, setActiveTab] = useState<"basic" | "json">("basic");
-  /** 队列一次性投递开关（server prefs，跨客户端同步） */
-  const serverPrefsSnapshot = useServerPreferences();
-  const queueFlushAsOne = serverPrefsSnapshot.queueFlushAsOne === true;
-  const setQueueFlushAsOne = useCallback((v: boolean) => {
-    setServerPref("queueFlushAsOne", v);
-  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      setStreamingEnterDefault(loadStreamingEnterAction());
-      setSoundEnabled(readSoundEnabled());
       const params = new URLSearchParams();
       if (cwd) params.set("cwd", cwd);
       const qs = params.toString();
@@ -542,58 +525,6 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
                     </option>
                   ))}
                 </select>
-              </div>
-            </div>
-          </div>
-
-          {/* 输入行为 */}
-          <div style={blockStyle}>
-            <div style={sectionTitleStyle}>{t("defaults_inputSection")}</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              <div>
-                <div style={labelStyle}>{t("defaults_streamingEnter")}</div>
-                <select
-                  value={streamingEnterDefault}
-                  onChange={(e) => {
-                    const next = e.target.value === "steer" ? "steer" : "followUp";
-                    setStreamingEnterDefault(next);
-                    saveStreamingEnterAction(next);
-                    window.dispatchEvent(new Event("pidance:streaming-enter-changed"));
-                  }}
-                  style={selectStyle}
-                >
-                  <option value="followUp">{t("defaults_streamingEnterQueue")}</option>
-                  <option value="steer">{t("defaults_streamingEnterSteer")}</option>
-                </select>
-                <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-dim)", maxWidth: 420, lineHeight: 1.45 }}>
-                  {t("defaults_streamingEnterHint")}
-                </div>
-              </div>
-              <BooleanField
-                label={t("defaults_completionSound")}
-                checked={soundEnabled}
-                onChange={(next) => {
-                  setSoundEnabled(next);
-                  writeSoundEnabled(next);
-                }}
-              />
-              <div style={{ marginTop: -4, fontSize: 11, color: "var(--text-dim)", maxWidth: 420, lineHeight: 1.45 }}>
-                {t("defaults_completionSoundHint")}
-              </div>
-            </div>
-          </div>
-
-          {/* 队列 */}
-          <div style={blockStyle}>
-            <div style={sectionTitleStyle}>{t("defaults_queueSection")}</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              <BooleanField
-                label={t("defaults_queueFlushAsOne")}
-                checked={queueFlushAsOne}
-                onChange={(v) => setQueueFlushAsOne(v)}
-              />
-              <div style={{ fontSize: 11, color: "var(--text-dim)", maxWidth: 420, lineHeight: 1.45 }}>
-                {t("defaults_queueFlushAsOneHint")}
               </div>
             </div>
           </div>

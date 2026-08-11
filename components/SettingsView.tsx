@@ -10,6 +10,9 @@ import { PromptsConfig } from "./PromptsConfig";
 import { logoutUiSession } from "./UiLoginGate";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useTheme } from "@/hooks/useTheme";
+import { loadStreamingEnterAction, saveStreamingEnterAction, type StreamingEnterAction } from "@/lib/ui-preferences";
+import { readSoundEnabled, writeSoundEnabled } from "@/hooks/useAudio";
+import { setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { useI18n, type Locale } from "@/lib/i18n";
 import { loadAutoUpdateCheck, saveAutoUpdateCheck } from "@/lib/ui-preferences";
 import {
@@ -267,6 +270,17 @@ function GeneralPage() {
 function AppearancePage() {
   const { mode, themeStyle, setTheme, setThemeStyle } = useTheme();
   const { locale, setLocale, t } = useI18n();
+  // 本地交互偏好（非 settings.json）：回车动作 / 提示音 / 队列一次性投递
+  const [streamingEnter, setStreamingEnter] = useState<StreamingEnterAction>("followUp");
+  useEffect(() => {
+    setStreamingEnter(loadStreamingEnterAction());
+  }, []);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  useEffect(() => {
+    setSoundEnabled(readSoundEnabled());
+  }, []);
+  const serverPrefs = useServerPreferences();
+  const queueFlushAsOne = serverPrefs.queueFlushAsOne === true;
   return (
     <div className="settings-page-content">
       <SegmentedChoice
@@ -299,6 +313,60 @@ function AppearancePage() {
       />
       <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6, maxWidth: 420 }}>
         {t("appearance_coverage")}
+      </div>
+
+      {/* 交互偏好（本地，非 settings.json） */}
+      <div style={{ borderTop: "1px solid var(--border)", paddingTop: 18, marginTop: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)" }}>{t("appearance_interactionSection")}</div>
+        <div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 4 }}>{t("defaults_streamingEnter")}</div>
+          <select
+            value={streamingEnter}
+            onChange={(e) => {
+              const next = e.target.value === "steer" ? "steer" : "followUp";
+              setStreamingEnter(next);
+              saveStreamingEnterAction(next);
+              window.dispatchEvent(new Event("pidance:streaming-enter-changed"));
+            }}
+            style={{
+              width: "100%", maxWidth: 420, padding: "7px 10px", borderRadius: 7,
+              border: "1px solid var(--border)", background: "var(--bg)",
+              color: "var(--text)", fontSize: 13, outline: "none", cursor: "pointer",
+            }}
+          >
+            <option value="followUp">{t("defaults_streamingEnterQueue")}</option>
+            <option value="steer">{t("defaults_streamingEnterSteer")}</option>
+          </select>
+          <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-dim)", maxWidth: 420, lineHeight: 1.45 }}>
+            {t("defaults_streamingEnterHint")}
+          </div>
+        </div>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text)", cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={soundEnabled}
+            onChange={(e) => {
+              const next = e.target.checked;
+              setSoundEnabled(next);
+              writeSoundEnabled(next);
+            }}
+          />
+          {t("defaults_completionSound")}
+        </label>
+        <div style={{ marginTop: -6, fontSize: 11, color: "var(--text-dim)", maxWidth: 420, lineHeight: 1.45 }}>
+          {t("defaults_completionSoundHint")}
+        </div>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text)", cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={queueFlushAsOne}
+            onChange={(e) => setServerPref("queueFlushAsOne", e.target.checked)}
+          />
+          {t("defaults_queueFlushAsOne")}
+        </label>
+        <div style={{ marginTop: -6, fontSize: 11, color: "var(--text-dim)", maxWidth: 420, lineHeight: 1.45 }}>
+          {t("defaults_queueFlushAsOneHint")}
+        </div>
       </div>
     </div>
   );
