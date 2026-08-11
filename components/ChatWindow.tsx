@@ -429,6 +429,8 @@ const chatPlan = composeChatPlan({
       onBuiltinCommand={handleBuiltinSlashCommand}
       soundEnabled={soundEnabled}
       onSoundToggle={onSoundToggle}
+      footerCollapsed={footerCollapsed}
+      onFooterToggle={() => setFooterCollapsed((v) => !v)}
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? (effectiveNewSessionCwd ? `new:${effectiveNewSessionCwd}` : undefined)}
       cwd={session?.cwd ?? effectiveNewSessionCwd}
@@ -789,36 +791,6 @@ const chatPlan = composeChatPlan({
           }}
         >
           <div style={{ maxWidth: 820, margin: "0 auto" }}>
-            {/* 折叠按钮：位于输入框下方行首（模型选择正下方对应位置） */}
-            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: footerCollapsed ? 10 : 0 }}>
-              <button
-                type="button"
-                onClick={() => setFooterCollapsed((v) => !v)}
-                aria-expanded={!footerCollapsed}
-                aria-label={footerCollapsed ? t("footer_expand") : t("footer_collapse")}
-                title={footerCollapsed ? t("footer_expand") : t("footer_collapse")}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  width: 22,
-                  height: 22,
-                  padding: 0,
-                  border: "1px solid var(--border)",
-                  borderRadius: 6,
-                  background: "var(--bg-panel)",
-                  color: "var(--text-dim)",
-                  cursor: "pointer",
-                  flexShrink: 0,
-                }}
-              >
-                {footerCollapsed ? (
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
-                ) : (
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m6 15 6-6 6 6" /></svg>
-                )}
-              </button>
-            </div>
             {!footerCollapsed && (
               <>
                 <ExtensionWidgets widgets={belowEditorWidgets} />

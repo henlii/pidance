@@ -107,6 +107,9 @@ interface Props {
   soundEnabled?: boolean;
   onSoundToggle?: () => void;
   onAudioUnlock?: () => void;
+  /** footer（输入框下方状态条）折叠状态与切换 */
+  footerCollapsed?: boolean;
+  onFooterToggle?: () => void;
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
@@ -268,6 +271,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onBuiltinCommand,
   onAudioUnlock,
   onPromptWithStreamingBehavior,
+  footerCollapsed, onFooterToggle,
   draftKey,
   cwd,
 }: Props, ref) {
@@ -1886,6 +1890,36 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
           {/* LEFT: model + thinking（思考紧贴模型；手机端常显） */}
           <div style={{ flex: "0 1 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 2, maxWidth: isMobile ? "100%" : undefined }}>
+            {/* Footer 折叠按钮 — 位于模型选择前面，折叠输入框下方状态条 */}
+            {onFooterToggle && (
+              <button
+                type="button"
+                onClick={onFooterToggle}
+                aria-expanded={!footerCollapsed}
+                aria-label={footerCollapsed ? t("footer_expand") : t("footer_collapse")}
+                title={footerCollapsed ? t("footer_expand") : t("footer_collapse")}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: isMobile ? 26 : 24,
+                  height: isMobile ? 26 : 24,
+                  padding: 0,
+                  border: "1px solid var(--border)",
+                  borderRadius: 7,
+                  background: "var(--bg-panel)",
+                  color: "var(--text-dim)",
+                  cursor: "pointer",
+                  flexShrink: 0,
+                }}
+              >
+                {footerCollapsed ? (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+                ) : (
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m6 15 6-6 6 6" /></svg>
+                )}
+              </button>
+            )}
             {/* Model selector — 运行中也可改，下次发送/引导/队列生效 */}
             {modelOptions.length > 0 && currentName && onModelChange && (
                 <div ref={dropdownRef} style={{ position: "relative", flex: "0 1 auto", minWidth: 0 }}>
