@@ -1580,18 +1580,20 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               style={{
               display: "flex", alignItems: "center", gap: 6, height: 32,
               margin: "1px 6px", paddingLeft: sidebarRowPaddingLeft(0), paddingRight: 8,
-              color: "var(--text-dim)", fontSize: 10.5, fontWeight: 600,
-              letterSpacing: "0.04em", textTransform: "uppercase",
+              color: "var(--text-muted)", fontSize: 12.5, fontWeight: 600,
               position: "relative", cursor: "pointer", borderRadius: 6,
-            }}>
+            }}
+              onMouseEnter={(event) => { event.currentTarget.style.background = "var(--bg-hover)"; }}
+              onMouseLeave={(event) => { event.currentTarget.style.background = "transparent"; }}
+            >
               <ChevronButton
                 collapsed={!showRecentSessions}
                 label={showRecentSessions ? t("sidebar_collapseRecentSessions") : t("sidebar_expandRecentSessions")}
                 left={sidebarIndicatorLeft(0)}
                 onClick={(event) => { event.stopPropagation(); setShowRecentSessions(!showRecentSessions); }}
               />
-              <span aria-hidden="true" className="sidebar-indicator-icon" style={{ position: "absolute", left: sidebarIndicatorLeft(0), top: "50%", display: "flex", width: SIDEBAR_INDICATOR_SLOT, height: 20, alignItems: "center", justifyContent: "center", transform: "translateY(-50%)" }}><HistoryIcon size={13} /></span>
-              {t("sidebar_recentSessions")}
+              <span aria-hidden="true" className="sidebar-indicator-icon" style={{ position: "absolute", left: sidebarIndicatorLeft(0), top: "50%", display: "flex", width: SIDEBAR_INDICATOR_SLOT, height: 20, alignItems: "center", justifyContent: "center", transform: "translateY(-50%)", color: "var(--text-dim)" }}><HistoryIcon size={13} /></span>
+              <span style={{ flex: 1, fontSize: 12.5, fontWeight: 600 }}>{t("sidebar_recentSessions")}</span>
             </div>
             {showRecentSessions && <div>
               {recentSessions.slice(0, recentVisibleCount).map((s) => {
@@ -1632,29 +1634,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 );
               })}
               {recentVisibleCount < recentSessions.length && (
-                <button
-                  type="button"
-                  onClick={() => setRecentVisibleCount((n) => Math.min(n + RECENT_SESSIONS_LOAD_MORE, recentSessions.length))}
-                  style={{
-                    display: "block",
-                    width: "calc(100% - 12px)",
-                    margin: "2px 6px 4px",
-                    padding: "6px 8px",
-                    border: "1px solid var(--border)",
-                    borderRadius: 6,
-                    background: "transparent",
-                    color: "var(--text-dim)",
-                    cursor: "pointer",
-                    fontSize: 11,
-                    textAlign: "center",
-                  }}
-                >
-                  {t("sidebar_loadMoreRecent", {
-                    count: Math.min(RECENT_SESSIONS_LOAD_MORE, recentSessions.length - recentVisibleCount),
-                    shown: Math.min(recentVisibleCount, recentSessions.length),
-                    total: recentSessions.length,
-                  })}
-                </button>
+                <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "2px 8px 5px 28px" }}>
+                  <button
+                    type="button"
+                    className="sidebar-pagination-btn"
+                    onClick={() => setRecentVisibleCount((n) => Math.min(n + RECENT_SESSIONS_LOAD_MORE, recentSessions.length))}
+                  >
+                    {t("sidebar_showMore")}
+                    <span aria-hidden="true">+{RECENT_SESSIONS_LOAD_MORE}</span>
+                  </button>
+                </div>
               )}
             </div>}
           </div>
