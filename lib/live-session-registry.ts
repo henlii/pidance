@@ -123,19 +123,6 @@ function getLocks(): Map<
   return globalThis.__piStartLocks;
 }
 
-/**
- * 等待该 sessionId 上的 ensureLive/start 启动锁结束。
- * release 与 send 并发时：先等启动完成再 destroy/复用，避免半初始化 host。
- */
-export async function awaitSessionStartLock(sessionId: string): Promise<void> {
-  const inflight = getLocks().get(sessionId);
-  if (!inflight) return;
-  try {
-    await inflight;
-  } catch {
-    /* 启动失败：锁已在 finally 清理 */
-  }
-}
 
 export function getRpcSession(sessionId: string): LiveAgentSession | undefined {
   return getRegistry().get(sessionId);

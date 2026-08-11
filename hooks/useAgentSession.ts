@@ -2103,7 +2103,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     clearLiveActivities();
   }, [session?.id, newSessionCwd, commitExtensionUiState, extensionUiStateRef, clearLiveActivities]);
 
-  // 切离空闲 live：取消后台 wake + 释放上一个 host（仍在跑的不会释放）
+  // 切离会话：不主动销毁 live host，交给 10 分钟 idle 自动释放（切回仍热启动）。
+  // 仅取消上一会话的后台 wake，避免串台写 systemPrompt。
   const previousLiveSessionIdRef = useRef<string | null>(null);
   useEffect(() => {
     const prev = previousLiveSessionIdRef.current;
@@ -2111,10 +2112,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (prev && prev !== next) {
       wakeAbortRef.current?.abort();
       wakeAbortRef.current = null;
-      // release 会 await 启动锁：若上一会话 ensureLive 尚未结束，等它完成再 destroy
-      void fetch(`/api/sessions/${encodeURIComponent(prev)}/release`, {
-        method: "POST",
-      }).catch(() => undefined);
     }
     previousLiveSessionIdRef.current =
       session && session.readOnly !== true ? session.id : null;
