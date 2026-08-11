@@ -419,6 +419,7 @@ const chatPlan = composeChatPlan({
       onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
       availableThinkingLevels={availableThinkingLevels}
       thinkingLevelMap={currentThinkingLevelMap}
+      thinkingLevelMaps={modelThinkingLevelMaps}
       retryInfo={retryInfo}
       queuedMessages={queuedMessages}
       onRecallQueue={handleRecallQueue}

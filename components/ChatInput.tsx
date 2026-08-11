@@ -106,6 +106,8 @@ interface Props {
   onThinkingLevelChange?: (level: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") => void;
   availableThinkingLevels?: string[] | null;
   thinkingLevelMap?: Record<string, string | null> | null;
+  /** 每模型思考级别映射（provider:modelId → map） */
+  thinkingLevelMaps?: Record<string, Record<string, string | null>> | null;
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
   queuedMessages?: QueuedMessages | null;
   onRecallQueue?: () => void;
@@ -146,9 +148,8 @@ function compareModelOptions(a: ModelOption, b: ModelOption): number {
     || MODEL_OPTION_COLLATOR.compare(a.modelId, b.modelId);
 }
 
-const THINKING_LEVELS = ["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const THINKING_LEVEL_DESC: Record<typeof THINKING_LEVELS[number], "input_usePiDefault" | "input_thinkingOff" | "input_thinkingMinimal" | "input_thinkingLow" | "input_thinkingMedium" | "input_thinkingHigh" | "input_thinkingXhigh" | "input_thinkingMax"> = {
-  auto: "input_usePiDefault",
   off: "input_thinkingOff",
   minimal: "input_thinkingMinimal",
   low: "input_thinkingLow",
@@ -287,7 +288,7 @@ function QueuedMessageRow({ kind, text }: { kind: "steer" | "follow-up"; text: s
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelAuthConfigured, onModelChange,
   onAbortCompaction, isCompacting, compactError, compactResult,
-  thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
+  thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, thinkingLevelMaps,
   retryInfo, queuedMessages, onRecallQueue, onSendQueueAsSteer,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
@@ -319,7 +320,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
-  const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
 
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? getDraft(draftKey)?.images.map(draftImageToAttachedImage) ?? [] : []
@@ -342,8 +342,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
   const toolDropdownRef = useRef<HTMLDivElement>(null);
   const toolDropdownPanelRef = useRef<HTMLDivElement>(null);
-  const thinkingDropdownRef = useRef<HTMLDivElement>(null);
-  const thinkingDropdownPanelRef = useRef<HTMLDivElement>(null);
 
   const inputContainerRef = useRef<HTMLDivElement>(null);
   const slashOverlayRef = useRef<HTMLDivElement>(null);
@@ -371,8 +369,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         setDepthMenuFor(null);
       }
     };
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
+    // pointerdown 覆盖鼠标与触摸（手机端点击外部同样收回）
+    document.addEventListener("pointerdown", onDocClick);
+    return () => document.removeEventListener("pointerdown", onDocClick);
   }, [depthMenuFor]);
 
   /** 模型信息 tooltip 文案。 */
@@ -386,14 +385,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     [t],
   );
 
-  /** 每模型可用思考深度（map 显式 null 时禁用）。 */
+  /** 每模型可用思考深度（map 显式 null 时禁用；不含 auto）。 */
   const levelsForModel = useCallback(
     (provider: string, modelId: string): string[] => {
-      const map = thinkingLevelMap?.[`${provider}:${modelId}`];
+      const map = thinkingLevelMaps?.[`${provider}:${modelId}`];
       const all = THINKING_LEVELS.filter((l) => (map ? (map as unknown as Record<string, string | null>)[l] !== null : true));
-      return all.length > 0 ? all : ["auto", "off", "low", "medium", "high", "max"];
+      return all.length > 0 ? all : [...THINKING_LEVELS];
     },
-    [thinkingLevelMap],
+    [thinkingLevelMaps],
   );
 
   /** 缓存思考深度（服务端偏好，跨客户端）。 */
@@ -410,6 +409,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     (provider: string, modelId: string, level: string) => {
       setServerPref(`thinkingLevel.${provider}:${modelId}`, level);
       setDepthMenuFor(null);
+      // 选择后关闭模型选择列表并切换模型 + 思考深度
+      setModelDropdownOpen(false);
+      modelButtonRef.current?.focus({ preventScroll: true });
       onModelChange?.(provider, modelId, level);
     },
     [onModelChange],
@@ -1225,7 +1227,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const slashListboxId = useId();
   const atListboxId = useId();
   const modelMenuId = useId();
-  const thinkingMenuId = useId();
   const slashOverlay = useAnchoredOverlay({
     open: slashMenuOpen && slashQuery !== null,
     anchorRef: inputContainerRef,
@@ -1256,16 +1257,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     minWidth: "anchor",
     width: isMobile ? "max" : undefined,
   });
-  const thinkingOverlay = useAnchoredOverlay({
-    open: thinkingDropdownOpen,
-    anchorRef: thinkingDropdownRef,
-    overlayRef: thinkingDropdownPanelRef,
-    preferredPlacement: "above",
-    gap: 6,
-    margin: 8,
-    align: "end",
-    minWidth: 180,
-  });
+
   const slashMenuVisible = slashMenuOpen && slashQuery !== null;
   const atMenuVisible = atMenuOpen && atQuery !== null;
   const inputActiveDescendant = slashMenuVisible && filteredSlashCommands.length > 0
@@ -1277,15 +1269,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   // Esc 分层关闭浮层：思考 → 工具 → 模型，逐层且焦点回 trigger。
   useEffect(() => {
-    const anyOpen = thinkingDropdownOpen || toolDropdownOpen || modelDropdownOpen;
+    const anyOpen = toolDropdownOpen || modelDropdownOpen;
     if (!anyOpen) return;
     const onKeyDown = (e: globalThis.KeyboardEvent) => {
       if (e.key !== "Escape" || e.defaultPrevented) return;
       e.preventDefault();
-      if (thinkingDropdownOpen) {
-        setThinkingDropdownOpen(false);
-        focusTriggerButton(thinkingDropdownRef.current);
-      } else if (toolDropdownOpen) {
+      if (toolDropdownOpen) {
         setToolDropdownOpen(false);
         focusTriggerButton(toolDropdownRef.current);
       } else if (modelDropdownOpen) {
@@ -1295,12 +1284,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [thinkingDropdownOpen, toolDropdownOpen, modelDropdownOpen]);
+  }, [toolDropdownOpen, modelDropdownOpen]);
 
   // 菜单打开时把焦点送进面板（选中项优先，无则首项），Esc/选择后焦点回 trigger。
-  useEffect(() => {
-    if (thinkingDropdownOpen) focusPanelOption(thinkingDropdownPanelRef.current, '[role="menuitemradio"]');
-  }, [thinkingDropdownOpen]);
   useEffect(() => {
     if (toolDropdownOpen) focusPanelOption(toolDropdownPanelRef.current, '[role="menuitemradio"]');
   }, [toolDropdownOpen]);
@@ -1322,12 +1308,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         toolDropdownPanelRef.current && !toolDropdownPanelRef.current.contains(e.target as Node)
       ) {
         setToolDropdownOpen(false);
-      }
-      if (
-        thinkingDropdownRef.current && !thinkingDropdownRef.current.contains(e.target as Node) &&
-        thinkingDropdownPanelRef.current && !thinkingDropdownPanelRef.current.contains(e.target as Node)
-      ) {
-        setThinkingDropdownOpen(false);
       }
     };
     document.addEventListener("mousedown", handler);
@@ -2039,7 +2019,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       setModelDropdownOpen(opening);
                       if (opening) {
                         // 同一时刻只保留一个浮层：关掉其它菜单与输入补全。
-                        setThinkingDropdownOpen(false);
                         setToolDropdownOpen(false);
                         setSlashMenuOpen(false);
                         setAtMenuOpen(false);
@@ -2099,6 +2078,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
                     </svg>
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{currentName}</span>
+                    {/* 思考深度并入模型选择按钮显示（外层已保证 onModelChange 存在） */}
+                    <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginLeft: 2 }}>
+                      ·{thinkingDisplayLabel}
+                    </span>
                   </button>
                   {/* Portal 到 body：与思考/工具菜单一致，fixed 坐标免疫任何祖先
                       containing block（transform/filter/backdrop-filter）干扰 */}
@@ -2289,118 +2272,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     document.body,
                   )}
                 </div>
-            )}
-            {/* Thinking — 紧贴模型旁，运行中也常显（下次发送生效） */}
-            {onThinkingLevelChange && (
-              <div ref={thinkingDropdownRef} style={{ position: "relative", flexShrink: 0 }}>
-                <button
-                  onClick={() => {
-                    const opening = !thinkingDropdownOpen;
-                    setThinkingDropdownOpen(opening);
-                    if (opening) {
-                      setToolDropdownOpen(false);
-                      setModelDropdownOpen(false);
-                      setSlashMenuOpen(false);
-                      setAtMenuOpen(false);
-                    }
-                  }}
-                  title={isStreaming ? `${thinkingDisplayLabel} · ${t("input_changeAppliesNextTurn")}` : thinkingDisplayLabel}
-                  data-tooltip={isStreaming ? `${thinkingDisplayLabel} · ${t("input_changeAppliesNextTurn")}` : thinkingDisplayLabel}
-                  className="instant-tooltip tooltip-up"
-                  aria-label={t("input_thinkingTitle")}
-                  aria-haspopup="menu"
-                  aria-expanded={thinkingDropdownOpen}
-                  aria-controls={thinkingMenuId}
-                  style={{
-                    display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                    padding: isMobile ? "0 8px" : "8px 12px",
-                    height: 32,
-                    background: thinkingDropdownOpen ? "var(--bg-hover)" : "none",
-                    border: "none",
-                    borderRadius: 9,
-                    color: "var(--text-muted)",
-                    cursor: "pointer",
-                    fontSize: 12,
-                    transition: "background 0.12s, color 0.12s",
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.background = "var(--bg-hover)";
-                    e.currentTarget.style.color = "var(--text)";
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = thinkingDropdownOpen ? "var(--bg-hover)" : "none";
-                    e.currentTarget.style.color = "var(--text-muted)";
-                  }}
-                >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M9.5 2A5.5 5.5 0 0 0 4 7.5c0 1.7.78 3.21 2 4.21V14a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-2.29c1.22-1 2-2.51 2-4.21A5.5 5.5 0 0 0 9.5 2z" />
-                    <line x1="7" y1="18" x2="12" y2="18" />
-                    <line x1="8" y1="21" x2="11" y2="21" />
-                  </svg>
-                  <span style={{ whiteSpace: "nowrap" }}>{thinkingDisplayLabel}</span>
-                </button>
-                {thinkingDropdownOpen && createPortal(
-                  <div
-                    ref={thinkingDropdownPanelRef}
-                    id={thinkingMenuId}
-                    role="menu"
-                    onKeyDown={(e) => movePanelOptionFocus(e, '[role="menuitemradio"]')}
-                    style={{
-                    ...thinkingOverlay.style,
-                    zIndex: 100, background: "var(--bg)", border: "1px solid var(--border)",
-                    borderRadius: 8,
-                    boxShadow: thinkingOverlay.placement === "above" ? "0 -4px 16px rgba(0,0,0,0.10)" : "0 4px 16px rgba(0,0,0,0.10)",
-                    overflow: "hidden", overflowY: "auto",
-                  }}>
-                    {THINKING_LEVELS.filter((lvl) => {
-                      if (!availableThinkingLevels) return true;
-                      if (lvl === "auto") return true;
-                      return availableThinkingLevels.includes(lvl);
-                    }).map((lvl) => {
-                      const isActive = (thinkingLevel ?? "auto") === lvl;
-                      const desc = THINKING_LEVEL_DESC[lvl];
-                      const mappedVal = (lvl !== "auto" && thinkingLevelMap) ? thinkingLevelMap[lvl] : undefined;
-                      const displayLabel = (mappedVal != null && mappedVal !== lvl) ? mappedVal : lvl;
-                      const showOriginal = mappedVal != null && mappedVal !== lvl;
-                      return (
-                        <button
-                          key={lvl}
-                          role="menuitemradio"
-                          aria-checked={isActive}
-                          onClick={() => {
-                            setThinkingDropdownOpen(false);
-                            focusTriggerButton(thinkingDropdownRef.current);
-                            if (!isActive) onThinkingLevelChange(lvl);
-                          }}
-                          style={{
-                            display: "flex", alignItems: "center", gap: 8,
-                            width: "100%", padding: "7px 12px",
-                            minHeight: isMobile ? 44 : undefined,
-                            background: isActive ? "var(--bg-selected)" : "none",
-                            border: "none",
-                            color: isActive ? "var(--text)" : "var(--text-muted)",
-                            cursor: "pointer", fontSize: 12, textAlign: "left",
-                            fontWeight: isActive ? 600 : 400,
-                            whiteSpace: "nowrap",
-                          }}
-                          onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                          onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "none"; }}
-                        >
-                          {isActive
-                            ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
-                            : <span style={{ width: 10, flexShrink: 0 }} />}
-                          <span style={{ flex: 1 }}>
-                            {displayLabel}
-                            {showOriginal && <span style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginLeft: 5 }}>({lvl})</span>}
-                          </span>
-                          <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{t(desc)}</span>
-                        </button>
-                      );
-                    })}
-                  </div>,
-                  document.body,
-                )}
-              </div>
             )}
           </div>
 
