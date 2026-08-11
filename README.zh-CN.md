@@ -112,7 +112,7 @@ npm run lint
 
 ## 架构
 
-Pidance 的目标架构是 Pi 的 Web mode adapter。当前 `main` 正从外部 `pi --mode rpc` 迁移到同进程 SDK；迁移期外部 RPC 模块只做止血、测试、适配和退役，不再承载新能力。完整实施规格与验收见 [#20](https://github.com/henlii/pidance/issues/20)。
+Pidance 是 Pi 的 Web mode adapter：主 Agent 使用同进程 Pi SDK（`AgentSessionRuntime`）。完整实施规格与验收见 [#20](https://github.com/henlii/pidance/issues/20)。
 
 ```text
 浏览器 / Route Handlers

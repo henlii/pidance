@@ -109,7 +109,7 @@ See [docs/release.md](./docs/release.md) for the complete procedure.
 
 ## Architecture
 
-Pidance's target architecture is a Pi Web mode adapter. `main` is currently migrating from an external `pi --mode rpc` process to the in-process SDK. During the migration, external-RPC modules are legacy code: they may be stabilized, tested, adapted, or removed, but must not receive new product capabilities. See [#20](https://github.com/henlii/pidance/issues/20) for the complete implementation specification and acceptance criteria.
+Pidance is a Pi Web mode adapter: the main Agent runs the in-process Pi SDK (`AgentSessionRuntime`). See [#20](https://github.com/henlii/pidance/issues/20) for the implementation specification and acceptance criteria.
 
 ```text
 Browser / Route Handlers

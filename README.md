@@ -109,8 +109,7 @@ npm run test:browser          # 浏览器回归（需已运行的实例，默认
 
 ## 架构概览
 
-Pidance 的目标架构是 Pi 的 Web mode adapter。当前 `main` 正在从外部 `pi --mode rpc`
-迁移到同进程 SDK；迁移期外部 RPC 模块只允许退役和补回归测试，不再承载新能力。
+Pidance 是 Pi 的 Web mode adapter：主 Agent 使用同进程 Pi SDK（`AgentSessionRuntime`）。
 完整实施规格与验收见 [#20](https://github.com/henlii/pidance/issues/20)。
 
 ```text
