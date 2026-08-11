@@ -17,8 +17,7 @@ function attachRuntimeFields<T extends {
     info.runtimePiVersion = rt.runtime.version;
     info.runtimePath = rt.runtime.path;
     info.runtimeCompatible = rt.runtime.compatible;
-    // piSdkVersion 展示外部 runtime 版本（不再读 npm 包）
-    if (rt.runtime.version) info.piSdkVersion = rt.runtime.version;
+    // piSdkVersion 保留 package.json 内置 SDK 版本；外部 RPC 版本在 runtimePiVersion
   } catch {
     // best-effort
   }

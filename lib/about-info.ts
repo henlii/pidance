@@ -66,12 +66,27 @@ export function buildAboutInfo(pkg: unknown): AboutInfo {
 
   const repository = normalizeRepositoryUrl(record.repository);
 
-  // 不再从 package.json dependencies 读 pi npm 版本（产品默认只用外部 pi）
+  // 内置 Pi SDK 版本：从 dependencies 精确读取（P2 起为必需依赖 0.83.0）
+  const piSdkVersion = readDependencyVersion(record, "@earendil-works/pi-coding-agent");
+
   return {
     name: displayName,
     version,
-    piSdkVersion: null,
+    piSdkVersion,
     homepage,
     repository,
   };
+}
+
+function readDependencyVersion(pkg: Record<string, unknown>, name: string): string | null {
+  for (const key of ["dependencies", "optionalDependencies"] as const) {
+    const block = pkg[key];
+    if (!block || typeof block !== "object") continue;
+    const raw = (block as Record<string, unknown>)[name];
+    if (typeof raw === "string" && raw.trim()) {
+      // 精确版本或带前缀的范围均原样返回；About 展示用
+      return raw.trim().replace(/^[=v]/, "");
+    }
+  }
+  return null;
 }

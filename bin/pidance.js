@@ -15,6 +15,23 @@ const { shouldRequireAuth, resolvePassword, describeHost } = require("./pidance-
 const pkgDir = path.join(__dirname, "..");
 const nextDir = path.join(pkgDir, ".next");
 
+// Node engine 门禁（与 package.json engines.node 对齐）：低于最低版本直接失败，
+// 避免进入半运行状态。npm engines 默认只警告，这里 fail-closed。
+const MIN_NODE = { major: 22, minor: 19, patch: 0 };
+function nodeMeetsMin(version) {
+  const m = String(version).replace(/^v/, "").split(".").map((x) => parseInt(x, 10) || 0);
+  const [maj = 0, min = 0, pat = 0] = m;
+  if (maj !== MIN_NODE.major) return maj > MIN_NODE.major;
+  if (min !== MIN_NODE.minor) return min > MIN_NODE.minor;
+  return pat >= MIN_NODE.patch;
+}
+if (!nodeMeetsMin(process.versions.node)) {
+  console.error(
+    `[pidance] 拒绝启动：需要 Node.js >= ${MIN_NODE.major}.${MIN_NODE.minor}.${MIN_NODE.patch}，当前为 ${process.versions.node}。`,
+  );
+  process.exit(1);
+}
+
 // Resolve next's CLI entry directly to avoid relying on .bin symlinks (which
 // may not exist when installed via npx).
 let nextBin;
