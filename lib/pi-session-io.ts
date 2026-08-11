@@ -56,13 +56,16 @@ export function openSessionManager(
   return manager;
 }
 
+/**
+ * 创建内存会话。默认不落盘（与 Pi 一致：首条 assistant 前可不写文件）。
+ * 需要立即出现在会话列表/可删除时，调用方再 materializeSessionFile。
+ * 产品路径：ensure_session 不落盘；首次 prompt 成功后再 materialize，避免侧栏堆「无消息」空会话。
+ */
 export function createSessionManager(
   cwd: string,
   sessionDir?: string,
 ): SessionManager {
-  const manager = SessionManager.create(cwd, sessionDir);
-  materializeSessionFile(manager);
-  return manager;
+  return SessionManager.create(cwd, sessionDir);
 }
 
 /** 只读视图：与 session-reader SessionManagerReadView 对齐 */

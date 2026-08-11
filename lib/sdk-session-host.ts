@@ -32,6 +32,7 @@ import {
 import {
   openSessionManager,
   createSessionManager,
+  materializeSessionFile,
 } from "./pi-session-io";
 import {
   createWebExtensionUIAdapter,
@@ -521,6 +522,13 @@ export class SdkSessionHost {
                 preflightResult: (ok) => {
                   if (!ok) return;
                   settled = true;
+                  // 首次用户消息已入内存：落盘 header+entries，侧栏才可见且非「空会话」
+                  try {
+                    materializeSessionFile(session.sessionManager);
+                  } catch (err) {
+                    console.error("[pidance] materialize after prompt failed:", err);
+                  }
+                  this.syncIdentityFromSession();
                   this.options.onSessionListInvalidate?.();
                   resolve();
                 },
@@ -528,6 +536,12 @@ export class SdkSessionHost {
               .then(() => {
                 if (!settled) {
                   settled = true;
+                  try {
+                    materializeSessionFile(session.sessionManager);
+                  } catch (err) {
+                    console.error("[pidance] materialize after prompt failed:", err);
+                  }
+                  this.syncIdentityFromSession();
                   this.options.onSessionListInvalidate?.();
                   resolve();
                 }
