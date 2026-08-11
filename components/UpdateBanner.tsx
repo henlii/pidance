@@ -185,7 +185,10 @@ export function UpdateBanner() {
             }),
           );
           markDismissed(check.latestVersion);
-          // 服务重启后页面可能断开；提示用户稍后刷新
+          // 升级成功：短暂展示完成态后自动刷新（服务可能已重启）
+          window.setTimeout(() => {
+            window.location.reload();
+          }, 1200);
         } else {
           setProgress({
             phase: "error",
