@@ -93,7 +93,7 @@ test("pidance.activity：长 content 不截断，内部滚动且键盘可达", (
   assert.ok(html.includes("row-0"));
   assert.ok(html.includes("row-399"), "长内容不得截断");
   assert.match(html, /<pre[^>]*tabindex="0"/);
-  assert.match(html, /max-height:320px/);
+  assert.match(html, /max-height:min\(320px, 45vh\)/);
   assert.match(html, /overflow:auto/);
 });
 
@@ -233,7 +233,7 @@ test("实时工具：运行中默认展开终端输出，并优先展示快照�
   assert.ok(html.includes("checking\nfinished"));
   assert.ok(html.includes("Live output"));
   assert.ok(html.includes("Output truncated at 64 KB"));
-  assert.match(html, /<pre[^>]*tabindex="0"[^>]*max-height:320px/);
+  assert.match(html, /<pre[^>]*tabindex="0"[^>]*max-height:min\(320px, 45vh\)/);
 });
 
 test("TUI 渲染桥：ANSI 调用、实时与结果行优先于原始输出和结构化结果", () => {

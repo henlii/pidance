@@ -774,8 +774,9 @@ function TextBlock({ block, isStreaming, cwd, onOpenFile }: { block: TextContent
   return <MarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{block.text}</MarkdownBody>;
 }
 
-/** 思考 / 工具明细默认最大高度：超出在块内滚动，避免会话视口被无限撑高。 */
-const STREAM_BLOCK_MAX_HEIGHT = 320;
+/** 思考 / 工具明细默认最大高度：超出在块内滚动，避免会话视口被无限撑高。
+ * 手机小视口按 45vh 收缩，避免块内滚动区占满屏幕。 */
+const STREAM_BLOCK_MAX_HEIGHT = "min(320px, 45vh)";
 /** 距块底多少 px 内视为仍跟随；用户上滚超出后停止自动向下。 */
 const STREAM_BLOCK_FOLLOW_TOLERANCE_PX = 24;
 
@@ -1799,7 +1800,7 @@ function PidanceActivityView({ message, activity }: { message: CustomMessage; ac
             style={{
               margin: 0,
               padding: "8px 12px",
-              maxHeight: 320,
+              maxHeight: STREAM_BLOCK_MAX_HEIGHT,
               overflow: "auto",
               color: "var(--text)",
               fontSize: 12,

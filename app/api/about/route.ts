@@ -8,18 +8,9 @@ export async function GET() {
     const raw = readFileSync(join(process.cwd(), "package.json"), "utf8");
     const pkg: unknown = JSON.parse(raw);
     const info = buildAboutInfo(pkg);
-    return NextResponse.json(
-      {
-        ...info,
-        agentRuntimeMode: "inprocess",
-        runtimePiVersion: info.piSdkVersion,
-        runtimePath: "in-process:@earendil-works/pi-coding-agent",
-        runtimeCompatible: true,
-      },
-      {
-        headers: { "Cache-Control": "no-store" },
-      },
-    );
+    return NextResponse.json(info, {
+      headers: { "Cache-Control": "no-store" },
+    });
   } catch {
     const fallback = buildAboutInfo({
       name: "@henlii/pidance",
@@ -27,17 +18,8 @@ export async function GET() {
       homepage: "https://github.com/henlii/pidance#readme",
       repository: { type: "git", url: "git+https://github.com/henlii/pidance.git" },
     });
-    return NextResponse.json(
-      {
-        ...fallback,
-        agentRuntimeMode: "inprocess",
-        runtimePiVersion: fallback.piSdkVersion,
-        runtimePath: "in-process:@earendil-works/pi-coding-agent",
-        runtimeCompatible: true,
-      },
-      {
-        headers: { "Cache-Control": "no-store" },
-      },
-    );
+    return NextResponse.json(fallback, {
+      headers: { "Cache-Control": "no-store" },
+    });
   }
 }

@@ -315,6 +315,23 @@ export class SdkSessionHost {
       case "auto_compaction_end":
         this.notifyRunning();
         break;
+      case "message_end": {
+        // user 消息确认：SDK 在订阅者回调返回后才执行 sessionManager.appendMessage，
+        // 延后一帧再 materialize，确保 header+user 一同落盘（避免列表只见空会话/消失）。
+        const msg = (event as { message?: { role?: string } }).message;
+        if (msg?.role === "user") {
+          setImmediate(() => {
+            try {
+              materializeSessionFile(this.session.sessionManager);
+              this.syncIdentityFromSession();
+              this.options.onSessionListInvalidate?.();
+            } catch (err) {
+              console.error("[pidance] materialize after user message failed:", err);
+            }
+          });
+        }
+        break;
+      }
       case "queue_update": {
         const steering = Array.isArray(event.steering)
           ? (event.steering as unknown[]).filter((t): t is string => typeof t === "string")
@@ -524,12 +541,9 @@ export class SdkSessionHost {
                 preflightResult: (ok) => {
                   if (!ok) return;
                   settled = true;
-                  // 首次用户消息已入内存：落盘 header+entries，侧栏才可见且非「空会话」
-                  try {
-                    materializeSessionFile(session.sessionManager);
-                  } catch (err) {
-                    console.error("[pidance] materialize after prompt failed:", err);
-                  }
+                  // 注意：此时 user 消息尚未 append 到 sessionManager（SDK 在预检后
+                  // 才把消息交给 agent 事件流），materialize 只会写出 header-only；
+                  // 真正的落盘在 message_end(user) 处理后的 setImmediate 中完成。
                   this.syncIdentityFromSession();
                   this.options.onSessionListInvalidate?.();
                   resolve();

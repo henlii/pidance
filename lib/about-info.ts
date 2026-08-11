@@ -5,15 +5,10 @@
 export interface AboutInfo {
   name: string;
   version: string;
+  /** 内置 @earendil-works/pi-coding-agent 版本 */
   piSdkVersion: string | null;
   homepage: string | null;
   repository: string | null;
-  /** 外部 RPC runtime 版本；inprocess 时与 piSdkVersion 同或 null */
-  runtimePiVersion?: string | null;
-  /** inprocess | rpc */
-  agentRuntimeMode?: "inprocess" | "rpc";
-  runtimePath?: string | null;
-  runtimeCompatible?: boolean;
 }
 
 const DEFAULT_NAME = "Pidance";
