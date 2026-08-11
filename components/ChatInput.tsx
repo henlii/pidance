@@ -4,6 +4,9 @@ import React, { useRef, useState, useCallback, useEffect, useId, useImperativeHa
 import { createPortal } from "react-dom";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft-store";
+import { getServerPref, setServerPref } from "@/lib/server-preferences";
+import { hydrateDraftFromServer } from "@/lib/draft-store";
+import { ensureServerPrefsLoaded } from "@/lib/server-preferences";
 import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
   type AtQueryMatch, type FileIndexEntry,
@@ -66,6 +69,8 @@ interface ModelOption {
   provider: string;
   modelId: string;
   name: string;
+  contextWindow?: number;
+  maxTokens?: number;
 }
 
 interface Props {
@@ -82,10 +87,16 @@ interface Props {
   model?: { provider: string; modelId: string } | null;
   isAutoModelSelection?: boolean;
   modelNames?: Record<string, string>;
-  modelList?: { id: string; name: string; provider: string }[];
+  modelList?: {
+    id: string;
+    name: string;
+    provider: string;
+    contextWindow?: number;
+    maxTokens?: number;
+  }[];
   /** providerId → 是否有可用凭据；未认证且无环境凭据的 provider 模型在列表中灰显禁用。 */
   modelAuthConfigured?: Record<string, boolean>;
-  onModelChange?: (provider: string, modelId: string) => void;
+  onModelChange?: (provider: string, modelId: string, thinkingLevel?: string | null) => void;
   onCompact?: () => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
@@ -113,6 +124,17 @@ interface Props {
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
+}
+
+/** token 数友好格式化：1000000 → 1M，256000 → 256K。 */
+function formatTokens(n: number): string {
+  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) return "";
+  if (n >= 1_000_000) {
+    const v = n / 1_000_000;
+    return `${Number.isInteger(v) ? v : v.toFixed(1)}M`;
+  }
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
+  return String(n);
 }
 
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
@@ -336,6 +358,82 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const fileIndexMetaRef = useRef<{ cwd: string; fetchedAt: number } | null>(null);
   const fileIndexFetchingRef = useRef<string | null>(null);
   const draftKeyRef = useRef(draftKey);
+
+  // —— 模型信息与思考深度（需求 5）——
+  /** 当前展开思考深度浮层的模型（provider:modelId）；null = 未展开 */
+  const [depthMenuFor, setDepthMenuFor] = useState<string | null>(null);
+  const depthMenuRef = useRef<HTMLDivElement | null>(null);
+  // 点击外部关闭深度浮层
+  useEffect(() => {
+    if (depthMenuFor === null) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (depthMenuRef.current && !depthMenuRef.current.contains(e.target as Node)) {
+        setDepthMenuFor(null);
+      }
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [depthMenuFor]);
+
+  /** 模型信息 tooltip 文案。 */
+  const modelInfoTitle = useCallback(
+    (m: { modelId: string; name: string; provider: string; contextWindow?: number; maxTokens?: number }): string => {
+      const parts: string[] = [m.name];
+      if (typeof m.contextWindow === "number") parts.push(`${t("input_modelContext")} ${formatTokens(m.contextWindow)}`);
+      if (typeof m.maxTokens === "number") parts.push(`${t("input_modelMaxOutput")} ${formatTokens(m.maxTokens)}`);
+      return parts.join(" · ");
+    },
+    [t],
+  );
+
+  /** 每模型可用思考深度（map 显式 null 时禁用）。 */
+  const levelsForModel = useCallback(
+    (provider: string, modelId: string): string[] => {
+      const map = thinkingLevelMap?.[`${provider}:${modelId}`];
+      const all = THINKING_LEVELS.filter((l) => (map ? (map as unknown as Record<string, string | null>)[l] !== null : true));
+      return all.length > 0 ? all : ["auto", "off", "low", "medium", "high", "max"];
+    },
+    [thinkingLevelMap],
+  );
+
+  /** 缓存思考深度（服务端偏好，跨客户端）。 */
+  const cachedThinkingLevel = useCallback(
+    (provider: string, modelId: string): string | null => {
+      const v = getServerPref<string>(`thinkingLevel.${provider}:${modelId}`);
+      return typeof v === "string" && v ? v : null;
+    },
+    [],
+  );
+
+  /** 选择思考深度：写缓存 + 应用（带深度切换模型）。 */
+  const applyModelWithThinking = useCallback(
+    (provider: string, modelId: string, level: string) => {
+      setServerPref(`thinkingLevel.${provider}:${modelId}`, level);
+      setDepthMenuFor(null);
+      onModelChange?.(provider, modelId, level);
+    },
+    [onModelChange],
+  );
+
+  // 服务端草稿恢复（多客户端同步）：挂载/切 key 时若服务端有草稿且本地为空则回填
+  const draftRestoredRef = useRef<string | null>(null);
+  useEffect(() => {
+    const key = draftKey;
+    if (!key) return;
+    void ensureServerPrefsLoaded().then(() => {
+      if (draftRestoredRef.current === key) return;
+      draftRestoredRef.current = key;
+      const remote = hydrateDraftFromServer(key);
+      if (!remote) return;
+      // 本地已有更新的内存草稿（本会话编辑过）则不覆盖
+      const local = getDraft(key);
+      if (local && (local.value !== "" || local.images.length > 0)) return;
+      setValue(remote.value);
+      if (remote.images.length > 0) {
+        setAttachedImages(remote.images.map(draftImageToAttachedImage));
+      }
+    });
+  }, [draftKey, setAttachedImages]);
   const valueRef = useRef(value);
   const attachedImagesRef = useRef(attachedImages);
   valueRef.current = value;
@@ -1061,7 +1159,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   // Build model options: prefer modelList (has provider info), fallback to modelNames
   const modelOptions: ModelOption[] = (() => {
     if (modelList && modelList.length > 0) {
-      return modelList.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name })).sort(compareModelOptions);
+      return modelList
+        .map((m) => ({
+          provider: m.provider,
+          modelId: m.id,
+          name: m.name,
+          contextWindow: m.contextWindow,
+          maxTokens: m.maxTokens,
+        }))
+        .sort(compareModelOptions);
     }
     return Object.entries(modelNames ?? {}).map(([modelId, name]) => ({
       provider: model?.provider ?? "unknown",
@@ -1939,7 +2045,23 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                         setAtMenuOpen(false);
                       }
                     }}
-                    title={isStreaming ? t("input_changeAppliesNextTurn") : undefined}
+                    title={
+                      isStreaming
+                        ? t("input_changeAppliesNextTurn")
+                        : (model
+                            ? modelInfoTitle({
+                                modelId: model.modelId,
+                                name: currentName,
+                                provider: model.provider,
+                                contextWindow: modelList?.find(
+                                  (m) => m.provider === model?.provider && m.id === model?.modelId,
+                                )?.contextWindow,
+                                maxTokens: modelList?.find(
+                                  (m) => m.provider === model?.provider && m.id === model?.modelId,
+                                )?.maxTokens,
+                              })
+                            : undefined)
+                    }
                     style={{
                       display: "flex", alignItems: "center", gap: isMobile ? 4 : 6,
                       justifyContent: "flex-start",
@@ -2024,21 +2146,30 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                             </div>
                           )}
                           {group.options.map((opt) => {
-                            const isActive = opt.modelId === model?.modelId && opt.provider === model?.provider;
-                            const blocked = authBlocked && !isActive;
-                            return (
+                          const isActive = opt.modelId === model?.modelId && opt.provider === model?.provider;
+                          const blocked = authBlocked && !isActive;
+                          const infoTitle = blocked ? t("models_authRequiredToViewModels") : modelInfoTitle(opt);
+                          const cached = cachedThinkingLevel(opt.provider, opt.modelId);
+                          const currentLevel = cached ?? thinkingLevel ?? "auto";
+                          const levels = levelsForModel(opt.provider, opt.modelId);
+                          const depthKey = `${opt.provider}:${opt.modelId}`;
+                          const depthOpen = depthMenuFor === depthKey;
+                          return (
+                            <div key={depthKey} style={{ position: "relative" }}>
                               <button
-                                key={`${opt.provider}:${opt.modelId}`}
                                 role="option"
                                 aria-selected={isActive}
                                 aria-disabled={blocked || undefined}
                                 disabled={blocked}
-                                title={blocked ? t("models_authRequiredToViewModels") : undefined}
+                                title={infoTitle}
                                 onClick={() => {
                                   setModelDropdownOpen(false);
                                   // 键盘选择后焦点回 trigger；指针用户不受程序聚焦影响。
                                   modelButtonRef.current?.focus({ preventScroll: true });
-                                  if (!isActive || isAutoModelSelection) onModelChange(opt.provider, opt.modelId);
+                                  if (!isActive || isAutoModelSelection) {
+                                    // 点击模型项使用缓存思考深度（上次用的），无缓存用当前默认
+                                    onModelChange(opt.provider, opt.modelId, cached ?? thinkingLevel ?? null);
+                                  }
                                 }}
                                 style={{
                                   display: "flex", alignItems: "center", gap: 8,
@@ -2059,10 +2190,98 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                                   ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
                                   : <span style={{ width: 10, flexShrink: 0 }} />}
                                 {/* 超长模型名省略号收尾，不再被 overflowX:hidden 硬切 */}
-                                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{opt.name}</span>
+                                <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{opt.name}</span>
+                                {/* 上下文长度说明（模型名后） */}
+                                {typeof opt.contextWindow === "number" && (
+                                  <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+                                    {formatTokens(opt.contextWindow)}
+                                  </span>
+                                )}
+                                {/* 思考深度按钮：显示缓存/当前深度，点击向右展开深度选择（大点击区） */}
+                                <span
+                                  role="button"
+                                  tabIndex={0}
+                                  aria-label={t("input_modelThinkingLevel")}
+                                  aria-expanded={depthOpen}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setDepthMenuFor(depthOpen ? null : depthKey);
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter" || e.key === " ") {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      setDepthMenuFor(depthOpen ? null : depthKey);
+                                    }
+                                  }}
+                                  style={{
+                                    display: "inline-flex", alignItems: "center", gap: 3,
+                                    flexShrink: 0,
+                                    minWidth: 44, minHeight: isMobile ? 44 : 32,
+                                    justifyContent: "center",
+                                    padding: "0 6px",
+                                    borderRadius: 6,
+                                    background: depthOpen ? "var(--bg-selected)" : "var(--bg-subtle)",
+                                    color: "var(--text-muted)",
+                                    cursor: "pointer",
+                                    fontSize: 11,
+                                    fontFamily: "var(--font-mono)",
+                                  }}
+                                >
+                                  {currentLevel}
+                                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6" /></svg>
+                                </span>
+                                {depthOpen && (
+                                  <div
+                                    ref={depthMenuRef}
+                                    role="listbox"
+                                    aria-label={t("input_modelThinkingLevel")}
+                                    style={{
+                                      position: "absolute", right: 0, top: "calc(100% + 2px)",
+                                      zIndex: 600,
+                                      background: "var(--bg)", border: "1px solid var(--border)",
+                                      borderRadius: 8,
+                                      boxShadow: "0 4px 16px rgba(0,0,0,0.12)",
+                                      padding: 4,
+                                      display: "flex", flexDirection: "column", gap: 2,
+                                      minWidth: 116,
+                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    {levels.map((lv) => (
+                                      <button
+                                        key={lv}
+                                        type="button"
+                                        role="option"
+                                        aria-selected={lv === currentLevel}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          applyModelWithThinking(opt.provider, opt.modelId, lv);
+                                        }}
+                                        style={{
+                                          minHeight: isMobile ? 44 : 30,
+                                          padding: "0 10px",
+                                          border: "none",
+                                          borderRadius: 6,
+                                          background: lv === currentLevel ? "var(--bg-selected)" : "none",
+                                          color: lv === currentLevel ? "var(--text)" : "var(--text-muted)",
+                                          cursor: "pointer",
+                                          fontSize: 11,
+                                          fontFamily: "var(--font-mono)",
+                                          textAlign: "left",
+                                        }}
+                                        onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                                        onMouseLeave={(e) => { e.currentTarget.style.background = lv === currentLevel ? "var(--bg-selected)" : "none"; }}
+                                      >
+                                        {lv}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
                               </button>
-                            );
-                          })}
+                            </div>
+                          );
+                        })}
                         </div>
                         );
                       })}

@@ -18,6 +18,10 @@ export type CatalogModel = {
   provider: string;
   thinkingLevelMap?: Record<string, string | null>;
   reasoning?: boolean;
+  /** models.json 配置的上下文窗口（token） */
+  contextWindow?: number;
+  /** 最大输出 token */
+  maxTokens?: number;
 };
 
 function loadModelsJson(modelsPath: string): Record<string, unknown> {
@@ -53,6 +57,12 @@ export function listModelsFromModelsJson(modelsPath?: string): CatalogModel[] {
         provider: providerId,
         thinkingLevelMap,
         reasoning: m.reasoning === true,
+        ...(typeof m.contextWindow === "number" && Number.isFinite(m.contextWindow)
+          ? { contextWindow: m.contextWindow }
+          : {}),
+        ...(typeof m.maxTokens === "number" && Number.isFinite(m.maxTokens)
+          ? { maxTokens: m.maxTokens }
+          : {}),
       });
     }
   }
@@ -103,7 +113,19 @@ export function buildModelsDataFromDisk(options: {
   for (const m of catalog) {
     const key = `${m.provider}:${m.id}`;
     models[key] = m.name;
-    modelList.push({ id: m.id, name: m.name, provider: m.provider });
+    modelList.push({
+      id: m.id,
+      name: m.name,
+      provider: m.provider,
+      contextWindow:
+        typeof m.contextWindow === "number" && Number.isFinite(m.contextWindow)
+          ? m.contextWindow
+          : undefined,
+      maxTokens:
+        typeof m.maxTokens === "number" && Number.isFinite(m.maxTokens)
+          ? m.maxTokens
+          : undefined,
+    });
     thinkingLevels[key] = thinkingLevelsFor(m);
     if (m.thinkingLevelMap) thinkingLevelMaps[key] = m.thinkingLevelMap;
     if (authConfigured[m.provider] === undefined) {

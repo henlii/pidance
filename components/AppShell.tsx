@@ -923,6 +923,7 @@ function AppShellInner() {
         onInitialRestoreDone={handleInitialRestoreDone}
         refreshKey={refreshKey}
         onSessionDeleted={handleSessionDeleted}
+        onProjectAdded={(cwd) => handleNewSession(cwd)}
         optimisticSessions={optimisticPendingSessions}
         clientRunningSessionId={clientRunningSessionId}
       />

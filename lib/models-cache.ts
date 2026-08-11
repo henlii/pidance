@@ -1,6 +1,14 @@
 export interface ModelsData {
   models: Record<string, string>;
-  modelList: { id: string; name: string; provider: string }[];
+  modelList: {
+    id: string;
+    name: string;
+    provider: string;
+    /** models.json 配置的上下文窗口（token），未知为 undefined */
+    contextWindow?: number;
+    /** 最大输出 token，未知为 undefined */
+    maxTokens?: number;
+  }[];
   defaultModel: { provider: string; modelId: string } | null;
   thinkingLevels: Record<string, string[]>;
   thinkingLevelMaps: Record<string, Record<string, string | null>>;

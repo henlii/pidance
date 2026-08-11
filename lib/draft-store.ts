@@ -10,6 +10,9 @@ export interface ChatDraft {
 
 const drafts = new Map<string, ChatDraft>();
 
+// 服务端持久化草稿（跨客户端同步）：存储路径 drafts.<key>
+import { setServerPref, getServerPref } from "./server-preferences";
+
 function cloneDraft(draft: ChatDraft): ChatDraft {
   return {
     value: draft.value,
@@ -21,6 +24,10 @@ function isEmptyDraft(draft: ChatDraft): boolean {
   return !draft.value && draft.images.length === 0;
 }
 
+function draftKeyPath(key: string): string {
+  return `drafts.${key}`;
+}
+
 export function getDraft(key: string): ChatDraft | null {
   const draft = drafts.get(key);
   return draft ? cloneDraft(draft) : null;
@@ -29,11 +36,32 @@ export function getDraft(key: string): ChatDraft | null {
 export function setDraft(key: string, draft: ChatDraft): void {
   if (isEmptyDraft(draft)) {
     drafts.delete(key);
+    setServerPref(draftKeyPath(key), undefined);
     return;
   }
   drafts.set(key, cloneDraft(draft));
+  setServerPref(draftKeyPath(key), cloneDraft(draft));
 }
 
 export function clearDraft(key: string): void {
   drafts.delete(key);
+  setServerPref(draftKeyPath(key), undefined);
+}
+
+/** 从服务端恢复指定 key 的草稿（网页激活/多客户端同步用）。 */
+export function hydrateDraftFromServer(key: string): ChatDraft | null {
+  const remote = getServerPref<ChatDraft>(draftKeyPath(key));
+  if (!remote || typeof remote !== "object" || Array.isArray(remote)) return null;
+  if (typeof remote.value !== "string") return null;
+  const images = Array.isArray(remote.images)
+    ? remote.images.filter(
+        (img): img is ChatDraftImage =>
+          typeof img === "object" && img !== null && typeof (img as ChatDraftImage).data === "string",
+      )
+    : [];
+  const draft: ChatDraft = { value: remote.value, images };
+  if (isEmptyDraft(draft)) return null;
+  // 回填内存（覆盖本地较旧值：服务端是跨客户端权威）
+  drafts.set(key, cloneDraft(draft));
+  return draft;
 }

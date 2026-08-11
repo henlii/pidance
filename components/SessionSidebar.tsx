@@ -125,6 +125,8 @@ interface Props {
   onInitialRestoreDone?: () => void;
   refreshKey?: number;
   onSessionDeleted?: (sessionId: string) => void;
+  /** 添加项目成功：通知上层进入引导页并选中新项目 */
+  onProjectAdded?: (cwd: string) => void;
   /**
    * 真实 id 已返回、列表尚未回流的乐观会话列表（多 id）。
    * 内部按 id upsert 进 pending map，与 server 列表 merge。
@@ -137,7 +139,7 @@ interface Props {
 
 // ── 主组件 ─────────────────────────────────────────────────────────────────
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, optimisticSessions, clientRunningSessionId }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, onProjectAdded, optimisticSessions, clientRunningSessionId }: Props) {
   const { t } = useI18n();
   const [serverSessions, setServerSessions] = useState<SessionInfo[]>([]);
   const serverSessionsRef = useRef<SessionInfo[]>([]);
@@ -742,12 +744,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       restoreClosedProject(root);
       selectCwd(resolvedCwd, root);
       closeCustomPathPanel();
+      // 添加项目成功：进入引导页并选中新项目
+      onProjectAdded?.(root);
     } catch (e) {
       setCustomPathError(e instanceof Error ? e.message : String(e));
     } finally {
       setCustomPathValidating(false);
     }
-  }, [browsePath, customPathValue, customPathValidating, projectRootFor, restoreClosedProject, selectCwd, closeCustomPathPanel]);
+  }, [browsePath, customPathValue, customPathValidating, projectRootFor, restoreClosedProject, selectCwd, closeCustomPathPanel, onProjectAdded]);
 
   /** 添加项目按钮：总是打开弹窗，不直接拉起原生目录选择器。 */
   const openAddProjectDialog = useCallback(() => {
@@ -794,6 +798,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       restoreClosedProject(root);
       selectCwd(data.cwd, root);
       closeCustomPathPanel();
+      onProjectAdded?.(root);
     } catch (e) {
       setCustomPathError(e instanceof Error ? e.message : String(e));
     } finally {

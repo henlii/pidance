@@ -24,6 +24,7 @@ import { copyText } from "@/lib/clipboard";
 import type { GitFileStatus, GitFileStatusKind, GitStatusResponse } from "@/lib/git-types";
 import { useI18n } from "@/lib/i18n";
 import { loadSidebarPreferences, saveFileExplorerState } from "@/lib/ui-preferences";
+import { ensureServerPrefsLoaded, getServerPref, setServerPref } from "@/lib/server-preferences";
 
 interface FileEntry {
   name: string;
@@ -803,7 +804,10 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   }, [cwd, gitFiles]);
 
   const persistExplorerState = useCallback((expanded: Set<string>, scrollTop: number) => {
-    saveFileExplorerState(cwd, { expanded: [...expanded], scrollTop });
+    const state = { expanded: [...expanded], scrollTop };
+    saveFileExplorerState(cwd, state);
+    // 服务端持久化（跨客户端同步）
+    setServerPref(`fileTree.${cwd}`, state);
   }, [cwd]);
 
   const handleToggleExpanded = useCallback((fullPath: string, open: boolean) => {
@@ -943,6 +947,11 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
 
   useEffect(() => () => onUploadBusyChange?.(false), [onUploadBusyChange]);
 
+  // 确保服务端偏好已加载（首次挂载异步拉取，cwd 恢复逻辑依赖）
+  useEffect(() => {
+    void ensureServerPrefsLoaded();
+  }, []);
+
   useEffect(() => {
     const cwdChanged = prevCwdRef.current !== cwd;
     const previousCwd = prevCwdRef.current;
@@ -957,7 +966,11 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         });
       }
       // 恢复新 cwd 的展开/滚动；滚动在 roots 渲染完成后应用。
-      const saved = loadSidebarPreferences().fileExplorerState[cwd] ?? { expanded: [], scrollTop: 0 };
+      // 服务端为跨客户端权威：先取 server，其次 localStorage。
+      let saved = getServerPref<{ expanded: string[]; scrollTop: number }>(`fileTree.${cwd}`);
+      if (!saved || !Array.isArray(saved.expanded)) {
+        saved = loadSidebarPreferences().fileExplorerState[cwd] ?? { expanded: [], scrollTop: 0 };
+      }
       setExpandedPaths(new Set(saved.expanded));
       pendingScrollTopRef.current = saved.scrollTop;
       setHighlightedPaths(new Set());

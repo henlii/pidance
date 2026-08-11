@@ -15,6 +15,8 @@ export function SettingsJsonEditor() {
   const [error, setError] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  /** 校验结果：null 未校验 / true 通过 / string 错误信息 */
+  const [validation, setValidation] = useState<true | string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -63,12 +65,19 @@ export function SettingsJsonEditor() {
     }
   }, [text, t]);
 
-  const save = useCallback(async () => {
-    const validation = validateText();
-    if (validation !== null) {
-      setError(validation);
-      return;
+  /** 校验并落结果：true=通过，string=错误，用于按钮门控与提示。 */
+  const runValidation = useCallback((): boolean => {
+    if (text === null) {
+      setValidation(null);
+      return false;
     }
+    const err = validateText();
+    setValidation(err === null ? true : err);
+    return err === null;
+  }, [text, validateText]);
+
+  const save = useCallback(async () => {
+    if (!runValidation()) return;
     setSaving(true);
     setError(null);
     setSavedFlash(false);
@@ -124,9 +133,14 @@ export function SettingsJsonEditor() {
         {t("settingsJson_hint")}
       </div>
 
-      {error && (
+      {(error || (typeof validation === "string")) && (
         <div style={{ fontSize: 12, color: "var(--status-danger)", marginBottom: 10, fontFamily: "var(--font-mono)" }}>
-          {error}
+          {typeof validation === "string" ? validation : error}
+        </div>
+      )}
+      {validation === true && (
+        <div style={{ fontSize: 12, color: "var(--status-ok, var(--accent))", marginBottom: 10, fontFamily: "var(--font-mono)" }}>
+          {t("settingsJson_valid")}
         </div>
       )}
 
@@ -136,6 +150,8 @@ export function SettingsJsonEditor() {
           setText(e.target.value);
           setError(null);
           setSavedFlash(false);
+          // 内容变更后需重新校验才可保存
+          setValidation(null);
         }}
         spellCheck={false}
         aria-label={t("settingsJson_editorLabel")}
@@ -145,10 +161,7 @@ export function SettingsJsonEditor() {
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
         <button
           type="button"
-          onClick={() => {
-            const validation = validateText();
-            setError(validation);
-          }}
+          onClick={() => void runValidation()}
           disabled={text === null}
           style={{
             minHeight: 30,
@@ -166,7 +179,8 @@ export function SettingsJsonEditor() {
         <button
           type="button"
           onClick={() => void save()}
-          disabled={text === null || saving}
+          // 保存按钮默认禁用；校验通过后才可用
+          disabled={text === null || saving || validation !== true}
           style={{
             minHeight: 30,
             padding: "0 14px",
@@ -174,10 +188,10 @@ export function SettingsJsonEditor() {
             border: "1px solid var(--accent)",
             background: "var(--accent)",
             color: "var(--accent-foreground)",
-            cursor: text === null || saving ? "not-allowed" : "pointer",
+            cursor: text === null || saving || validation !== true ? "not-allowed" : "pointer",
             fontSize: 12,
             fontWeight: 600,
-            opacity: text === null || saving ? 0.65 : 1,
+            opacity: text === null || saving || validation !== true ? 0.65 : 1,
           }}
         >
           {saving ? t("common_saving") : t("common_save")}

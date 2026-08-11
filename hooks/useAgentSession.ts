@@ -1717,7 +1717,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isReadOnly]);
 
-  const handleModelChange = useCallback(async (provider: string, modelId: string) => {
+  const handleModelChange = useCallback(async (provider: string, modelId: string, thinkingLevel?: string | null) => {
     // 只读会话：set_model 会写会话状态，拦截。
     if (isReadOnly) return;
     if (isNew) {
@@ -1726,6 +1726,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
       if (!sid) return;
       try {
+        if (thinkingLevel) {
+          await sendAgentCommand(sid, { type: "set_thinking_level", level: thinkingLevel });
+        }
         await sendAgentCommand(sid, { type: "set_model", provider, modelId });
       } catch (e) {
         console.error("Failed to set model:", e);
@@ -1735,6 +1738,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!sid) return;
     try {
+      if (thinkingLevel) {
+        await sendAgentCommand(sid, { type: "set_thinking_level", level: thinkingLevel });
+      }
       await sendAgentCommand(sid, { type: "set_model", provider, modelId });
       setCurrentModelOverride({ provider, modelId });
     } catch (e) {
