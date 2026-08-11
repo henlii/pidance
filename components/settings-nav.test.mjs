@@ -7,7 +7,7 @@ const jiti = createJiti(import.meta.url);
 test("页面清单：general/appearance/models/defaults 无 cwd 可用，skills/plugins 保留导航项并给出提示", async () => {
   const { getSettingsPages } = await jiti.import("./settings-nav.ts");
   const withoutCwd = getSettingsPages(false);
-  assert.deepEqual(withoutCwd.map((p) => p.id), ["general", "appearance", "models", "defaults", "skills", "plugins"]);
+  assert.deepEqual(withoutCwd.map((p) => p.id), ["general", "appearance", "models", "defaults", "prompts", "skills", "plugins"]);
   assert.equal(withoutCwd.find((p) => p.id === "general").available, true);
   assert.equal(withoutCwd.find((p) => p.id === "appearance").available, true);
   assert.equal(withoutCwd.find((p) => p.id === "models").available, true);
@@ -20,7 +20,7 @@ test("页面清单：general/appearance/models/defaults 无 cwd 可用，skills/
   assert.equal(skills.unavailableHint, "skills");
   assert.equal(plugins.available, false);
   assert.equal(plugins.unavailableHint, "plugins");
-  assert.deepEqual(withoutCwd.map((p) => p.label), ["general", "appearance", "models", "defaults", "skills", "plugins"]);
+  assert.deepEqual(withoutCwd.map((p) => p.label), ["general", "appearance", "models", "defaults", "prompts", "skills", "plugins"]);
 
   const withCwd = getSettingsPages(true);
   assert.ok(withCwd.every((p) => p.available));
