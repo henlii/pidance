@@ -13,6 +13,7 @@ import {
   type StreamingEnterAction,
 } from "@/lib/ui-preferences";
 import { readSoundEnabled, writeSoundEnabled } from "@/hooks/useAudio";
+import { SettingsJsonEditor } from "./SettingsJsonEditor";
 
 interface AgentDefaultsConfigProps {
   cwd: string | null;
@@ -94,6 +95,8 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
   const [error, setError] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  /** 二级页：基础表单 / 原始 JSON */
+  const [activeTab, setActiveTab] = useState<"basic" | "json">("basic");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -245,8 +248,34 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
     ? modelList.filter((m) => m.provider === draft.defaultProvider)
     : [];
 
+  const tabStyle = (active: boolean): React.CSSProperties => ({
+    minHeight: 30,
+    padding: "0 12px",
+    borderRadius: 7,
+    border: "1px solid var(--border)",
+    background: active ? "var(--bg-selected)" : "var(--bg-panel)",
+    color: active ? "var(--text)" : "var(--text-muted)",
+    cursor: "pointer",
+    fontSize: 12,
+    fontWeight: active ? 600 : 400,
+  });
+
   return (
     <div style={{ padding: "18px 20px" }}>
+      {/* 二级页导航：基础（分块表单）/ 原始 JSON */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        <button type="button" onClick={() => setActiveTab("basic")} style={tabStyle(activeTab === "basic")} aria-current={activeTab === "basic" ? "page" : undefined}>
+          {t("defaults_basicTab")}
+        </button>
+        <button type="button" onClick={() => setActiveTab("json")} style={tabStyle(activeTab === "json")} aria-current={activeTab === "json" ? "page" : undefined}>
+          {t("defaults_jsonTab")}
+        </button>
+      </div>
+
+      {activeTab === "json" ? (
+        <SettingsJsonEditor />
+      ) : (
+      <>
       <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 16 }}>
         {t("defaults_hint")}
       </div>
@@ -485,6 +514,8 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
           <span style={{ fontSize: 12, color: "var(--accent)" }}>{t("common_saved")}</span>
         )}
       </div>
+      </>
+      )}
     </div>
   );
 }

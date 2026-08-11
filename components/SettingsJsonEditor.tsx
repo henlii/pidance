@@ -1,0 +1,208 @@
+"use client";
+
+import React, { useCallback, useEffect, useState } from "react";
+import { useI18n } from "@/lib/i18n";
+
+/**
+ * settings.json 原始 JSON 编辑模式：
+ * 加载 → 编辑 → 校验（客户端 + 服务端）→ 原子保存。
+ */
+export function SettingsJsonEditor() {
+  const { t } = useI18n();
+  const [text, setText] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/settings/raw", { cache: "no-store" });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      const body = (await res.json()) as { json?: string };
+      setText(typeof body.json === "string" ? body.json : "{}\n");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setText(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load, reloadKey]);
+
+  /** 客户端 JSON 校验：返回错误描述或 null。 */
+  const validateText = useCallback((): string | null => {
+    if (text === null) return null;
+    try {
+      const parsed: unknown = JSON.parse(text);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        return t("settingsJson_mustBeObject");
+      }
+      return null;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      // 提取 "position N" → 行/列
+      const m = /position (\d+)/.exec(message);
+      if (m) {
+        const pos = Number(m[1]);
+        const before = text.slice(0, pos);
+        const line = before.split("\n").length;
+        const col = pos - before.lastIndexOf("\n");
+        return t("settingsJson_invalidAt", { line: String(line), col: String(col) });
+      }
+      return t("settingsJson_invalid", { message });
+    }
+  }, [text, t]);
+
+  const save = useCallback(async () => {
+    const validation = validateText();
+    if (validation !== null) {
+      setError(validation);
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    setSavedFlash(false);
+    try {
+      const res = await fetch("/api/settings/raw", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ json: text }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      setSavedFlash(true);
+      window.setTimeout(() => setSavedFlash(false), 2000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }, [text, validateText, t]);
+
+  if (loading && text === null) {
+    return (
+      <div style={{ padding: "12px 0", fontSize: 12, color: "var(--text-muted)" }}>
+        {t("common_loading")}
+      </div>
+    );
+  }
+
+  const textareaStyle: React.CSSProperties = {
+    width: "100%",
+    minHeight: 320,
+    maxHeight: "60vh",
+    padding: "10px 12px",
+    borderRadius: 7,
+    border: "1px solid var(--border)",
+    background: "var(--bg)",
+    color: "var(--text)",
+    fontSize: 12,
+    lineHeight: 1.55,
+    outline: "none",
+    fontFamily: "var(--font-mono)",
+    whiteSpace: "pre",
+    overflow: "auto",
+    boxSizing: "border-box",
+    resize: "vertical",
+  };
+
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 12, maxWidth: 560 }}>
+        {t("settingsJson_hint")}
+      </div>
+
+      {error && (
+        <div style={{ fontSize: 12, color: "var(--status-danger)", marginBottom: 10, fontFamily: "var(--font-mono)" }}>
+          {error}
+        </div>
+      )}
+
+      <textarea
+        value={text ?? ""}
+        onChange={(e) => {
+          setText(e.target.value);
+          setError(null);
+          setSavedFlash(false);
+        }}
+        spellCheck={false}
+        aria-label={t("settingsJson_editorLabel")}
+        style={textareaStyle}
+      />
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+        <button
+          type="button"
+          onClick={() => {
+            const validation = validateText();
+            setError(validation);
+          }}
+          disabled={text === null}
+          style={{
+            minHeight: 30,
+            padding: "0 12px",
+            borderRadius: 7,
+            border: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+            color: "var(--text)",
+            cursor: text === null ? "not-allowed" : "pointer",
+            fontSize: 12,
+          }}
+        >
+          {t("settingsJson_validate")}
+        </button>
+        <button
+          type="button"
+          onClick={() => void save()}
+          disabled={text === null || saving}
+          style={{
+            minHeight: 30,
+            padding: "0 14px",
+            borderRadius: 7,
+            border: "1px solid var(--accent)",
+            background: "var(--accent)",
+            color: "var(--accent-foreground)",
+            cursor: text === null || saving ? "not-allowed" : "pointer",
+            fontSize: 12,
+            fontWeight: 600,
+            opacity: text === null || saving ? 0.65 : 1,
+          }}
+        >
+          {saving ? t("common_saving") : t("common_save")}
+        </button>
+        <button
+          type="button"
+          onClick={() => setReloadKey((k) => k + 1)}
+          disabled={saving}
+          style={{
+            minHeight: 30,
+            padding: "0 12px",
+            borderRadius: 7,
+            border: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+            color: "var(--text-muted)",
+            cursor: saving ? "not-allowed" : "pointer",
+            fontSize: 12,
+          }}
+        >
+          {t("defaults_refresh")}
+        </button>
+        {savedFlash && (
+          <span style={{ fontSize: 12, color: "var(--accent)" }}>{t("common_saved")}</span>
+        )}
+      </div>
+    </div>
+  );
+}
