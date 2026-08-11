@@ -755,6 +755,8 @@ export function PluginsConfig({
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [addMode, setAddMode] = useState(false);
+  /** 手机端：详情/添加页打开（全屏新页面，列表隐藏） */
+  const mobileDetailOpen = addMode || selected !== null;
   /** 插件更新检查结果（packageKey → 信息） */
   const [pluginUpdates, setPluginUpdates] = useState<Record<string, { latest: string | null; hasUpdate: boolean }>>({});
   const [checkingUpdates, setCheckingUpdates] = useState(false);
@@ -1034,10 +1036,10 @@ export function PluginsConfig({
           <div
             style={{
               width: isMobile ? "100%" : 245,
-              maxHeight: isMobile ? "40vh" : undefined,
+              maxHeight: isMobile ? undefined : undefined,
               borderRight: isMobile ? "none" : "1px solid var(--border)",
               borderBottom: isMobile ? "1px solid var(--border)" : "none",
-              display: "flex",
+              display: isMobile && mobileDetailOpen ? "none" : "flex",
               flexDirection: "column",
               flexShrink: 0,
               background: "var(--bg-panel)",
@@ -1243,6 +1245,27 @@ export function PluginsConfig({
           </div>
 
           <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+            {isMobile && mobileDetailOpen && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSelected(null);
+                  setAddMode(false);
+                  setActionError(null);
+                  setActionMessage(null);
+                }}
+                style={{
+                  display: "flex", alignItems: "center", gap: 5,
+                  minHeight: 32, padding: "0 10px", marginBottom: 12,
+                  borderRadius: 7, border: "1px solid var(--border)",
+                  background: "var(--bg-panel)", color: "var(--text-muted)",
+                  cursor: "pointer", fontSize: 12,
+                }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6" /></svg>
+                {t("common_back")}
+              </button>
+            )}
             {addMode ? (
               <AddPluginPanel
                 cwd={cwd}
