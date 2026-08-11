@@ -32,6 +32,7 @@ import { useNoticeState } from "@/hooks/useNoticeState";
 import { parseTodos } from "@/lib/todo-parser";
 import { getSessionCapabilities } from "@/components/session-capabilities";
 import { useSessionCommands } from "@/hooks/useSessionCommands";
+import { ensureServerPrefsLoaded, getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { resolveDisplayModel, settleModelOverride } from "@/lib/model-selection";
 import { useI18n } from "@/lib/i18n";
 import {
@@ -395,6 +396,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setLocalFollowUpQueue(next);
     // 展示层 followUp 始终以本地队列为准（Pi 队列不再使用 follow_up RPC）
     setQueuedMessages((prev) => ({ ...prev, followUp: next }));
+    // 服务端持久化（跨客户端可见）：sessionQueue.<sid>
+    const sid = sessionIdRef.current;
+    if (sid) {
+      setServerPref(`sessionQueue.${sid}`, next);
+    }
   }, []);
   // 分支切换/总结进行中：树节点、发送与再次导航全部暂停，避免与 navigateTree 并发写。
   const [branchBusy, setBranchBusy] = useState(false);
@@ -2139,6 +2145,42 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     await dispatchWorkspaceHistoryPrompt(message);
   }, [dispatchWorkspaceHistoryPrompt]);
 
+  // 服务端队列同步：挂载恢复 + focus 时从服务端拉取（多客户端可见）
+  const serverPrefs = useServerPreferences();
+  const lastRemoteQueueRef = useRef<string[] | null>(null);
+  useEffect(() => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    const key = `sessionQueue.${sid}`;
+    void ensureServerPrefsLoaded().then(() => {
+      const remote = getServerPref<string[]>(key);
+      if (Array.isArray(remote)) {
+        lastRemoteQueueRef.current = remote;
+        // 本地为空时恢复服务端队列；否则以本地为准（本地有正在输入/刚入队的）
+        if (localFollowUpRef.current.length === 0 && remote.length > 0) {
+          updateLocalFollowUp(remote);
+        }
+      }
+    });
+  }, [session?.id, updateLocalFollowUp]);
+
+  // focus/激活同步：服务端队列变化（其他客户端入队/清空）时更新本地
+  useEffect(() => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    const remote = (serverPrefs[`sessionQueue.${sid}`] as string[] | undefined) ?? null;
+    if (!Array.isArray(remote)) return;
+    if (lastRemoteQueueRef.current === null) {
+      lastRemoteQueueRef.current = remote;
+      return;
+    }
+    if (JSON.stringify(remote) !== JSON.stringify(lastRemoteQueueRef.current)) {
+      lastRemoteQueueRef.current = remote;
+      // 服务端权威：其他客户端可能入队/消费；本地队列跟随（避免双份）
+      updateLocalFollowUp(remote);
+    }
+  }, [serverPrefs, session?.id, updateLocalFollowUp]);
+
   // 会话切换：清空阻塞队列与可见卡片；不发送 extension_ui_response。
   useEffect(() => {
     const current = extensionUiStateRef.current;
@@ -2349,6 +2391,31 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     container.addEventListener("scroll", onScroll, { passive: true });
     return () => container.removeEventListener("scroll", onScroll);
   }, [scrollContainerEl, applyAutoFollowMode, updateJumpButtonVisibility]);
+
+  // 队列自动投递：agent 执行结束（空闲）且 follow-up 队列非空时自动逐条发出
+  const autoFlushingQueueRef = useRef(false);
+  useEffect(() => {
+    if (agentRunning || bashRunning) return;
+    if (autoFlushingQueueRef.current) return;
+    const queue = localFollowUpRef.current;
+    if (queue.length === 0) return;
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    autoFlushingQueueRef.current = true;
+    void (async () => {
+      try {
+        for (const text of queue) {
+          await sendAgentCommand(sid, { type: "prompt", message: text }).catch((e) => {
+            console.error("Failed to send queued message:", e);
+          });
+        }
+        // 全部投递完成后清空本地与服务端队列
+        updateLocalFollowUp([]);
+      } finally {
+        autoFlushingQueueRef.current = false;
+      }
+    })();
+  }, [agentRunning, bashRunning, updateLocalFollowUp]);
 
   // agent/bash 结束后的 settle 窗口 + 双 rAF 补钉：
   // 结束瞬间 process group 从「扁平流式」切到折叠结构、streaming 槽卸除，高度会突变；
