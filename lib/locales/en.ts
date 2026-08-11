@@ -38,7 +38,7 @@ export const en = {
   update_bannerUpgrade: 'One-click upgrade',
   update_bannerDismiss: 'Dismiss',
   update_bannerWorkspace: 'New version available (use formal install on 31415 to upgrade)',
-update_overlayTitle: 'Upgrading Pidance',
+  update_overlayTitle: 'Upgrading Pidance',
   update_phasePreparing: 'Preparing',
   update_phaseDownloading: 'Downloading',
   update_phaseInstalling: 'Installing',

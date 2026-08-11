@@ -38,7 +38,7 @@ export const zhCN: Record<TranslationKey, string> = {
   update_bannerUpgrade: '一键升级',
   update_bannerDismiss: '稍后',
   update_bannerWorkspace: '发现新版本（工作区/测试部署请在正式安装 31415 升级）',
-update_overlayTitle: '正在升级 Pidance',
+  update_overlayTitle: '正在升级 Pidance',
   update_phasePreparing: '准备中',
   update_phaseDownloading: '下载中',
   update_phaseInstalling: '安装中',
