@@ -10,7 +10,7 @@
 
 Pidance is an open-source web client for the [Pi](https://github.com/badlogic/pi-mono) coding agent. It reads local Pi session files directly and preserves Pi SDK session and runtime semantics, bringing live chat, project files, Git, worktrees, subagents, and configuration into one browser workspace. Pi remains the source of truth for data and execution semantics; Pidance provides a clearer and more complete interface.
 
-> Current version: `0.1.0` · npm package: `@henlii/pidance` · CLI: `pidance`
+> Current version: `0.1.3` · npm package: `@henlii/pidance` · CLI: `pidance`
 
 ## Preview
 
@@ -109,18 +109,33 @@ See [docs/release.md](./docs/release.md) for the complete procedure.
 
 ## Architecture
 
-```text
-Browser
-  ├─ Session / file / Git REST APIs ─▶ Next.js Route Handlers ─▶ local disk and Pi config
-  ├─ Send message ───────────────────▶ SessionService ──────────▶ AgentSession
-  └─ SSE events ◀──────────────────── EventStreamManager ◀───── AgentSession events
+Pidance's target architecture is a Pi Web mode adapter. `main` is currently migrating from an external `pi --mode rpc` process to the in-process SDK. During the migration, external-RPC modules are legacy code: they may be stabilized, tested, adapted, or removed, but must not receive new product capabilities. See [#20](https://github.com/henlii/pidance/issues/20) for the complete implementation specification and acceptance criteria.
 
-~/.pi/agent/sessions/*.jsonl always remains the session source of truth
+```text
+Browser / Route Handlers
+          │
+          ▼
+SessionService ───────▶ read-only session projections and caches
+          │
+          ▼
+LiveSessionRegistry
+          │
+          ▼
+SdkSessionHost ───────▶ Web Extension UI Adapter
+          │
+          ▼
+Pi AgentSessionRuntime
+  ├─ AgentSession
+  ├─ AgentSessionServices
+  └─ SessionManager
+
+~/.pi/agent/sessions/*.jsonl remains the Pi session source of truth
 ```
 
-- **Read-only browsing** parses Pi `.jsonl` sessions without creating an AgentSession.
-- **Sending a message** creates or reuses an in-process AgentSession wrapper on the server.
-- Session service, event streaming, extension UI, project context, and chat composition form one-way seams so the UI cannot bypass session lifecycle rules.
+- **Read-only browsing** parses Pi `.jsonl` sessions without creating an AgentSession; scanners and caches never write JSONL.
+- **Sending a message** creates or reuses an in-process SDK session host only when needed.
+- Pi owns agent lifecycle, session replacement, resources, and JSONL/tree semantics. Pidance owns product use cases, the live registry, Web event projection, and UI adapters.
+- Session service, event streaming, Extension UI, project context, and chat composition remain one-way dependencies so the UI cannot bypass session lifecycle rules.
 - File endpoints only expose explicit roots such as selected projects, worktrees, and session working directories.
 
 ## Documentation

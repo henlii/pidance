@@ -110,6 +110,31 @@ npm run lint
 
 开发时不要运行 `next build` / `npm run build`，它会写入 `.next/`，容易影响正在运行的 dev server。发布流程再执行构建。
 
+## 架构
+
+Pidance 的目标架构是 Pi 的 Web mode adapter。当前 `main` 正从外部 `pi --mode rpc` 迁移到同进程 SDK；迁移期外部 RPC 模块只做止血、测试、适配和退役，不再承载新能力。完整实施规格与验收见 [#20](https://github.com/henlii/pidance/issues/20)。
+
+```text
+浏览器 / Route Handlers
+          │
+          ▼
+SessionService ───────▶ 只读会话投影与缓存
+          │
+          ▼
+LiveSessionRegistry
+          │
+          ▼
+SdkSessionHost ───────▶ Web Extension UI Adapter
+          │
+          ▼
+Pi AgentSessionRuntime
+  ├─ AgentSession
+  ├─ AgentSessionServices
+  └─ SessionManager
+```
+
+Pi SDK 拥有 Agent、会话替换、资源和 JSONL/tree 语义；Pidance 只拥有产品用例、live registry、Web 事件与 UI 适配。`~/.pi/agent/sessions/*.jsonl` 始终是 Pi 会话事实来源，快扫与缓存只读。
+
 ## 项目结构
 
 ```
@@ -148,8 +173,13 @@ lib/
   git-status.ts       # Git status 收集和规范化
   git-types.ts        # Git 数据共享类型
   http-dispatcher.ts  # 服务端 fetch 的 HTTP(S) 代理配置
-  rpc-manager.ts      # AgentSessionWrapper 生命周期和全局 registry
-  session-reader.ts   # 解析 .jsonl 会话文件和分支上下文
+  live-session-registry.ts # 目标：live registry、启动锁、running 和 idle
+  sdk-session-host.ts  # 目标：同进程 Pi SDK host 与事件/状态投影
+  web-extension-ui.ts  # 目标：Pi ExtensionUIContext 到 Web UI
+  rpc-manager.ts       # 迁移期 legacy：外部 RPC registry/factory
+  pi-runtime/          # 迁移期 legacy：外部进程/协议/runtime slot
+  session-file.ts      # 迁移期 legacy：自研 JSONL tree reader/writer
+  session-reader.ts    # 解析 .jsonl 会话文件和分支上下文
   session-file-references.ts # 会话引用文件的检查
   normalize.ts        # 规范化 toolCall 字段名
   file-access.ts      # 文件读取安全边界和允许的根目录

@@ -10,7 +10,7 @@
 
 Pidance 是面向 [Pi](https://github.com/badlogic/pi-mono) coding agent 的开源 Web 客户端。它直接读取本机 Pi 会话文件，并沿用 Pi SDK 的会话与运行时语义，把实时对话、项目文件、Git、工作树、子代理和配置管理汇集到一个浏览器工作区。Pi 仍是数据与执行语义的事实来源；Pidance 负责提供更清晰、更完整的操作界面。
 
-> 当前版本：`0.1.0` · npm 包：`@henlii/pidance` · CLI：`pidance`
+> 当前版本：`0.1.3` · npm 包：`@henlii/pidance` · CLI：`pidance`
 
 ## 界面预览
 
@@ -109,18 +109,35 @@ npm run test:browser          # 浏览器回归（需已运行的实例，默认
 
 ## 架构概览
 
-```text
-浏览器
-  ├─ 会话 / 文件 / Git REST API ──▶ Next.js Route Handlers ──▶ 本地磁盘与 Pi 配置
-  ├─ 发送消息 ───────────────────▶ SessionService ───────────▶ AgentSession
-  └─ SSE 事件流 ◀──────────────── EventStreamManager ◀────── AgentSession 事件
+Pidance 的目标架构是 Pi 的 Web mode adapter。当前 `main` 正在从外部 `pi --mode rpc`
+迁移到同进程 SDK；迁移期外部 RPC 模块只允许退役和补回归测试，不再承载新能力。
+完整实施规格与验收见 [#20](https://github.com/henlii/pidance/issues/20)。
 
-~/.pi/agent/sessions/*.jsonl 始终是会话事实来源
+```text
+浏览器 / Route Handlers
+          │
+          ▼
+SessionService ───────▶ 只读会话投影与缓存
+          │
+          ▼
+LiveSessionRegistry
+          │
+          ▼
+SdkSessionHost ───────▶ Web Extension UI Adapter
+          │
+          ▼
+Pi AgentSessionRuntime
+  ├─ AgentSession
+  ├─ AgentSessionServices
+  └─ SessionManager
+
+~/.pi/agent/sessions/*.jsonl 始终是 Pi 会话事实来源
 ```
 
-- **只读浏览**直接解析 Pi `.jsonl` 会话，不创建 AgentSession。
-- **发送消息**时才在服务端进程内创建或复用 AgentSession wrapper。
-- 会话服务、事件流、扩展 UI、项目上下文和聊天合成器按单向 seam 分层，避免 UI 绕过会话生命周期。
+- **只读浏览**直接解析 Pi `.jsonl` 会话，不创建 AgentSession；快扫和缓存不得写 JSONL。
+- **发送消息**时才在服务端进程内创建或复用 SDK session host。
+- Pi SDK 拥有 Agent、会话替换、资源和 JSONL/tree 语义；Pidance 只拥有产品用例、live registry、Web 事件与 UI 适配。
+- SessionService、事件流、Extension UI、项目上下文和聊天合成器保持单向依赖，UI 不绕过会话生命周期。
 - 文件端点仅允许访问已选择项目、工作树和会话工作目录等明确根路径。
 
 ## 文档
