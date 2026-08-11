@@ -1404,7 +1404,8 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
         setConfig(normalized);
         setBaseline(b ?? null);
         const keys = Object.keys(normalized.providers ?? {});
-        if (keys.length > 0) setSelection({ type: "provider", name: keys[0] });
+        // 手机端进入只显示列表；桌面端自动选中第一个 provider
+        if (keys.length > 0 && !isMobile) setSelection({ type: "provider", name: keys[0] });
       })
       .catch(() => { setConfig({ providers: {} }); setBaseline(null); })
       .finally(() => setLoading(false));

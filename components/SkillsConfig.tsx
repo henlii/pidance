@@ -744,7 +744,8 @@ export function SkillsConfig({
       if (!res.ok || d.error) throw new Error(d.error ?? `HTTP ${res.status}`);
       const list = d.skills ?? [];
       setSkills(list);
-      if (list.length > 0 && !selected) setSelected(list[0].filePath);
+      // 手机端进入只显示列表；桌面端自动选中第一个
+      if (list.length > 0 && !selected && !isMobile) setSelected(list[0].filePath);
       return list;
     } catch (e) {
       setError(String(e));

@@ -832,6 +832,8 @@ export function PluginsConfig({
       setAddMode((current) => next.packages.length === 0 || current);
       setSelected((current) => {
         if (current && next.packages.some((pkg) => packageKey(pkg) === current)) return current;
+        // 手机端进入只显示列表（全屏详情页不自动进入）；桌面端保留自动选中
+        if (isMobile) return null;
         return next.packages[0] ? packageKey(next.packages[0]) : null;
       });
     } catch (err) {
@@ -839,7 +841,7 @@ export function PluginsConfig({
     } finally {
       setLoading(false);
     }
-  }, [cwd]);
+  }, [cwd, isMobile]);
 
   useEffect(() => {
     void loadPlugins();

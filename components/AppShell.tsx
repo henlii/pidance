@@ -1063,45 +1063,9 @@ function AppShellInner() {
               </svg>
             )}
           </button>
-          <button
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              toggleTheme({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-            }}
-            title={isDark ? t("app_lightMode") : t("app_darkMode")}
-            data-tooltip={isDark ? t("app_lightMode") : t("app_darkMode")}
-            className="instant-tooltip"
-            aria-label={isDark ? t("app_lightMode") : t("app_darkMode")}
-            aria-pressed={isDark}
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "center",
-              width: 36, height: 36, padding: 0,
-              background: "none", border: "none", borderRight: "1px solid var(--border)",
-              color: "var(--text-muted)", cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
-          >
-            {isDark ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="5" />
-                <line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
-                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-                <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
-                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-              </svg>
-            ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-              </svg>
-            )}
-          </button>
           {/* Session stats — right-aligned in top bar */}
           {showChat && (sessionStats || contextUsage) && (() => {
-            const tokenStats = sessionStats?.tokens;
-            const c = sessionStats?.cost ?? 0;
             const fmt = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
-            const costStr = c > 0 ? (c >= 0.01 ? `$${c.toFixed(2)}` : `<$0.01`) : null;
 
             let ctxColor = "var(--text-muted)";
             let ctxStr: string | null = null;
@@ -1115,19 +1079,13 @@ function AppShellInner() {
                 : (isMobile ? "?" : `? / ${fmt(contextUsage.contextWindow)}`);
             }
 
-            const tooltipParts: string[] = [];
-            if (tokenStats) {
-              tooltipParts.push(`${t("app_input")}: ${tokenStats.input.toLocaleString()}`);
-              tooltipParts.push(`${t("app_output")}: ${tokenStats.output.toLocaleString()}`);
-              tooltipParts.push(`${t("app_cacheRead")}: ${tokenStats.cacheRead.toLocaleString()}`);
-              tooltipParts.push(`${t("app_cacheWrite")}: ${tokenStats.cacheWrite.toLocaleString()}`);
-              if (c > 0) tooltipParts.push(`${t("app_cost")}: $${c.toFixed(4)}`);
-            }
-            if (contextUsage?.contextWindow) {
-              const pct = contextUsage.percent;
-              tooltipParts.push(t("app_contextTooltip", { pct: pct !== null ? pct.toFixed(1) + "%" : t("app_unknown"), total: contextUsage.contextWindow.toLocaleString() }));
-            }
-            const tooltip = tooltipParts.join("  |  ");
+            // 用量统计（词元/费用）已移除；顶栏只保留上下文信息
+            const tooltip = contextUsage?.contextWindow
+              ? (() => {
+                  const pct = contextUsage.percent;
+                  return t("app_contextTooltip", { pct: pct !== null ? pct.toFixed(1) + "%" : t("app_unknown"), total: contextUsage.contextWindow.toLocaleString() });
+                })()
+              : null;
 
             const infoTabActive = rightPanelOpen && activeRightTabId === "info";
             return (
@@ -1163,35 +1121,6 @@ function AppShellInner() {
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                     <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
                   </svg>
-                )}
-                {!isMobile && tokenStats && tokenStats.input > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="5" y1="8.5" x2="5" y2="1.5" /><polyline points="2 4 5 1.5 8 4" />
-                    </svg>
-                    {fmt(tokenStats.input)}
-                  </span>
-                )}
-                {!isMobile && tokenStats && tokenStats.output > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
-                    </svg>
-                    {fmt(tokenStats.output)}
-                  </span>
-                )}
-                {!isMobile && tokenStats && tokenStats.cacheRead > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M8.5 5a3.5 3.5 0 1 1-1-2.45" /><polyline points="6.5 1.5 8.5 2.5 7.5 4.5" />
-                    </svg>
-                    {fmt(tokenStats.cacheRead)}
-                  </span>
-                )}
-                {!isMobile && costStr && (
-                  <span style={{ display: "flex", alignItems: "center", color: "var(--text)", fontWeight: 500 }}>
-                    {costStr}
-                  </span>
                 )}
                 {ctxStr && (
                   <span style={{ display: "flex", alignItems: "center", gap: 4, color: ctxColor }}>
