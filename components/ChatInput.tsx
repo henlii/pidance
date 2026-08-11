@@ -2046,9 +2046,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       justifyContent: "flex-start",
                       padding: isMobile ? "6px 8px" : "8px 12px",
                       height: 32,
-                      // 手机端不占满整行，避免模型按钮过大挤压思考/停止
+                      // 宽度自适应内容，min/max 兜底（手机不占满整行）
                       width: "auto",
-                      maxWidth: isMobile ? 132 : 220,
+                      minWidth: isMobile ? 96 : 140,
+                      maxWidth: isMobile ? 220 : 340,
                       overflow: "hidden",
                       background: modelDropdownOpen ? "var(--bg-hover)" : "none",
                       border: "none",
@@ -2058,7 +2059,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       fontSize: isMobile ? 11 : 12,
                       transition: "background 0.12s, color 0.12s",
                       flex: "0 1 auto",
-                      minWidth: 0,
                     }}
                     onMouseEnter={(e) => {
                       e.currentTarget.style.background = "var(--bg-hover)";

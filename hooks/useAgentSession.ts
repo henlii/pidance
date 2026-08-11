@@ -1725,6 +1725,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setPendingModel({ provider, modelId });
       const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
       if (!sid) return;
+      // 本地立即同步显示（选择路径不经过 handleThinkingLevelChange）
+      if (thinkingLevel) setThinkingLevel(thinkingLevel as ThinkingLevelOption);
       try {
         if (thinkingLevel) {
           await sendAgentCommand(sid, { type: "set_thinking_level", level: thinkingLevel });
@@ -1737,6 +1739,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     const sid = sessionIdRef.current;
     if (!sid) return;
+    // 本地立即同步显示（选择路径不经过 handleThinkingLevelChange）
+    if (thinkingLevel) setThinkingLevel(thinkingLevel as ThinkingLevelOption);
     try {
       if (thinkingLevel) {
         await sendAgentCommand(sid, { type: "set_thinking_level", level: thinkingLevel });
