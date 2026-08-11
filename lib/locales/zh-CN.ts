@@ -512,6 +512,7 @@ export const zhCN: Record<TranslationKey, string> = {
   sidebar_projectMenuLabel: "{project} 的项目菜单",
   // input
   input_usePiDefault: "使用 Pi 默认值", input_queued: "已排队 · {count}", input_searchingAllFiles: "正在搜索所有文件…", input_indexTruncated: "索引不完整", input_loadingFiles: "正在加载文件…", input_files: "文件", input_searching: "正在搜索…", input_noMatchingFiles: "没有匹配的文件", input_placeholderSteer: "引导 / 跟进…", input_placeholderRunning: "运行中…", input_placeholderMessage: "输入消息…", input_imageQueueDisabled: "Agent 运行时无法排队图片附件", input_steerTooltip: "中断当前运行并立即注入此消息", input_followUpTooltip: "在 Agent 完成后排队发送此消息", input_steer: "引导", input_followUp: "跟进", input_send: "发送", input_shellStatus: "Shell · {scope}", input_shellLocal: "输出仅保留在本地", input_shellModel: "输出发送给模型", input_more: "更多", input_toolsNone: "无工具（只读）", input_toolsDefault: "4 个内置工具", input_toolsAll: "所有内置工具", input_stop: "停止", input_soundDisable: "关闭完成提示音", input_soundEnable: "开启完成提示音",
+  chat_sendSubmittedSwitched: '消息已发送（发送中切换了会话）',
   input_compactCommandDescription: "压缩当前会话",
   input_reloadCommandDescription: "重新加载当前会话",
   input_nameCommandDescription: "设置会话名称",
@@ -677,6 +678,7 @@ export const zhCN: Record<TranslationKey, string> = {
   settingsJson_invalidAt: 'JSON 解析失败：第 {line} 行第 {col} 列',
   settingsJson_mustBeObject: 'settings.json 必须是 JSON 对象',
   settingsJson_validate: '校验',
+  settingsJson_format: '格式化',
   settingsJson_valid: 'JSON 校验通过，可保存',
   settingsJson_editorLabel: 'settings.json 原文',
   settingsJson_hint: '编辑 ~/.pi/agent/settings.json 全部内容（含 SDK 与扩展键）。保存前会校验 JSON；非法内容不会写入。',

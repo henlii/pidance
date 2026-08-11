@@ -536,6 +536,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    */
   const finishingPromptRunIdRef = useRef<number | null>(null);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
+  /** prompt 命令已提交成功（防止切走/收尾竞态把已发送消息回滚成失败） */
+  const promptSubmittedRef = useRef(false);
 
   const todos = useMemo(() => {
     const todoMessages = streamState.streamingMessage
@@ -1600,11 +1602,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const selectedModel = newSessionModel;
         const existingSid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
         const sid = existingSid ?? await ensureNewSession();
+        // 发送期间捕获 intent：切走后仍把消息发到已创建会话，不 promote 到新 intent
+        const intentAtSend = newSessionIntentIdRef.current;
 
         if (sid) {
           sentSessionId = sid;
           // ensure 成功即 promote：即使后续 SSE/prompt 失败也保留 sid，禁止二次创建。
-          promoteNewSession(1, message);
+          // 发送中切走：跳过 promote（UI 已离开该 intent），发送仍完成
+          if (newSessionIntentIdRef.current === intentAtSend) {
+            promoteNewSession(1, message);
+          }
           if (selectedModel) {
             setPendingModel(selectedModel);
             if (existingSid) {
@@ -1617,6 +1624,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             message,
             ...(piImages?.length ? { images: piImages } : {}),
           });
+          promptSubmittedRef.current = true;
         } else {
           // 无可用 sid（竞态：isNew 已被并发消费等）：未发送，保留 draft。
           return false;
@@ -1644,6 +1652,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           message,
           ...(piImages?.length ? { images: piImages } : {}),
         });
+        promptSubmittedRef.current = true;
       }
       if (isSlashCommandPrompt && sentSessionId) {
         void waitForPromptSettlement(sentSessionId, promptRunId);
@@ -1653,6 +1662,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return true;
     } catch (e) {
       console.error("Failed to send message:", e);
+      // prompt 已提交成功（切走/收尾竞态导致的后续异常）：不回滚已发送消息
+      if (promptSubmittedRef.current) {
+        promptSubmittedRef.current = false;
+        addNotice({ type: "warning", message: t("chat_sendSubmittedSwitched") });
+        return true;
+      }
       // P0-1：失败 = 消息未确认进入权威视图 → 移除假 bubble + 保留 draft。
       // 发送失败时乐观 user 消息若仍在列表末尾（未被 message_end 消费），
       // 它是未落地的「假 bubble」；draft 由 insertIfEmpty 恢复（输入框空才写入，

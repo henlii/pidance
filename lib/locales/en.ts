@@ -512,6 +512,7 @@ export const en = {
   sidebar_projectMenuLabel: "Project menu for {project}",
   // input
   input_usePiDefault: "Use Pi default", input_queued: "Queued · {count}", input_searchingAllFiles: "searching all files…", input_indexTruncated: "index truncated", input_loadingFiles: "Loading files…", input_files: "Files", input_searching: "Searching…", input_noMatchingFiles: "No matching files", input_placeholderSteer: "Steer now / queue follow-up…", input_placeholderRunning: "Agent is running…", input_placeholderMessage: "Message… Type / for commands, @ for files", input_imageQueueDisabled: "Image attachments cannot be queued while the agent is running", input_steerTooltip: "Interrupt the current run and inject this message now", input_followUpTooltip: "Queue this message after the agent finishes", input_steer: "Steer", input_followUp: "Follow-up", input_send: "Send", input_shellStatus: "Shell · {scope}", input_shellLocal: "output stays local", input_shellModel: "output sent to model", input_more: "More", input_toolsNone: "No tools, read-only", input_toolsDefault: "4 built-in tools", input_toolsAll: "All built-in tools", input_stop: "Stop", input_soundDisable: "Disable completion sound", input_soundEnable: "Enable completion sound",
+  chat_sendSubmittedSwitched: 'Message sent (session switched while sending)',
   input_compactCommandDescription: "Compact the current session",
   input_reloadCommandDescription: "Reload the current session",
   input_nameCommandDescription: "Set the session name",
@@ -678,6 +679,7 @@ export const en = {
   settingsJson_invalidAt: 'JSON parse error at line {line}, column {col}',
   settingsJson_mustBeObject: 'settings.json must be a JSON object',
   settingsJson_validate: 'Validate',
+  settingsJson_format: 'Format',
   settingsJson_valid: 'JSON valid — ready to save',
   settingsJson_editorLabel: 'settings.json raw content',
   settingsJson_hint: 'Edit the full ~/.pi/agent/settings.json (including SDK and extension keys). JSON is validated before saving.',

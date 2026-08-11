@@ -12,7 +12,7 @@ import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ExtensionDialog } from "./ExtensionDialog";
 import { NewSessionGuide } from "./NewSessionGuide";
 import { TodoPanel } from "./TodoPanel";
-import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
+import { useAgentSession, type AgentPhase, type NoticeItem, type ThinkingLevelOption } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
 import { useI18n } from "@/lib/i18n";
 import { useDragDrop } from "@/hooks/useDragDrop";
@@ -387,6 +387,27 @@ const chatPlan = composeChatPlan({
     ? (modelThinkingLevels[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
     : null;
 
+  // 配置默认思考深度（settings.json defaultThinkingLevel）：引导页显示用
+  const [defaultThinkingLevel, setDefaultThinkingLevel] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/agent-settings", { cache: "no-store" });
+        if (!res.ok) return;
+        const body = (await res.json()) as { defaultThinkingLevel?: string | null };
+        if (!cancelled && typeof body.defaultThinkingLevel === "string") {
+          setDefaultThinkingLevel(body.defaultThinkingLevel);
+        }
+      } catch {
+        /* 非关键：引导页深度显示回退 auto */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.id]);
+
   const currentThinkingLevelMap = displayModelValue
     ? (modelThinkingLevelMaps[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
     : null;
@@ -415,7 +436,7 @@ const chatPlan = composeChatPlan({
       isCompacting={isCompacting}
       compactError={compactError}
       compactResult={compactResult}
-      thinkingLevel={thinkingLevel}
+      thinkingLevel={isNew ? ((defaultThinkingLevel ?? thinkingLevel) as ThinkingLevelOption) : thinkingLevel}
       onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
       availableThinkingLevels={availableThinkingLevels}
       thinkingLevelMap={currentThinkingLevelMap}

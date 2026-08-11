@@ -15,6 +15,8 @@ export function SettingsJsonEditor() {
   const [error, setError] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const [lineScrollTop, setLineScrollTop] = useState(0);
   /** 校验结果：null 未校验 / true 通过 / string 错误信息 */
   const [validation, setValidation] = useState<true | string | null>(null);
 
@@ -64,6 +66,25 @@ export function SettingsJsonEditor() {
       return t("settingsJson_invalid", { message });
     }
   }, [text, t]);
+
+  /** 格式化：JSON.parse → 缩进 2 回填。 */
+  const formatJson = useCallback(() => {
+    if (text === null) return;
+    const err = validateText();
+    if (err !== null) {
+      setValidation(err);
+      return;
+    }
+    try {
+      const parsed: unknown = JSON.parse(text);
+      setText(JSON.stringify(parsed, null, 2));
+      setValidation(true);
+      setError(null);
+      setSavedFlash(false);
+    } catch {
+      /* validateText 已拦截 */
+    }
+  }, [text, validateText]);
 
   /** 校验并落结果：true=通过，string=错误，用于按钮门控与提示。 */
   const runValidation = useCallback((): boolean => {
@@ -144,21 +165,64 @@ export function SettingsJsonEditor() {
         </div>
       )}
 
-      <textarea
-        value={text ?? ""}
-        onChange={(e) => {
-          setText(e.target.value);
-          setError(null);
-          setSavedFlash(false);
-          // 内容变更后需重新校验才可保存
-          setValidation(null);
-        }}
-        spellCheck={false}
-        aria-label={t("settingsJson_editorLabel")}
-        style={textareaStyle}
-      />
+      <div style={{ display: "flex", alignItems: "stretch", border: "1px solid var(--border)", borderRadius: 7, overflow: "hidden" }}>
+        {/* 行号 gutter（与 textarea 同步滚动） */}
+        <div
+          aria-hidden="true"
+          style={{
+            flexShrink: 0,
+            padding: "10px 6px 10px 10px",
+            background: "var(--bg-panel)",
+            borderRight: "1px solid var(--border)",
+            color: "var(--text-dim)",
+            fontSize: 12,
+            lineHeight: 1.55,
+            fontFamily: "var(--font-mono)",
+            textAlign: "right",
+            userSelect: "none",
+            overflow: "hidden",
+            maxHeight: "60vh",
+          }}
+        >
+          {(text ?? "").split("\n").map((_, i) => (
+            <div key={i} style={{ transform: `translateY(-${lineScrollTop}px)` }}>{i + 1}</div>
+          ))}
+        </div>
+        <textarea
+          ref={textareaRef}
+          value={text ?? ""}
+          onChange={(e) => {
+            setText(e.target.value);
+            setError(null);
+            setSavedFlash(false);
+            // 内容变更后需重新校验才可保存
+            setValidation(null);
+          }}
+          onScroll={(e) => setLineScrollTop(e.currentTarget.scrollTop)}
+          spellCheck={false}
+          aria-label={t("settingsJson_editorLabel")}
+          style={{ ...textareaStyle, border: "none", borderRadius: 0, minHeight: 320, maxHeight: "60vh" }}
+        />
+      </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+        <button
+          type="button"
+          onClick={() => void formatJson()}
+          disabled={text === null}
+          style={{
+            minHeight: 30,
+            padding: "0 12px",
+            borderRadius: 7,
+            border: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+            color: "var(--text)",
+            cursor: text === null ? "not-allowed" : "pointer",
+            fontSize: 12,
+          }}
+        >
+          {t("settingsJson_format")}
+        </button>
         <button
           type="button"
           onClick={() => void runValidation()}

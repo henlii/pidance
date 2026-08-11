@@ -917,14 +917,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       clearInput();
       return;
     }
+    // 队列/引导严格按配置：followup 无 onFollowUp 时不得降级为 steer（会打断当前运行）
     if (mode === "steer" && onSteer) {
       onSteer(msg, undefined);
     } else if (mode === "followup" && onFollowUp) {
       onFollowUp(msg, undefined);
     } else if (mode === "steer" && onFollowUp) {
       onFollowUp(msg, undefined);
-    } else if (mode === "followup" && onSteer) {
-      onSteer(msg, undefined);
     }
     clearInput();
   }, [value, attachedImages.length, hasReadyUploads, hasUploading, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, composeMessageWithUploads]);
