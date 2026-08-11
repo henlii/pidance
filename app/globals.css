@@ -1082,56 +1082,9 @@ span.linenumber {
   color: var(--text-dim);
 }
 
-/* 无延迟 tooltip：原生 title 继续作为兜底，细指针设备立即显示自绘提示。 */
+/* tooltip 改由 InstantTooltipHost（fixed portal）渲染，避免 overflow/transform 裁切。
+   保留 title 作为无 JS / 触摸兜底；此处不再画 ::after。 */
 @media (hover: hover) and (pointer: fine) {
-  .sidebar-icon-btn[data-tooltip],
-  .instant-tooltip[data-tooltip] {
-    position: relative;
-  }
-  .sidebar-icon-btn[data-tooltip]::after,
-  .instant-tooltip[data-tooltip]::after {
-    content: attr(data-tooltip);
-    position: absolute;
-    left: 50%;
-    top: calc(100% + 6px);
-    z-index: 9000;
-    max-width: 260px;
-    padding: 5px 8px;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-sm);
-    background: var(--bg-elevated);
-    color: var(--text);
-    box-shadow: var(--shadow-float);
-    font-size: 11px;
-    font-weight: 400;
-    line-height: 1.35;
-    white-space: nowrap;
-    pointer-events: none;
-    opacity: 0;
-    transform: translate(-50%, -2px);
-    transition: none;
-  }
-  .sidebar-icon-btn[data-tooltip]:hover::after,
-  .sidebar-icon-btn[data-tooltip]:focus-visible::after,
-  .instant-tooltip[data-tooltip]:hover::after,
-  .instant-tooltip[data-tooltip]:focus-visible::after {
-    opacity: 1;
-    transform: translate(-50%, 0);
-  }
-  .tooltip-up[data-tooltip]::after {
-    top: auto;
-    bottom: calc(100% + 6px);
-  }
-  .workspace-container .sidebar-icon-btn[data-tooltip]::after {
-    left: auto;
-    right: calc(100% + 6px);
-    top: 50%;
-    transform: translate(2px, -50%);
-  }
-  .workspace-container .sidebar-icon-btn[data-tooltip]:hover::after,
-  .workspace-container .sidebar-icon-btn[data-tooltip]:focus-visible::after {
-    transform: translate(0, -50%);
-  }
   .sidebar-indent-indicator {
     opacity: 0;
     pointer-events: none;

@@ -11,6 +11,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { getFileIcon, FolderIcon } from "./FileIcons";
 import { MoreVerticalIcon, PencilIcon } from "./session-sidebar/display";
 import {
@@ -331,7 +332,8 @@ function FileRowMenu({ entryPath, name, isDir, cwd, onRename, onCreate, t }: {
   t: ReturnType<typeof useI18n>["t"];
 }) {
   const [open, setOpen] = useState(false);
-  const [position, setPosition] = useState<{ top: number; right: number } | null>(null);
+  // left/top 视口坐标；portal 到 body，避开 workspace transform 导致 fixed 错位
+  const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const label = t("files_rowMenuLabel", { name });
@@ -351,13 +353,14 @@ function FileRowMenu({ entryPath, name, isDir, cwd, onRename, onCreate, t }: {
     const viewport = () => close();
     document.addEventListener("mousedown", outside);
     window.addEventListener("resize", viewport);
-    window.addEventListener("scroll", viewport, true);
+    // 仅窗口滚动关闭；不监听 capture 滚动（面板内滚动会误关）
+    window.addEventListener("scroll", viewport);
     const frame = requestAnimationFrame(() => menuRef.current?.querySelector<HTMLElement>("[role='menuitem']")?.focus());
     return () => {
       cancelAnimationFrame(frame);
       document.removeEventListener("mousedown", outside);
       window.removeEventListener("resize", viewport);
-      window.removeEventListener("scroll", viewport, true);
+      window.removeEventListener("scroll", viewport);
     };
   }, [close, open]);
 
@@ -365,12 +368,15 @@ function FileRowMenu({ entryPath, name, isDir, cwd, onRename, onCreate, t }: {
     if (open) { close(); return; }
     const rect = triggerRef.current?.getBoundingClientRect();
     if (rect) {
-      // 菜单靠近视口底部时向上翻转，避免最后几项被裁切。
       const estimatedMenuHeight = isDir ? 244 : 176;
+      const estimatedMenuWidth = 200;
       const top = rect.bottom + 4 + estimatedMenuHeight <= window.innerHeight
         ? rect.bottom + 4
         : Math.max(8, rect.top - estimatedMenuHeight - 4);
-      setPosition({ top, right: Math.max(8, window.innerWidth - rect.right) });
+      // 右对齐触发按钮，必要时向左夹紧
+      let left = rect.right - estimatedMenuWidth;
+      left = Math.max(8, Math.min(left, window.innerWidth - estimatedMenuWidth - 8));
+      setPosition({ top, left });
     }
     setOpen(true);
   };
@@ -407,12 +413,12 @@ function FileRowMenu({ entryPath, name, isDir, cwd, onRename, onCreate, t }: {
       >
         <MoreVerticalIcon size={12} />
       </button>
-      {open && position && (
+      {open && position && createPortal(
         <div
           ref={menuRef}
           role="menu"
           aria-label={label}
-          style={{ position: "fixed", top: position.top, right: position.right, zIndex: 600, minWidth: 190, padding: 4, background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: "var(--radius-md)", boxShadow: "var(--shadow-float)" }}
+          style={{ position: "fixed", top: position.top, left: position.left, zIndex: 10060, minWidth: 190, padding: 4, background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: "var(--radius-md)", boxShadow: "var(--shadow-float)" }}
         >
           <a
             role="menuitem"
@@ -469,7 +475,8 @@ function FileRowMenu({ entryPath, name, isDir, cwd, onRename, onCreate, t }: {
             {menuIcon(<PencilIcon size={13} />)}
             {t("files_rename")}
           </button>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

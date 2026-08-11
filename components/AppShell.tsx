@@ -14,6 +14,7 @@ import { SettingsView } from "./SettingsView";
 import { CommandPalette } from "./CommandPalette";
 import type { SettingsPageId } from "./settings-nav";
 import { AboutDialog } from "./AboutDialog";
+import { InstantTooltipHost } from "./InstantTooltipHost";
 import { UpdateBanner } from "./UpdateBanner";
 import { BranchNavigator } from "./BranchNavigator";
 import { useTheme } from "@/hooks/useTheme";
@@ -1306,6 +1307,7 @@ function AppShellInner() {
         onPluginsReloaded={() => setSessionKey((key) => key + 1)}
       />
     )}
+    <InstantTooltipHost />
     <UpdateBanner />
     <AboutDialog open={aboutOpen} onClose={() => setAboutOpen(false)} />
     <CommandPalette
