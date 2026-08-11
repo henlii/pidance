@@ -28,6 +28,7 @@ import {
   type SidebarPreferences,
 } from "@/lib/ui-preferences";
 import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
+import { ProjectAssetsEditor } from "./ProjectAssetsEditor";
 import {
   bumpGroupVisibleCount,
   deriveRecentSessions,
@@ -175,6 +176,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // 编辑项目弹窗：目标项目根 + 名称草稿（打开时由 alias/路径显示名初始化）
   const [editProjectRoot, setEditProjectRoot] = useState<string | null>(null);
   const [editProjectValue, setEditProjectValue] = useState("");
+  const [editProjectTab, setEditProjectTab] = useState<"name" | "rules" | "skills">("name");
   const editProjectInputRef = useRef<HTMLInputElement>(null);
   const mountedRef = useRef(true);
   const [wtNewForProject, setWtNewForProject] = useState<string | null>(null);
@@ -1240,6 +1242,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const handleOpenEditProject = useCallback((root: string) => {
     setOpenProjectMenuRoot(null);
     setEditProjectValue(prefs.projectAliases[root] ?? displayCwd(root, homeDir));
+    setEditProjectTab("name");
     setEditProjectRoot(root);
   }, [prefs.projectAliases, homeDir]);
 
@@ -1954,64 +1957,107 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         open={editProjectRoot !== null}
         onClose={() => setEditProjectRoot(null)}
         title={t("sidebar_editProject")}
-        width={440}
+        width={720}
         closeLabel={t("dialog_close")}
-        initialFocusRef={editProjectInputRef}
         description={editProjectRoot
           ? t("sidebar_editProjectDescription", { path: editProjectRoot })
           : undefined}
-        actions={
-          <>
-            <DialogButton onClick={() => setEditProjectRoot(null)}>{t("sidebar_cancel")}</DialogButton>
-            <DialogButton
-              primary
-              disabled={!editProjectValue.trim()}
-              onClick={handleSaveProjectAlias}
-            >
-              {t("sidebar_save")}
-            </DialogButton>
-          </>
-        }
       >
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            handleSaveProjectAlias();
-          }}
-        >
-          <label
-            htmlFor="edit-project-name"
-            style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--text)", marginBottom: 6 }}
-          >
-            {t("sidebar_projectName")}
-          </label>
-          <input
-            id="edit-project-name"
-            ref={editProjectInputRef}
-            value={editProjectValue}
-            onChange={(e) => setEditProjectValue(e.target.value)}
-            placeholder={t("sidebar_projectName")}
-            aria-label={t("sidebar_projectName")}
-            aria-invalid={!editProjectValue.trim()}
-            autoComplete="off"
-            spellCheck={false}
-            style={{
-              width: "100%",
-              height: 32,
-              fontSize: 12.5,
-              padding: "0 10px",
-              border: "1px solid var(--border)",
-              borderRadius: 7,
-              outline: "none",
-              background: "var(--bg-panel)",
-              color: "var(--text)",
-              boxSizing: "border-box",
+        {/* 编辑项目：名称 / 项目规则 / 项目技能 */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+          {([
+            ["name", t("sidebar_projectName")],
+            ["rules", t("sidebar_projectRules")],
+            ["skills", t("sidebar_projectSkills")],
+          ] as const).map(([tabId, label]) => (
+            <button
+              key={tabId}
+              type="button"
+              onClick={() => setEditProjectTab(tabId)}
+              style={{
+                minHeight: 28, padding: "0 12px", borderRadius: 6,
+                border: "1px solid var(--border)",
+                background: editProjectTab === tabId ? "var(--bg-selected)" : "var(--bg-panel)",
+                color: editProjectTab === tabId ? "var(--text)" : "var(--text-muted)",
+                cursor: "pointer", fontSize: 12, fontWeight: editProjectTab === tabId ? 600 : 400,
+              }}
+              aria-current={editProjectTab === tabId ? "page" : undefined}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {editProjectTab === "name" ? (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleSaveProjectAlias();
             }}
-          />
-          {!editProjectValue.trim() && (
-            <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--status-danger)" }}>{t("sidebar_projectNameRequired")}</div>
-          )}
-        </form>
+          >
+            <label
+              htmlFor="edit-project-name"
+              style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--text)", marginBottom: 6 }}
+            >
+              {t("sidebar_projectName")}
+            </label>
+            <input
+              id="edit-project-name"
+              ref={editProjectInputRef}
+              value={editProjectValue}
+              onChange={(e) => setEditProjectValue(e.target.value)}
+              placeholder={t("sidebar_projectName")}
+              aria-label={t("sidebar_projectName")}
+              aria-invalid={!editProjectValue.trim()}
+              autoComplete="off"
+              spellCheck={false}
+              style={{
+                width: "100%",
+                height: 32,
+                fontSize: 12.5,
+                padding: "0 10px",
+                border: "1px solid var(--border)",
+                borderRadius: 7,
+                outline: "none",
+                background: "var(--bg-panel)",
+                color: "var(--text)",
+                boxSizing: "border-box",
+              }}
+            />
+            {!editProjectValue.trim() && (
+              <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--status-danger)" }}>{t("sidebar_projectNameRequired")}</div>
+            )}
+            <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+              <button
+                type="submit"
+                disabled={!editProjectValue.trim()}
+                style={{
+                  minHeight: 30, padding: "0 14px", borderRadius: 7,
+                  border: "1px solid var(--accent)", background: "var(--accent)",
+                  color: "var(--accent-foreground)",
+                  cursor: !editProjectValue.trim() ? "not-allowed" : "pointer",
+                  fontSize: 12, fontWeight: 600,
+                  opacity: !editProjectValue.trim() ? 0.6 : 1,
+                }}
+              >
+                {t("sidebar_save")}
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditProjectRoot(null)}
+                style={{
+                  minHeight: 30, padding: "0 12px", borderRadius: 7,
+                  border: "1px solid var(--border)", background: "var(--bg-panel)",
+                  color: "var(--text-muted)", cursor: "pointer", fontSize: 12,
+                }}
+              >
+                {t("sidebar_cancel")}
+              </button>
+            </div>
+          </form>
+        ) : (
+          editProjectRoot && <ProjectAssetsEditor cwd={editProjectRoot} />
+        )}
       </ViewportDialog>
       </div>
     </RunningTimeContext.Provider>

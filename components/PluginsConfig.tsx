@@ -292,6 +292,130 @@ function SegmentedScope({
   );
 }
 
+function PluginConfigSection({ pluginSource }: { pluginSource: string }) {
+  const { t } = useI18n();
+  const [entries, setEntries] = useState<Array<{ plugin: string; path: string; content: string }> | null>(null);
+  const [editing, setEditing] = useState<{ path: string; content: string } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/plugin-configs", { cache: "no-store" });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      const body = (await res.json()) as { entries?: Array<{ plugin: string; path: string; content: string }> };
+      setEntries(body.entries ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (loading && !entries) {
+    return <div style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("common_loading")}</div>;
+  }
+  if (!entries || entries.length === 0) {
+    return <div style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("pluginConfigs_none")}</div>;
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {error && <div style={{ fontSize: 12, color: "var(--status-danger)" }}>{error}</div>}
+      {entries.map((entry) => (
+        <div key={entry.path} style={{ border: "1px solid var(--border)", borderRadius: 7, overflow: "hidden" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", background: "var(--bg-panel)", borderBottom: "1px solid var(--border)" }}>
+            <span style={{ fontSize: 11, color: "var(--text)", fontFamily: "var(--font-mono)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+              {entry.plugin}/config.json
+            </span>
+            {editing?.path === entry.path ? (
+              <button
+                type="button"
+                onClick={() => setEditing(null)}
+                style={{ fontSize: 11, color: "var(--text-muted)", cursor: "pointer", background: "none", border: "none" }}
+              >
+                {t("common_cancel")}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setEditing({ path: entry.path, content: entry.content })}
+                style={{ fontSize: 11, color: "var(--accent)", cursor: "pointer", background: "none", border: "none" }}
+              >
+                {t("pluginConfigs_edit")}
+              </button>
+            )}
+          </div>
+          {editing?.path === entry.path ? (
+            <div style={{ padding: 8 }}>
+              <textarea
+                value={editing.content}
+                onChange={(e) => setEditing({ ...editing, content: e.target.value })}
+                spellCheck={false}
+                style={{
+                  width: "100%", minHeight: 140, padding: 8, borderRadius: 6,
+                  border: "1px solid var(--border)", background: "var(--bg)",
+                  color: "var(--text)", fontSize: 12, fontFamily: "var(--font-mono)",
+                  lineHeight: 1.5, boxSizing: "border-box", resize: "vertical",
+                }}
+              />
+              <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={async () => {
+                    setSaving(true);
+                    setError(null);
+                    try {
+                      const res = await fetch("/api/plugin-configs", {
+                        method: "PUT",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ path: editing.path, content: editing.content }),
+                      });
+                      if (!res.ok) {
+                        const body = (await res.json().catch(() => ({}))) as { error?: string };
+                        throw new Error(body.error ?? `HTTP ${res.status}`);
+                      }
+                      setEntries((prev) => prev?.map((e) => (e.path === editing.path ? { ...e, content: editing.content } : e)) ?? null);
+                      setEditing(null);
+                    } catch (e) {
+                      setError(e instanceof Error ? e.message : String(e));
+                    } finally {
+                      setSaving(false);
+                    }
+                  }}
+                  style={{
+                    minHeight: 28, padding: "0 12px", borderRadius: 6,
+                    border: "1px solid var(--accent)", background: "var(--accent)",
+                    color: "var(--accent-foreground)", cursor: saving ? "not-allowed" : "pointer",
+                    fontSize: 12, fontWeight: 600, opacity: saving ? 0.6 : 1,
+                  }}
+                >
+                  {saving ? t("common_saving") : t("common_save")}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <pre style={{ margin: 0, padding: "6px 10px", fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", maxHeight: 120, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+              {entry.content.slice(0, 400)}{entry.content.length > 400 ? "…" : ""}
+            </pre>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function AddPluginPanel({
   cwd,
   source,
@@ -416,6 +540,116 @@ function AddPluginPanel({
       {actionError && (
         <div style={{ fontSize: 12, color: "var(--status-danger)", whiteSpace: "pre-wrap" }}>
           {actionError}
+        </div>
+      )}
+
+      {/* 插件库搜索（npm registry） */}
+      <div style={{ borderTop: "1px solid var(--border)", paddingTop: 14, marginTop: 4 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", marginBottom: 8 }}>
+          {t("plugins_searchLibrary")}
+        </div>
+        <PluginLibrarySearch onPick={(name) => onSourceChange(`npm:${name}`)} />
+      </div>
+    </div>
+  );
+}
+
+function PluginLibrarySearch({ onPick }: { onPick: (name: string) => void }) {
+  const { t } = useI18n();
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<Array<{ name: string; version: string; description: string }> | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const runSearch = useCallback(async () => {
+    const q = query.trim();
+    if (!q) return;
+    setSearching(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/plugins/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: q }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      const body = (await res.json()) as { results?: Array<{ name: string; version: string; description: string }> };
+      setResults(body.results ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setResults(null);
+    } finally {
+      setSearching(false);
+    }
+  }, [query]);
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void runSearch();
+          }}
+          placeholder={t("plugins_searchLibraryPlaceholder")}
+          aria-label={t("plugins_searchLibrary")}
+          style={{
+            flex: 1, height: 30, padding: "0 10px", borderRadius: 6,
+            border: "1px solid var(--border)", background: "var(--bg)",
+            color: "var(--text)", fontSize: 12, outline: "none",
+          }}
+        />
+        <button
+          type="button"
+          onClick={() => void runSearch()}
+          disabled={searching || !query.trim()}
+          style={{
+            minHeight: 30, padding: "0 12px", borderRadius: 6,
+            border: "1px solid var(--border)", background: "var(--bg-panel)",
+            color: "var(--text)", cursor: searching || !query.trim() ? "not-allowed" : "pointer",
+            fontSize: 12, opacity: searching || !query.trim() ? 0.5 : 1,
+          }}
+        >
+          {searching ? t("common_loading") : t("common_search")}
+        </button>
+      </div>
+      {error && <div style={{ fontSize: 11, color: "var(--status-danger)", marginTop: 6 }}>{error}</div>}
+      {results && results.length === 0 && !error && (
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 6 }}>{t("plugins_searchEmpty")}</div>
+      )}
+      {results && results.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8, maxHeight: 240, overflowY: "auto" }}>
+          {results.map((r) => (
+            <button
+              key={r.name}
+              type="button"
+              onClick={() => onPick(r.name)}
+              style={{
+                textAlign: "left", padding: "7px 9px", borderRadius: 6,
+                border: "1px solid var(--border)", background: "var(--bg-panel)",
+                color: "var(--text)", cursor: "pointer", fontSize: 11,
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-panel)"; }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontFamily: "var(--font-mono)", fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {r.name}
+                </span>
+                <span style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", flexShrink: 0 }}>v{r.version}</span>
+              </div>
+              {r.description && (
+                <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {r.description}
+                </div>
+              )}
+            </button>
+          ))}
         </div>
       )}
     </div>
@@ -619,6 +853,14 @@ function PackageDetail({
           {actionError}
         </div>
       )}
+
+      {/* 插件配置文件（通用扫描 config.json；JSON 校验后保存） */}
+      <div style={{ borderTop: "1px solid var(--border)", paddingTop: 16, marginTop: 4 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
+          {t("pluginConfigs_section")}
+        </div>
+        <PluginConfigSection pluginSource={pkg.source} />
+      </div>
     </div>
   );
 }
