@@ -497,7 +497,7 @@ export const zhCN: Record<TranslationKey, string> = {
   app_setupAddModel: "通过底部的设置按钮添加模型",
   app_systemPromptReadOnlyHint: "只读会话不提供系统提示词。",
   app_systemPromptEmptyHint: "系统提示词为空。",
-  app_systemPromptAfterMessageHint: "外部 Pi 运行时未提供系统提示词（RPC 协议不含该字段）。",
+  app_systemPromptAfterMessageHint: "当前会话未加载系统提示词（需 live 会话；同进程 SDK 会在 get_state 中返回）。",
   // sidebar
   sidebar_expandProjectNamed: "展开 {project}",
   sidebar_collapseProjectNamed: "折叠 {project}",

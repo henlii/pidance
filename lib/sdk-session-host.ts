@@ -432,6 +432,8 @@ export class SdkSessionHost {
       steeringMode: session.steeringMode,
       followUpMode: session.followUpMode,
       thinkingLevel: session.thinkingLevel,
+      // SDK 同进程可直接投影完整 system prompt（RPC 时代协议不含该字段）
+      systemPrompt: session.systemPrompt ?? "",
       model: model
         ? { id: model.id, provider: model.provider }
         : undefined,

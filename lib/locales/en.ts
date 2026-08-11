@@ -497,7 +497,7 @@ export const en = {
   app_setupAddModel: "Add a model using the Settings button at the bottom",
   app_systemPromptReadOnlyHint: "System prompt is not available for read-only sessions.",
   app_systemPromptEmptyHint: "The system prompt is empty.",
-  app_systemPromptAfterMessageHint: "The external Pi runtime does not expose the system prompt (not part of the RPC protocol).",
+  app_systemPromptAfterMessageHint: "System prompt is not loaded for this session (requires a live session; the in-process SDK returns it via get_state).",
   // sidebar
   sidebar_expandProjectNamed: "Expand {project}",
   sidebar_collapseProjectNamed: "Collapse {project}",
