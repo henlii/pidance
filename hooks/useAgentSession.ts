@@ -365,6 +365,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [forkingEntryId, setForkingEntryId] = useState<string | null>(null);
   const [currentModelOverride, setCurrentModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
   const [pendingModel, setPendingModel] = useState<{ provider: string; modelId: string } | null>(null);
+  /** pendingModel 的 ref 副本（handleSend 闭包读取最新值） */
+  const pendingModelRef = useRef<{ provider: string; modelId: string } | null>(null);
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactError, setCompactError] = useState<string | null>(null);
   const [compactResult, setCompactResult] = useState<CompactResultInfo | null>(null);
@@ -1622,6 +1624,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       } else if (session) {
         sentSessionId = session.id;
         await ensureEventsConnected(session.id);
+        // 下一轮生效：应用切换前记录的 pending 模型（引导消息不经过此路径）
+        const pendingModelToApply = pendingModelRef.current;
+        if (pendingModelToApply) {
+          pendingModelRef.current = null;
+          setPendingModel(null);
+          try {
+            await sendAgentCommand(session.id, {
+              type: "set_model",
+              provider: pendingModelToApply.provider,
+              modelId: pendingModelToApply.modelId,
+            });
+          } catch (e) {
+            console.error("Failed to apply pending model:", e);
+          }
+        }
         await sendAgentCommand(session.id, {
           type: "prompt",
           message,
@@ -1728,7 +1745,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 本地立即同步显示（选择路径不经过 handleThinkingLevelChange）
       if (thinkingLevel) setThinkingLevel(thinkingLevel as ThinkingLevelOption);
       try {
-        if (thinkingLevel) {
+        if (thinkingLevel && thinkingLevel !== "auto") {
           await sendAgentCommand(sid, { type: "set_thinking_level", level: thinkingLevel });
         }
         await sendAgentCommand(sid, { type: "set_model", provider, modelId });
@@ -1742,14 +1759,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 本地立即同步显示（选择路径不经过 handleThinkingLevelChange）
     if (thinkingLevel) setThinkingLevel(thinkingLevel as ThinkingLevelOption);
     try {
-      if (thinkingLevel) {
+      // 思考深度立即应用（下次 prompt 生效）；auto 表示用配置默认，不发送
+      if (thinkingLevel && thinkingLevel !== "auto") {
         await sendAgentCommand(sid, { type: "set_thinking_level", level: thinkingLevel });
       }
-      await sendAgentCommand(sid, { type: "set_model", provider, modelId });
-      setCurrentModelOverride({ provider, modelId });
     } catch (e) {
-      console.error("Failed to set model:", e);
+      console.error("Failed to set thinking level:", e);
     }
+    // 模型切换下一轮生效：只记 pending，不立即 set_model；
+    // 引导（steer）/当前轮保持原模型，下一轮 prompt 前应用。
+    setPendingModel({ provider, modelId });
+    pendingModelRef.current = { provider, modelId };
   }, [isNew, isReadOnly, setNewSessionModel]);
 
   const handleCompact = useCallback(async () => {

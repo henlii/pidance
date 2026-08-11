@@ -148,8 +148,9 @@ function compareModelOptions(a: ModelOption, b: ModelOption): number {
     || MODEL_OPTION_COLLATOR.compare(a.modelId, b.modelId);
 }
 
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const THINKING_LEVELS = ["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const THINKING_LEVEL_DESC: Record<typeof THINKING_LEVELS[number], "input_usePiDefault" | "input_thinkingOff" | "input_thinkingMinimal" | "input_thinkingLow" | "input_thinkingMedium" | "input_thinkingHigh" | "input_thinkingXhigh" | "input_thinkingMax"> = {
+  auto: "input_usePiDefault",
   off: "input_thinkingOff",
   minimal: "input_thinkingMinimal",
   low: "input_thinkingLow",
