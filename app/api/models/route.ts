@@ -1,17 +1,19 @@
 /**
- * GET /api/models — 自管 models.json + settings + auth-store（不依赖 ModelRuntime）。
- * 仅列出用户 models.json 中的自定义 provider 模型。
+ * GET /api/models — models.json 自定义模型 + 已配置凭据的内置渠道模型。
+ * 不依赖 ModelRuntime；内置目录来自 pi-ai providers/all（经 pi-builtin-models）。
  */
 
 import { stat } from "fs/promises";
 import { resolve } from "path";
 import { getAuthPath, getModelsPath, getSettingsPath } from "@/lib/pi-paths";
-import { isProviderConfigured } from "@/lib/auth-store";
+import { isProviderConfigured, listCredentialProviders } from "@/lib/auth-store";
 import { loadModelsWithCache, type ModelsData } from "@/lib/models-cache";
 import {
-  buildModelsDataFromDisk,
+  buildModelsDataFromCatalog,
   listModelsFromModelsJson,
+  mergeCatalogModels,
 } from "@/lib/models-catalog";
+import { listBuiltinCatalogModels } from "@/lib/pi-builtin-models";
 import { loadSettingsFile } from "@/lib/settings-store";
 
 export const dynamic = "force-dynamic";
@@ -61,9 +63,16 @@ async function loadModels(_cwd: string): Promise<ModelsData> {
     ? (settings.enabledModels as string[])
     : undefined;
 
-  const catalog = listModelsFromModelsJson(modelsPath);
+  const custom = listModelsFromModelsJson(modelsPath);
   const authConfigured: Record<string, boolean> = {};
-  for (const m of catalog) {
+  // 先登记 auth.json 已有凭据的 provider（含 deepseek 等内置渠道）
+  for (const providerId of listCredentialProviders(authPath)) {
+    authConfigured[providerId] = isProviderConfigured(providerId, {
+      authPath,
+      modelsPath,
+    });
+  }
+  for (const m of custom) {
     if (authConfigured[m.provider] === undefined) {
       authConfigured[m.provider] = isProviderConfigured(m.provider, {
         authPath,
@@ -72,8 +81,9 @@ async function loadModels(_cwd: string): Promise<ModelsData> {
     }
   }
 
-  const base = buildModelsDataFromDisk({
-    modelsPath,
+  const builtins = await listBuiltinCatalogModels();
+  const catalog = mergeCatalogModels(custom, builtins, authConfigured);
+  const base = buildModelsDataFromCatalog(catalog, {
     settingsPath,
     authConfigured,
   });

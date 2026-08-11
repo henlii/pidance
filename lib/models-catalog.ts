@@ -1,6 +1,6 @@
 /**
  * 从 models.json 构建模型列表（不依赖 ModelRuntime）。
- * 仅覆盖用户 models.json 中的自定义 provider；内置 pi 模型 catalog 仍可由外部 pi 提供。
+ * 自定义 provider 来自 models.json；已配置凭据的内置渠道由 pi-builtin-models 合并。
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -89,15 +89,39 @@ export function thinkingLevelsFor(model: CatalogModel): string[] {
 }
 
 /**
- * 仅从 models.json + settings 构建 ModelsData（不含内置 provider catalog）。
+ * 合并 models.json 自定义模型与已配置凭据的内置渠道模型。
+ * 同 provider:id 时 models.json 覆盖内置（用户自定义端点优先）。
+ */
+export function mergeCatalogModels(
+  custom: readonly CatalogModel[],
+  builtins: readonly CatalogModel[],
+  authConfigured: Record<string, boolean>,
+): CatalogModel[] {
+  const keys = new Set(custom.map((m) => `${m.provider}:${m.id}`));
+  const out: CatalogModel[] = [...custom];
+  for (const m of builtins) {
+    const key = `${m.provider}:${m.id}`;
+    if (keys.has(key)) continue;
+    // 仅纳入已配置凭据的内置渠道，避免把全部 40+ 供应商模型塞进选择器
+    if (authConfigured[m.provider] === true) {
+      out.push(m);
+      keys.add(key);
+    }
+  }
+  return out;
+}
+
+/**
+ * 从已合并 catalog + settings 构建 ModelsData。
  * authConfigured 由调用方注入（auth-store）。
  */
-export function buildModelsDataFromDisk(options: {
-  modelsPath?: string;
-  settingsPath?: string;
-  authConfigured?: Record<string, boolean>;
-}): ModelsData {
-  const catalog = listModelsFromModelsJson(options.modelsPath);
+export function buildModelsDataFromCatalog(
+  catalog: readonly CatalogModel[],
+  options: {
+    settingsPath?: string;
+    authConfigured?: Record<string, boolean>;
+  } = {},
+): ModelsData {
   const settings = loadSettingsFile(options.settingsPath ?? getSettingsPath());
   const defaultProvider =
     typeof settings.defaultProvider === "string" ? settings.defaultProvider : null;
@@ -129,7 +153,7 @@ export function buildModelsDataFromDisk(options: {
     thinkingLevels[key] = thinkingLevelsFor(m);
     if (m.thinkingLevelMap) thinkingLevelMaps[key] = m.thinkingLevelMap;
     if (authConfigured[m.provider] === undefined) {
-      // 调用方未提供时：models.json 有 provider 即先标 false，由上层补全
+      // 调用方未提供时：catalog 有 provider 即先标 false，由上层补全
       authConfigured[m.provider] = false;
     }
   }
@@ -156,4 +180,19 @@ export function buildModelsDataFromDisk(options: {
     thinkingLevelMaps,
     authConfigured,
   };
+}
+
+/**
+ * 仅从 models.json + settings 构建 ModelsData（不含内置 provider catalog）。
+ * authConfigured 由调用方注入（auth-store）。
+ */
+export function buildModelsDataFromDisk(options: {
+  modelsPath?: string;
+  settingsPath?: string;
+  authConfigured?: Record<string, boolean>;
+}): ModelsData {
+  return buildModelsDataFromCatalog(listModelsFromModelsJson(options.modelsPath), {
+    settingsPath: options.settingsPath,
+    authConfigured: options.authConfigured,
+  });
 }

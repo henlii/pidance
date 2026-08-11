@@ -7,6 +7,7 @@ import { isProviderConfigured } from "@/lib/auth-store";
 import { BUILTIN_API_KEY_PROVIDERS } from "@/lib/builtin-api-key-providers";
 import { OAUTH_PROVIDER_IDS } from "@/lib/oauth-providers";
 import { listModelsFromModelsJson } from "@/lib/models-catalog";
+import { listBuiltinCatalogModels } from "@/lib/pi-builtin-models";
 import { getModelsPath } from "@/lib/pi-paths";
 import { existsSync, readFileSync } from "node:fs";
 
@@ -36,9 +37,17 @@ function providersWithModelsJsonKey(): Set<string> {
 
 export async function GET() {
   const models = listModelsFromModelsJson();
+  const builtins = await listBuiltinCatalogModels();
   const modelsJsonKey = providersWithModelsJsonKey();
   const modelCountByProvider = new Map<string, number>();
   for (const m of models) {
+    modelCountByProvider.set(m.provider, (modelCountByProvider.get(m.provider) ?? 0) + 1);
+  }
+  // 内置渠道模型计数：models.json 未覆盖时补上（选择器同规则）
+  const customKeys = new Set(models.map((m) => `${m.provider}:${m.id}`));
+  for (const m of builtins) {
+    if (customKeys.has(`${m.provider}:${m.id}`)) continue;
+    if (!isProviderConfigured(m.provider)) continue;
     modelCountByProvider.set(m.provider, (modelCountByProvider.get(m.provider) ?? 0) + 1);
   }
 
