@@ -208,7 +208,6 @@ export function UpdateBanner() {
   }, [check, t]);
 
   const color = "var(--accent)";
-  const pct = Math.max(0, Math.min(100, progress?.percent ?? 0));
   const busy = overlay && doneOk === null;
 
   return (
@@ -324,38 +323,26 @@ export function UpdateBanner() {
               </div>
             )}
 
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--text)" }}>
-                <span>{progress ? t(phaseLabelKey(progress.phase)) : t("update_phasePreparing")}</span>
-                <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text-muted)" }}>{Math.round(pct)}%</span>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "center", textAlign: "center" }}>
+              <div style={{ fontSize: 14, fontWeight: 650, color: "var(--text)" }}>
+                {progress ? t(phaseLabelKey(progress.phase)) : t("update_phasePreparing")}
               </div>
-              <div
-                style={{
-                  height: 10,
-                  borderRadius: 999,
-                  background: "var(--bg-hover)",
-                  overflow: "hidden",
-                  border: "1px solid var(--border)",
-                }}
-              >
-                <div
-                  style={{
-                    height: "100%",
-                    width: `${pct}%`,
-                    borderRadius: 999,
-                    background:
-                      progress?.phase === "error"
-                        ? "var(--status-danger)"
-                        : progress?.phase === "done"
-                          ? "var(--status-success)"
-                          : "var(--accent)",
-                    transition: "width 0.35s ease",
-                  }}
-                />
-              </div>
-              <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5, minHeight: 32 }}>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.55, minHeight: 36, maxWidth: 320 }}>
                 {progress?.message || t("update_phasePreparing")}
               </div>
+              {busy && (
+                <div
+                  aria-hidden="true"
+                  style={{
+                    width: 28,
+                    height: 28,
+                    borderRadius: "50%",
+                    border: "2px solid var(--border)",
+                    borderTopColor: "var(--accent)",
+                    animation: "sidebar-running-spin 0.9s linear infinite",
+                  }}
+                />
+              )}
             </div>
 
             {resultMsg && doneOk !== null && (
