@@ -160,7 +160,9 @@ export type SessionService = {
   ): Promise<{ session: LiveAgentSession; realSessionId: string }>;
   send(sessionId: string, command: SessionCommand): Promise<unknown>;
   /**
-   * 类型安全的持久活动写入：ensureLive（含 readOnly 门禁）后调用 wrapper.appendActivity。
+   * 类型安全的持久活动写入。
+   * 单写者：仅当 live 暴露 in-process SessionManager（inner.sessionManager）时走 live.appendActivity；
+   * 外部 RPC 等无 inner 的 live 必须先 destroy 再磁盘写，不得与外部 pi 并发写同一 JSONL。
    * 不得绕过 readOnly；customType 固定为 pidance.activity。
    */
   appendActivity(
@@ -352,12 +354,23 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
     async appendActivity(sessionId, input) {
       // readOnly（subagent 持久化）拒绝写，且不启动任何会话
       await requireWritableSession(sessionId, service.isReadOnly);
-      // 单写者：外部 RPC 会话无 appendActivity 方法；若 live 存活必须先停进程再写盘，
-      // 不得与外部 pi 同时写同一 JSONL。inprocess wrapper 有原生方法可直接调用。
-      const live = service.getLive(sessionId);
-      const appendOnWrapper = (live as { appendActivity?: (i: SessionActivityInput) => { entryId: string; activity: SessionActivity } } | undefined)?.appendActivity;
-      if (live?.isAlive() && typeof appendOnWrapper === "function") {
-        return appendOnWrapper.call(live, input);
+      // 单写者：
+      // - 仅 in-process live（暴露 inner.sessionManager）可直接 appendActivity（SDK SessionManager 写）
+      // - ExternalRpcSession 虽有 appendActivity，但底层是磁盘 SessionFile，不得与外部 pi 并发写
+      // - 无 inner 时必须先 destroy live，再离线写盘
+      const live = service.getLive(sessionId) as
+        | {
+            isAlive: () => boolean;
+            appendActivity?: (i: SessionActivityInput) =>
+              | { entryId: string; activity: SessionActivity }
+              | Promise<{ entryId: string; activity: SessionActivity }>;
+            inner?: { sessionManager?: unknown };
+          }
+        | undefined;
+      const hasInProcessManager = Boolean(live?.inner?.sessionManager);
+      const appendOnWrapper = live?.appendActivity;
+      if (live?.isAlive() && hasInProcessManager && typeof appendOnWrapper === "function") {
+        return await appendOnWrapper.call(live, input);
       }
       if (live?.isAlive()) {
         service.destroy(sessionId);
@@ -447,53 +460,21 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         throw new Error("entryId is required");
       }
       const trimmedId = entryId.trim();
-      const wrapper = deps.getRpcSession(sessionId) as
-        | { isAlive?: () => boolean; isRunning?: () => boolean; inner?: {
-            isBashRunning?: boolean;
-            sessionManager: {
-              getLeafId: () => string | null;
-              getEntry: (id: string) => { type?: string; message?: { role?: string } } | undefined;
-              branch: (id: string) => void;
-              buildSessionContext: () => { messages: unknown[] };
-            };
-            extensionRunner?: { emit?: (e: unknown) => Promise<{ cancel?: boolean } | void> | void };
-            agent?: { state?: { messages?: unknown[] } };
-          } }
+
+      // 磁盘 branch 前：任何仍存活的 live（含外部 RPC）必须先 destroy，保证单写者。
+      // 外部 RPC 正常路径会在 send 内 quiesce 后 isAlive=false；此处是直连/竞态防护。
+      const liveBefore = deps.getRpcSession(sessionId) as
+        | { isAlive?: () => boolean; inner?: { isBashRunning?: boolean } }
         | undefined;
-
-      // 外部 RPC：进程已 quiesce 或无 inner → 纯磁盘 branch
-      const inner = wrapper?.inner;
-      if (!inner?.sessionManager) {
-        const filePath = await deps.resolveSessionPath(sessionId);
-        if (!filePath) throw new Error("Session not found");
-        const sessionManager = openSessionFile(filePath);
-        const oldLeafId = sessionManager.getLeafId();
-        // 目标 = 当前 leaf：无导航语义，不写 sidecar（避免固化无变化值）
-        if (trimmedId === oldLeafId) return { cancelled: false };
-        // 目标 = 文件末尾（外部 pi 默认 leaf）：清除过期 sidecar。
-        // 只跳过写入会残留旧分支指针，下次磁盘 open 恢复旧 leaf，
-        // 导航到最新分支的意图丢失（UI 弹回旧分支）。
-        if (trimmedId === sessionManager.getLastEntryId()) {
-          clearLeafSidecar(filePath);
-          return { cancelled: false };
+      if (liveBefore?.isAlive?.()) {
+        if (liveBefore.inner?.isBashRunning) {
+          throw new Error("Cannot switch branch while a shell command is running");
         }
-        if (!sessionManager.getEntry(trimmedId)) throw new Error(`Entry ${trimmedId} not found`);
-        try {
-          sessionManager.branch(trimmedId);
-          return { cancelled: false };
-        } finally {
-          deps.invalidateSessionListCache();
-        }
+        service.destroy(sessionId);
       }
 
-      // 有 inner 时也走磁盘 SessionFile（不再依赖 SDK SessionManager / collectEntriesForBranchSummary）
-      if (inner.isBashRunning) {
-        throw new Error("Cannot switch branch while a shell command is running");
-      }
       const filePath = await deps.resolveSessionPath(sessionId);
       if (!filePath) throw new Error("Session not found");
-      // 先 destroy live，避免进程与磁盘 leaf 分叉
-      deps.getRpcSession(sessionId)?.destroy();
       const sessionManager = openSessionFile(filePath);
       const oldLeafId = sessionManager.getLeafId();
       // 目标 = 当前 leaf：无导航语义，不写 sidecar（避免固化无变化值）
@@ -519,50 +500,20 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         throw new Error("assistantEntryId is required");
       }
       const trimmedId = assistantEntryId.trim();
-      const wrapper = deps.getRpcSession(sessionId) as
-        | {
-            inner?: {
-              isBashRunning?: boolean;
-              sessionManager: {
-                getLeafId: () => string | null;
-                getBranch: (id: string) => Array<{ id: string; type?: string; message?: { role?: string } }>;
-                getEntry: (id: string) => { type?: string; message?: { role?: string } } | undefined;
-              };
-              navigateTree: (id: string, opts: { summarize: boolean }) => Promise<{ cancelled: boolean }>;
-            };
-          }
+
+      // 磁盘 branch 前：存活 live 先 destroy（与 selectLeafExact 同一单写者护栏）
+      const liveBefore = deps.getRpcSession(sessionId) as
+        | { isAlive?: () => boolean; inner?: { isBashRunning?: boolean } }
         | undefined;
-      const inner = wrapper?.inner;
-
-      // 外部 RPC / 无 inner：磁盘 branch 到 turnEnd
-      if (!inner?.sessionManager) {
-        const filePath = await deps.resolveSessionPath(sessionId);
-        if (!filePath) throw new Error("Session not found");
-        const sessionManager = openSessionFile(filePath);
-        const leafId = sessionManager.getLeafId();
-        if (!leafId) throw new Error("Session has no leaf");
-        const path = sessionManager.getBranch(leafId);
-        const targetEntry = sessionManager.getEntry(trimmedId);
-        if (!targetEntry) throw new Error("Entry not found");
-        if (targetEntry.type !== "message" || (targetEntry as { message?: { role?: string } }).message?.role !== "assistant") {
-          throw new Error("Only assistant messages can be branched from");
+      if (liveBefore?.isAlive?.()) {
+        if (liveBefore.inner?.isBashRunning) {
+          throw new Error("Cannot branch while a shell command is running");
         }
-        const turnEnd = computeTurnEnd(path as never, trimmedId);
-        try {
-          sessionManager.branch(turnEnd);
-          return { cancelled: false };
-        } finally {
-          deps.invalidateSessionListCache();
-        }
+        service.destroy(sessionId);
       }
 
-      // 有 inner 时也走磁盘（外部 RPC / 卸 SDK）
-      if (inner.isBashRunning) {
-        throw new Error("Cannot branch while a shell command is running");
-      }
       const filePath = await deps.resolveSessionPath(sessionId);
       if (!filePath) throw new Error("Session not found");
-      deps.getRpcSession(sessionId)?.destroy();
       const sessionManager = openSessionFile(filePath);
       const leafId = sessionManager.getLeafId();
       if (!leafId) throw new Error("Session has no leaf");
@@ -607,6 +558,10 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       const inner = wrapper?.inner;
 
       // 统一磁盘 SessionFile（不依赖 pi npm SessionManager）
+      // 读/分叉源文件前先停 live，避免外部 pi 仍在 append 时读到半写状态
+      if (deps.getRpcSession(sessionId)?.isAlive()) {
+        service.destroy(sessionId);
+      }
       const filePath =
         (inner?.sessionFile || wrapper?.sessionFile) ??
         (await deps.resolveSessionPath(sessionId));

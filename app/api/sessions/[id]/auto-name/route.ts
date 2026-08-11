@@ -57,12 +57,16 @@ export async function POST(
     }
 
     // 统一写名路径：优先 send set_session_name（wrapper 与 ExternalRpcSession 均支持）；
-    // 会话进程不可用（如外部 RPC 已退出）时回退磁盘 SessionFile 直写。
+    // 会话进程不可用时回退磁盘 SessionFile，但必须先 destroy live，保证单写者。
     try {
       await session.send({ type: "set_session_name", name: result.title });
     } catch {
       const sessionFile = session.sessionFile;
       if (!sessionFile) throw new Error("Session file is missing");
+      // 单写者：任何仍存活的 live 先停，再离线写盘；禁止与外部 pi 并发 append
+      if (session.isAlive()) {
+        sessionService.destroy(id);
+      }
       openSessionFile(sessionFile).appendSessionInfo(result.title);
     }
     invalidateSessionListCache();

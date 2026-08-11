@@ -684,7 +684,14 @@ export class ExternalRpcSession {
       }
 
       case "append_activity": {
-        return this.appendActivity(command as Record<string, unknown>);
+        // 单写者：磁盘 SessionFile 写前必须 quiesce 外部 pi，写后 destroy。
+        // 不得在进程存活时 openSessionFile + append（会与外部 pi 交错写 JSONL）。
+        await this.quiesceForTreeWrite();
+        try {
+          return this.appendActivity(command as Record<string, unknown>);
+        } finally {
+          this.destroy();
+        }
       }
 
       // —— 产品树操作：quiesce → SessionFile → destroy —— //
@@ -882,7 +889,8 @@ export class ExternalRpcSession {
 
   /**
    * 持久活动写入：磁盘 SessionFile.appendCustomEntry。
-   * 外部 RPC 无 inner；与 inprocess wrapper.appendActivity 同语义。
+   * 调用方必须先 quiesce 外部 pi（send append_activity 已保证）；
+   * SessionService 对无 inner 的 live 会 destroy 后走离线写盘，不再调用本方法。
    */
   appendActivity(input: Record<string, unknown> | unknown): {
     entryId: string;
@@ -890,6 +898,11 @@ export class ExternalRpcSession {
   } {
     if (!this.realSessionFile) {
       throw new Error("Cannot append activity: session file missing");
+    }
+    if (this.process?.isAlive()) {
+      throw new Error(
+        "Cannot append activity while external RPC process is alive; quiesce first",
+      );
     }
     const activity =
       input &&
