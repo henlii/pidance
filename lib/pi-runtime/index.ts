@@ -66,9 +66,3 @@ export {
   type ContextUsageSnapshot,
   type QueuedMessagesSnapshot,
 } from "./project-rpc-state";
-export {
-  installLatestPiGlobal,
-  packageDirFromNpmRoot,
-  PI_NPM_PACKAGE,
-  type InstallPiResult,
-} from "./install-pi";
