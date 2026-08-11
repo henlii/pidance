@@ -37,6 +37,23 @@ export type PidanceUpdateApplyResult = {
   restarted?: boolean;
 };
 
+/** 升级阶段（供 SSE / 全屏进度条） */
+export type UpgradePhase =
+  | "preparing"
+  | "downloading"
+  | "installing"
+  | "linking"
+  | "restarting"
+  | "done"
+  | "error";
+
+export type UpgradeProgressEvent = {
+  phase: UpgradePhase;
+  /** 0–100 粗粒度进度 */
+  percent: number;
+  message: string;
+};
+
 type CacheEntry = { latest: string; ts: number };
 
 declare global {
@@ -266,10 +283,19 @@ export async function applyPidanceUpdate(options?: {
   fetchImpl?: typeof fetch;
   execFileImpl?: typeof execFileAsync;
   restartService?: boolean;
+  onProgress?: (event: UpgradeProgressEvent) => void;
 }): Promise<PidanceUpdateApplyResult> {
   const cwd = options?.cwd ?? process.cwd();
   const env = options?.env ?? process.env;
   const exec = options?.execFileImpl ?? execFileAsync;
+  const report = (phase: UpgradePhase, percent: number, message: string) => {
+    try {
+      options?.onProgress?.({ phase, percent, message });
+    } catch {
+      /* ignore listener errors */
+    }
+  };
+  report("preparing", 5, "准备升级…");
   const check = await checkPidanceUpdate({
     cwd,
     env,
@@ -277,6 +303,7 @@ export async function applyPidanceUpdate(options?: {
   });
 
   if (!check.upgradeSupported || !check.installRoot) {
+    report("error", 100, check.reason);
     return {
       ok: false,
       status: "not_supported",
@@ -299,6 +326,7 @@ export async function applyPidanceUpdate(options?: {
   }
 
   if (compareSemver(target, check.currentVersion) <= 0 && !options?.targetVersion) {
+    report("done", 100, "已是最新版本");
     return {
       ok: true,
       status: "already_latest",
@@ -324,6 +352,7 @@ export async function applyPidanceUpdate(options?: {
   const registry = check.registry;
 
   try {
+    report("preparing", 12, `创建发布目录 ${target}…`);
     mkdirSync(releaseDir, { recursive: true });
     const wrapperPkg = {
       name: `pidance-${target}`,
@@ -335,16 +364,33 @@ export async function applyPidanceUpdate(options?: {
     };
     writeFileSync(join(releaseDir, "package.json"), `${JSON.stringify(wrapperPkg, null, 2)}\n`, "utf8");
 
-    await exec(
-      "npm",
-      ["install", "--omit=dev", `--registry=${registry}`, "--no-fund", "--no-audit"],
-      {
-        cwd: releaseDir,
-        env: { ...env, npm_config_registry: registry },
-        timeout: 600_000,
-        maxBuffer: 8 * 1024 * 1024,
-      },
-    );
+    report("downloading", 20, "正在从 npm 下载包…");
+    // npm install 无可靠百分比；下载阶段用定时器缓升，结束后跳到 installing
+    let fake = 20;
+    const tick = setInterval(() => {
+      if (fake < 68) {
+        fake += 2;
+        report("downloading", fake, "正在从 npm 下载包…");
+      } else if (fake < 78) {
+        fake += 1;
+        report("installing", fake, "正在安装依赖…");
+      }
+    }, 800);
+    try {
+      await exec(
+        "npm",
+        ["install", "--omit=dev", `--registry=${registry}`, "--no-fund", "--no-audit"],
+        {
+          cwd: releaseDir,
+          env: { ...env, npm_config_registry: registry },
+          timeout: 600_000,
+          maxBuffer: 8 * 1024 * 1024,
+        },
+      );
+    } finally {
+      clearInterval(tick);
+    }
+    report("installing", 82, "校验安装结果…");
 
     const installedPkg = join(releaseDir, "node_modules", "@henlii", "pidance", "package.json");
     if (!existsSync(installedPkg)) {
@@ -355,6 +401,7 @@ export async function applyPidanceUpdate(options?: {
       throw new Error(`安装版本不符：期望 ${target}，实际 ${installed.version ?? "?"}`);
     }
 
+    report("linking", 88, "切换 current 符号链接…");
     // 原子切换 current：先写临时链接再 rename
     const currentLink = join(installRoot, "current");
     const tmpLink = join(installRoot, `.current-tmp-${process.pid}`);
@@ -370,6 +417,7 @@ export async function applyPidanceUpdate(options?: {
     const shouldRestart = options?.restartService !== false && env.PIDANCE_SKIP_SERVICE_RESTART !== "1";
     if (shouldRestart) {
       try {
+        report("restarting", 94, "正在重启服务…");
         await exec("systemctl", ["restart", "pidance.service"], {
           timeout: 120_000,
           env,
@@ -377,20 +425,22 @@ export async function applyPidanceUpdate(options?: {
         restarted = true;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        return {
-          ok: true,
-          status: "upgraded",
+        const result = {
+          ok: true as const,
+          status: "upgraded" as const,
           currentVersion: check.currentVersion,
           targetVersion: target,
           message: `已切换到 ${target}，但重启 pidance.service 失败：${msg}`,
           restarted: false,
         };
+        report("done", 100, result.message);
+        return result;
       }
     }
 
-    return {
-      ok: true,
-      status: "upgraded",
+    const result = {
+      ok: true as const,
+      status: "upgraded" as const,
       currentVersion: check.currentVersion,
       targetVersion: target,
       message: restarted
@@ -398,8 +448,11 @@ export async function applyPidanceUpdate(options?: {
         : `已升级到 ${target}（未重启服务）`,
       restarted,
     };
+    report("done", 100, result.message);
+    return result;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    report("error", 100, `升级失败：${msg}`);
     return {
       ok: false,
       status: "error",
