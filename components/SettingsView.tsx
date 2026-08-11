@@ -338,7 +338,7 @@ function GeneralPage() {
                   }
                   setRuntimeDir(typeof data.runtimeDir === "string" ? data.runtimeDir : "");
                   setRuntimeResolved(data.resolved ?? null);
-                  setRuntimeMsg(t("general_runtimeSaved"));
+                  setRuntimeMsg(t("general_runtimeRedetected"));
                 } catch (e) {
                   setRuntimeMsg(e instanceof Error ? e.message : String(e));
                 } finally {
@@ -362,8 +362,50 @@ function GeneralPage() {
           </button>
           <button
             type="button"
+            disabled={runtimeBusy || installBusy}
+            onClick={() => {
+              setRuntimeBusy(true);
+              setRuntimeMsg(null);
+              void (async () => {
+                try {
+                  const res = await fetch("/api/runtime/config", { cache: "no-store" });
+                  if (!res.ok) {
+                    setRuntimeMsg(`HTTP ${res.status}`);
+                    return;
+                  }
+                  const data = (await res.json()) as {
+                    runtimeDir?: string;
+                    resolved?: { path: string | null; version: string | null; source: string };
+                  };
+                  if (typeof data.runtimeDir === "string") setRuntimeDir(data.runtimeDir);
+                  setRuntimeResolved(data.resolved ?? null);
+                  setRuntimeMsg(t("general_runtimeSaved"));
+                } catch (e) {
+                  setRuntimeMsg(e instanceof Error ? e.message : String(e));
+                } finally {
+                  setRuntimeBusy(false);
+                }
+              })();
+            }}
+            style={{
+              minHeight: 32,
+              padding: "0 14px",
+              borderRadius: 7,
+              border: "1px solid var(--border)",
+              background: "var(--bg-panel)",
+              color: "var(--text)",
+              cursor: runtimeBusy || installBusy ? "wait" : "pointer",
+              fontSize: 12,
+              fontWeight: 600,
+            }}
+          >
+            {runtimeBusy ? t("general_runtimeRedetecting") : t("general_runtimeRedetect")}
+          </button>
+          <button
+            type="button"
             disabled={installBusy}
             onClick={() => {
+              if (!window.confirm(t("general_installPiConfirm"))) return;
               setInstallBusy(true);
               setRuntimeMsg(null);
               void (async () => {

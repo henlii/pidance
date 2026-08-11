@@ -1,22 +1,22 @@
 /**
- * API-key provider 列表：从 models.json + auth-store 推导（不依赖 ModelRuntime）。
- * OAuth-only provider 排除（走 /api/auth/providers）。
+ * API-key provider 列表：内置目录 + models.json 中已有供应商 + auth 状态。
+ * 不依赖 ModelRuntime；OAuth 供应商走 /api/auth/providers。
  */
 
 import { isProviderConfigured } from "@/lib/auth-store";
+import { BUILTIN_API_KEY_PROVIDERS } from "@/lib/builtin-api-key-providers";
+import { OAUTH_PROVIDER_IDS } from "@/lib/oauth-providers";
 import { listModelsFromModelsJson } from "@/lib/models-catalog";
 import { getModelsPath } from "@/lib/pi-paths";
 import { existsSync, readFileSync } from "node:fs";
 
 export const dynamic = "force-dynamic";
 
-const OAUTH_PROVIDER_IDS = new Set(["anthropic", "github-copilot", "openai-codex"]);
-
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** models.json 中有 apiKey 的 provider 视为 custom（source=models_json_key），历史逻辑会跳过 */
+/** models.json 中有 apiKey 的 provider（自定义端点，由 Models 页管理） */
 function providersWithModelsJsonKey(): Set<string> {
   const path = getModelsPath();
   const out = new Set<string>();
@@ -37,29 +37,38 @@ function providersWithModelsJsonKey(): Set<string> {
 export async function GET() {
   const models = listModelsFromModelsJson();
   const modelsJsonKey = providersWithModelsJsonKey();
-  const byProvider = new Map<string, number>();
+  const modelCountByProvider = new Map<string, number>();
   for (const m of models) {
-    byProvider.set(m.provider, (byProvider.get(m.provider) ?? 0) + 1);
+    modelCountByProvider.set(m.provider, (modelCountByProvider.get(m.provider) ?? 0) + 1);
   }
 
-  const result: {
-    id: string;
-    displayName: string;
-    configured: boolean;
-    source?: string;
-    modelCount: number;
-  }[] = [];
+  const byId = new Map<
+    string,
+    { id: string; displayName: string; configured: boolean; source?: string; modelCount: number }
+  >();
 
-  for (const [id, modelCount] of byProvider) {
+  // 1) 内置 API Key 供应商（始终出现在添加列表）
+  for (const p of BUILTIN_API_KEY_PROVIDERS) {
+    if (OAUTH_PROVIDER_IDS.has(p.id)) continue;
+    byId.set(p.id, {
+      id: p.id,
+      displayName: p.displayName,
+      configured: isProviderConfigured(p.id),
+      source: isProviderConfigured(p.id) ? "auth_json" : undefined,
+      modelCount: modelCountByProvider.get(p.id) ?? 0,
+    });
+  }
+
+  // 2) models.json 中的其它供应商（非 OAuth、非仅 models.json 明文 key 的 custom）
+  for (const [id, modelCount] of modelCountByProvider) {
     if (OAUTH_PROVIDER_IDS.has(id)) continue;
-    // 与历史：跳过 key 仅来自 models.json 的 custom provider（在 ModelsConfig 里另管）
-    if (modelsJsonKey.has(id) && !isProviderConfigured(id)) continue;
-    if (modelsJsonKey.has(id)) {
-      // 有 models.json key 但历史会 skip source===models_json_key 的整项
-      // 保持：这类 provider 不进 all-providers 列表
+    if (modelsJsonKey.has(id)) continue; // 自定义端点在 Models 配置里另管
+    if (byId.has(id)) {
+      const cur = byId.get(id)!;
+      cur.modelCount = modelCount;
       continue;
     }
-    result.push({
+    byId.set(id, {
       id,
       displayName: id,
       configured: isProviderConfigured(id),
@@ -67,6 +76,10 @@ export async function GET() {
       modelCount,
     });
   }
+
+  const result = [...byId.values()].sort((a, b) =>
+    a.displayName.localeCompare(b.displayName, undefined, { sensitivity: "base" }),
+  );
 
   return Response.json({ providers: result });
 }
