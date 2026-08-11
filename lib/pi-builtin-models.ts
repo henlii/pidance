@@ -112,7 +112,22 @@ export async function listBuiltinCatalogModels(): Promise<CatalogModel[]> {
         cached = [];
         return cached;
       }
-      const mod = (await import(pathToFileURL(path).href)) as BuiltinProvidersModule;
+      const url = pathToFileURL(path).href;
+      let mod: BuiltinProvidersModule | null = null;
+      // 1) 原生动态 import（node --test / jiti 可用）
+      try {
+        mod = (await import(url)) as BuiltinProvidersModule;
+      } catch {
+        mod = null;
+      }
+      // 2) Next/webpack 会把表达式 import 打空：用 Function 绕过 bundler
+      if (!mod || (typeof mod.builtinProviders !== "function" && typeof mod.getBuiltinProviders !== "function")) {
+        // eslint-disable-next-line @typescript-eslint/no-implied-eval -- 故意绕过 bundler
+        const importRuntime = new Function("u", "return import(u)") as (
+          u: string,
+        ) => Promise<BuiltinProvidersModule>;
+        mod = await importRuntime(url);
+      }
       cached = projectBuiltinCatalog(mod);
       return cached;
     } catch {
