@@ -6,6 +6,7 @@ import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
 import { PluginsConfig } from "./PluginsConfig";
 import { AgentDefaultsConfig } from "./AgentDefaultsConfig";
+import { PromptsConfig } from "./PromptsConfig";
 import { logoutUiSession } from "./UiLoginGate";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useTheme } from "@/hooks/useTheme";
@@ -46,6 +47,8 @@ function settingsPageLabelKey(id: SettingsPageId) {
       return "common_models";
     case "defaults":
       return "common_defaults";
+    case "prompts":
+      return "common_prompts";
     case "skills":
       return "common_skills";
     case "plugins":
@@ -346,6 +349,8 @@ export function SettingsView({ cwd, sessionId, onClose, onModelsChanged, onAuthS
         return <ModelsConfig embedded onClose={onModelsChanged ?? onClose} onAuthStateChange={onAuthStateChange} />;
       case "defaults":
         return <AgentDefaultsConfig cwd={cwd} />;
+      case "prompts":
+        return <PromptsConfig />;
       case "skills":
         return <SkillsConfig embedded cwd={cwd!} onClose={onClose} />;
       case "plugins":
