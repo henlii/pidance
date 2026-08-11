@@ -430,7 +430,7 @@ const chatPlan = composeChatPlan({
       soundEnabled={soundEnabled}
       onSoundToggle={onSoundToggle}
       footerCollapsed={footerCollapsed}
-      onFooterToggle={() => setFooterCollapsed((v) => !v)}
+      onFooterToggle={isEmptyNew ? undefined : () => setFooterCollapsed((v) => !v)}
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? (effectiveNewSessionCwd ? `new:${effectiveNewSessionCwd}` : undefined)}
       cwd={session?.cwd ?? effectiveNewSessionCwd}
