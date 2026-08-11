@@ -22,4 +22,5 @@ export {
   rekeyLiveSession,
   startRpcSession,
   startLiveSession,
+  awaitSessionStartLock,
 } from "./live-session-registry";

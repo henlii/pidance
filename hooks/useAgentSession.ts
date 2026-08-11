@@ -399,6 +399,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
+  /** 切换会话时取消进行中的后台 wake，避免串台写 systemPrompt */
+  const wakeAbortRef = useRef<AbortController | null>(null);
   // 侧栏运行中指示：agentRunning 在 ensureEventsConnected 前已置位（冷启动窗口），
   // 比 SSE running 更早，用于消除「发送后好几秒才显示运行中」。
   useEffect(() => {
@@ -609,6 +611,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     let messagesLoaded = false;
     try {
       if (showLoading) setLoading(true);
+      // 切换会话：先清上一会话的 live 投影，避免 systemPrompt/用量串台
+      if (includeState) {
+        setSystemPrompt(null);
+        setContextUsage(null);
+      }
       // tail-first：首屏只拉最新 N 条，尽快结束 loading；更旧历史按需 prepend。
       const params = new URLSearchParams({
         deferThinking: "1",
@@ -693,29 +700,65 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // D3 写动作按需请求成功标记；其它既有调用仍保持 null 返回语义。
       if (!includeState) return reportSuccess ? true : null;
 
-      try {
-        const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
-        if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
-        const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse };
-        if (sessionIdRef.current !== sid) return null;
-
-        const liveState = agentState.state;
-        if (liveState) {
-          if (liveState.contextUsage !== undefined) setContextUsage(liveState.contextUsage ?? null);
-          if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt ?? null);
-          if (liveState.thinkingLevel !== undefined) setThinkingLevel((liveState.thinkingLevel as ThinkingLevelOption) ?? "auto");
-          if (liveState.extensionStatuses !== undefined) patchExtensionUiState({ statuses: liveState.extensionStatuses ?? [] });
-          if (liveState.extensionWidgets !== undefined) patchExtensionUiState({ widgets: liveState.extensionWidgets ?? [] });
-          if (liveState.queuedMessages !== undefined) {
-            setQueuedMessages({
-              steering: normalizeQueuedMessages(liveState.queuedMessages).steering,
-              followUp: [...localFollowUpRef.current],
-            });
-          }
-        } else if (!agentState.running) {
-          setQueuedMessages({ steering: [], followUp: [...localFollowUpRef.current] });
+      // —— 状态：热路径同步（已 live，毫秒级）；冷 ensureLive 后台异步 ——
+      // 消息已先展示。后台 wake 与发送共用服务端 start lock，不会双开 host。
+      const applyLiveState = (liveState: AgentStateResponse) => {
+        if (liveState.contextUsage !== undefined) setContextUsage(liveState.contextUsage ?? null);
+        if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt ?? null);
+        if (liveState.thinkingLevel !== undefined) {
+          setThinkingLevel((liveState.thinkingLevel as ThinkingLevelOption) ?? "auto");
         }
-        return agentState;
+        if (liveState.extensionStatuses !== undefined) {
+          patchExtensionUiState({ statuses: liveState.extensionStatuses ?? [] });
+        }
+        if (liveState.extensionWidgets !== undefined) {
+          patchExtensionUiState({ widgets: liveState.extensionWidgets ?? [] });
+        }
+        if (liveState.queuedMessages !== undefined) {
+          setQueuedMessages({
+            steering: normalizeQueuedMessages(liveState.queuedMessages).steering,
+            followUp: [...localFollowUpRef.current],
+          });
+        }
+      };
+
+      try {
+        // 1) 热：不 wake，仅已 live 时立刻拿 systemPrompt / 运行态（重连流式）
+        const hotRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
+        if (hotRes.ok) {
+          const hot = await hotRes.json() as { running: boolean; state?: AgentStateResponse };
+          if (sessionIdRef.current !== sid) return null;
+          if (hot.running && hot.state) {
+            applyLiveState(hot.state);
+            return hot;
+          }
+          if (!hot.running) {
+            setQueuedMessages({ steering: [], followUp: [...localFollowUpRef.current] });
+          }
+        }
+
+        // 2) 冷：后台 wake=1（ensureLive 可能 0.5–数秒），不阻塞消息 UI
+        wakeAbortRef.current?.abort();
+        const ac = new AbortController();
+        wakeAbortRef.current = ac;
+        void (async () => {
+          try {
+            const wakeRes = await fetch(
+              `/api/sessions/${encodeURIComponent(sid)}/state?wake=1`,
+              { signal: ac.signal },
+            );
+            if (!wakeRes.ok || ac.signal.aborted) return;
+            const woken = await wakeRes.json() as { running: boolean; state?: AgentStateResponse };
+            if (sessionIdRef.current !== sid || ac.signal.aborted) return;
+            if (woken.state) applyLiveState(woken.state);
+          } catch (e) {
+            if (e instanceof Error && e.name === "AbortError") return;
+            console.error("Failed to wake agent state:", e);
+          }
+        })();
+
+        // 消息已就绪；运行态待后台 wake / 或发送时 ensureLive
+        return { running: false };
       } catch (e) {
         console.error("Failed to load agent state:", e);
         return null;
@@ -2059,6 +2102,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     });
     clearLiveActivities();
   }, [session?.id, newSessionCwd, commitExtensionUiState, extensionUiStateRef, clearLiveActivities]);
+
+  // 切离空闲 live：取消后台 wake + 释放上一个 host（仍在跑的不会释放）
+  const previousLiveSessionIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = previousLiveSessionIdRef.current;
+    const next = session?.id ?? null;
+    if (prev && prev !== next) {
+      wakeAbortRef.current?.abort();
+      wakeAbortRef.current = null;
+      // release 会 await 启动锁：若上一会话 ensureLive 尚未结束，等它完成再 destroy
+      void fetch(`/api/sessions/${encodeURIComponent(prev)}/release`, {
+        method: "POST",
+      }).catch(() => undefined);
+    }
+    previousLiveSessionIdRef.current =
+      session && session.readOnly !== true ? session.id : null;
+  }, [session?.id, session?.readOnly]);
 
   useEffect(() => {
     if (session) {
