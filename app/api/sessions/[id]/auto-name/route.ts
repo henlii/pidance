@@ -11,7 +11,7 @@ import {
 } from "@/lib/session-title";
 import { invalidateSessionListCache, resolveSessionPath } from "@/lib/session-reader";
 import { sessionService, READ_ONLY_SUBAGENT_ERROR } from "@/lib/session-service";
-import { openSessionFile } from "@/lib/session-file";
+import { openSessionView } from "@/lib/pi-session-io";
 
 export async function POST(
   _req: Request,
@@ -31,9 +31,8 @@ export async function POST(
     // 读磁盘消息（不依赖 live wrapper 的 inner AgentSession）
     const filePath = await resolveSessionPath(id);
     if (!filePath) throw new Error("Session not found");
-    const { messages } = openSessionFile(filePath).buildSessionContext() as {
+    const { messages } = openSessionView(filePath).buildSessionContext() as {
       messages: Array<{ role: string; content: unknown }>;
-      entryIds: string[];
     };
 
     // 默认模型配置：settings.json defaultProvider/defaultModel + models.json
@@ -67,7 +66,7 @@ export async function POST(
       if (session.isAlive()) {
         sessionService.destroy(id);
       }
-      openSessionFile(sessionFile).appendSessionInfo(result.title);
+      openSessionView(sessionFile).appendSessionInfo(result.title);
     }
     invalidateSessionListCache();
     return NextResponse.json({ title: result.title, usage: result.usage ?? null });

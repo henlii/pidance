@@ -47,7 +47,7 @@
     "start": "next start -p 31415",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "node --test lib/*.test.mjs lib/pi-runtime/*.test.mjs components/*.test.mjs hooks/*.test.mjs bin/*.test.mjs",
+    "test": "node --test lib/*.test.mjs components/*.test.mjs hooks/*.test.mjs bin/*.test.mjs",
     "verify:render-bridge": "node scripts/verify-subagent-render-bridge.mjs",
     "test:browser": "node --test scripts/browser-regression.test.mjs",
     "check": "npm run typecheck && npm run lint && npm run test",

@@ -1,5 +1,5 @@
 import { basename } from "path";
-import { SESSION_VERSION as CURRENT_SESSION_VERSION, openSessionFile } from "./session-file";
+import { CURRENT_SESSION_VERSION, openSessionView } from "./pi-session-io";
 
 /** 与 AgentSession.exportToJsonl 对齐的分支导出错误。 */
 export class SessionExportError extends Error {
@@ -86,7 +86,7 @@ export function exportSessionFileToJsonl(
   filePath: string,
   options: BuildSessionBranchJsonlOptions = {},
 ): string {
-  const sm = openSessionFile(filePath);
+  const sm = openSessionView(filePath);
   return buildSessionBranchJsonl(sm, options);
 }
 

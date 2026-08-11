@@ -11,7 +11,6 @@ import {
   type AgentSessionRuntime,
   type AgentSessionServices,
 } from "@earendil-works/pi-coding-agent";
-import { existsSync } from "node:fs";
 import { getAgentDir } from "./pi-paths";
 import {
   clearRunningStartedAt,
@@ -24,13 +23,16 @@ import {
 } from "./session-activity";
 import {
   clearLeafSidecar,
-  readLeafSidecar,
   writeLeafSidecar,
 } from "./session-leaf-sidecar";
 import {
   tryAcquireSessionLock,
   type SessionLockHandle,
 } from "./session-ownership-lock";
+import {
+  openSessionManager,
+  createSessionManager,
+} from "./pi-session-io";
 import {
   createWebExtensionUIAdapter,
   type WebExtensionUIAdapter,
@@ -63,47 +65,13 @@ function asString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
 
-/**
- * 打开或创建 SessionManager，并在创建 AgentSession 前应用 leaf sidecar。
- */
-/**
- * Pi SessionManager 在首条 assistant 之前延迟落盘；Web 列表/删除需要文件立即存在。
- * 通过内部 _rewriteFile 强制写出 header（与 createBranchedSession 立即写盘语义对齐）。
- */
-export function materializeSessionFile(manager: SessionManager): void {
-  const file = manager.getSessionFile();
-  if (!file || existsSync(file)) return;
-  const rewrite = (manager as { _rewriteFile?: () => void })._rewriteFile;
-  if (typeof rewrite === "function") {
-    rewrite.call(manager);
-  }
-}
-
+/** 打开或创建 SessionManager，并在创建 AgentSession 前应用 leaf sidecar。 */
 export function openSessionManagerForHost(
   sessionFile: string,
   cwd: string,
 ): SessionManager {
-  if (sessionFile) {
-    const manager = SessionManager.open(sessionFile);
-    const expected = readLeafSidecar(sessionFile);
-    if (expected && manager.getEntry(expected)) {
-      const last = manager.getLeafId();
-      // 非末尾 leaf：branch 到 sidecar 目标（Pi manager 内存 leaf）
-      if (last !== expected) {
-        try {
-          manager.branch(expected);
-        } catch {
-          clearLeafSidecar(sessionFile);
-        }
-      }
-    } else if (expected) {
-      clearLeafSidecar(sessionFile);
-    }
-    return manager;
-  }
-  const manager = SessionManager.create(cwd);
-  materializeSessionFile(manager);
-  return manager;
+  if (sessionFile) return openSessionManager(sessionFile);
+  return createSessionManager(cwd);
 }
 
 export class SdkSessionHost {

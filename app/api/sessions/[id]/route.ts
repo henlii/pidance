@@ -10,7 +10,7 @@ import {
   listAllSessions,
   buildSessionNavigationSnapshot,
 } from "@/lib/session-reader";
-import { openSessionFile } from "@/lib/session-file";
+import { openSessionView } from "@/lib/pi-session-io";
 import { clearLeafSidecar } from "@/lib/session-leaf-sidecar";
 import {
   parseContextLimitParam,
@@ -113,7 +113,7 @@ export async function PATCH(
     if (live?.isAlive()) {
       await live.send({ type: "set_session_name", name: name.trim() });
     } else {
-      const sm = openSessionFile(filePath);
+      const sm = openSessionView(filePath);
       sm.appendSessionInfo(name.trim());
     }
     invalidateSessionListCache();

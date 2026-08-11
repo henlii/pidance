@@ -21,7 +21,7 @@ import {
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { discoverSubagentSessions } from "./subagent-sessions";
 import { getAgentDir } from "./pi-paths";
-import { openSessionFile } from "./session-file";
+import { openSessionView } from "./pi-session-io";
 
 export { getAgentDir };
 
@@ -402,7 +402,7 @@ export function readSessionHeader(filePath: string): SessionHeader | null {
 }
 
 export function getSessionEntries(filePath: string): SessionEntry[] {
-  const entries = openSessionFile(filePath).getEntries();
+  const entries = openSessionView(filePath).getEntries();
   return entries as unknown as SessionEntry[];
 }
 
@@ -430,7 +430,7 @@ export type LiveSessionReadSource = {
 /**
  * 选择 sessions GET 的权威读视图：
  * - 有存活 live 且含 inner.sessionManager 时用 live（inprocess 遗留）
- * - 否则 openSessionFile（自有 JSONL，不依赖 pi npm）
+ * - 否则 openSessionView（Pi SessionManager 只读）
  * 不 start 新会话、不 mutate live 状态。
  */
 export function resolveSessionManagerForRead(options: {
@@ -445,12 +445,11 @@ export function resolveSessionManagerForRead(options: {
   const open =
     options.openFromDisk ??
     ((path: string) => {
-      const sm = openSessionFile(path);
-      // SessionFile 无 getTree：用 entries 拼浅树
+      const sm = openSessionView(path);
       return {
         getEntries: () => sm.getEntries(),
         getLeafId: () => sm.getLeafId(),
-        getTree: () => buildShallowTreeFromEntries(sm.getEntries()),
+        getTree: () => sm.getTree() as ReturnType<SessionManagerReadView["getTree"]>,
         getHeader: () => sm.getHeader(),
         getSessionName: () => sm.getSessionName(),
       } as SessionManagerReadView;

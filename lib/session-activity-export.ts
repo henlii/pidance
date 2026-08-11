@@ -11,7 +11,7 @@ import {
   type SessionActivity,
 } from "./session-activity";
 import { SessionExportError } from "./session-export";
-import { openSessionFile } from "./session-file";
+import { openSessionView } from "./pi-session-io";
 
 /** 单条可渲染的 activity（已校验）。 */
 export type ActivityExportItem = {
@@ -88,7 +88,7 @@ export function collectSessionFileActivities(
   filePath: string,
   options: CollectBranchActivitiesOptions = {},
 ): ActivityExportItem[] {
-  const sm = openSessionFile(filePath);
+  const sm = openSessionView(filePath);
   return collectBranchActivities(sm, options);
 }
 
@@ -227,6 +227,6 @@ export function projectSessionFileActivitiesIntoExportHtml(
   filePath: string,
   options: ProjectActivitiesIntoExportHtmlOptions = {},
 ): string {
-  const sm = openSessionFile(filePath);
+  const sm = openSessionView(filePath);
   return projectActivitiesIntoExportHtml(html, sm, options);
 }

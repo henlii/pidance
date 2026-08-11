@@ -1,8 +1,12 @@
 import { existsSync } from "fs";
 import { allowFileRoot } from "./file-access";
 import { getAgentDir } from "./pi-paths";
-import { openSessionFile, SessionFile } from "./session-file";
-import { clearLeafSidecar } from "./session-leaf-sidecar";
+import {
+  openSessionView,
+  openSessionManager,
+  materializeSessionFile,
+} from "./pi-session-io";
+import { clearLeafSidecar, writeLeafSidecar } from "./session-leaf-sidecar";
 import {
   getRpcSession,
   getRunningRpcSessionIds,
@@ -115,8 +119,8 @@ const defaultDeps: SessionServiceDeps = {
   subscribeRunningSessions,
   allowFileRoot,
   invalidateSessionListCache,
-  openSessionCwd: (filePath) => openSessionFile(filePath).getHeader()?.cwd ?? process.cwd(),
-  // SessionFile 无 getTree：经 resolveSessionManagerForRead 补浅树适配
+  openSessionCwd: (filePath) => openSessionView(filePath).getHeader()?.cwd ?? process.cwd(),
+  // 磁盘 open 经 resolveSessionManagerForRead / openSessionView
   openSessionManager: (filePath) => resolveSessionManagerForRead({ filePath }),
   existsSync,
   now: () => Date.now(),
@@ -365,7 +369,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       await requireWritableSession(sessionId, service.isReadOnly);
       // 单写者：
       // - 仅 in-process live（暴露 inner.sessionManager）可直接 appendActivity（SDK SessionManager 写）
-      // - ExternalRpcSession 虽有 appendActivity，但底层是磁盘 SessionFile，不得与外部 pi 并发写
+      // - 无 inner 的 live 不得直接磁盘写，须先 destroy
       // - 无 inner 时必须先 destroy live，再离线写盘
       const live = service.getLive(sessionId) as
         | {
@@ -387,7 +391,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       const filePath = await deps.resolveSessionPath(sessionId);
       if (!filePath) throw new Error("Session not found");
       const activity = normalizeActivityInput(input);
-      const manager = openSessionFile(filePath);
+      const manager = openSessionView(filePath);
       const entryId = manager.appendCustomEntry(PIDANCE_ACTIVITY_CUSTOM_TYPE, activity);
       deps.invalidateSessionListCache();
       return { entryId, activity };
@@ -404,7 +408,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       if (!filePath) throw new Error("Session not found");
       const data = normalizeCommandEntryData(input);
       if (!data.command) throw new Error("command is required");
-      const manager = openSessionFile(filePath);
+      const manager = openSessionView(filePath);
       const entryId = manager.appendCustomEntry(PIDANCE_COMMAND_CUSTOM_TYPE, data);
       deps.invalidateSessionListCache();
       return { entryId, data };
@@ -482,7 +486,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
 
       const filePath = await deps.resolveSessionPath(sessionId);
       if (!filePath) throw new Error("Session not found");
-      const sessionManager = openSessionFile(filePath);
+      const sessionManager = openSessionView(filePath);
       const oldLeafId = sessionManager.getLeafId();
       // 目标 = 当前 leaf：无导航语义，不写 sidecar（避免固化无变化值）
       if (trimmedId === oldLeafId) return { cancelled: false };
@@ -496,6 +500,8 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       if (!sessionManager.getEntry(trimmedId)) throw new Error(`Entry ${trimmedId} not found`);
       try {
         sessionManager.branch(trimmedId);
+        // Pi branch 仅改内存 leaf；非末尾须写 sidecar 供重启恢复
+        writeLeafSidecar(filePath, trimmedId);
         return { cancelled: false };
       } finally {
         deps.invalidateSessionListCache();
@@ -521,7 +527,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
 
       const filePath = await deps.resolveSessionPath(sessionId);
       if (!filePath) throw new Error("Session not found");
-      const sessionManager = openSessionFile(filePath);
+      const sessionManager = openSessionView(filePath);
       const leafId = sessionManager.getLeafId();
       if (!leafId) throw new Error("Session has no leaf");
       const path = sessionManager.getBranch(leafId);
@@ -536,6 +542,11 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       const turnEnd = computeTurnEnd(path as never, trimmedId);
       try {
         sessionManager.branch(turnEnd);
+        if (turnEnd === sessionManager.getLastEntryId()) {
+          clearLeafSidecar(filePath);
+        } else {
+          writeLeafSidecar(filePath, turnEnd);
+        }
         return { cancelled: false };
       } finally {
         deps.invalidateSessionListCache();
@@ -564,7 +575,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         | undefined;
       const inner = wrapper?.inner;
 
-      // 统一磁盘 SessionFile（不依赖 pi npm SessionManager）
+      // 统一磁盘 Pi SessionManager
       // 读/分叉源文件前先停 live，避免外部 pi 仍在 append 时读到半写状态
       if (deps.getRpcSession(sessionId)?.isAlive()) {
         service.destroy(sessionId);
@@ -574,7 +585,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         (await deps.resolveSessionPath(sessionId));
       if (!filePath) throw new Error("Session not found");
       const currentSessionFile = filePath;
-      const sessionManager = openSessionFile(currentSessionFile);
+      const sessionManager = openSessionView(currentSessionFile);
       const entry = sessionManager.getEntry(trimmedId);
       if (!entry) throw new Error("Invalid entry ID");
 
@@ -591,16 +602,18 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       }
 
       const sessionDir = sessionManager.getSessionDir();
-      const sourceManager = openSessionFile(currentSessionFile, sessionDir);
+      const sourceManager = openSessionManager(currentSessionFile, sessionDir);
       const newSessionFile = sourceManager.createBranchedSession(branchLeafId);
       if (!newSessionFile) throw new Error("Failed to create session");
-      const newManager = openSessionFile(newSessionFile, sessionDir);
+      // createBranchedSession 可能尚未落盘（无 assistant 时）；强制写出
+      materializeSessionFile(sourceManager);
+      const newManager = openSessionView(newSessionFile, sessionDir);
       const newSessionId = newManager.getSessionId();
       cacheSessionPath(newSessionId, newSessionFile);
       deps.invalidateSessionListCache();
       const sourceModel = inner?.model;
       if (sourceModel && shouldInheritModel(
-        newManager.getEntries().some((e) => e.type === "model_change"),
+        newManager.getEntries().some((e) => (e as { type?: string }).type === "model_change"),
         { provider: sourceModel.provider, modelId: sourceModel.id },
       )) {
         newManager.appendModelChange(sourceModel.provider, sourceModel.id);
