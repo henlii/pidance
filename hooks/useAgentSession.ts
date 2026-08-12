@@ -2005,6 +2005,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isReadOnly, notifyAutoFollowSend]);
 
+  /**
+   * SDK 错误：扩展命令（/xxx）不能被 steer/followUp 排队，但 prompt() 在
+   * streaming 时也会立即执行扩展命令（见 Pi AgentSession.prompt）。
+   */
+  const isExtensionCommandQueueError = useCallback((e: unknown): boolean => {
+    const msg = e instanceof Error ? e.message : String(e);
+    return /Extension command .* cannot be queued/.test(msg);
+  }, []);
+
   const handlePromptWithStreamingBehavior = useCallback(async (
     message: string,
     behavior: "steer" | "followUp",
@@ -2026,9 +2035,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ...(piImages?.length ? { images: piImages } : {}),
       });
     } catch (e) {
+      if (isExtensionCommandQueueError(e)) {
+        // 扩展命令不能 steer：prompt() 在 streaming 时也立即执行扩展命令
+        await sendAgentCommand(sid, { type: "prompt", message });
+        return;
+      }
       console.error("Failed to steer:", e);
     }
-  }, [isReadOnly]);
+  }, [isReadOnly, isExtensionCommandQueueError]);
 
   /**
    * follow-up 发送（Codex 风格）：agent 运行中入本地队列（不调 follow_up RPC，
@@ -2104,8 +2118,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setMessages((prev) => [...prev, optimistic]);
     try {
       if (agentRunningRef.current) {
-        // 运行中：steer（打断当前思考，立即引导）
-        await sendAgentCommand(sid, { type: "steer", message: merged });
+        try {
+          // 运行中：steer（打断当前思考，立即引导）
+          await sendAgentCommand(sid, { type: "steer", message: merged });
+        } catch (e) {
+          if (!isExtensionCommandQueueError(e)) throw e;
+          // 扩展命令（/xxx）不能被 steer 排队；prompt() 在 streaming 时立即执行
+          await sendAgentCommand(sid, { type: "prompt", message: merged });
+        }
       } else {
         // 空闲：Pi 的 steer 只入进程队列不唤醒；用 prompt 立即发起新回合
         await sendAgentCommand(sid, { type: "prompt", message: merged });
@@ -2117,7 +2137,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       console.error("Failed to send queue as steer:", e);
       addNotice({ type: "error", message: String(e instanceof Error ? e.message : e) });
     }
-  }, [isReadOnly, notifyAutoFollowSend, updateLocalFollowUp, addNotice]);
+  }, [isReadOnly, notifyAutoFollowSend, updateLocalFollowUp, addNotice, isExtensionCommandQueueError]);
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     // 只读会话：set_thinking_level 会写会话状态，拦截。
