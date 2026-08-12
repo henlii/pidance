@@ -133,7 +133,7 @@ export function InstantTooltipHost() {
         left: tip.left,
         top: tip.top,
         zIndex: 10050,
-        maxWidth: "min(260px, calc(100vw - 16px))",
+        maxWidth: "min(280px, calc(100vw - 16px))",
         padding: "5px 8px",
         border: "1px solid var(--border-strong)",
         borderRadius: "var(--radius-sm)",
@@ -147,6 +147,7 @@ export function InstantTooltipHost() {
         overflowWrap: "anywhere",
         wordBreak: "break-word",
         pointerEvents: "none",
+        // 与测量层一致，避免长文案撑破气泡
       }}
     >
       {tip.text}
