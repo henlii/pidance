@@ -3,10 +3,12 @@ import { checkPidanceUpdate } from "@/lib/pidance-update";
 
 export const dynamic = "force-dynamic";
 
-/** GET /api/update/check — 查 npm 最新版与本机是否可一键升级（只读）。 */
+/** GET /api/update/check — 查 npm 最新版与本机是否可一键升级（只读）。
+ *  始终 forceRefresh：用户主动检查不应命中进程内 30min latest 缓存。
+ */
 export async function GET() {
   try {
-    const result = await checkPidanceUpdate();
+    const result = await checkPidanceUpdate({ forceRefresh: true });
     return NextResponse.json(result, {
       headers: { "Cache-Control": "no-store" },
     });

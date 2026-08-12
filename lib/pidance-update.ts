@@ -213,9 +213,11 @@ export async function getCachedLatestVersion(
   registry: string = getNpmRegistry(),
   now: number = Date.now(),
   fetchImpl: typeof fetch = globalThis.fetch.bind(globalThis),
+  /** 用户点「检查更新」时跳过进程内缓存，避免刚发版仍显示旧 latest */
+  force = false,
 ): Promise<string | null> {
   const hit = globalThis.__piPidanceLatestCache;
-  if (hit && now - hit.ts < LATEST_CACHE_TTL_MS && hit.latest) {
+  if (!force && hit && now - hit.ts < LATEST_CACHE_TTL_MS && hit.latest) {
     return hit.latest;
   }
   const latest = await fetchLatestPidanceVersion(registry, fetchImpl);
@@ -230,13 +232,20 @@ export async function checkPidanceUpdate(options?: {
   env?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch;
   now?: number;
+  /** true：强制拉 npm（检查更新按钮 / API GET） */
+  forceRefresh?: boolean;
 }): Promise<PidanceUpdateCheck> {
   const cwd = options?.cwd ?? process.cwd();
   const env = options?.env ?? process.env;
   const registry = getNpmRegistry(env);
   const currentVersion = readInstalledPidanceVersion(cwd);
   const { mode, installRoot } = detectUpgradeMode(cwd, env);
-  const latestVersion = await getCachedLatestVersion(registry, options?.now, options?.fetchImpl);
+  const latestVersion = await getCachedLatestVersion(
+    registry,
+    options?.now,
+    options?.fetchImpl,
+    options?.forceRefresh === true,
+  );
   const updateAvailable =
     latestVersion != null && compareSemver(latestVersion, currentVersion) > 0;
   const allow = isSelfUpgradeAllowed(env);
