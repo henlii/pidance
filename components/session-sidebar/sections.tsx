@@ -12,7 +12,7 @@ import { ViewportDialog } from "../ui/ViewportDialog";
 import { useI18n } from "@/lib/i18n";
 import type { SessionInfo } from "@/lib/types";
 import type { SidebarDisplayMode, ProjectAliases } from "@/lib/ui-preferences";
-import { displayCwd } from "@/lib/project-context";
+import { displayCwd, projectDisplayName } from "@/lib/project-context";
 import { getSessionCapabilities, canArchiveSession } from "../session-capabilities";
 import { archiveSession, archiveFailureKind } from "@/lib/session-archive-client";
 import { trackRunningStartedAt } from "@/lib/running-duration";
@@ -160,7 +160,7 @@ function ProjectSection({
   const collapsed = isSessionNodeEffectivelyCollapsed(collapsedProjectRoots, project.root, searchActive);
   const hasSessions = project.mainTree.length > 0 || project.worktrees.some((group) => group.tree.length > 0);
   // 显示名优先 alias；title 仍保留真实 root 路径（见行 title 属性）。
-  const projectName = projectAliases[project.root] ?? displayCwd(project.root, homeDir);
+  const projectName = projectAliases[project.root] ?? projectDisplayName(project.root);
   const collapseLabel = collapsed
     ? t("sidebar_expandProjectNamed", { project: projectName })
     : t("sidebar_collapseProjectNamed", { project: projectName });

@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef } from "react";
 import type { SessionInfo } from "@/lib/types";
-import { displayCwd, getRecentProjects } from "@/lib/project-context";
+import { displayCwd, getRecentProjects, projectDisplayName } from "@/lib/project-context";
 import {
   isSessionNodeEffectivelyCollapsed,
   normalizeSessionQuery,
@@ -1241,7 +1241,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   /** 打开编辑项目弹窗：名称初值为 alias 或路径显示名。 */
   const handleOpenEditProject = useCallback((root: string) => {
     setOpenProjectMenuRoot(null);
-    setEditProjectValue(prefs.projectAliases[root] ?? displayCwd(root, homeDir));
+    setEditProjectValue(prefs.projectAliases[root] ?? projectDisplayName(root));
     setEditProjectTab("name");
     setEditProjectRoot(root);
   }, [prefs.projectAliases, homeDir]);
@@ -1255,7 +1255,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     setEditProjectRoot(null);
     updatePrefs((prev) => {
       const nextAliases = { ...prev.projectAliases };
-      if (name === displayCwd(root, homeDir)) delete nextAliases[root];
+      if (name === projectDisplayName(root)) delete nextAliases[root];
       else nextAliases[root] = name;
       return { ...prev, projectAliases: nextAliases };
     });

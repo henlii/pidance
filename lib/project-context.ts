@@ -38,6 +38,14 @@ export function displayCwd(cwd: string, homeDir?: string): string {
   return cwd;
 }
 
+/** 项目显示名：取路径最后一段文件夹名（添加项目默认名；alias 优先于它）。 */
+export function projectDisplayName(root: string): string {
+  const clean = root.replaceAll("\\", "/").replace(/\/+$/, "");
+  const idx = clean.lastIndexOf("/");
+  const name = idx >= 0 ? clean.slice(idx + 1) : clean;
+  return name || root;
+}
+
 export function buildSessionTree(sessions: SessionInfo[]): ProjectSessionTreeNode[] {
   const byId = new Map<string, ProjectSessionTreeNode>();
   for (const session of sessions) byId.set(session.id, { session, children: [] });
