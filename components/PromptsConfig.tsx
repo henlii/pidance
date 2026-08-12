@@ -32,7 +32,6 @@ export function PromptsConfig() {
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<PromptKey | null>(null);
-  const [savingAll, setSavingAll] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState<PromptKey | null>(null);
   /** 当前二级页（系统文令 / 系统追加 / 全局规则）——必须在任何 early return 之前声明 */
@@ -114,37 +113,6 @@ export function PromptsConfig() {
     [entries],
   );
 
-  /** 底部常驻「保存全部」：串行保存所有脏块 */
-  const saveAll = useCallback(async () => {
-    if (!entries) return;
-    const dirtyKeys = (Object.keys(entries) as PromptKey[]).filter(
-      (key) => drafts[key] !== entries[key].content,
-    );
-    if (dirtyKeys.length === 0) return;
-    setSavingAll(true);
-    setError(null);
-    try {
-      for (const key of dirtyKeys) {
-        const res = await fetch("/api/prompts", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ key, content: drafts[key] }),
-        });
-        if (!res.ok) {
-          const body = (await res.json().catch(() => ({}))) as { error?: string };
-          throw new Error(body.error ?? `HTTP ${res.status}`);
-        }
-      }
-      setSavedFlash("all" as unknown as PromptKey);
-      window.setTimeout(() => setSavedFlash(null), 2000);
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSavingAll(false);
-    }
-  }, [drafts, entries, load]);
-
   if (loading && !entries) {
     return (
       <div style={{ padding: "18px 20px", fontSize: 12, color: "var(--text-muted)" }}>
@@ -177,8 +145,8 @@ export function PromptsConfig() {
 
   const editorStyle: React.CSSProperties = {
     width: "100%",
-    minHeight: 160,
-    maxHeight: "45vh",
+    flex: 1,
+    minHeight: 0,
     padding: "10px 12px",
     borderRadius: 7,
     border: "1px solid var(--border)",
@@ -194,7 +162,6 @@ export function PromptsConfig() {
     resize: "vertical",
   };
 
-  const dirtyCount = entries ? Object.keys(entries).filter((k) => drafts[k as PromptKey] !== entries[k as PromptKey].content).length : 0;
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
@@ -218,10 +185,10 @@ export function PromptsConfig() {
         </div>
       </div>
 
-      {/* 中部内容区：超高内部滚动（仅当前二级页） */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "12px 20px 20px" }}>
+      {/* 中部内容区：编辑器自动扩展（仅当前二级页） */}
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "12px 20px 20px", display: "flex", flexDirection: "column" }}>
       {error && (
-        <div style={{ fontSize: 12, color: "var(--status-danger)", marginBottom: 12 }}>
+        <div style={{ flexShrink: 0, fontSize: 12, color: "var(--status-danger)", marginBottom: 12 }}>
           {t("prompts_saveFailed")}: {error}
         </div>
       )}
@@ -231,8 +198,8 @@ export function PromptsConfig() {
         const entry = entries[key];
         const dirty = drafts[key] !== entry.content;
         return (
-          <div key={key} style={{ marginBottom: 26 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+          <>
+            <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
               <div style={sectionTitleStyle as React.CSSProperties}>{titles[key]}</div>
               <span style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
                 {fileNames[key]}
@@ -267,69 +234,40 @@ export function PromptsConfig() {
               spellCheck={false}
               disabled={saving === key}
               aria-label={titles[key]}
-              style={editorStyle}
+              style={{ ...editorStyle, resize: "none", flex: 1, minHeight: 200 }}
             />
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
-              <button
-                type="button"
-                onClick={() => void put(key, { content: drafts[key] })}
-                disabled={saving === key || !dirty}
-                style={{
-                  minHeight: 30,
-                  padding: "0 14px",
-                  borderRadius: 7,
-                  border: `1px solid ${dirty ? "var(--accent)" : "var(--border)"}`,
-                  background: dirty ? "var(--accent)" : "var(--bg-panel)",
-                  color: dirty ? "var(--accent-foreground)" : "var(--text-muted)",
-                  cursor: saving === key || !dirty ? "not-allowed" : "pointer",
-                  fontSize: 12,
-                  fontWeight: 600,
-                  opacity: saving === key || !dirty ? 0.65 : 1,
-                }}
-              >
-                {saving === key ? t("common_saving") : t("common_save")}
-              </button>
-              {!entry.enabled && (
-                <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
-                  {t("prompts_disabledDraftHint")}
-                </span>
-              )}
-              {savedFlash === key && (
-                <span style={{ fontSize: 12, color: "var(--accent)" }}>{t("common_saved")}</span>
-              )}
-            </div>
-          </div>
+          </>
         );
       })()}
       </div>
 
-      {/* 底部操作区常驻 */}
+      {/* 底部操作区常驻：保存当前二级页 */}
       <div style={{ flexShrink: 0, padding: "12px 20px 16px", borderTop: "1px solid var(--border)", background: "var(--bg)", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <button
           type="button"
-          onClick={() => void saveAll()}
-          disabled={savingAll || dirtyCount === 0}
+          onClick={() => void put(activeKey, { content: drafts[activeKey] })}
+          disabled={saving === activeKey || drafts[activeKey] === entries[activeKey].content}
           style={{
             minHeight: 32,
             padding: "0 14px",
             borderRadius: 7,
-            border: `1px solid ${dirtyCount > 0 ? "var(--accent)" : "var(--border)"}`,
-            background: dirtyCount > 0 ? "var(--accent)" : "var(--bg-panel)",
-            color: dirtyCount > 0 ? "var(--accent-foreground)" : "var(--text-muted)",
-            cursor: savingAll || dirtyCount === 0 ? "not-allowed" : "pointer",
+            border: `1px solid ${drafts[activeKey] !== entries[activeKey].content ? "var(--accent)" : "var(--border)"}`,
+            background: drafts[activeKey] !== entries[activeKey].content ? "var(--accent)" : "var(--bg-panel)",
+            color: drafts[activeKey] !== entries[activeKey].content ? "var(--accent-foreground)" : "var(--text-muted)",
+            cursor: saving === activeKey || drafts[activeKey] === entries[activeKey].content ? "not-allowed" : "pointer",
             fontSize: 12,
             fontWeight: 600,
-            opacity: savingAll || dirtyCount === 0 ? 0.65 : 1,
+            opacity: saving === activeKey || drafts[activeKey] === entries[activeKey].content ? 0.65 : 1,
           }}
         >
-          {savingAll ? t("common_saving") : t("prompts_saveAll")}
+          {saving === activeKey ? t("common_saving") : t("common_save")}
         </button>
-        {dirtyCount > 0 && !savingAll && (
+        {!entries[activeKey].enabled && (
           <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
-            {t("prompts_dirtyCount", { count: String(dirtyCount) })}
+            {t("prompts_disabledDraftHint")}
           </span>
         )}
-        {savedFlash && (
+        {savedFlash === activeKey && (
           <span style={{ fontSize: 12, color: "var(--accent)" }}>{t("common_saved")}</span>
         )}
       </div>
