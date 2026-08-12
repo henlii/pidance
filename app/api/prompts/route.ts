@@ -9,17 +9,9 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@/lib/pi-paths";
+import { PROMPT_FILES, type PromptKey } from "@/lib/prompt-files";
 
 export const dynamic = "force-dynamic";
-
-/** 文令文件名（Pi 约定）：覆盖 SYSTEM.md、追加 APPEND_SYSTEM.md、全局规则 AGENTS.md。 */
-export const PROMPT_FILES = {
-  system: "SYSTEM.md",
-  systemAppend: "APPEND_SYSTEM.md",
-  agents: "AGENTS.md",
-} as const;
-
-export type PromptKey = keyof typeof PROMPT_FILES;
 
 const DRAFTS_FILENAME = "pidance-prompt-drafts.json";
 const MAX_PROMPT_BYTES = 512 * 1024;
