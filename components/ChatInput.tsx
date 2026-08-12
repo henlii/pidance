@@ -4,7 +4,7 @@ import React, { useRef, useState, useCallback, useEffect, useId, useImperativeHa
 import { createPortal } from "react-dom";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft-store";
-import { setServerPref, useServerPreferences } from "@/lib/server-preferences";
+import { getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { listThinkingDisplayLevel, modelClickThinkingLevel } from "@/lib/thinking-level-policy";
 import { hydrateDraftFromServer } from "@/lib/draft-store";
 import { ensureServerPrefsLoaded } from "@/lib/server-preferences";
@@ -362,19 +362,45 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   // —— 模型信息与思考深度（需求 5）——
   /** 当前展开思考深度浮层的模型（provider:modelId）；null = 未展开 */
   const [depthMenuFor, setDepthMenuFor] = useState<string | null>(null);
+  /** 深度菜单 fixed 坐标（从模型行右侧弹出；portal 到 body，手机同逻辑） */
+  const [depthMenuPos, setDepthMenuPos] = useState<{ top: number; left: number } | null>(null);
   const depthMenuRef = useRef<HTMLDivElement | null>(null);
+  const openDepthMenu = useCallback((depthKey: string, anchor: HTMLElement) => {
+    const rect = anchor.getBoundingClientRect();
+    const menuWidth = 120;
+    const gap = 6;
+    // 优先从触发点右侧弹出；右侧不够则翻到左侧
+    let left = rect.right + gap;
+    if (left + menuWidth > window.innerWidth - 8) {
+      left = Math.max(8, rect.left - menuWidth - gap);
+    }
+    const top = Math.max(8, Math.min(rect.top, window.innerHeight - 8 - 44 * 8));
+    setDepthMenuPos({ top, left });
+    setDepthMenuFor(depthKey);
+  }, []);
+  const closeDepthMenu = useCallback(() => {
+    setDepthMenuFor(null);
+    setDepthMenuPos(null);
+  }, []);
   // 点击外部关闭深度浮层
   useEffect(() => {
     if (depthMenuFor === null) return;
-    const onDocClick = (e: MouseEvent) => {
-      if (depthMenuRef.current && !depthMenuRef.current.contains(e.target as Node)) {
-        setDepthMenuFor(null);
-      }
+    const onDocClick = (e: PointerEvent) => {
+      const target = e.target as Node;
+      if (depthMenuRef.current?.contains(target)) return;
+      // 点在同一触发按钮上由 toggle 处理，这里不关（避免立刻被关）
+      if ((target as HTMLElement)?.closest?.("[data-depth-trigger]")) return;
+      closeDepthMenu();
     };
-    // pointerdown 覆盖鼠标与触摸（手机端点击外部同样收回）
     document.addEventListener("pointerdown", onDocClick);
-    return () => document.removeEventListener("pointerdown", onDocClick);
-  }, [depthMenuFor]);
+    window.addEventListener("resize", closeDepthMenu);
+    window.addEventListener("scroll", closeDepthMenu, true);
+    return () => {
+      document.removeEventListener("pointerdown", onDocClick);
+      window.removeEventListener("resize", closeDepthMenu);
+      window.removeEventListener("scroll", closeDepthMenu, true);
+    };
+  }, [closeDepthMenu, depthMenuFor]);
 
   /** 模型信息 tooltip 文案。 */
   const modelInfoTitle = useCallback(
@@ -397,12 +423,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     [thinkingLevelMaps],
   );
 
-  // 订阅服务端偏好，保证写缓存后列表立即刷新（不再读到过期 getServerPref 快照）
+  // 订阅服务端偏好，保证写缓存后列表立即刷新
   const serverPrefs = useServerPreferences();
-  /** 每模型独立缓存的思考深度；禁止回退到会话级 thinkingLevel（会串改其它模型显示）。 */
+  /** 每模型独立缓存的思考深度（嵌套键 thinkingLevel[provider:modelId]）。 */
   const cachedThinkingLevel = useCallback(
     (provider: string, modelId: string): string | null => {
-      const v = serverPrefs[`thinkingLevel.${provider}:${modelId}`];
+      // 依赖 serverPrefs 触发重渲染；读路径走 getServerPref 解析点路径
+      void serverPrefs;
+      const v = getServerPref<string>(`thinkingLevel.${provider}:${modelId}`);
       return typeof v === "string" && v ? v : null;
     },
     [serverPrefs],
@@ -412,13 +440,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const applyModelWithThinking = useCallback(
     (provider: string, modelId: string, level: string) => {
       setServerPref(`thinkingLevel.${provider}:${modelId}`, level);
-      setDepthMenuFor(null);
+      closeDepthMenu();
       // 选择后关闭模型选择列表并切换模型 + 思考深度
       setModelDropdownOpen(false);
       modelButtonRef.current?.focus({ preventScroll: true });
       onModelChange?.(provider, modelId, level);
     },
-    [onModelChange],
+    [closeDepthMenu, onModelChange],
   );
 
   // 服务端草稿恢复（多客户端同步）：挂载/切 key 时若服务端有草稿且本地为空则回填
@@ -2185,21 +2213,24 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                                     {formatTokens(opt.contextWindow)}
                                   </span>
                                 )}
-                                {/* 思考深度按钮：显示缓存/当前深度，点击向右展开深度选择（大点击区） */}
+                                {/* 思考深度按钮：显示缓存/当前深度，点击从右侧弹出深度列表（手机同） */}
                                 <span
                                   role="button"
                                   tabIndex={0}
+                                  data-depth-trigger={depthKey}
                                   aria-label={t("input_modelThinkingLevel")}
                                   aria-expanded={depthOpen}
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    setDepthMenuFor(depthOpen ? null : depthKey);
+                                    if (depthOpen) closeDepthMenu();
+                                    else openDepthMenu(depthKey, e.currentTarget);
                                   }}
                                   onKeyDown={(e) => {
                                     if (e.key === "Enter" || e.key === " ") {
                                       e.preventDefault();
                                       e.stopPropagation();
-                                      setDepthMenuFor(depthOpen ? null : depthKey);
+                                      if (depthOpen) closeDepthMenu();
+                                      else openDepthMenu(depthKey, e.currentTarget);
                                     }
                                   }}
                                   style={{
@@ -2219,54 +2250,61 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                                   {currentLevel}
                                   <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6" /></svg>
                                 </span>
-                                {depthOpen && (
-                                  <div
-                                    ref={depthMenuRef}
-                                    role="listbox"
-                                    aria-label={t("input_modelThinkingLevel")}
-                                    style={{
-                                      position: "absolute", right: 0, top: "calc(100% + 2px)",
-                                      zIndex: 600,
-                                      background: "var(--bg)", border: "1px solid var(--border)",
-                                      borderRadius: 8,
-                                      boxShadow: "0 4px 16px rgba(0,0,0,0.12)",
-                                      padding: 4,
-                                      display: "flex", flexDirection: "column", gap: 2,
-                                      minWidth: 116,
-                                    }}
-                                    onClick={(e) => e.stopPropagation()}
-                                  >
-                                    {levels.map((lv) => (
-                                      <button
-                                        key={lv}
-                                        type="button"
-                                        role="option"
-                                        aria-selected={lv === currentLevel}
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          applyModelWithThinking(opt.provider, opt.modelId, lv);
-                                        }}
-                                        style={{
-                                          minHeight: isMobile ? 44 : 30,
-                                          padding: "0 10px",
-                                          border: "none",
-                                          borderRadius: 6,
-                                          background: lv === currentLevel ? "var(--bg-selected)" : "none",
-                                          color: lv === currentLevel ? "var(--text)" : "var(--text-muted)",
-                                          cursor: "pointer",
-                                          fontSize: 11,
-                                          fontFamily: "var(--font-mono)",
-                                          textAlign: "left",
-                                        }}
-                                        onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                                        onMouseLeave={(e) => { e.currentTarget.style.background = lv === currentLevel ? "var(--bg-selected)" : "none"; }}
-                                      >
-                                        {lv}
-                                      </button>
-                                    ))}
-                                  </div>
-                                )}
                               </button>
+                              {depthOpen && depthMenuPos && createPortal(
+                                <div
+                                  ref={depthMenuRef}
+                                  role="listbox"
+                                  aria-label={t("input_modelThinkingLevel")}
+                                  style={{
+                                    position: "fixed",
+                                    top: depthMenuPos.top,
+                                    left: depthMenuPos.left,
+                                    zIndex: 10070,
+                                    background: "var(--bg)",
+                                    border: "1px solid var(--border)",
+                                    borderRadius: 8,
+                                    boxShadow: "0 4px 16px rgba(0,0,0,0.12)",
+                                    padding: 4,
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    gap: 2,
+                                    minWidth: 116,
+                                  }}
+                                  onClick={(e) => e.stopPropagation()}
+                                  onPointerDown={(e) => e.stopPropagation()}
+                                >
+                                  {levels.map((lv) => (
+                                    <button
+                                      key={lv}
+                                      type="button"
+                                      role="option"
+                                      aria-selected={lv === currentLevel}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        applyModelWithThinking(opt.provider, opt.modelId, lv);
+                                      }}
+                                      style={{
+                                        minHeight: isMobile ? 44 : 30,
+                                        padding: "0 10px",
+                                        border: "none",
+                                        borderRadius: 6,
+                                        background: lv === currentLevel ? "var(--bg-selected)" : "none",
+                                        color: lv === currentLevel ? "var(--text)" : "var(--text-muted)",
+                                        cursor: "pointer",
+                                        fontSize: 11,
+                                        fontFamily: "var(--font-mono)",
+                                        textAlign: "left",
+                                      }}
+                                      onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                                      onMouseLeave={(e) => { e.currentTarget.style.background = lv === currentLevel ? "var(--bg-selected)" : "none"; }}
+                                    >
+                                      {lv}
+                                    </button>
+                                  ))}
+                                </div>,
+                                document.body,
+                              )}
                             </div>
                           );
                         })}

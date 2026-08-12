@@ -81,8 +81,8 @@ function scheduleSave(): void {
 /** 修改偏好：路径写法 key 支持 "a.b" 点路径（浅层）。 */
 export function setServerPref(key: string, value: unknown): void {
   if (!singletonLoaded) {
-    // 未加载时先丢弃本地修改，等加载完成后由接入点重新应用（防覆盖服务端值）
-    void ensureServerPrefsLoaded();
+    // 未加载完成：加载后再写入（避免「思考深度」等选择被静默丢弃）
+    void ensureServerPrefsLoaded().then(() => setServerPref(key, value));
     return;
   }
   const parts = key.split(".");
