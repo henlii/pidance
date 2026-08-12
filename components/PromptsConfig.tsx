@@ -32,6 +32,7 @@ export function PromptsConfig() {
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<PromptKey | null>(null);
+  const [savingAll, setSavingAll] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState<PromptKey | null>(null);
 
@@ -100,6 +101,37 @@ export function PromptsConfig() {
     [entries],
   );
 
+  /** 底部常驻「保存全部」：串行保存所有脏块 */
+  const saveAll = useCallback(async () => {
+    if (!entries) return;
+    const dirtyKeys = (Object.keys(entries) as PromptKey[]).filter(
+      (key) => drafts[key] !== entries[key].content,
+    );
+    if (dirtyKeys.length === 0) return;
+    setSavingAll(true);
+    setError(null);
+    try {
+      for (const key of dirtyKeys) {
+        const res = await fetch("/api/prompts", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key, content: drafts[key] }),
+        });
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as { error?: string };
+          throw new Error(body.error ?? `HTTP ${res.status}`);
+        }
+      }
+      setSavedFlash("all" as unknown as PromptKey);
+      window.setTimeout(() => setSavedFlash(null), 2000);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingAll(false);
+    }
+  }, [drafts, entries, load]);
+
   if (loading && !entries) {
     return (
       <div style={{ padding: "18px 20px", fontSize: 12, color: "var(--text-muted)" }}>
@@ -149,12 +181,19 @@ export function PromptsConfig() {
     resize: "vertical",
   };
 
+  const dirtyCount = entries ? Object.keys(entries).filter((k) => drafts[k as PromptKey] !== entries[k as PromptKey].content).length : 0;
+
   return (
-    <div style={{ padding: "18px 20px" }}>
-      <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 16, maxWidth: 560 }}>
-        {t("prompts_hint")}
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
+      {/* 顶部提示常驻 */}
+      <div style={{ flexShrink: 0, padding: "16px 20px 0" }}>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6, maxWidth: 560 }}>
+          {t("prompts_hint")}
+        </div>
       </div>
 
+      {/* 中部内容区：超高内部滚动 */}
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "12px 20px 20px" }}>
       {error && (
         <div style={{ fontSize: 12, color: "var(--status-danger)", marginBottom: 12 }}>
           {t("prompts_saveFailed")}: {error}
@@ -235,6 +274,38 @@ export function PromptsConfig() {
           </div>
         );
       })}
+      </div>
+
+      {/* 底部操作区常驻 */}
+      <div style={{ flexShrink: 0, padding: "12px 20px 16px", borderTop: "1px solid var(--border)", background: "var(--bg)", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <button
+          type="button"
+          onClick={() => void saveAll()}
+          disabled={savingAll || dirtyCount === 0}
+          style={{
+            minHeight: 32,
+            padding: "0 14px",
+            borderRadius: 7,
+            border: `1px solid ${dirtyCount > 0 ? "var(--accent)" : "var(--border)"}`,
+            background: dirtyCount > 0 ? "var(--accent)" : "var(--bg-panel)",
+            color: dirtyCount > 0 ? "var(--accent-foreground)" : "var(--text-muted)",
+            cursor: savingAll || dirtyCount === 0 ? "not-allowed" : "pointer",
+            fontSize: 12,
+            fontWeight: 600,
+            opacity: savingAll || dirtyCount === 0 ? 0.65 : 1,
+          }}
+        >
+          {savingAll ? t("common_saving") : t("prompts_saveAll")}
+        </button>
+        {dirtyCount > 0 && !savingAll && (
+          <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+            {t("prompts_dirtyCount", { count: String(dirtyCount) })}
+          </span>
+        )}
+        {savedFlash && (
+          <span style={{ fontSize: 12, color: "var(--accent)" }}>{t("common_saved")}</span>
+        )}
+      </div>
     </div>
   );
 }

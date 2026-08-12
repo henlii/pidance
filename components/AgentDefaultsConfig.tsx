@@ -423,9 +423,9 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
   const blockStyle: React.CSSProperties = { marginBottom: 22 };
 
   return (
-    <div style={{ padding: "18px 20px" }}>
-      {/* 二级页导航：基础（分块表单）/ 原始 JSON */}
-      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
+      {/* 顶部二级页切换常驻 */}
+      <div style={{ flexShrink: 0, padding: "16px 20px 0", display: "flex", gap: 8, flexWrap: "wrap" }}>
         <button type="button" onClick={() => setActiveTab("basic")} style={tabStyle(activeTab === "basic")} aria-current={activeTab === "basic" ? "page" : undefined}>
           {t("defaults_basicTab")}
         </button>
@@ -434,6 +434,8 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
         </button>
       </div>
 
+      {/* 中部内容区：超高内部滚动 */}
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "16px 20px 20px" }}>
       {activeTab === "json" ? (
         <SettingsJsonEditor />
       ) : (
@@ -655,48 +657,53 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
             </div>
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <button
-              type="button"
-              onClick={() => void save()}
-              disabled={!dirty || saving}
-              style={{
-                minHeight: 32,
-                padding: "0 14px",
-                borderRadius: 7,
-                border: `1px solid ${dirty ? "var(--accent)" : "var(--border)"}`,
-                background: dirty ? "var(--accent)" : "var(--bg-panel)",
-                color: dirty ? "var(--accent-foreground)" : "var(--text-muted)",
-                cursor: !dirty || saving ? "not-allowed" : "pointer",
-                fontSize: 12,
-                fontWeight: 600,
-                opacity: !dirty || saving ? 0.65 : 1,
-              }}
-            >
-              {saving ? t("common_saving") : t("common_save")}
-            </button>
-            <button
-              type="button"
-              onClick={() => setReloadKey((k) => k + 1)}
-              disabled={loading || saving}
-              style={{
-                minHeight: 32,
-                padding: "0 12px",
-                borderRadius: 7,
-                border: "1px solid var(--border)",
-                background: "var(--bg-panel)",
-                color: "var(--text-muted)",
-                cursor: loading || saving ? "not-allowed" : "pointer",
-                fontSize: 12,
-              }}
-            >
-              {t("defaults_refresh")}
-            </button>
-            {savedFlash && (
-              <span style={{ fontSize: 12, color: "var(--accent)" }}>{t("common_saved")}</span>
-            )}
-          </div>
         </>
+      )}
+      </div>
+
+      {/* 底部操作区常驻（仅基础页） */}
+      {activeTab === "basic" && (
+        <div style={{ flexShrink: 0, padding: "12px 20px 16px", borderTop: "1px solid var(--border)", background: "var(--bg)", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            onClick={() => void save()}
+            disabled={!dirty || saving}
+            style={{
+              minHeight: 32,
+              padding: "0 14px",
+              borderRadius: 7,
+              border: `1px solid ${dirty ? "var(--accent)" : "var(--border)"}`,
+              background: dirty ? "var(--accent)" : "var(--bg-panel)",
+              color: dirty ? "var(--accent-foreground)" : "var(--text-muted)",
+              cursor: !dirty || saving ? "not-allowed" : "pointer",
+              fontSize: 12,
+              fontWeight: 600,
+              opacity: !dirty || saving ? 0.65 : 1,
+            }}
+          >
+            {saving ? t("common_saving") : t("common_save")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setReloadKey((k) => k + 1)}
+            disabled={loading || saving}
+            style={{
+              minHeight: 32,
+              padding: "0 12px",
+              borderRadius: 7,
+              border: "1px solid var(--border)",
+              background: "var(--bg-panel)",
+              color: "var(--text-muted)",
+              cursor: loading || saving ? "not-allowed" : "pointer",
+              fontSize: 12,
+            }}
+          >
+            {t("defaults_refresh")}
+          </button>
+          {savedFlash && (
+            <span style={{ fontSize: 12, color: "var(--accent)" }}>{t("common_saved")}</span>
+          )}
+        </div>
       )}
     </div>
   );
