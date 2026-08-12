@@ -1258,9 +1258,25 @@ function AddProviderPicker({
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div style={{ width: 820, maxWidth: "calc(100vw - 32px)", maxHeight: "min(72vh, calc(100vh - 32px))", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10, display: "flex", flexDirection: "column", boxShadow: "0 8px 32px rgba(0,0,0,0.22)", overflow: "hidden" }}>
-        {/* Search */}
+        {/* 顶栏：返回 + 搜索 */}
         <div style={{ padding: "10px 14px", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", alignItems: "center", gap: 8 }}>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--text-dim)", flexShrink: 0 }}>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={t("common_back")}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0,
+              minHeight: 28, padding: "0 8px", borderRadius: 6,
+              border: "1px solid var(--border)", background: "var(--bg-panel)",
+              color: "var(--text-muted)", cursor: "pointer", fontSize: 12,
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polyline points="15 18 9 12 15 6" />
+            </svg>
+            {t("common_back")}
+          </button>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--text-dim)", flexShrink: 0 }} aria-hidden="true">
             <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
           </svg>
           <input
@@ -1709,21 +1725,22 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
               })}
             </div>
 
-            {/* Add provider */}
+            {/* 添加供应商：文字按钮，与插件/技能侧栏一致 */}
             <div style={{ borderTop: "1px solid var(--border)", padding: "8px 6px" }}>
-              <button onClick={() => setPickerOpen(true)}
+              <button
                 type="button"
+                onClick={() => setPickerOpen(true)}
                 aria-label={t("models_addProvider")}
-                title={t("models_addProvider")}
                 style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                width: "100%", padding: "6px 0", background: "none", border: "1px dashed var(--border)", borderRadius: 5,
-                color: "var(--text-muted)", cursor: "pointer",
-              }}
-                onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; e.currentTarget.style.color = "var(--accent)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.color = "var(--text-muted)"; }}
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: "100%", minHeight: 30, padding: "0 8px",
+                  borderRadius: 7, border: "1px solid var(--border)",
+                  background: pickerOpen ? "var(--bg-selected)" : "var(--bg-panel)",
+                  color: pickerOpen ? "var(--accent)" : "var(--text-muted)",
+                  cursor: "pointer", fontSize: 12, fontWeight: 500,
+                }}
               >
-                <Plus size={14} aria-hidden />
+                {t("models_addProvider")}
               </button>
             </div>
           </div>
