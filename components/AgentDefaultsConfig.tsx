@@ -434,11 +434,13 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
         </button>
       </div>
 
-      {/* 中部内容区：超高内部滚动 */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "16px 20px 20px" }}>
+      {/* 中部内容区：JSON 页全高（stickyFooter 内部布局）；基础页超高内部滚动 */}
       {activeTab === "json" ? (
-        <SettingsJsonEditor />
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", padding: "16px 20px 0" }}>
+          <SettingsJsonEditor stickyFooter />
+        </div>
       ) : (
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "16px 20px 20px" }}>
         <>
           <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 16 }}>
             {t("defaults_hint")}
@@ -658,8 +660,8 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
           </div>
 
         </>
+        </div>
       )}
-      </div>
 
       {/* 底部操作区常驻（仅基础页） */}
       {activeTab === "basic" && (
