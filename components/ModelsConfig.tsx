@@ -117,12 +117,14 @@ interface ModelEntry {
   id: string;
   name?: string;
   api?: string;
+  baseUrl?: string;
   reasoning?: boolean;
   thinkingLevelMap?: Record<string, string | null>;
   input?: string[];
   contextWindow?: number;
   maxTokens?: number;
   cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  headers?: Record<string, string>;
   compat?: Record<string, unknown>;
 }
 
@@ -133,7 +135,10 @@ interface ProviderEntry {
   apiKey?: string;
   /** GET 投影：服务器是否已配置 apiKey（原始值永不回传） */
   apiKeyConfigured?: boolean;
+  /** 是否用 Authorization: Bearer 发送 apiKey（Pi models.json authHeader） */
+  authHeader?: boolean;
   headers?: Record<string, string>;
+  headersConfigured?: boolean;
   compat?: Record<string, unknown>;
   models?: ModelEntry[];
   modelOverrides?: Record<string, unknown>;
@@ -344,6 +349,162 @@ function IconButton({
   );
 }
 
+// ── Headers 键值编辑 ─────────────────────────────────────────────────────────
+
+function HeadersEditor({
+  value,
+  onChange,
+}: {
+  value?: Record<string, string>;
+  onChange: (next?: Record<string, string>) => void;
+}) {
+  const { t } = useI18n();
+  const entries = Object.entries(value ?? {});
+  const setEntry = (index: number, key: string, val: string) => {
+    const list = entries.map(([k, v], i) => (i === index ? ([key, val] as const) : ([k, v] as const)));
+    const obj: Record<string, string> = {};
+    for (const [k, v] of list) {
+      if (!k.trim()) continue;
+      obj[k.trim()] = v;
+    }
+    onChange(Object.keys(obj).length ? obj : undefined);
+  };
+  const removeAt = (index: number) => {
+    const obj: Record<string, string> = {};
+    entries.forEach(([k, v], i) => {
+      if (i !== index) obj[k] = v;
+    });
+    onChange(Object.keys(obj).length ? obj : undefined);
+  };
+  const addRow = () => {
+    const obj = { ...(value ?? {}) };
+    let i = 1;
+    let key = "X-Custom-Header";
+    while (key in obj) {
+      key = `X-Custom-Header-${i++}`;
+    }
+    obj[key] = "";
+    onChange(obj);
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      {entries.map(([k, v], index) => (
+        <div key={index} style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 6 }}>
+          <TextInput value={k} onChange={(nk) => setEntry(index, nk, v)} placeholder={t("models_headerKey")} mono />
+          <TextInput value={v} onChange={(nv) => setEntry(index, k, nv)} placeholder={t("models_headerValue")} mono />
+          <button
+            type="button"
+            onClick={() => removeAt(index)}
+            style={{
+              minHeight: 30, padding: "0 8px", borderRadius: 5,
+              border: "1px solid var(--border)", background: "var(--bg-panel)",
+              color: "var(--status-danger)", cursor: "pointer", fontSize: 11,
+            }}
+          >
+            {t("common_remove")}
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={addRow}
+        style={{
+          alignSelf: "flex-start", minHeight: 28, padding: "0 10px", borderRadius: 5,
+          border: "1px dashed var(--border)", background: "none",
+          color: "var(--text-muted)", cursor: "pointer", fontSize: 11,
+        }}
+      >
+        + {t("models_addHeader")}
+      </button>
+    </div>
+  );
+}
+
+const PROVIDER_COMPAT_BOOLS = [
+  "supportsDeveloperRole",
+  "supportsReasoningEffort",
+  "supportsStore",
+  "supportsUsageInStreaming",
+  "supportsStrictMode",
+  "sendSessionAffinityHeaders",
+  "supportsLongCacheRetention",
+] as const;
+
+const MODEL_COMPAT_BOOLS = [
+  "supportsDeveloperRole",
+  "supportsReasoningEffort",
+  "requiresReasoningContentOnAssistantMessages",
+  "requiresThinkingAsText",
+  "supportsLongCacheRetention",
+  "supportsStore",
+  "supportsUsageInStreaming",
+  "supportsStrictMode",
+  "sendSessionAffinityHeaders",
+] as const;
+
+const THINKING_FORMATS = [
+  "",
+  "openai",
+  "openrouter",
+  "together",
+  "baseten",
+  "deepseek",
+  "zai",
+  "qwen",
+  "chat-template",
+  "qwen-chat-template",
+  "string-thinking",
+  "ant-ling",
+] as const;
+
+const SESSION_AFFINITY_FORMATS = ["", "openai", "openai-nosession", "openrouter"] as const;
+const MAX_TOKENS_FIELDS = ["", "max_tokens", "max_completion_tokens"] as const;
+
+function setCompatBool(
+  compat: Record<string, unknown> | undefined,
+  key: string,
+  enabled: boolean,
+): Record<string, unknown> | undefined {
+  const next = { ...(compat ?? {}) };
+  if (enabled) next[key] = true;
+  else delete next[key];
+  return Object.keys(next).length ? next : undefined;
+}
+
+function setCompatString(
+  compat: Record<string, unknown> | undefined,
+  key: string,
+  value: string,
+): Record<string, unknown> | undefined {
+  const next = { ...(compat ?? {}) };
+  if (!value) delete next[key];
+  else next[key] = value;
+  return Object.keys(next).length ? next : undefined;
+}
+
+function CompatBoolGrid({
+  keys,
+  compat,
+  onChange,
+}: {
+  keys: readonly string[];
+  compat?: Record<string, unknown>;
+  onChange: (next?: Record<string, unknown>) => void;
+}) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {keys.map((key) => (
+        <Check
+          key={key}
+          label={key}
+          checked={compat?.[key] === true}
+          onChange={(v) => onChange(setCompatBool(compat, key, v))}
+        />
+      ))}
+    </div>
+  );
+}
+
 // ── Provider detail ───────────────────────────────────────────────────────────
 
 function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
@@ -401,6 +562,41 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
       <Field label={t("models_apiLabel")}>
         <Select value={provider.api ?? "openai-completions"} onChange={(v) => set("api", v)} options={API_OPTIONS} required />
       </Field>
+
+      <Check
+        label={t("models_authHeader")}
+        checked={provider.authHeader === true}
+        onChange={(v) => set("authHeader", v || undefined)}
+      />
+      <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: -8 }}>{t("models_authHeaderHint")}</div>
+
+      <div>
+        <SectionTitle>{t("models_headers")}</SectionTitle>
+        <div style={{ marginTop: 8 }}>
+          <HeadersEditor value={provider.headers} onChange={(h) => set("headers", h)} />
+        </div>
+        {provider.headersConfigured && (
+          <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 4 }}>{t("models_headersHint")}</div>
+        )}
+      </div>
+
+      <div>
+        <SectionTitle>{t("models_compat")}</SectionTitle>
+        <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 10 }}>
+          <Field label={t("models_sessionAffinityFormat")}>
+            <Select
+              value={typeof provider.compat?.sessionAffinityFormat === "string" ? String(provider.compat.sessionAffinityFormat) : ""}
+              onChange={(v) => set("compat", setCompatString(provider.compat, "sessionAffinityFormat", v))}
+              options={SESSION_AFFINITY_FORMATS}
+            />
+          </Field>
+          <CompatBoolGrid
+            keys={PROVIDER_COMPAT_BOOLS}
+            compat={provider.compat}
+            onChange={(c) => set("compat", c)}
+          />
+        </div>
+      </div>
     </div>
   );
 }
@@ -711,10 +907,19 @@ function ModelDetail({
         <Select value={model.api ?? ""} onChange={(v) => set("api", v || undefined)} options={API_OPTIONS} />
       </Field>
 
+      <Field label={t("models_baseUrlOverride")}>
+        <TextInput
+          value={model.baseUrl ?? ""}
+          onChange={(v) => set("baseUrl", v || undefined)}
+          placeholder={t("models_baseUrlOverrideHint")}
+          mono
+        />
+      </Field>
+
       <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
         <Check label={t("models_reasoning")} checked={model.reasoning ?? false} onChange={(v) => set("reasoning", v || undefined)} />
         <Check label={t("models_imageInput")} checked={model.input?.includes("image") ?? false}
-          onChange={(v) => set("input", v ? ["text", "image"] : undefined)} />
+          onChange={(v) => set("input", v ? ["text", "image"] : ["text"])} />
       </div>
 
       {model.reasoning && (
@@ -763,6 +968,47 @@ function ModelDetail({
               <NumInput value={costVal(k)} onChange={(v) => setCost(k, v)} placeholder="0" />
             </Field>
           ))}
+        </div>
+      </div>
+
+      <div>
+        <SectionTitle>{t("models_headers")}</SectionTitle>
+        <div style={{ marginTop: 8 }}>
+          <HeadersEditor value={model.headers} onChange={(h) => set("headers", h)} />
+        </div>
+      </div>
+
+      <div>
+        <SectionTitle>{t("models_compat")}</SectionTitle>
+        <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <Field label={t("models_thinkingFormat")}>
+              <Select
+                value={typeof model.compat?.thinkingFormat === "string" ? String(model.compat.thinkingFormat) : ""}
+                onChange={(v) => set("compat", setCompatString(model.compat, "thinkingFormat", v))}
+                options={THINKING_FORMATS}
+              />
+            </Field>
+            <Field label={t("models_maxTokensField")}>
+              <Select
+                value={typeof model.compat?.maxTokensField === "string" ? String(model.compat.maxTokensField) : ""}
+                onChange={(v) => set("compat", setCompatString(model.compat, "maxTokensField", v))}
+                options={MAX_TOKENS_FIELDS}
+              />
+            </Field>
+          </div>
+          <Field label={t("models_sessionAffinityFormat")}>
+            <Select
+              value={typeof model.compat?.sessionAffinityFormat === "string" ? String(model.compat.sessionAffinityFormat) : ""}
+              onChange={(v) => set("compat", setCompatString(model.compat, "sessionAffinityFormat", v))}
+              options={SESSION_AFFINITY_FORMATS}
+            />
+          </Field>
+          <CompatBoolGrid
+            keys={MODEL_COMPAT_BOOLS}
+            compat={model.compat}
+            onChange={(c) => set("compat", c)}
+          />
         </div>
       </div>
     </div>
