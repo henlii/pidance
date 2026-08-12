@@ -11,9 +11,18 @@ import { SettingsPageFooter, settingsPrimaryButtonStyle, settingsSecondaryButton
 export function SettingsJsonEditor({
   stickyFooter = false,
   onClose,
+  apiPath = "/api/settings/raw",
+  fixedHint = "~/.pi/agent/settings.json",
+  titleLabel,
+  fileLabel = "settings.json",
 }: {
   stickyFooter?: boolean;
   onClose?: () => void;
+  /** 原文读写 API（GET/PUT { json: string }） */
+  apiPath?: string;
+  fixedHint?: string;
+  titleLabel?: string;
+  fileLabel?: string;
 } = {}) {
   const { t } = useI18n();
   const [text, setText] = useState<string | null>(null);
@@ -31,7 +40,7 @@ export function SettingsJsonEditor({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/settings/raw", { cache: "no-store" });
+      const res = await fetch(apiPath, { cache: "no-store" });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(body.error ?? `HTTP ${res.status}`);
@@ -44,7 +53,7 @@ export function SettingsJsonEditor({
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [apiPath]);
 
   useEffect(() => {
     void load();
@@ -110,7 +119,7 @@ export function SettingsJsonEditor({
     setError(null);
     setSavedFlash(false);
     try {
-      const res = await fetch("/api/settings/raw", {
+      const res = await fetch(apiPath, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ json: text }),
@@ -126,7 +135,7 @@ export function SettingsJsonEditor({
     } finally {
       setSaving(false);
     }
-  }, [text, validateText, t]);
+  }, [text, validateText, t, apiPath]);
 
   if (loading && text === null) {
     return (
@@ -162,10 +171,10 @@ export function SettingsJsonEditor({
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "12px 20px 12px", display: "flex", flexDirection: "column" }}>
           <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
             <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)" }}>
-              {t("defaults_jsonTab")}
+              {titleLabel ?? t("defaults_jsonTab")}
             </div>
             <span style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
-              settings.json
+              {fileLabel}
             </span>
           </div>
           <div
@@ -236,7 +245,7 @@ export function SettingsJsonEditor({
         </div>
 
         <SettingsPageFooter
-          fixedHint="~/.pi/agent/settings.json"
+          fixedHint={fixedHint}
           dynamicHint={
             typeof validation === "string" || error ? (
               <span style={{ color: "var(--status-danger)", fontFamily: "var(--font-mono)" }}>

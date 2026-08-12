@@ -5,6 +5,7 @@ import { Check as CheckIcon, Eraser, LoaderCircle, Plus, Zap } from "lucide-reac
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/lib/i18n";
 import { SettingsPageFooter, settingsPrimaryButtonStyle } from "./SettingsPageFooter";
+import { SettingsJsonEditor } from "./SettingsJsonEditor";
 // Color icons (have their own fill colors — no background needed)
 import AnthropicIcon from "@lobehub/icons/es/Anthropic/components/Mono";
 import OpenAIIcon from "@lobehub/icons/es/OpenAI/components/Mono";
@@ -168,6 +169,13 @@ type Selection =
   | { type: "apikey"; providerId: string };
 
 const API_OPTIONS = ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"] as const;
+
+function formatContextTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`;
+  if (n >= 1000) return `${Math.round(n / 1000)}k`;
+  return String(n);
+}
+
 
 // ── Form field helpers ────────────────────────────────────────────────────────
 
@@ -549,12 +557,13 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
       <Field label={t("models_apiKey")}>
         {/* GET 投影不含原始密钥：已配置时显示掩码 "***"，输入即成为新密钥草稿 */}
         <SecretTextInput
-          value={provider.apiKey ?? (provider.apiKeyConfigured ? "***" : "")}
+          value={provider.apiKey ?? ""}
           onChange={(v) => set("apiKey", v || undefined)}
-          placeholder={t("models_apiKeyPlaceholder")} mono />
-        <span style={{ fontSize: 10, color: provider.apiKeyConfigured && !provider.apiKey ? "var(--status-success)" : "var(--text-dim)", marginTop: 2 }}>
-          {provider.apiKeyConfigured && !provider.apiKey
-            ? `${t("models_configured")} · ${t("models_enterNewKey")}`
+          placeholder={provider.apiKeyConfigured ? t("models_apiKeyKeepPlaceholder") : t("models_apiKeyPlaceholder")}
+          mono />
+        <span style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>
+          {provider.apiKeyConfigured
+            ? t("models_apiKeyKeepHint")
             : t("models_apiKeyHint")}
         </span>
       </Field>
@@ -1624,6 +1633,8 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
   const { t } = useI18n();
 
   const isMobile = useIsMobile();
+  /** 基础表单 / 原始 JSON（与会话设置二级页一致） */
+  const [activeTab, setActiveTab] = useState<"basic" | "json">("basic");
   const [config, setConfig] = useState<ModelsJson>({ providers: {} });
   // GET 附带的文件基线：PUT 带回做冲突检测（多标签页/多端互覆盖防护）
   const [baseline, setBaseline] = useState<ModelsConfigBaseline | null>(null);
@@ -1675,6 +1686,24 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
     loadOAuthProviders();
     loadApiKeyProviders();
   }, [loadOAuthProviders, loadApiKeyProviders]);
+
+  // 从 JSON 页切回基础页时重载，避免两边状态漂移
+  useEffect(() => {
+    if (activeTab !== "basic") return;
+    let cancelled = false;
+    fetch("/api/models-config")
+      .then((r) => r.json())
+      .then((d: ModelsJson & { baseline?: ModelsConfigBaseline | null }) => {
+        if (cancelled) return;
+        const { baseline: b, ...rest } = d as ModelsJson & { baseline?: ModelsConfigBaseline | null };
+        const normalized = rest.providers ? rest : { ...rest, providers: {} };
+        setConfig(normalized as ModelsJson);
+        if (b) setBaseline(b);
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [activeTab]);
+
 
   // 认证状态变化后的统一回流：重新拉取 OAuth + API Key 认证状态，
   // 并通知宿主刷新模型列表（外部浏览器完成 OAuth 后原页面自动更新）。
@@ -1851,6 +1880,49 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
         </div>
         )}
 
+        {/* 二级页：基础 / 原始 JSON */}
+        <div style={{ flexShrink: 0, padding: "12px 16px 0", display: "flex", gap: 8, flexWrap: "wrap", borderBottom: activeTab === "json" ? "none" : undefined }}>
+          <button
+            type="button"
+            onClick={() => setActiveTab("basic")}
+            style={{
+              minHeight: 28, padding: "0 12px", borderRadius: 6, border: "1px solid var(--border)",
+              background: activeTab === "basic" ? "var(--bg-selected)" : "var(--bg-panel)",
+              color: activeTab === "basic" ? "var(--text)" : "var(--text-muted)",
+              cursor: "pointer", fontSize: 12, fontWeight: activeTab === "basic" ? 600 : 400,
+            }}
+            aria-current={activeTab === "basic" ? "page" : undefined}
+          >
+            {t("defaults_basicTab")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("json")}
+            style={{
+              minHeight: 28, padding: "0 12px", borderRadius: 6, border: "1px solid var(--border)",
+              background: activeTab === "json" ? "var(--bg-selected)" : "var(--bg-panel)",
+              color: activeTab === "json" ? "var(--text)" : "var(--text-muted)",
+              cursor: "pointer", fontSize: 12, fontWeight: activeTab === "json" ? 600 : 400,
+            }}
+            aria-current={activeTab === "json" ? "page" : undefined}
+          >
+            {t("defaults_jsonTab")}
+          </button>
+        </div>
+
+        {activeTab === "json" ? (
+          <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+            <SettingsJsonEditor
+              stickyFooter
+              onClose={onClose}
+              apiPath="/api/models-config/raw"
+              fixedHint="~/.pi/agent/models.json"
+              titleLabel={t("defaults_jsonTab")}
+              fileLabel="models.json"
+            />
+          </div>
+        ) : (
+        <>
         {/* Body */}
         <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
 
@@ -1947,9 +2019,11 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
                           <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: m.id ? "var(--text-muted)" : "var(--text-dim)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                             {m.id || t("models_newModel")}
                           </span>
-                          {m.reasoning && (
-                            <span style={{ fontSize: 9, padding: "1px 4px", background: "rgba(99,102,241,0.12)", color: "rgba(99,102,241,0.8)", borderRadius: 3, flexShrink: 0 }}>T</span>
-                          )}
+                          {typeof m.contextWindow === "number" && Number.isFinite(m.contextWindow) ? (
+                            <span style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", flexShrink: 0 }}>
+                              {formatContextTokens(m.contextWindow)}
+                            </span>
+                          ) : null}
                         </div>
                       );
                     })}
@@ -2021,6 +2095,8 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
             {savedOk ? t("common_saved") : saving ? t("models_saving") : t("common_save")}
           </button>
         </SettingsPageFooter>
+        </>
+        )}
       </div>
       {pickerOpen && (
         <AddProviderPicker
