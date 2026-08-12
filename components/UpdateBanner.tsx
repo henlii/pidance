@@ -95,10 +95,11 @@ export function UpdateBanner() {
     };
   }, []);
 
-  const dismiss = useCallback(() => {
+  // 不用 useCallback：依赖 check 切片时 React Compiler 会跳过 preserve-manual-memoization
+  const dismiss = () => {
     if (check?.latestVersion) markDismissed(check.latestVersion);
     setVisible(false);
-  }, [check?.latestVersion]);
+  };
 
   const upgrade = useCallback(async () => {
     if (!check?.updateAvailable || !check.latestVersion) return;

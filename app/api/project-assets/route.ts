@@ -9,11 +9,12 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmdirSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { getAllowedFileRoots, isFilePathAllowed } from "@/lib/file-access";
 
 export const dynamic = "force-dynamic";
@@ -29,7 +30,7 @@ function projectAssetsDir(cwd: string): string {
 function isInside(cwd: string, target: string): boolean {
   const root = resolve(cwd);
   const rel = relative(root, resolve(target));
-  return rel !== "" && !rel.startsWith("..") && !resolve(target).startsWith(`${root}${require("node:path").sep}`);
+  return rel !== "" && !rel.startsWith("..") && !resolve(target).startsWith(`${root}${sep}`);
 }
 
 async function guardCwd(cwd: string): Promise<string | null> {
@@ -241,7 +242,6 @@ export async function POST(req: Request) {
 }
 
 function rmdirIfEmpty(dir: string): void {
-  const { rmdirSync } = require("node:fs") as typeof import("node:fs");
   try {
     if (readdirSync(dir).length === 0) rmdirSync(dir);
   } catch {
