@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import { THINKING_LEVELS, type AgentThinkingLevel } from "@/lib/agent-settings";
 import { SettingsJsonEditor } from "./SettingsJsonEditor";
+import { SettingsPageFooter, settingsPrimaryButtonStyle, settingsSecondaryButtonStyle } from "./SettingsPageFooter";
 
 interface AgentDefaultsConfigProps {
   cwd: string | null;
@@ -214,7 +215,7 @@ function draftDirty(draft: Draft, base: Draft): boolean {
   );
 }
 
-export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
+export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps & { onClose?: () => void }) {
   const { t } = useI18n();
   const [raw, setRaw] = useState<SettingsObject | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -437,7 +438,7 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
       {/* 中部内容区：JSON 页全高（stickyFooter 内部布局）；基础页超高内部滚动 */}
       {activeTab === "json" ? (
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", padding: "16px 20px 0" }}>
-          <SettingsJsonEditor stickyFooter />
+          <SettingsJsonEditor stickyFooter onClose={onClose} />
         </div>
       ) : (
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "16px 20px 20px" }}>
@@ -663,49 +664,36 @@ export function AgentDefaultsConfig({ cwd }: AgentDefaultsConfigProps) {
         </div>
       )}
 
-      {/* 底部操作区常驻（仅基础页） */}
+      {/* 底部操作区常驻（仅基础页；JSON 页由 SettingsJsonEditor stickyFooter 自带） */}
       {activeTab === "basic" && (
-        <div style={{ flexShrink: 0, padding: "12px 20px 16px", borderTop: "1px solid var(--border)", background: "var(--bg)", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          <button
-            type="button"
-            onClick={() => void save()}
-            disabled={!dirty || saving}
-            style={{
-              minHeight: 32,
-              padding: "0 14px",
-              borderRadius: 7,
-              border: `1px solid ${dirty ? "var(--accent)" : "var(--border)"}`,
-              background: dirty ? "var(--accent)" : "var(--bg-panel)",
-              color: dirty ? "var(--accent-foreground)" : "var(--text-muted)",
-              cursor: !dirty || saving ? "not-allowed" : "pointer",
-              fontSize: 12,
-              fontWeight: 600,
-              opacity: !dirty || saving ? 0.65 : 1,
-            }}
-          >
-            {saving ? t("common_saving") : t("common_save")}
-          </button>
+        <SettingsPageFooter
+          fixedHint="~/.pi/agent/settings.json"
+          dynamicHint={
+            error ? (
+              <span style={{ color: "var(--status-danger)" }}>{t("defaults_saveFailed")}: {error}</span>
+            ) : savedFlash ? (
+              <span style={{ color: "var(--accent)" }}>{t("common_saved")}</span>
+            ) : null
+          }
+          onClose={onClose}
+        >
           <button
             type="button"
             onClick={() => setReloadKey((k) => k + 1)}
             disabled={loading || saving}
-            style={{
-              minHeight: 32,
-              padding: "0 12px",
-              borderRadius: 7,
-              border: "1px solid var(--border)",
-              background: "var(--bg-panel)",
-              color: "var(--text-muted)",
-              cursor: loading || saving ? "not-allowed" : "pointer",
-              fontSize: 12,
-            }}
+            style={settingsSecondaryButtonStyle(!(loading || saving))}
           >
             {t("defaults_refresh")}
           </button>
-          {savedFlash && (
-            <span style={{ fontSize: 12, color: "var(--accent)" }}>{t("common_saved")}</span>
-          )}
-        </div>
+          <button
+            type="button"
+            onClick={() => void save()}
+            disabled={!dirty || saving}
+            style={settingsPrimaryButtonStyle(Boolean(dirty && !saving))}
+          >
+            {saving ? t("common_saving") : t("common_save")}
+          </button>
+        </SettingsPageFooter>
       )}
     </div>
   );

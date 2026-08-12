@@ -11,6 +11,7 @@ import type {
 import { shortenPath } from "@/lib/file-paths";
 import { LoaderCircle, RefreshCw } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
+import { SettingsPageFooter, settingsSecondaryButtonStyle } from "./SettingsPageFooter";
 
 // 设置类界面的图标按钮：24×24 盒、细描边，对齐 sidebar-icon-btn 惯例；
 // label 同时落在 title 与 aria-label 上，loading 时换旋转 LoaderCircle。
@@ -927,14 +928,8 @@ export function SkillsConfig({
               overflow: "hidden",
             }}
       >
-        {/* Header：独立弹窗显示标题+关闭；嵌入时只留一行项目路径说明 */}
-        {embedded ? (
-          <div style={{ padding: "10px 18px 0", flexShrink: 0 }}>
-            <code style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
-              {shortenPath(cwd)}
-            </code>
-          </div>
-        ) : (
+        {/* Header：仅独立弹窗显示标题；嵌入时由 Settings 外壳提供 chrome，不显示路径 */}
+        {!embedded && (
         <div
           style={{
             display: "flex",
@@ -945,26 +940,9 @@ export function SkillsConfig({
             flexShrink: 0,
           }}
         >
-          <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-            <span
-              style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}
-            >
-              {t("common_skills")}
-            </span>
-            <code
-              style={{
-                fontSize: 11,
-                color: "var(--text-muted)",
-                fontFamily: "var(--font-mono)",
-                maxWidth: 320,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {shortenPath(cwd)}
-            </code>
-          </div>
+          <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>
+            {t("common_skills")}
+          </span>
           <button
             onClick={onClose}
             style={{
@@ -1287,64 +1265,32 @@ export function SkillsConfig({
           </div>
         </div>
 
-        {/* Footer */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "10px 18px",
-            borderTop: "1px solid var(--border)",
-            flexShrink: 0,
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            {skills.some((skill) => Boolean(skill.install)) && (
-              <IconButton
-                label={
-                  checkingAll
-                    ? t("skills_checkingAll")
-                    : t("skills_checkAll")
-                }
-                onClick={() => void checkForUpdates()}
-                disabled={checkingAll || updatingSkill !== null}
-                loading={checkingAll}
-              >
-                <RefreshCw size={12} aria-hidden />
-              </IconButton>
-            )}
-            {Object.values(updateStatuses).filter(
-              (status) => status.state === "update-available",
-            ).length > 0 && (
-              <span style={{ fontSize: 12, color: "var(--status-warning)" }}>
-                {
-                  Object.values(updateStatuses).filter(
-                    (status) => status.state === "update-available",
-                  ).length
-                }{" "}
-                {Object.values(updateStatuses).filter(
-                  (status) => status.state === "update-available",
-                ).length === 1
+        <SettingsPageFooter
+          dynamicHint={
+            Object.values(updateStatuses).filter((s) => s.state === "update-available").length > 0 ? (
+              <span style={{ color: "var(--status-warning)" }}>
+                {Object.values(updateStatuses).filter((s) => s.state === "update-available").length}{" "}
+                {Object.values(updateStatuses).filter((s) => s.state === "update-available").length === 1
                   ? t("skills_updateSingle")
                   : t("skills_updatePlural")}
               </span>
-            )}
-          </div>
-          <button
-            onClick={onClose}
-            style={{
-              padding: "6px 14px",
-              background: "none",
-              border: "1px solid var(--border)",
-              borderRadius: 6,
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: 13,
-            }}
-          >
-            {t("dialog_close")}
-          </button>
-        </div>
+            ) : saveError ? (
+              <span style={{ color: "var(--status-danger)" }}>{saveError}</span>
+            ) : null
+          }
+          onClose={onClose}
+        >
+          {skills.some((skill) => Boolean(skill.install)) && (
+            <button
+              type="button"
+              onClick={() => void checkForUpdates()}
+              disabled={checkingAll || updatingSkill !== null}
+              style={settingsSecondaryButtonStyle(!(checkingAll || updatingSkill !== null))}
+            >
+              {checkingAll ? t("skills_checkingAll") : t("skills_checkAll")}
+            </button>
+          )}
+        </SettingsPageFooter>
       </div>
     </div>
   );

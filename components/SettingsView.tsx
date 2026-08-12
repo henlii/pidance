@@ -14,6 +14,7 @@ import { loadStreamingEnterAction, saveStreamingEnterAction, type StreamingEnter
 import { readSoundEnabled, writeSoundEnabled } from "@/hooks/useAudio";
 import { setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { useI18n, type Locale } from "@/lib/i18n";
+import { SettingsPageFooter } from "./SettingsPageFooter";
 import { loadAutoUpdateCheck, saveAutoUpdateCheck } from "@/lib/ui-preferences";
 import {
   SETTINGS_PAGE_STORAGE_KEY,
@@ -132,7 +133,7 @@ function SegmentedChoice<T extends string>({
 }
 
 /** 设置 → 通用：UI 会话登录管理（服务器密码门禁）。 */
-function GeneralPage() {
+function GeneralPage({ onClose }: { onClose?: () => void }) {
   const { t } = useI18n();
   const [status, setStatus] = useState<{
     passwordRequired: boolean;
@@ -211,7 +212,8 @@ function GeneralPage() {
   const canLogout = Boolean(status?.passwordRequired && status.authenticated);
 
   return (
-    <div className="settings-page-content">
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
+      <div className="settings-page-content" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
       <div style={{ marginBottom: 22 }}>
         <div style={sectionTitle}>{t("general_loginSection")}</div>
         <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 12, maxWidth: 480 }}>
@@ -340,15 +342,18 @@ function GeneralPage() {
           </div>
         </div>
       </div>
+      </div>
+      <SettingsPageFooter onClose={onClose} />
     </div>
   );
 }
 
-function AppearancePage() {
+function AppearancePage({ onClose }: { onClose?: () => void }) {
   const { mode, themeStyle, setTheme, setThemeStyle } = useTheme();
   const { locale, setLocale, t } = useI18n();
   return (
-    <div className="settings-page-content">
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
+      <div className="settings-page-content" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
       <SegmentedChoice
         label={t("appearance_colorMode")}
         options={[
@@ -380,7 +385,8 @@ function AppearancePage() {
       <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6, maxWidth: 420 }}>
         {t("appearance_coverage")}
       </div>
-
+      </div>
+      <SettingsPageFooter onClose={onClose} />
     </div>
   );
 }
@@ -423,15 +429,15 @@ export function SettingsView({ cwd, sessionId, onClose, onModelsChanged, onAuthS
     }
     switch (activePageInfo.id) {
       case "general":
-        return <GeneralPage />;
+        return <GeneralPage onClose={onClose} />;
       case "appearance":
-        return <AppearancePage />;
+        return <AppearancePage onClose={onClose} />;
       case "models":
         return <ModelsConfig embedded onClose={onModelsChanged ?? onClose} onAuthStateChange={onAuthStateChange} />;
       case "defaults":
-        return <AgentDefaultsConfig cwd={cwd} />;
+        return <AgentDefaultsConfig cwd={cwd} onClose={onClose} />;
       case "prompts":
-        return <PromptsConfig />;
+        return <PromptsConfig onClose={onClose} />;
       case "skills":
         return <SkillsConfig embedded globalOnly cwd={cwd!} onClose={onClose} />;
       case "plugins":

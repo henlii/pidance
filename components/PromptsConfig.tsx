@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import { useI18n } from "@/lib/i18n";
+import { SettingsPageFooter, settingsPrimaryButtonStyle } from "./SettingsPageFooter";
 
 type PromptKey = "system" | "systemAppend" | "agents";
 
@@ -22,7 +23,7 @@ const sectionTitleStyle: React.CSSProperties = {
  * 文令配置：系统文令覆盖（SYSTEM.md）/ 系统文令追加（APPEND_SYSTEM.md）/
  * 全局规则（AGENTS.md）。开关控制文件是否存在；禁用时也可编辑并持久化草稿。
  */
-export function PromptsConfig() {
+export function PromptsConfig({ onClose }: { onClose?: () => void } = {}) {
   const { t } = useI18n();
   const [entries, setEntries] = useState<Record<PromptKey, PromptEntry> | null>(null);
   const [drafts, setDrafts] = useState<Record<PromptKey, string>>({
@@ -179,12 +180,6 @@ export function PromptsConfig() {
           </button>
         ))}
       </div>
-      <div style={{ flexShrink: 0, padding: "10px 20px 0" }}>
-        <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6, maxWidth: 560 }}>
-          {t("prompts_hint")}
-        </div>
-      </div>
-
       {/* 中部内容区：编辑器自动扩展（仅当前二级页） */}
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "12px 20px 20px", display: "flex", flexDirection: "column" }}>
       {error && (
@@ -241,36 +236,30 @@ export function PromptsConfig() {
       })()}
       </div>
 
-      {/* 底部操作区常驻：保存当前二级页 */}
-      <div style={{ flexShrink: 0, padding: "12px 20px 16px", borderTop: "1px solid var(--border)", background: "var(--bg)", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+      <SettingsPageFooter
+        fixedHint={fileNames[activeKey]}
+        dynamicHint={
+          error ? (
+            <span style={{ color: "var(--status-danger)" }}>{t("prompts_saveFailed")}: {error}</span>
+          ) : !entries[activeKey].enabled ? (
+            <span style={{ color: "var(--text-dim)" }}>{t("prompts_disabledDraftHint")}</span>
+          ) : savedFlash === activeKey ? (
+            <span style={{ color: "var(--accent)" }}>{t("common_saved")}</span>
+          ) : null
+        }
+        onClose={onClose}
+      >
         <button
           type="button"
           onClick={() => void put(activeKey, { content: drafts[activeKey] })}
           disabled={saving === activeKey || drafts[activeKey] === entries[activeKey].content}
-          style={{
-            minHeight: 32,
-            padding: "0 14px",
-            borderRadius: 7,
-            border: `1px solid ${drafts[activeKey] !== entries[activeKey].content ? "var(--accent)" : "var(--border)"}`,
-            background: drafts[activeKey] !== entries[activeKey].content ? "var(--accent)" : "var(--bg-panel)",
-            color: drafts[activeKey] !== entries[activeKey].content ? "var(--accent-foreground)" : "var(--text-muted)",
-            cursor: saving === activeKey || drafts[activeKey] === entries[activeKey].content ? "not-allowed" : "pointer",
-            fontSize: 12,
-            fontWeight: 600,
-            opacity: saving === activeKey || drafts[activeKey] === entries[activeKey].content ? 0.65 : 1,
-          }}
+          style={settingsPrimaryButtonStyle(
+            saving !== activeKey && drafts[activeKey] !== entries[activeKey].content,
+          )}
         >
           {saving === activeKey ? t("common_saving") : t("common_save")}
         </button>
-        {!entries[activeKey].enabled && (
-          <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
-            {t("prompts_disabledDraftHint")}
-          </span>
-        )}
-        {savedFlash === activeKey && (
-          <span style={{ fontSize: 12, color: "var(--accent)" }}>{t("common_saved")}</span>
-        )}
-      </div>
+      </SettingsPageFooter>
     </div>
   );
 }

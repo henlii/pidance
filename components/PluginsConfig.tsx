@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { sendAgentCommand } from "@/lib/agent-client";
-import { CircleArrowUp, LoaderCircle, RefreshCw, RotateCw } from "lucide-react";
+import { CircleArrowUp, LoaderCircle, Trash2 } from "lucide-react";
+import { SettingsPageFooter, settingsDangerIconButtonStyle, settingsSecondaryButtonStyle } from "./SettingsPageFooter";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { PluginPackageInfo, PluginsResponse } from "@/lib/api-types";
 import { shortenPath } from "@/lib/file-paths";
@@ -27,11 +28,14 @@ function resourceSummary(pkg: PluginPackageInfo, t: ReturnType<typeof useI18n>["
   return parts.length ? parts.join(" · ") : t("plugins_noResources");
 }
 
-function versionSummary(pkg: PluginPackageInfo, t: ReturnType<typeof useI18n>["t"]): string {
-  const parts = [];
-  if (pkg.version) parts.push(t("plugins_versionInstalled", { version: pkg.version }));
-  if (pkg.configuredVersion) parts.push(t("plugins_versionConfigured", { version: pkg.configuredVersion }));
-  return parts.length ? parts.join(" · ") : t("common_unknown");
+/** 列表/详情版本行：有更新时「当前 → 最新」，否则当前版本 */
+function versionLine(
+  pkg: PluginPackageInfo,
+  update?: { hasUpdate?: boolean; latest?: string | null } | null,
+): string {
+  const current = pkg.version ?? "?";
+  if (update?.hasUpdate && update.latest) return `${current} → ${update.latest}`;
+  return current;
 }
 
 function installLocation(scope: PluginScope, cwd: string): string {
@@ -543,7 +547,6 @@ function PackageDetail({
   locked,
   onToggleLock,
   onAction,
-  onReloadSession,
 }: {
   pkg: PluginPackageInfo;
   cwd: string;
@@ -555,12 +558,10 @@ function PackageDetail({
   locked: boolean;
   onToggleLock: () => void;
   onAction: (action: PluginAction, pkg: PluginPackageInfo) => void;
-  onReloadSession: () => void;
 }) {
   const { t } = useI18n();
   const key = packageKey(pkg);
   const busy = busyKey?.endsWith(key) ?? false;
-  const reloadBusy = busyKey === "reload";
   const enabled = !pkg.disabled;
 
   return (
@@ -569,7 +570,7 @@ function PackageDetail({
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 180, flex: 1 }}>
           <Toggle
             enabled={enabled}
-            loading={busy || reloadBusy}
+            loading={busy}
             onToggle={() => onAction(pkg.disabled ? "enable" : "disable", pkg)}
             label={pkg.disabled ? t("plugins_enable") : t("plugins_disable")}
           />
@@ -631,18 +632,18 @@ function PackageDetail({
               style={{
                 fontSize: 10, padding: "2px 6px", borderRadius: 999,
                 background: "color-mix(in srgb, var(--status-warning) 15%, transparent)",
-                color: "var(--status-warning)", fontWeight: 600,
+                color: "var(--status-warning)", fontWeight: 600, fontFamily: "var(--font-mono)",
               }}
             >
-              {t("plugins_updateAvailable", { latest: updateInfo.latest ?? "?" })}
+              {versionLine(pkg, updateInfo)}
             </span>
           )}
           {!locked && (
           <button
             type="button"
             onClick={() => onAction("update", pkg)}
-            disabled={busy || reloadBusy}
-            style={iconButtonStyle(busy || reloadBusy)}
+            disabled={busy}
+            style={iconButtonStyle(busy)}
             title={busyKey === `update:${key}` ? t("plugins_updating", { source: pkg.source }) : t("plugins_update", { source: pkg.source })}
             aria-label={busyKey === `update:${key}` ? t("plugins_updating", { source: pkg.source }) : t("plugins_update", { source: pkg.source })}
           >
@@ -655,24 +656,21 @@ function PackageDetail({
           )}
           <button
             type="button"
-            onClick={onReloadSession}
-            disabled={!sessionId || reloadBusy || busy}
-            style={iconButtonStyle(!sessionId || reloadBusy || busy)}
-            title={reloadBusy ? t("plugins_reloading") : sessionId ? t("plugins_reload") : t("plugins_openSession")}
-            aria-label={reloadBusy ? t("plugins_reloading") : sessionId ? t("plugins_reload") : t("plugins_openSession")}
+            onClick={() => {
+              if (window.confirm(t("plugins_confirmRemove", { source: pkg.source }))) {
+                onAction("remove", pkg);
+              }
+            }}
+            disabled={busy}
+            style={settingsDangerIconButtonStyle(!busy)}
+            title={busyKey === `remove:${key}` ? t("plugins_removing") : t("common_remove")}
+            aria-label={busyKey === `remove:${key}` ? t("plugins_removing") : t("common_remove")}
           >
-            {reloadBusy ? (
+            {busyKey === `remove:${key}` ? (
               <LoaderCircle size={13} className="animate-spin" aria-hidden />
             ) : (
-              <RotateCw size={13} aria-hidden />
+              <Trash2 size={13} aria-hidden />
             )}
-          </button>
-          <button
-            onClick={() => onAction("remove", pkg)}
-            disabled={busy || reloadBusy}
-            style={buttonStyle(busy || reloadBusy, true)}
-          >
-            {busyKey === `remove:${key}` ? t("plugins_removing") : t("common_remove")}
           </button>
         </div>
       </div>
@@ -689,7 +687,7 @@ function PackageDetail({
         <div style={{ color: "var(--text-dim)" }}>{t("common_status")}</div>
         <div style={{ color: statusColor(pkg.status), textTransform: "capitalize" }}>{pkg.status}</div>
         <div style={{ color: "var(--text-dim)" }}>{t("common_version")}</div>
-        <div style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{versionSummary(pkg, t)}</div>
+        <div style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{versionLine(pkg, updateInfo)}</div>
         <div style={{ color: "var(--text-dim)" }}>{t("plugins_package")}</div>
         <div style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", overflowWrap: "anywhere" }}>
           {pkg.packageName ?? t("common_unknown")}
@@ -982,14 +980,8 @@ export function PluginsConfig({
               overflow: "hidden",
             }}
       >
-        {/* Header：独立弹窗显示标题+关闭；嵌入时只留一行项目路径说明 */}
-        {embedded ? (
-          <div style={{ padding: "10px 18px 0", flexShrink: 0 }}>
-            <code style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
-              {shortenPath(cwd)}
-            </code>
-          </div>
-        ) : (
+        {/* Header：仅独立弹窗显示标题；嵌入时由 Settings 外壳提供 chrome */}
+        {!embedded && (
         <div
           style={{
             display: "flex",
@@ -1000,23 +992,9 @@ export function PluginsConfig({
             flexShrink: 0,
           }}
         >
-          <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0 }}>
-            <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>
-              {t("common_plugins")}
-            </span>
-            <code
-              style={{
-                fontSize: 11,
-                color: "var(--text-muted)",
-                fontFamily: "var(--font-mono)",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {shortenPath(cwd)}
-            </code>
-          </div>
+          <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>
+            {t("common_plugins")}
+          </span>
           <button
             onClick={onClose}
             style={{
@@ -1128,9 +1106,10 @@ export function PluginsConfig({
                                   background: "color-mix(in srgb, var(--status-warning) 18%, transparent)",
                                   color: "var(--status-warning)",
                                   fontWeight: 600,
+                                  fontFamily: "var(--font-mono)",
                                 }}
                               >
-                                {t("plugins_updateAvailable", { latest: pluginUpdates[packageKey(pkg)]?.latest ?? "?" })}
+                                {versionLine(pkg, pluginUpdates[packageKey(pkg)])}
                               </span>
                             )}
                             <div
@@ -1156,7 +1135,7 @@ export function PluginsConfig({
                                   marginTop: 2,
                                 }}
                               >
-                                {versionSummary(pkg, t)}
+                                {versionLine(pkg, pluginUpdates[packageKey(pkg)])}
                               </div>
                             )}
                           </div>
@@ -1168,81 +1147,49 @@ export function PluginsConfig({
               )}
             </div>
             <div style={{ padding: "8px 6px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
-              <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+              <div style={{ display: "flex", gap: 6 }}>
                 <button
                   type="button"
                   onClick={() => void checkAllUpdates()}
                   disabled={checkingUpdates || !data}
                   style={{
-                    flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                    padding: "6px 4px", borderRadius: 5, border: "1px solid var(--border)",
-                    background: "var(--bg-panel)", color: "var(--text-muted)",
-                    cursor: checkingUpdates || !data ? "not-allowed" : "pointer",
-                    fontSize: 11, opacity: checkingUpdates || !data ? 0.5 : 1,
+                    ...settingsSecondaryButtonStyle(!(checkingUpdates || !data)),
+                    flex: 1, minHeight: 30, padding: "0 6px", fontSize: 11,
                   }}
                 >
-                  {checkingUpdates ? <LoaderCircle size={12} className="animate-spin" aria-hidden /> : <RefreshCw size={12} aria-hidden />}
-                  {t("plugins_checkAllUpdates")}
+                  {checkingUpdates ? t("common_loading") : t("plugins_checkUpdates")}
                 </button>
                 <button
                   type="button"
                   onClick={() => void upgradeAll()}
                   disabled={updatingAll || Object.values(pluginUpdates).filter((u) => u.hasUpdate).length === 0}
                   style={{
-                    flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                    padding: "6px 4px", borderRadius: 5, border: "1px solid var(--accent)",
-                    background: "var(--accent)", color: "var(--accent-foreground)",
+                    flex: 1, minHeight: 30, padding: "0 6px", borderRadius: 7,
+                    border: "1px solid var(--accent)", background: "var(--accent)",
+                    color: "var(--accent-foreground)", fontSize: 11, fontWeight: 600,
                     cursor: updatingAll || Object.values(pluginUpdates).filter((u) => u.hasUpdate).length === 0 ? "not-allowed" : "pointer",
-                    fontSize: 11, fontWeight: 600,
                     opacity: updatingAll || Object.values(pluginUpdates).filter((u) => u.hasUpdate).length === 0 ? 0.5 : 1,
                   }}
                 >
-                  {updatingAll ? <LoaderCircle size={12} className="animate-spin" aria-hidden /> : <CircleArrowUp size={12} aria-hidden />}
-                  {t("plugins_upgradeAll")}
+                  {updatingAll ? t("common_loading") : t("plugins_upgradeAll")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAddMode(true);
+                    setActionError(null);
+                    setActionMessage(null);
+                  }}
+                  style={{
+                    ...settingsSecondaryButtonStyle(true),
+                    flex: 1, minHeight: 30, padding: "0 6px", fontSize: 11,
+                    background: addMode ? "var(--bg-selected)" : "var(--bg-panel)",
+                    color: addMode ? "var(--accent)" : "var(--text-muted)",
+                  }}
+                >
+                  {t("plugins_add")}
                 </button>
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setAddMode(true);
-                  setActionError(null);
-                  setActionMessage(null);
-                }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  padding: "7px 8px",
-                  borderRadius: 5,
-                  border: "none",
-                  width: "100%",
-                  cursor: "pointer",
-                  background: addMode ? "var(--bg-selected)" : "none",
-                  color: addMode ? "var(--accent)" : "var(--text-dim)",
-                  fontSize: 12,
-                }}
-                onMouseEnter={(e) => {
-                  if (!addMode) e.currentTarget.style.background = "var(--bg-hover)";
-                }}
-                onMouseLeave={(e) => {
-                  if (!addMode) e.currentTarget.style.background = "none";
-                }}
-              >
-                <svg
-                  width="13"
-                  height="13"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <line x1="12" y1="5" x2="12" y2="19" />
-                  <line x1="5" y1="12" x2="19" y2="12" />
-                </svg>
-                {t("plugins_add")}
-              </button>
             </div>
           </div>
 
@@ -1292,7 +1239,6 @@ export function PluginsConfig({
                 locked={Boolean(locks[packageKey(selectedPackage)])}
                 onToggleLock={() => toggleLock(packageKey(selectedPackage))}
                 onAction={runAction}
-                onReloadSession={reloadSession}
               />
             ) : (
               <div
@@ -1311,49 +1257,42 @@ export function PluginsConfig({
           </div>
         </div>
 
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
-            padding: "10px 18px",
-            borderTop: "1px solid var(--border)",
-            flexShrink: 0,
-          }}
-        >
-          <div style={{ minWidth: 0, flex: 1, fontSize: 11, color: "var(--text-dim)", overflow: "hidden" }}>
-            {data?.diagnostics.length ? (
+        <SettingsPageFooter
+          fixedHint={
+            data
+              ? t("plugins_totals", {
+                  extensions: data.totals.extensions,
+                  skills: data.totals.skills,
+                  prompts: data.totals.prompts,
+                  themes: data.totals.themes,
+                })
+              : null
+          }
+          dynamicHint={
+            actionError ? (
+              <span style={{ color: "var(--status-danger)" }}>{actionError}</span>
+            ) : actionMessage ? (
+              <span style={{ color: "var(--accent)" }}>{actionMessage}</span>
+            ) : data?.diagnostics.length ? (
               <span
                 title={data.diagnostics.map((d) => `${d.type}: ${d.source ? `${d.source}: ` : ""}${d.message}`).join("\n")}
                 style={{ color: data.diagnostics.some((d) => d.type === "error") ? "var(--status-danger)" : "var(--status-warning)" }}
               >
                 {t(data.diagnostics.length === 1 ? "plugins_diagnostics_one" : "plugins_diagnostics_other", { count: data.diagnostics.length })}
               </span>
-            ) : (
-              <span>
-                {data ? t("plugins_totals", { extensions: data.totals.extensions, skills: data.totals.skills, prompts: data.totals.prompts, themes: data.totals.themes }) : ""}
-              </span>
-            )}
-          </div>
+            ) : null
+          }
+          onClose={onClose}
+        >
           <button
             type="button"
             onClick={() => void loadPlugins()}
             disabled={loading || busyKey !== null}
-            style={iconButtonStyle(loading || busyKey !== null)}
-            title={loading ? t("plugins_refreshing") : t("plugins_refresh")}
-            aria-label={loading ? t("plugins_refreshing") : t("plugins_refresh")}
+            style={settingsSecondaryButtonStyle(!(loading || busyKey !== null))}
           >
-            {loading ? (
-              <LoaderCircle size={13} className="animate-spin" aria-hidden />
-            ) : (
-              <RefreshCw size={13} aria-hidden />
-            )}
+            {loading ? t("plugins_refreshing") : t("plugins_refresh")}
           </button>
-          <button onClick={onClose} style={buttonStyle(false)}>
-            {t("dialog_close")}
-          </button>
-        </div>
+        </SettingsPageFooter>
       </div>
     </div>
   );

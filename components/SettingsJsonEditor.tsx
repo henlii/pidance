@@ -2,12 +2,19 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import { useI18n } from "@/lib/i18n";
+import { SettingsPageFooter, settingsPrimaryButtonStyle, settingsSecondaryButtonStyle } from "./SettingsPageFooter";
 
 /**
  * settings.json 原始 JSON 编辑模式：
  * 加载 → 编辑 → 校验（客户端 + 服务端）→ 原子保存。
  */
-export function SettingsJsonEditor({ stickyFooter = false }: { stickyFooter?: boolean } = {}) {
+export function SettingsJsonEditor({
+  stickyFooter = false,
+  onClose,
+}: {
+  stickyFooter?: boolean;
+  onClose?: () => void;
+} = {}) {
   const { t } = useI18n();
   const [text, setText] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -156,16 +163,6 @@ export function SettingsJsonEditor({ stickyFooter = false }: { stickyFooter?: bo
             {t("settingsJson_hint")}
           </div>
         </div>
-        {(error || (typeof validation === "string")) && (
-          <div style={{ flexShrink: 0, fontSize: 12, color: "var(--status-danger)", marginBottom: 10, fontFamily: "var(--font-mono)" }}>
-            {typeof validation === "string" ? validation : error}
-          </div>
-        )}
-        {validation === true && (
-          <div style={{ flexShrink: 0, fontSize: 12, color: "var(--status-ok, var(--accent))", marginBottom: 10, fontFamily: "var(--font-mono)" }}>
-            {t("settingsJson_valid")}
-          </div>
-        )}
         {/* 编辑器区：flex 自动扩展占满剩余高度（textarea 自身滚动，行号跟随） */}
         <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "stretch", border: "1px solid var(--border)", borderRadius: 7, overflow: "hidden" }}>
           <div
@@ -204,17 +201,28 @@ export function SettingsJsonEditor({ stickyFooter = false }: { stickyFooter?: bo
             style={{ ...textareaStyle, flex: 1, minHeight: 0, border: "none", borderRadius: 0 }}
           />
         </div>
-        {/* 底部操作区常驻 */}
-        <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 10, padding: "12px 0 16px", borderTop: "1px solid var(--border)", marginTop: 12, flexWrap: "wrap" }}>
+        <SettingsPageFooter
+          fixedHint="~/.pi/agent/settings.json"
+          dynamicHint={
+            typeof validation === "string" || error ? (
+              <span style={{ color: "var(--status-danger)", fontFamily: "var(--font-mono)" }}>
+                {typeof validation === "string" ? validation : error}
+              </span>
+            ) : validation === true ? (
+              <span style={{ color: "var(--status-ok, var(--accent))", fontFamily: "var(--font-mono)" }}>
+                {t("settingsJson_valid")}
+              </span>
+            ) : savedFlash ? (
+              <span style={{ color: "var(--accent)" }}>{t("common_saved")}</span>
+            ) : null
+          }
+          onClose={onClose}
+        >
           <button
             type="button"
             onClick={() => void formatJson()}
             disabled={text === null}
-            style={{
-              minHeight: 30, padding: "0 12px", borderRadius: 7,
-              border: "1px solid var(--border)", background: "var(--bg-panel)",
-              color: "var(--text)", cursor: text === null ? "not-allowed" : "pointer", fontSize: 12,
-            }}
+            style={settingsSecondaryButtonStyle(text !== null)}
           >
             {t("settingsJson_format")}
           </button>
@@ -222,45 +230,27 @@ export function SettingsJsonEditor({ stickyFooter = false }: { stickyFooter?: bo
             type="button"
             onClick={() => void runValidation()}
             disabled={text === null}
-            style={{
-              minHeight: 30, padding: "0 12px", borderRadius: 7,
-              border: "1px solid var(--border)", background: "var(--bg-panel)",
-              color: "var(--text)", cursor: text === null ? "not-allowed" : "pointer", fontSize: 12,
-            }}
+            style={settingsSecondaryButtonStyle(text !== null)}
           >
             {t("settingsJson_validate")}
           </button>
           <button
             type="button"
-            onClick={() => void save()}
-            disabled={text === null || saving || validation !== true}
-            style={{
-              minHeight: 30, padding: "0 14px", borderRadius: 7,
-              border: "1px solid var(--accent)", background: "var(--accent)",
-              color: "var(--accent-foreground)",
-              cursor: text === null || saving || validation !== true ? "not-allowed" : "pointer",
-              fontSize: 12, fontWeight: 600,
-              opacity: text === null || saving || validation !== true ? 0.65 : 1,
-            }}
-          >
-            {saving ? t("common_saving") : t("common_save")}
-          </button>
-          <button
-            type="button"
             onClick={() => setReloadKey((k) => k + 1)}
             disabled={saving}
-            style={{
-              minHeight: 30, padding: "0 12px", borderRadius: 7,
-              border: "1px solid var(--border)", background: "var(--bg-panel)",
-              color: "var(--text-muted)", cursor: saving ? "not-allowed" : "pointer", fontSize: 12,
-            }}
+            style={settingsSecondaryButtonStyle(!saving)}
           >
             {t("defaults_refresh")}
           </button>
-          {savedFlash && (
-            <span style={{ fontSize: 12, color: "var(--accent)" }}>{t("common_saved")}</span>
-          )}
-        </div>
+          <button
+            type="button"
+            onClick={() => void save()}
+            disabled={text === null || saving || validation !== true}
+            style={settingsPrimaryButtonStyle(text !== null && !saving && validation === true)}
+          >
+            {saving ? t("common_saving") : t("common_save")}
+          </button>
+        </SettingsPageFooter>
       </div>
     );
   }
