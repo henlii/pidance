@@ -7,7 +7,7 @@ import { useI18n } from "@/lib/i18n";
  * settings.json 原始 JSON 编辑模式：
  * 加载 → 编辑 → 校验（客户端 + 服务端）→ 原子保存。
  */
-export function SettingsJsonEditor() {
+export function SettingsJsonEditor({ stickyFooter = false }: { stickyFooter?: boolean } = {}) {
   const { t } = useI18n();
   const [text, setText] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -131,8 +131,8 @@ export function SettingsJsonEditor() {
 
   const textareaStyle: React.CSSProperties = {
     width: "100%",
-    minHeight: 320,
-    maxHeight: "60vh",
+    minHeight: stickyFooter ? 420 : 320,
+    maxHeight: stickyFooter ? "none" : "60vh",
     padding: "10px 12px",
     borderRadius: 7,
     border: "1px solid var(--border)",
@@ -145,8 +145,127 @@ export function SettingsJsonEditor() {
     whiteSpace: "pre",
     overflow: "auto",
     boxSizing: "border-box",
-    resize: "vertical",
+    resize: stickyFooter ? "none" : "vertical",
   };
+
+  if (stickyFooter) {
+    return (
+      <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
+        <div style={{ flexShrink: 0 }}>
+          <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 12, maxWidth: 560 }}>
+            {t("settingsJson_hint")}
+          </div>
+        </div>
+        {(error || (typeof validation === "string")) && (
+          <div style={{ flexShrink: 0, fontSize: 12, color: "var(--status-danger)", marginBottom: 10, fontFamily: "var(--font-mono)" }}>
+            {typeof validation === "string" ? validation : error}
+          </div>
+        )}
+        {validation === true && (
+          <div style={{ flexShrink: 0, fontSize: 12, color: "var(--status-ok, var(--accent))", marginBottom: 10, fontFamily: "var(--font-mono)" }}>
+            {t("settingsJson_valid")}
+          </div>
+        )}
+        {/* 编辑器区：超高内部滚动 */}
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+          <div style={{ display: "flex", alignItems: "stretch", border: "1px solid var(--border)", borderRadius: 7, overflow: "hidden" }}>
+            <div
+              aria-hidden="true"
+              style={{
+                flexShrink: 0,
+                padding: "10px 6px 10px 10px",
+                background: "var(--bg-panel)",
+                borderRight: "1px solid var(--border)",
+                color: "var(--text-dim)",
+                fontSize: 12,
+                lineHeight: 1.55,
+                fontFamily: "var(--font-mono)",
+                textAlign: "right",
+                userSelect: "none",
+                overflow: "hidden",
+                minHeight: 420,
+              }}
+            >
+              {(text ?? "").split("\n").map((_, i) => (
+                <div key={i} style={{ transform: `translateY(-${lineScrollTop}px)` }}>{i + 1}</div>
+              ))}
+            </div>
+            <textarea
+              ref={textareaRef}
+              value={text ?? ""}
+              onChange={(e) => {
+                setText(e.target.value);
+                setError(null);
+                setSavedFlash(false);
+                setValidation(null);
+              }}
+              onScroll={(e) => setLineScrollTop(e.currentTarget.scrollTop)}
+              spellCheck={false}
+              aria-label={t("settingsJson_editorLabel")}
+              style={{ ...textareaStyle, border: "none", borderRadius: 0 }}
+            />
+          </div>
+        </div>
+        {/* 底部操作区常驻 */}
+        <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 10, padding: "12px 0 16px", borderTop: "1px solid var(--border)", marginTop: 12, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            onClick={() => void formatJson()}
+            disabled={text === null}
+            style={{
+              minHeight: 30, padding: "0 12px", borderRadius: 7,
+              border: "1px solid var(--border)", background: "var(--bg-panel)",
+              color: "var(--text)", cursor: text === null ? "not-allowed" : "pointer", fontSize: 12,
+            }}
+          >
+            {t("settingsJson_format")}
+          </button>
+          <button
+            type="button"
+            onClick={() => void runValidation()}
+            disabled={text === null}
+            style={{
+              minHeight: 30, padding: "0 12px", borderRadius: 7,
+              border: "1px solid var(--border)", background: "var(--bg-panel)",
+              color: "var(--text)", cursor: text === null ? "not-allowed" : "pointer", fontSize: 12,
+            }}
+          >
+            {t("settingsJson_validate")}
+          </button>
+          <button
+            type="button"
+            onClick={() => void save()}
+            disabled={text === null || saving || validation !== true}
+            style={{
+              minHeight: 30, padding: "0 14px", borderRadius: 7,
+              border: "1px solid var(--accent)", background: "var(--accent)",
+              color: "var(--accent-foreground)",
+              cursor: text === null || saving || validation !== true ? "not-allowed" : "pointer",
+              fontSize: 12, fontWeight: 600,
+              opacity: text === null || saving || validation !== true ? 0.65 : 1,
+            }}
+          >
+            {saving ? t("common_saving") : t("common_save")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setReloadKey((k) => k + 1)}
+            disabled={saving}
+            style={{
+              minHeight: 30, padding: "0 12px", borderRadius: 7,
+              border: "1px solid var(--border)", background: "var(--bg-panel)",
+              color: "var(--text-muted)", cursor: saving ? "not-allowed" : "pointer", fontSize: 12,
+            }}
+          >
+            {t("defaults_refresh")}
+          </button>
+          {savedFlash && (
+            <span style={{ fontSize: 12, color: "var(--accent)" }}>{t("common_saved")}</span>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div>

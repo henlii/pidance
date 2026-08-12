@@ -182,17 +182,43 @@ export function PromptsConfig() {
   };
 
   const dirtyCount = entries ? Object.keys(entries).filter((k) => drafts[k as PromptKey] !== entries[k as PromptKey].content).length : 0;
+  /** 当前二级页（系统文令 / 系统追加 / 全局规则） */
+  const [activeKey, setActiveKey] = useState<PromptKey>("system");
+  const tabStyle = (active: boolean): React.CSSProperties => ({
+    minHeight: 28,
+    padding: "0 12px",
+    borderRadius: 6,
+    border: "1px solid var(--border)",
+    background: active ? "var(--bg-selected)" : "var(--bg-panel)",
+    color: active ? "var(--text)" : "var(--text-muted)",
+    cursor: "pointer",
+    fontSize: 12,
+    fontWeight: active ? 600 : 400,
+  });
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
-      {/* 顶部提示常驻 */}
-      <div style={{ flexShrink: 0, padding: "16px 20px 0" }}>
+      {/* 顶部二级页切换常驻 */}
+      <div style={{ flexShrink: 0, padding: "16px 20px 0", display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {(["system", "systemAppend", "agents"] as PromptKey[]).map((key) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setActiveKey(key)}
+            style={tabStyle(activeKey === key)}
+            aria-current={activeKey === key ? "page" : undefined}
+          >
+            {titles[key]}
+          </button>
+        ))}
+      </div>
+      <div style={{ flexShrink: 0, padding: "10px 20px 0" }}>
         <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6, maxWidth: 560 }}>
           {t("prompts_hint")}
         </div>
       </div>
 
-      {/* 中部内容区：超高内部滚动 */}
+      {/* 中部内容区：超高内部滚动（仅当前二级页） */}
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "12px 20px 20px" }}>
       {error && (
         <div style={{ fontSize: 12, color: "var(--status-danger)", marginBottom: 12 }}>
@@ -200,7 +226,8 @@ export function PromptsConfig() {
         </div>
       )}
 
-      {(["system", "systemAppend", "agents"] as PromptKey[]).map((key) => {
+      {(() => {
+        const key = activeKey;
         const entry = entries[key];
         const dirty = drafts[key] !== entry.content;
         return (
@@ -273,7 +300,7 @@ export function PromptsConfig() {
             </div>
           </div>
         );
-      })}
+      })()}
       </div>
 
       {/* 底部操作区常驻 */}
