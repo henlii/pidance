@@ -7,9 +7,9 @@
  * writeFileSync，无 schema/大小校验、非原子、无冲突检测、多标签页互覆盖。
  *
  * 本模块把 route 下沉为纯逻辑：
- * - GET：只返回脱敏投影——apiKey 原始值永不出现，仅提供 apiKeyConfigured
- *   布尔；敏感 header 打码为 "***"（非敏感 header 原值保留）；并附带
- *   baseline（mtimeMs/size）供 PUT 冲突检测。
+ * - GET：返回可编辑投影——apiKey 原值下发（设置页基础表单与原始 JSON 一致，
+ *   再隐藏无意义）；敏感 header 仍打码为 "***"（非敏感 header 原值保留）；
+ *   附带 apiKeyConfigured + baseline（mtimeMs/size）供 UI/冲突检测。
  * - PUT：apiKey 未提交（undefined）或掩码（"***"/空）→ 保留服务器现值，
  *   显式 null → 删除，正常字符串 → 更新；headers 为 merge 覆盖层——
  *   未提交键保留、null 删除、掩码保留现值（provider/model/modelOverride
@@ -114,8 +114,10 @@ export interface SanitizedProviderConfig {
   headers?: Record<string, string>;
   /** 是否配置了自定义 header（敏感值已打码为 "***"） */
   headersConfigured?: boolean;
-  /** 服务器是否已配置 apiKey（原始值永不返回） */
+  /** 服务器是否已配置 apiKey */
   apiKeyConfigured: boolean;
+  /** 当前 apiKey 原值（设置页可编辑；与 raw JSON 一致） */
+  apiKey?: string;
 }
 
 export interface SanitizedModelsConfig {
@@ -149,6 +151,8 @@ function sanitizeProvider(provider: unknown): SanitizedProviderConfig | null {
   const { apiKey, headers, models, modelOverrides, ...rest } = provider as Record<string, unknown>;
   const out = { ...rest } as unknown as SanitizedProviderConfig;
   out.apiKeyConfigured = typeof apiKey === "string" && apiKey.length > 0;
+  // 基础表单直接加载密钥（设置页另有 raw JSON 已含密钥，再脱敏无意义）
+  if (typeof apiKey === "string" && apiKey.length > 0) out.apiKey = apiKey;
   const h = sanitizeHeaders(headers);
   if (h.headers) {
     out.headers = h.headers;

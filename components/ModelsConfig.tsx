@@ -559,12 +559,10 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
         <SecretTextInput
           value={provider.apiKey ?? ""}
           onChange={(v) => set("apiKey", v || undefined)}
-          placeholder={provider.apiKeyConfigured ? t("models_apiKeyKeepPlaceholder") : t("models_apiKeyPlaceholder")}
+          placeholder={t("models_apiKeyPlaceholder")}
           mono />
         <span style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>
-          {provider.apiKeyConfigured
-            ? t("models_apiKeyKeepHint")
-            : t("models_apiKeyHint")}
+          {t("models_apiKeyHint")}
         </span>
       </Field>
 
