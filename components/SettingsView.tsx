@@ -420,7 +420,7 @@ export function SettingsView({ cwd, sessionId, onClose, onModelsChanged, onAuthS
       case "prompts":
         return <PromptsConfig />;
       case "skills":
-        return <SkillsConfig embedded cwd={cwd!} onClose={onClose} />;
+        return <SkillsConfig embedded globalOnly cwd={cwd!} onClose={onClose} />;
       case "plugins":
         return <PluginsConfig embedded cwd={cwd!} sessionId={sessionId} onClose={onClose} onReloaded={onPluginsReloaded} />;
     }

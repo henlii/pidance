@@ -714,11 +714,14 @@ export function SkillsConfig({
   cwd,
   onClose,
   embedded = false,
+  /** 仅显示全局技能（设置页用；项目级技能在项目编辑里管理） */
+  globalOnly = false,
 }: {
   cwd: string;
   onClose: () => void;
   /** 嵌入模式：去掉自身的全屏遮罩/外壳，由宿主（SettingsView）提供 chrome。 */
   embedded?: boolean;
+  globalOnly?: boolean;
 }) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
@@ -742,7 +745,9 @@ export function SkillsConfig({
       const res = await fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}`);
       const d = (await res.json()) as { skills?: Skill[]; error?: string };
       if (!res.ok || d.error) throw new Error(d.error ?? `HTTP ${res.status}`);
-      const list = d.skills ?? [];
+      const list = (d.skills ?? []).filter(
+        (s) => !globalOnly || s.sourceInfo?.scope !== "project",
+      );
       setSkills(list);
       // 手机端进入只显示列表；桌面端自动选中第一个
       if (list.length > 0 && !selected && !isMobile) setSelected(list[0].filePath);
