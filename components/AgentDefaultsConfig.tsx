@@ -437,7 +437,7 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
 
       {/* 中部内容区：JSON 页全高（stickyFooter 内部布局）；基础页超高内部滚动 */}
       {activeTab === "json" ? (
-        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", padding: "16px 20px 0" }}>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
           <SettingsJsonEditor stickyFooter onClose={onClose} />
         </div>
       ) : (

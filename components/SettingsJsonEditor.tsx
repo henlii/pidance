@@ -158,44 +158,83 @@ export function SettingsJsonEditor({
   if (stickyFooter) {
     return (
       <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
-        {/* 编辑器区：flex 自动扩展占满剩余高度（textarea 自身滚动，行号跟随） */}
-        <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "stretch", border: "1px solid var(--border)", borderRadius: 7, overflow: "hidden" }}>
+        {/* 中部：与文令页一致的 padding + 标题行 + 自动扩展编辑器 */}
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "12px 20px 12px", display: "flex", flexDirection: "column" }}>
+          <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)" }}>
+              {t("defaults_jsonTab")}
+            </div>
+            <span style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+              settings.json
+            </span>
+          </div>
           <div
-            aria-hidden="true"
             style={{
-              flexShrink: 0,
-              padding: "10px 6px 10px 10px",
-              background: "var(--bg-panel)",
-              borderRight: "1px solid var(--border)",
-              color: "var(--text-dim)",
-              fontSize: 12,
-              lineHeight: 1.55,
-              fontFamily: "var(--font-mono)",
-              textAlign: "right",
-              userSelect: "none",
+              flex: 1,
+              minHeight: 200,
+              display: "flex",
+              alignItems: "stretch",
+              border: "1px solid var(--border)",
+              borderRadius: 7,
               overflow: "hidden",
-              minHeight: 0,
+              background: "var(--bg)",
             }}
           >
-            {(text ?? "").split("\n").map((_, i) => (
-              <div key={i} style={{ transform: `translateY(-${lineScrollTop}px)` }}>{i + 1}</div>
-            ))}
+            <div
+              aria-hidden="true"
+              style={{
+                flexShrink: 0,
+                padding: "10px 6px 10px 10px",
+                background: "var(--bg-panel)",
+                borderRight: "1px solid var(--border)",
+                color: "var(--text-dim)",
+                fontSize: 12,
+                lineHeight: 1.55,
+                fontFamily: "var(--font-mono)",
+                textAlign: "right",
+                userSelect: "none",
+                overflow: "hidden",
+                minHeight: 0,
+              }}
+            >
+              {(text ?? "").split("\n").map((_, i) => (
+                <div key={i} style={{ transform: `translateY(-${lineScrollTop}px)` }}>{i + 1}</div>
+              ))}
+            </div>
+            <textarea
+              ref={textareaRef}
+              value={text ?? ""}
+              onChange={(e) => {
+                setText(e.target.value);
+                setError(null);
+                setSavedFlash(false);
+                setValidation(null);
+              }}
+              onScroll={(e) => setLineScrollTop(e.currentTarget.scrollTop)}
+              spellCheck={false}
+              aria-label={t("settingsJson_editorLabel")}
+              style={{
+                flex: 1,
+                minHeight: 0,
+                width: "100%",
+                padding: "10px 12px",
+                border: "none",
+                borderRadius: 0,
+                background: "var(--bg)",
+                color: "var(--text)",
+                fontSize: 12,
+                lineHeight: 1.55,
+                outline: "none",
+                fontFamily: "var(--font-mono)",
+                whiteSpace: "pre",
+                overflow: "auto",
+                boxSizing: "border-box",
+                resize: "none",
+              }}
+            />
           </div>
-          <textarea
-            ref={textareaRef}
-            value={text ?? ""}
-            onChange={(e) => {
-              setText(e.target.value);
-              setError(null);
-              setSavedFlash(false);
-              setValidation(null);
-            }}
-            onScroll={(e) => setLineScrollTop(e.currentTarget.scrollTop)}
-            spellCheck={false}
-            aria-label={t("settingsJson_editorLabel")}
-            style={{ ...textareaStyle, flex: 1, minHeight: 0, border: "none", borderRadius: 0 }}
-          />
         </div>
+
         <SettingsPageFooter
           fixedHint="~/.pi/agent/settings.json"
           dynamicHint={
@@ -249,6 +288,7 @@ export function SettingsJsonEditor({
       </div>
     );
   }
+
 
   return (
     <div>
