@@ -148,7 +148,12 @@ export function composeChatPlan(input: ChatCompositorInput): ChatRenderPlanItem[
         ...(refTarget === undefined ? {} : { attachRefMessageIndex: refTarget }),
       });
     }
-    if (finalAnswerMessage) plan.push(messageItem(messages, finalAssistantIdx, isStreaming, { messageOverride: finalAnswerMessage }));
+    if (finalAnswerMessage) {
+      plan.push(messageItem(messages, finalAssistantIdx, isStreaming, { messageOverride: finalAnswerMessage }));
+    } else if (hasAssistantErrorFeedback(finalAssistant) && !finalProcessMessage) {
+      // 无 answer/process 块的 error/aborted 消息仍须单独入计划（MessageView 画错误横幅）
+      plan.push(messageItem(messages, finalAssistantIdx, isStreaming));
+    }
     for (let renderIdx = finalAssistantIdx + 1; renderIdx < endIdx; renderIdx++) plan.push(messageItem(messages, renderIdx, isStreaming));
     idx = endIdx;
   }
