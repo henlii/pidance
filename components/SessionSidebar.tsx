@@ -2056,7 +2056,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             </div>
           </form>
         ) : (
-          editProjectRoot && <ProjectAssetsEditor cwd={editProjectRoot} />
+          editProjectRoot && (
+            <ProjectAssetsEditor
+              cwd={editProjectRoot}
+              tab={editProjectTab === "skills" ? "skills" : "rules"}
+            />
+          )
         )}
       </ViewportDialog>
       </div>

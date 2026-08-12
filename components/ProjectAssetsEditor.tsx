@@ -11,10 +11,10 @@ type ProjectSkill = {
 
 /**
  * 项目资产编辑：项目级规则（AGENTS.md）+ 项目技能（.agents/skills/）。
+ * tab 由外层受控（编辑项目弹窗外层已有 名称/规则/技能 切换，这里不再重复渲染内部 tab）。
  */
-export function ProjectAssetsEditor({ cwd }: { cwd: string }) {
+export function ProjectAssetsEditor({ cwd, tab }: { cwd: string; tab: "rules" | "skills" }) {
   const { t } = useI18n();
-  const [tab, setTab] = useState<"rules" | "skills">("rules");
   const [rules, setRules] = useState<string | null>(null);
   const [skills, setSkills] = useState<ProjectSkill[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -150,18 +150,6 @@ export function ProjectAssetsEditor({ cwd }: { cwd: string }) {
     [post, load],
   );
 
-  const tabStyle = (active: boolean): React.CSSProperties => ({
-    minHeight: 28,
-    padding: "0 12px",
-    borderRadius: 6,
-    border: "1px solid var(--border)",
-    background: active ? "var(--bg-selected)" : "var(--bg-panel)",
-    color: active ? "var(--text)" : "var(--text-muted)",
-    cursor: "pointer",
-    fontSize: 12,
-    fontWeight: active ? 600 : 400,
-  });
-
   const editorStyle: React.CSSProperties = {
     width: "100%",
     minHeight: 200,
@@ -186,15 +174,6 @@ export function ProjectAssetsEditor({ cwd }: { cwd: string }) {
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-        <button type="button" onClick={() => setTab("rules")} style={tabStyle(tab === "rules")} aria-current={tab === "rules" ? "page" : undefined}>
-          {t("projectAssets_rules")}
-        </button>
-        <button type="button" onClick={() => setTab("skills")} style={tabStyle(tab === "skills")} aria-current={tab === "skills" ? "page" : undefined}>
-          {t("projectAssets_skills")}
-        </button>
-      </div>
-
       {error && (
         <div style={{ fontSize: 12, color: "var(--status-danger)", marginBottom: 10, whiteSpace: "pre-wrap" }}>{error}</div>
       )}
