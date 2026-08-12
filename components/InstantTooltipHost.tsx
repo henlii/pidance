@@ -73,7 +73,7 @@ export function InstantTooltipHost() {
         measureEl = document.createElement("div");
         measureEl.setAttribute("aria-hidden", "true");
         measureEl.style.cssText =
-          "position:fixed;left:-9999px;top:0;visibility:hidden;pointer-events:none;max-width:min(260px,calc(100vw - 16px));padding:5px 8px;font-size:11px;font-weight:400;line-height:1.35;white-space:nowrap;border:1px solid transparent;box-sizing:border-box;";
+          "position:fixed;left:-9999px;top:0;visibility:hidden;pointer-events:none;max-width:min(280px,calc(100vw - 16px));padding:5px 8px;font-size:11px;font-weight:400;line-height:1.35;white-space:normal;overflow-wrap:anywhere;word-break:break-word;border:1px solid transparent;box-sizing:border-box;";
         document.body.appendChild(measureEl);
       }
       measureEl.textContent = text;
@@ -143,7 +143,9 @@ export function InstantTooltipHost() {
         fontSize: 11,
         fontWeight: 400,
         lineHeight: 1.35,
-        whiteSpace: "nowrap",
+        whiteSpace: "normal",
+        overflowWrap: "anywhere",
+        wordBreak: "break-word",
         pointerEvents: "none",
       }}
     >
@@ -152,4 +154,4 @@ export function InstantTooltipHost() {
     document.body,
   );
 }
-
+
