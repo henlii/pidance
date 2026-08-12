@@ -683,7 +683,7 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
             disabled={loading || saving}
             style={settingsSecondaryButtonStyle(!(loading || saving))}
           >
-            {t("defaults_refresh")}
+            {t("common_reload")}
           </button>
           <button
             type="button"

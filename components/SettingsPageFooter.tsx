@@ -90,29 +90,30 @@ export function SettingsPageFooter({
           minWidth: 0,
           display: "flex",
           flexDirection: "column",
-          gap: 3,
+          gap: 2,
           justifyContent: "center",
+          // 固定两行高度，避免各页底部栏因提示有无而跳动
+          minHeight: 36,
         }}
       >
-        {fixedHint != null && fixedHint !== "" && (
-          <div
-            style={{
-              fontSize: 11,
-              color: "var(--text-dim)",
-              fontFamily: "var(--font-mono)",
-              lineHeight: 1.4,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-            title={typeof fixedHint === "string" ? fixedHint : undefined}
-          >
-            {fixedHint}
-          </div>
-        )}
-        {dynamicHint != null && dynamicHint !== "" && (
-          <div style={{ fontSize: 12, lineHeight: 1.4, minHeight: 16 }}>{dynamicHint}</div>
-        )}
+        <div
+          style={{
+            fontSize: 11,
+            color: "var(--text-dim)",
+            fontFamily: "var(--font-mono)",
+            lineHeight: 1.4,
+            minHeight: 16,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+          title={typeof fixedHint === "string" ? fixedHint : undefined}
+        >
+          {fixedHint != null && fixedHint !== "" ? fixedHint : "\u00a0"}
+        </div>
+        <div style={{ fontSize: 12, lineHeight: 1.4, minHeight: 16 }}>
+          {dynamicHint != null && dynamicHint !== "" ? dynamicHint : "\u00a0"}
+        </div>
       </div>
       <div
         style={{
@@ -138,4 +139,4 @@ export function SettingsPageFooter({
     </div>
   );
 }
-
+

@@ -26,7 +26,7 @@ function isUsableProjectPath(cwd: string): boolean {
   }
 }
 
-import { closeSync, lstatSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, lstatSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -285,3 +285,56 @@ export async function toggleSkillDisableModelInvocation(
  *   但真实物理目标已由 realpath 锁定，最坏结果是写入该物理目录（根内），不会把内容
  *   写到任意外部路径。
  */
+
+export interface RemoveSkillInput {
+  cwd: string;
+  filePath: string;
+}
+
+/** 删除技能目录（baseDir）：与 toggle 相同来源门禁，仅允许全局/已信任项目技能根内。 */
+export async function removeSkill(
+  input: RemoveSkillInput,
+  deps: SkillWriteDeps = defaultDeps,
+): Promise<{ success: true }> {
+  const { cwd, filePath } = input;
+  if (!cwd || typeof cwd !== "string") throw new SkillWriteError("bad-request", "cwd required");
+  if (!filePath || typeof filePath !== "string") throw new SkillWriteError("bad-request", "filePath required");
+  if (!isAbsolute(filePath)) throw new SkillWriteError("bad-request", "filePath must be absolute");
+  if (!isUsableProjectPath(cwd)) throw new SkillWriteError("bad-request", "cwd must be an existing directory");
+
+  const { skills } = await deps.loadSkills(cwd);
+  const match = skills.find((skill) => resolve(skill.filePath) === resolve(filePath));
+  if (!match) throw new SkillWriteError("not-found", "skill not in loader list for cwd");
+
+  const baseDir = match.baseDir;
+  if (!baseDir || !isAbsolute(baseDir)) throw new SkillWriteError("bad-request", "skill baseDir invalid");
+
+  let realBase: string;
+  try {
+    realBase = realpathSync(baseDir);
+  } catch {
+    throw new SkillWriteError("not-found", "skill directory not found");
+  }
+  const source = classifySkillSource(join(baseDir, "SKILL.md"), join(realBase, "SKILL.md"), cwd, deps);
+  if (source === "denied") throw new SkillWriteError("forbidden", "skill source is not removable");
+
+  // baseDir 必须是技能根下的直接子目录，禁止越界删除
+  const roots = skillRoots(cwd, deps).map((r) => {
+    try { return realpathSync(r); } catch { return resolve(r); }
+  });
+  const underRoot = roots.some((root) => realBase === root || realBase.startsWith(root + sep));
+  if (!underRoot) throw new SkillWriteError("forbidden", "skill directory outside allowed roots");
+  // 拒绝删除技能根本身
+  if (roots.some((root) => realBase === root)) throw new SkillWriteError("forbidden", "cannot remove skill root");
+
+  try {
+    rmSync(realBase, { recursive: true, force: false });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") throw new SkillWriteError("not-found", "skill directory not found");
+    if ((error as NodeJS.ErrnoException)?.code === "EACCES" || (error as NodeJS.ErrnoException)?.code === "EPERM") {
+      throw new SkillWriteError("forbidden", "directory remove denied");
+    }
+    throw error;
+  }
+  return { success: true };
+}

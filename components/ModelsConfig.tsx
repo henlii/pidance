@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Check as CheckIcon, Eraser, LoaderCircle, Plus, Zap } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/lib/i18n";
+import { SettingsPageFooter, settingsPrimaryButtonStyle } from "./SettingsPageFooter";
 // Color icons (have their own fill colors — no background needed)
 import AnthropicIcon from "@lobehub/icons/es/Anthropic/components/Mono";
 import OpenAIIcon from "@lobehub/icons/es/OpenAI/components/Mono";
@@ -1580,17 +1581,10 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
         ? { display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg)", overflow: "hidden" }
         : { width: isMobile ? "calc(100vw - 16px)" : 860, maxWidth: "calc(100vw - 16px)", height: isMobile ? "calc(100dvh - 16px)" : "78vh", maxHeight: "calc(100dvh - 16px)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10, display: "flex", flexDirection: "column", boxShadow: "0 8px 32px rgba(0,0,0,0.18)", overflow: "hidden" }}>
 
-        {/* Header：独立弹窗显示标题+关闭；嵌入时只留一行配置文件路径说明 */}
-        {embedded ? (
-          <div style={{ padding: "10px 18px 0", flexShrink: 0 }}>
-            <code style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>~/.pi/agent/models.json</code>
-          </div>
-        ) : (
+        {/* Header：仅独立弹窗显示标题；路径放底部固定提示 */}
+        {!embedded && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 18px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-            <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{t("models_modelsTitle")}</span>
-            <code style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>~/.pi/agent/models.json</code>
-          </div>
+          <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{t("models_modelsTitle")}</span>
           <button onClick={onClose} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 20, lineHeight: 1, padding: "2px 6px" }}>×</button>
         </div>
         )}
@@ -1744,33 +1738,26 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
           </div>
         </div>
 
-        {/* Footer */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, padding: "10px 18px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
-          {saveError && <span style={{ fontSize: 12, color: "var(--status-danger)", flex: 1 }}>{saveError}</span>}
-          <button onClick={onClose} style={{ padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 13 }}>
-            {t("common_cancel")}
+        <SettingsPageFooter
+          fixedHint="~/.pi/agent/models.json"
+          dynamicHint={
+            saveError ? (
+              <span style={{ color: "var(--status-danger)" }}>{saveError}</span>
+            ) : savedOk ? (
+              <span style={{ color: "var(--accent)" }}>{t("common_saved")}</span>
+            ) : null
+          }
+          onClose={onClose}
+        >
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saving || savedOk}
+            style={settingsPrimaryButtonStyle(!(saving || savedOk))}
+          >
+            {savedOk ? t("common_saved") : saving ? t("models_saving") : t("common_save")}
           </button>
-          <button onClick={handleSave} disabled={saving || savedOk} style={{
-            position: "relative",
-            padding: "6px 16px",
-            minWidth: 92,
-            background: savedOk ? "var(--status-success)" : saving ? "var(--bg-panel)" : "var(--accent)",
-            border: "none", borderRadius: 6,
-            color: savedOk ? "#fff" : saving ? "var(--text-muted)" : "#fff",
-            cursor: (saving || savedOk) ? "default" : "pointer", fontSize: 13, fontWeight: 600,
-            display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
-            transition: "background-color 0.2s ease, color 0.2s ease",
-            animation: savedOk ? "saved-pop 0.45s ease" : undefined,
-          }}>
-            {savedOk && (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
-                style={{ strokeDasharray: 18, animation: "saved-check-draw 0.35s ease forwards", flexShrink: 0 }}>
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
-            )}
-            <span>{savedOk ? t("common_saved") : saving ? t("models_saving") : t("common_save")}</span>
-          </button>
-        </div>
+        </SettingsPageFooter>
       </div>
       {pickerOpen && (
         <AddProviderPicker

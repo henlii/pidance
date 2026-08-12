@@ -158,11 +158,6 @@ export function SettingsJsonEditor({
   if (stickyFooter) {
     return (
       <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
-        <div style={{ flexShrink: 0 }}>
-          <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 12, maxWidth: 560 }}>
-            {t("settingsJson_hint")}
-          </div>
-        </div>
         {/* 编辑器区：flex 自动扩展占满剩余高度（textarea 自身滚动，行号跟随） */}
         <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "stretch", border: "1px solid var(--border)", borderRadius: 7, overflow: "hidden" }}>
           <div
@@ -240,7 +235,7 @@ export function SettingsJsonEditor({
             disabled={saving}
             style={settingsSecondaryButtonStyle(!saving)}
           >
-            {t("defaults_refresh")}
+            {t("common_reload")}
           </button>
           <button
             type="button"
@@ -382,7 +377,7 @@ export function SettingsJsonEditor({
             fontSize: 12,
           }}
         >
-          {t("defaults_refresh")}
+          {t("common_reload")}
         </button>
         {savedFlash && (
           <span style={{ fontSize: 12, color: "var(--accent)" }}>{t("common_saved")}</span>

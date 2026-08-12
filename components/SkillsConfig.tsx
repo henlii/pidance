@@ -9,9 +9,10 @@ import type {
   SkillUpdateResult,
 } from "@/lib/api-types";
 import { shortenPath } from "@/lib/file-paths";
-import { LoaderCircle, RefreshCw } from "lucide-react";
+import { CircleArrowUp, LoaderCircle, Trash2 } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
-import { SettingsPageFooter, settingsSecondaryButtonStyle } from "./SettingsPageFooter";
+import { getServerPref, setServerPref } from "@/lib/server-preferences";
+import { SettingsPageFooter, settingsDangerIconButtonStyle, settingsPrimaryButtonStyle, settingsSecondaryButtonStyle } from "./SettingsPageFooter";
 
 // 设置类界面的图标按钮：24×24 盒、细描边，对齐 sidebar-icon-btn 惯例；
 // label 同时落在 title 与 aria-label 上，loading 时换旋转 LoaderCircle。
@@ -129,6 +130,7 @@ function Toggle({
   );
 }
 
+
 function SkillDetail({
   skill,
   cwd,
@@ -136,11 +138,12 @@ function SkillDetail({
   toggling,
   saveError,
   updateStatus,
-  checkingUpdate,
   updating,
   updateError,
-  onCheckUpdate,
   onUpdate,
+  onRemove,
+  locked,
+  onToggleLock,
 }: {
   skill: Skill;
   cwd: string;
@@ -148,232 +151,114 @@ function SkillDetail({
   toggling: boolean;
   saveError: string | null;
   updateStatus?: SkillUpdateResult;
-  checkingUpdate: boolean;
   updating: boolean;
   updateError: string | null;
-  onCheckUpdate: () => void;
   onUpdate: () => void;
+  onRemove: () => void;
+  locked: boolean;
+  onToggleLock: () => void;
 }) {
   const { t } = useI18n();
   const label = sourceLabel(skill);
   const enabled = !skill.disableModelInvocation;
-
-  function displayPath(p: string): string {
-    if (label === "project" && p.startsWith(cwd)) {
-      const rel = p.slice(cwd.length).replace(/^[/\\]/, "");
-      return `./${rel}`;
+  const canUpdate = Boolean(skill.install?.canCheckForUpdates);
+  const hasUpdate = updateStatus?.state === "update-available";
+  const versionText = (() => {
+    const cur = shortVersion(updateStatus?.currentVersion ?? skill.install?.versionHash) ?? t("skills_unknownVersion");
+    if (hasUpdate) {
+      const latest = shortVersion(updateStatus?.latestVersion) ?? "?";
+      return `${cur} → ${latest}`;
     }
-    return shortenPath(p);
-  }
+    return cur;
+  })();
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      {/* Path + tag + toggle */}
-      <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-        <span
-          style={{
-            fontSize: 10,
-            padding: "1px 5px",
-            borderRadius: 3,
-            flexShrink: 0,
-            background:
-              label === "project"
-                ? "rgba(99,102,241,0.12)"
-                : "rgba(120,120,120,0.12)",
-            color:
-              label === "project" ? "rgba(99,102,241,0.8)" : "var(--text-dim)",
-          }}
-        >
-          {label === "global" ? t("common_global") : label === "project" ? t("common_project") : t("skills_path")}
-        </span>
-        <span
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: 11,
-            color: "var(--text-dim)",
-            flex: 1,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {displayPath(skill.filePath)}
-        </span>
-        <Toggle
-          enabled={enabled}
-          loading={toggling}
-          onToggle={() => onToggle(skill)}
-        />
-        {saveError && (
-          <span style={{ fontSize: 12, color: "var(--status-danger)", flexShrink: 0 }}>
-            {saveError}
-          </span>
-        )}
-      </div>
-
-      {skill.install?.skillsShUrl && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 20, maxWidth: 680 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flex: 1 }}>
+          <Toggle enabled={enabled} loading={toggling} onToggle={() => onToggle(skill)} />
           <span
-            style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 500 }}
-          >
-            {t("common_source")}
-          </span>
-          <a
-            href={skill.install.skillsShUrl}
-            target="_blank"
-            rel="noreferrer"
-            title={skill.install.skillsShUrl}
             style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              width: "fit-content",
-              maxWidth: "100%",
-              color: "var(--accent)",
-              textDecoration: "none",
+              fontSize: 10, padding: "1px 5px", borderRadius: 3, flexShrink: 0,
+              background: label === "project" ? "rgba(99,102,241,0.12)" : "rgba(120,120,120,0.12)",
+              color: label === "project" ? "rgba(99,102,241,0.8)" : "var(--text-dim)",
             }}
           >
-            <span
+            {label === "global" ? t("common_global") : label === "project" ? t("common_project") : t("skills_path")}
+          </span>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--text)", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {skill.name}
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          {canUpdate && (
+            <label
+              title={t("skills_lockVersionHint")}
               style={{
-                fontFamily: "var(--font-mono)",
-                fontSize: 12,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
+                display: "inline-flex", alignItems: "center", gap: 5,
+                fontSize: 11, color: "var(--text-muted)", cursor: "pointer",
+                padding: "4px 6px", borderRadius: 6, border: "1px solid var(--border)",
               }}
             >
-              {skill.install.skillsShUrl.replace(/^https?:\/\//, "")} ↗
-            </span>
-          </a>
+              <input type="checkbox" checked={locked} onChange={onToggleLock} />
+              {t("skills_lockVersion")}
+            </label>
+          )}
+          {hasUpdate && !locked && (
+            <button
+              type="button"
+              onClick={onUpdate}
+              disabled={updating}
+              title={updating ? t("skills_updating") : t("skills_update")}
+              aria-label={updating ? t("skills_updating") : t("skills_update")}
+              style={{
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                width: 32, height: 32, borderRadius: 7, border: "1px solid var(--border)",
+                background: "var(--bg-panel)", color: "var(--accent)", cursor: updating ? "not-allowed" : "pointer",
+              }}
+            >
+              {updating ? <LoaderCircle size={13} className="animate-spin" aria-hidden /> : <CircleArrowUp size={13} aria-hidden />}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              if (window.confirm(t("skills_confirmRemove", { name: skill.name }))) onRemove();
+            }}
+            disabled={toggling || updating}
+            title={t("common_remove")}
+            aria-label={t("common_remove")}
+            style={settingsDangerIconButtonStyle(!(toggling || updating))}
+          >
+            <Trash2 size={13} aria-hidden />
+          </button>
         </div>
+      </div>
+
+      {skill.description && (
+        <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>{skill.description}</div>
       )}
 
       {skill.install && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-          <span
-            style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 500 }}
-          >
-            {t("common_version")}
-          </span>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              flexWrap: "wrap",
-            }}
-          >
-            <span
-              style={{
-                fontFamily: "var(--font-mono)",
-                fontSize: 12,
-                color: "var(--text-muted)",
-              }}
-            >
-              {shortVersion(updateStatus?.currentVersion ?? skill.install.versionHash) ?? t("skills_unknownVersion")}
-            </span>
-            {skill.install.canCheckForUpdates && (
-              <IconButton
-                label={checkingUpdate ? t("skills_checking") : t("skills_check")}
-                onClick={onCheckUpdate}
-                disabled={checkingUpdate || updating}
-                loading={checkingUpdate}
-              >
-                <RefreshCw size={12} aria-hidden />
-              </IconButton>
-            )}
-            {updateStatus?.state === "update-available" && (
-              <span
-                style={{
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 12,
-                  color: "var(--status-warning)",
-                }}
-              >
-                {shortVersion(updateStatus.latestVersion) ?? t("skills_unknownVersion")}
-              </span>
-            )}
-            {(checkingUpdate ||
-              (updateStatus && updateStatus.state !== "update-available")) && (
-              <span
-                style={{
-                  fontSize: 12,
-                  color: checkingUpdate
-                    ? "var(--accent)"
-                    : updateStatus?.state === "up-to-date"
-                      ? "var(--status-success)"
-                      : updateStatus?.state === "error"
-                          ? "var(--status-danger)"
-                          : "var(--text-dim)",
-                }}
-              >
-                {checkingUpdate
-                  ? t("skills_checkingShort")
-                  : updateStatus?.state === "up-to-date"
-                    ? t("skills_upToDate")
-                    : updateStatus?.state === "unsupported"
-                        ? t("skills_unavailable")
-                        : updateStatus?.message || t("skills_checkFailed")}
-              </span>
-            )}
-            {updateStatus?.state === "update-available" && (
-              <button
-                onClick={onUpdate}
-                disabled={updating || checkingUpdate}
-                style={{
-                  padding: "4px 10px",
-                  border: "none",
-                  borderRadius: 5,
-                  background: "var(--accent)",
-                  color: "#fff",
-                  cursor: updating || checkingUpdate ? "not-allowed" : "pointer",
-                  opacity: updating || checkingUpdate ? 0.5 : 1,
-                  fontSize: 11,
-                  fontWeight: 600,
-                }}
-              >
-                {updating ? t("skills_updating") : t("common_update")}
-              </button>
-            )}
-          </div>
-          {updateError && (
-            <span style={{ fontSize: 12, color: "var(--status-danger)" }}>{updateError}</span>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(72px, 100px) minmax(0, 1fr)", gap: "8px 12px", fontSize: 12 }}>
+          <div style={{ color: "var(--text-dim)" }}>{t("common_version")}</div>
+          <div style={{ color: hasUpdate ? "var(--status-warning)" : "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{versionText}</div>
+          {skill.install.package && (
+            <>
+              <div style={{ color: "var(--text-dim)" }}>{t("plugins_package")}</div>
+              <div style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", overflowWrap: "anywhere" }}>{skill.install.package}</div>
+            </>
           )}
         </div>
       )}
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-        <span
-          style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 500 }}
-        >
-          {t("common_name")}
-        </span>
-        <span
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: 14,
-            color: "var(--text)",
-          }}
-        >
-          {skill.name}
-        </span>
-      </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-        <span
-          style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 500 }}
-        >
-          {t("common_description")}
-        </span>
-        <span
-          style={{ fontSize: 14, color: "var(--text-muted)", lineHeight: 1.6 }}
-        >
-          {skill.description}
-        </span>
-      </div>
+      {(saveError || updateError) && (
+        <div style={{ fontSize: 12, color: "var(--status-danger)" }}>{saveError || updateError}</div>
+      )}
     </div>
   );
 }
+
 
 function AddSkillPanel({
   cwd,
@@ -738,6 +623,18 @@ export function SkillsConfig({
   const [checkingAll, setCheckingAll] = useState(false);
   const [updatingSkill, setUpdatingSkill] = useState<string | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
+  const [locks, setLocks] = useState<Record<string, boolean>>(() => {
+    const raw = getServerPref<Record<string, boolean>>("skillLocks");
+    return raw && typeof raw === "object" ? { ...raw } : {};
+  });
+  const toggleLock = useCallback((key: string) => {
+    setLocks((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      setServerPref("skillLocks", next);
+      return next;
+    });
+  }, []);
+
 
   const loadSkills = useCallback(async () => {
     setLoading(true);
@@ -770,7 +667,11 @@ export function SkillsConfig({
   const checkForUpdates = useCallback(async (skill?: Skill) => {
     const targets = skill
       ? [skill]
-      : skills.filter((item) => Boolean(item.install));
+      : skills.filter((item) => {
+          if (!item.install) return false;
+          const key = updateKey(item);
+          return key ? !locks[key] : false;
+        });
     const keys = targets
       .map(updateKey)
       .filter((key): key is string => Boolean(key));
@@ -811,7 +712,7 @@ export function SkillsConfig({
       });
       if (!skill) setCheckingAll(false);
     }
-  }, [cwd, skills]);
+  }, [cwd, skills, locks]);
 
   const updateInstalledSkill = useCallback(async (skill: Skill) => {
     if (!skill.install) return;
@@ -852,6 +753,23 @@ export function SkillsConfig({
       setUpdateError(e instanceof Error ? e.message : String(e));
     } finally {
       setUpdatingSkill(null);
+    }
+  }, [cwd, loadSkills]);
+
+  const removeInstalledSkill = useCallback(async (skill: Skill) => {
+    setSaveError(null);
+    try {
+      const res = await fetch("/api/skills", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd, filePath: skill.filePath }),
+      });
+      const d = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || d.error) throw new Error(d.error ?? `HTTP ${res.status}`);
+      setSelected(null);
+      await loadSkills();
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e));
     }
   }, [cwd, loadSkills]);
 
@@ -1157,49 +1075,57 @@ export function SkillsConfig({
                 })()
               )}
             </div>
-            {/* Add skill button */}
-            <div
-              style={{
-                padding: "8px 6px",
-                borderTop: "1px solid var(--border)",
-                flexShrink: 0,
-              }}
-            >
-              <div
-                onClick={() => setAddMode(true)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  padding: "7px 8px",
-                  borderRadius: 5,
-                  cursor: "pointer",
-                  background: addMode ? "var(--bg-selected)" : "none",
-                  color: addMode ? "var(--accent)" : "var(--text-dim)",
-                  fontSize: 12,
-                }}
-                onMouseEnter={(e) => {
-                  if (!addMode)
-                    e.currentTarget.style.background = "var(--bg-hover)";
-                }}
-                onMouseLeave={(e) => {
-                  if (!addMode) e.currentTarget.style.background = "none";
-                }}
-              >
-                <svg
-                  width="13"
-                  height="13"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
+            <div style={{ padding: "8px 6px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button
+                  type="button"
+                  onClick={() => void checkForUpdates()}
+                  disabled={checkingAll || updatingSkill !== null || skills.every((s) => !s.install)}
+                  style={{
+                    ...settingsSecondaryButtonStyle(!(checkingAll || updatingSkill !== null || skills.every((s) => !s.install))),
+                    flex: 1, minHeight: 30, padding: "0 6px", fontSize: 11,
+                  }}
                 >
-                  <line x1="12" y1="5" x2="12" y2="19" />
-                  <line x1="5" y1="12" x2="19" y2="12" />
-                </svg>
-                {t("skills_add")}
+                  {checkingAll ? t("common_loading") : t("skills_checkUpdates")}
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const updatable = skills.filter((s) => {
+                      const key = updateKey(s);
+                      return key && !locks[key] && updateStatuses[key]?.state === "update-available";
+                    });
+                    for (const s of updatable) await updateInstalledSkill(s);
+                  }}
+                  disabled={
+                    updatingSkill !== null
+                    || !skills.some((s) => {
+                      const key = updateKey(s);
+                      return key && !locks[key] && updateStatuses[key]?.state === "update-available";
+                    })
+                  }
+                  style={{
+                    flex: 1, minHeight: 30, padding: "0 6px", borderRadius: 7,
+                    border: "1px solid var(--accent)", background: "var(--accent)",
+                    color: "var(--accent-foreground)", fontSize: 11, fontWeight: 600,
+                    cursor: updatingSkill !== null ? "not-allowed" : "pointer",
+                    opacity: updatingSkill !== null ? 0.5 : 1,
+                  }}
+                >
+                  {t("skills_upgradeAll")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAddMode(true)}
+                  style={{
+                    ...settingsSecondaryButtonStyle(true),
+                    flex: 1, minHeight: 30, padding: "0 6px", fontSize: 11,
+                    background: addMode ? "var(--bg-selected)" : "var(--bg-panel)",
+                    color: addMode ? "var(--accent)" : "var(--text-muted)",
+                  }}
+                >
+                  {t("skills_add")}
+                </button>
               </div>
             </div>
           </div>
@@ -1238,15 +1164,15 @@ export function SkillsConfig({
                     ? updateStatuses[updateKey(selectedSkill)!]
                     : undefined
                 }
-                checkingUpdate={
-                  updateKey(selectedSkill)
-                    ? checkingUpdates.has(updateKey(selectedSkill)!)
-                    : false
-                }
                 updating={updatingSkill === updateKey(selectedSkill)}
                 updateError={updateError}
-                onCheckUpdate={() => void checkForUpdates(selectedSkill)}
                 onUpdate={() => void updateInstalledSkill(selectedSkill)}
+                onRemove={() => void removeInstalledSkill(selectedSkill)}
+                locked={Boolean(updateKey(selectedSkill) && locks[updateKey(selectedSkill)!])}
+                onToggleLock={() => {
+                  const key = updateKey(selectedSkill);
+                  if (key) toggleLock(key);
+                }}
               />
             ) : (
               <div
@@ -1266,6 +1192,7 @@ export function SkillsConfig({
         </div>
 
         <SettingsPageFooter
+          fixedHint={t("skills_countHint", { count: String(skills.length) })}
           dynamicHint={
             Object.values(updateStatuses).filter((s) => s.state === "update-available").length > 0 ? (
               <span style={{ color: "var(--status-warning)" }}>
@@ -1276,21 +1203,12 @@ export function SkillsConfig({
               </span>
             ) : saveError ? (
               <span style={{ color: "var(--status-danger)" }}>{saveError}</span>
+            ) : updateError ? (
+              <span style={{ color: "var(--status-danger)" }}>{updateError}</span>
             ) : null
           }
           onClose={onClose}
-        >
-          {skills.some((skill) => Boolean(skill.install)) && (
-            <button
-              type="button"
-              onClick={() => void checkForUpdates()}
-              disabled={checkingAll || updatingSkill !== null}
-              style={settingsSecondaryButtonStyle(!(checkingAll || updatingSkill !== null))}
-            >
-              {checkingAll ? t("skills_checkingAll") : t("skills_checkAll")}
-            </button>
-          )}
-        </SettingsPageFooter>
+        />
       </div>
     </div>
   );

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { loadSkillsWithInstallInfo } from "@/lib/skills-service";
-import { SkillWriteError, toggleSkillDisableModelInvocation } from "@/lib/skills-write";
+import { removeSkill, SkillWriteError, toggleSkillDisableModelInvocation } from "@/lib/skills-write";
 
 export const dynamic = "force-dynamic";
 
@@ -31,6 +31,23 @@ export async function PATCH(req: Request) {
       cwd: body.cwd ?? "",
       filePath: body.filePath ?? "",
       disableModelInvocation: body.disableModelInvocation ?? false,
+    }));
+  } catch (e) {
+    if (e instanceof SkillWriteError) {
+      const status = e.code === "forbidden" ? 403 : e.code === "not-found" ? 404 : 400;
+      return NextResponse.json({ error: e.message }, { status });
+    }
+    return NextResponse.json({ error: String(e) }, { status: 500 });
+  }
+}
+
+// DELETE /api/skills — 删除技能目录（全局/已信任项目技能根内）
+export async function DELETE(req: Request) {
+  try {
+    const body = await req.json() as { cwd?: string; filePath?: string };
+    return NextResponse.json(await removeSkill({
+      cwd: body.cwd ?? "",
+      filePath: body.filePath ?? "",
     }));
   } catch (e) {
     if (e instanceof SkillWriteError) {
