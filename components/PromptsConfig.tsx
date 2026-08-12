@@ -35,6 +35,19 @@ export function PromptsConfig() {
   const [savingAll, setSavingAll] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedFlash, setSavedFlash] = useState<PromptKey | null>(null);
+  /** 当前二级页（系统文令 / 系统追加 / 全局规则）——必须在任何 early return 之前声明 */
+  const [activeKey, setActiveKey] = useState<PromptKey>("system");
+  const tabStyle = (active: boolean): React.CSSProperties => ({
+    minHeight: 28,
+    padding: "0 12px",
+    borderRadius: 6,
+    border: "1px solid var(--border)",
+    background: active ? "var(--bg-selected)" : "var(--bg-panel)",
+    color: active ? "var(--text)" : "var(--text-muted)",
+    cursor: "pointer",
+    fontSize: 12,
+    fontWeight: active ? 600 : 400,
+  });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -182,19 +195,6 @@ export function PromptsConfig() {
   };
 
   const dirtyCount = entries ? Object.keys(entries).filter((k) => drafts[k as PromptKey] !== entries[k as PromptKey].content).length : 0;
-  /** 当前二级页（系统文令 / 系统追加 / 全局规则） */
-  const [activeKey, setActiveKey] = useState<PromptKey>("system");
-  const tabStyle = (active: boolean): React.CSSProperties => ({
-    minHeight: 28,
-    padding: "0 12px",
-    borderRadius: 6,
-    border: "1px solid var(--border)",
-    background: active ? "var(--bg-selected)" : "var(--bg-panel)",
-    color: active ? "var(--text)" : "var(--text-muted)",
-    cursor: "pointer",
-    fontSize: 12,
-    fontWeight: active ? 600 : 400,
-  });
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
