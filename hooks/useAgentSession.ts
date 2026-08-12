@@ -1531,9 +1531,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "auto_retry_start":
         setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage: event.errorMessage as string | undefined });
         break;
-      case "auto_retry_end":
+      case "auto_retry_end": {
         setRetryInfo(null);
+        // 重试耗尽仍失败：顶栏 notice + 会话内 error 消息双通道
+        if (event.success === false) {
+          const finalError = typeof event.finalError === "string" && event.finalError.trim()
+            ? event.finalError.trim()
+            : t("message_apiError");
+          addNotice({ type: "error", message: finalError });
+        }
         break;
+      }
       case "auto_compaction_start":
       case "compaction_start":
         setIsCompacting(true);
@@ -1555,7 +1563,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
     }
-  }, [addNotice, commitToolExecutions, finishAgentRun, handleExtensionUiRequest, loadSession]);
+  }, [addNotice, commitToolExecutions, finishAgentRun, handleExtensionUiRequest, loadSession, t]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {

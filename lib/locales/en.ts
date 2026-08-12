@@ -288,6 +288,8 @@ export const en = {
   message_newSessionFromAnswer: 'New session from this answer',
   message_newSessionFromAnswerTooltip: 'New session from this answer',
   message_creating: 'Creating…',
+  message_aborted: 'Aborted',
+  message_apiError: 'Model request failed',
   message_thinkingUnavailable: 'Thinking unavailable',
   message_thinkingLoading: 'Loading thinking…',
   message_noOutput: 'No output',

@@ -51,8 +51,19 @@ function findFinalAssistantIndex(messages: AgentMessage[], userIdx: number, endI
   return -1;
 }
 
+function hasAssistantErrorFeedback(message: AssistantMessage): boolean {
+  const stop = message.stopReason;
+  if (stop === "error" || stop === "aborted") return true;
+  return typeof message.errorMessage === "string" && message.errorMessage.trim().length > 0;
+}
+
 function hasDisplayableProcessMessage(message: AgentMessage): boolean {
-  if (message.role === "assistant") return getDisplayableAssistantBlocks(message as AssistantMessage).length > 0;
+  if (message.role === "assistant") {
+    const assistant = message as AssistantMessage;
+    // 上游 API/中止错误常无 content，但仍须在会话中可见
+    if (hasAssistantErrorFeedback(assistant)) return true;
+    return getDisplayableAssistantBlocks(assistant).length > 0;
+  }
   return message.role === "custom";
 }
 

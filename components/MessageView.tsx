@@ -595,7 +595,14 @@ function AssistantMessageView({
     return () => clearInterval(id);
   }, [isStreaming]);
 
-  if (blocks.length === 0 && !isStreaming) return null;
+  const stopReason = message.stopReason;
+  const errorMessage = typeof message.errorMessage === "string" ? message.errorMessage.trim() : "";
+  const isApiError = stopReason === "error" || (errorMessage.length > 0 && stopReason !== "end_turn" && stopReason !== "toolUse" && stopReason !== "length");
+  const isAborted = stopReason === "aborted";
+  const hasErrorFeedback = isApiError || isAborted || errorMessage.length > 0;
+
+  // 空 content 的错误/中止消息仍须展示反馈，不得整卡隐藏
+  if (blocks.length === 0 && !isStreaming && !hasErrorFeedback) return null;
 
   return (
     <div
@@ -656,6 +663,33 @@ function AssistantMessageView({
           <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} toolResults={toolResults} toolExecutionMap={toolExecutionMap} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} toolsActive={toolsActive} startedAt={message.timestamp} />
         ))}
       </div>
+
+      {/* 上游模型/API 异常与中止：空 content 时也必须可见 */}
+      {!isStreaming && hasErrorFeedback && (
+        <div
+          role="alert"
+          style={{
+            marginTop: 10,
+            padding: "10px 12px",
+            borderRadius: 8,
+            border: `1px solid ${isAborted ? "var(--status-warning-border, var(--border))" : "var(--status-danger-border, var(--border))"}`,
+            background: isAborted ? "var(--status-warning-bg, var(--bg-subtle))" : "var(--status-danger-bg, var(--bg-subtle))",
+            color: isAborted ? "var(--status-warning, var(--text))" : "var(--error-text, var(--status-danger, var(--text)))",
+            fontSize: 12,
+            lineHeight: 1.5,
+            whiteSpace: "pre-wrap",
+            overflowWrap: "anywhere",
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: errorMessage ? 4 : 0 }}>
+            {isAborted ? t("message_aborted") : t("message_apiError")}
+            {stopReason && stopReason !== "error" && stopReason !== "aborted" ? (
+              <span style={{ fontWeight: 400, opacity: 0.8 }}> ({stopReason})</span>
+            ) : null}
+          </div>
+          {errorMessage ? <div>{errorMessage}</div> : null}
+        </div>
+      )}
 
       <div style={{
         display: "flex", alignItems: "center", gap: 8, marginTop: 4,

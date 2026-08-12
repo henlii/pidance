@@ -288,6 +288,8 @@ export const zhCN: Record<TranslationKey, string> = {
   message_newSessionFromAnswer: '基于此回答开始新会话',
   message_newSessionFromAnswerTooltip: '基于此回答开始新会话',
   message_creating: '创建中…',
+  message_aborted: '已中止',
+  message_apiError: '模型请求失败',
   message_thinkingUnavailable: '思考不可用',
   message_thinkingLoading: '正在加载思考内容…',
   message_noOutput: '无输出',
