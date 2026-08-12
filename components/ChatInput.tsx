@@ -382,23 +382,28 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     setDepthMenuFor(null);
     setDepthMenuPos(null);
   }, []);
-  // 点击外部关闭深度浮层
+  // 点击外部关闭深度浮层（点在模型列表内延后关闭，避免 pointerdown 重渲染吞掉 click 选模型）
   useEffect(() => {
     if (depthMenuFor === null) return;
     const onDocClick = (e: PointerEvent) => {
       const target = e.target as Node;
+      const el = target as HTMLElement;
       if (depthMenuRef.current?.contains(target)) return;
-      // 点在同一触发按钮上由 toggle 处理，这里不关（避免立刻被关）
-      if ((target as HTMLElement)?.closest?.("[data-depth-trigger]")) return;
+      if (el?.closest?.("[data-depth-trigger]")) return;
+      if (modelDropdownPanelRef.current?.contains(target)) {
+        window.setTimeout(() => closeDepthMenu(), 0);
+        return;
+      }
       closeDepthMenu();
     };
     document.addEventListener("pointerdown", onDocClick);
     window.addEventListener("resize", closeDepthMenu);
-    window.addEventListener("scroll", closeDepthMenu, true);
+    // 不 capture：避免模型列表内部滚动时误伤；窗口滚动再关
+    window.addEventListener("scroll", closeDepthMenu);
     return () => {
       document.removeEventListener("pointerdown", onDocClick);
       window.removeEventListener("resize", closeDepthMenu);
-      window.removeEventListener("scroll", closeDepthMenu, true);
+      window.removeEventListener("scroll", closeDepthMenu);
     };
   }, [closeDepthMenu, depthMenuFor]);
 
@@ -1325,25 +1330,29 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (modelDropdownOpen) focusPanelOption(modelDropdownPanelRef.current, '[role="option"]');
   }, [modelDropdownOpen]);
 
-  // Close dropdowns on outside click
+  // Close dropdowns on outside click（深度菜单 portal 也算「内部」，不关模型列表）
   useEffect(() => {
     const handler = (e: MouseEvent) => {
+      const target = e.target as Node;
+      const inDepth = depthMenuRef.current?.contains(target);
       if (
-        dropdownRef.current && !dropdownRef.current.contains(e.target as Node) &&
-        modelDropdownPanelRef.current && !modelDropdownPanelRef.current.contains(e.target as Node)
+        dropdownRef.current && !dropdownRef.current.contains(target) &&
+        modelDropdownPanelRef.current && !modelDropdownPanelRef.current.contains(target) &&
+        !inDepth
       ) {
         setModelDropdownOpen(false);
+        closeDepthMenu();
       }
       if (
-        toolDropdownRef.current && !toolDropdownRef.current.contains(e.target as Node) &&
-        toolDropdownPanelRef.current && !toolDropdownPanelRef.current.contains(e.target as Node)
+        toolDropdownRef.current && !toolDropdownRef.current.contains(target) &&
+        toolDropdownPanelRef.current && !toolDropdownPanelRef.current.contains(target)
       ) {
         setToolDropdownOpen(false);
       }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, []);
+  }, [closeDepthMenu]);
 
 
 
@@ -2170,86 +2179,86 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                           const levels = levelsForModel(opt.provider, opt.modelId);
                           const depthKey = `${opt.provider}:${opt.modelId}`;
                           const depthOpen = depthMenuFor === depthKey;
+                          const selectModel = () => {
+                            if (blocked || !onModelChange) return;
+                            setModelDropdownOpen(false);
+                            closeDepthMenu();
+                            modelButtonRef.current?.focus({ preventScroll: true });
+                            // 引导页/已有会话一律写入：无缓存 = auto，不把上一模型深度带过去
+                            onModelChange(opt.provider, opt.modelId, modelClickThinkingLevel(cached));
+                          };
                           return (
-                            <div key={depthKey} style={{ position: "relative" }}>
+                            <div
+                              key={depthKey}
+                              role="option"
+                              aria-selected={isActive}
+                              aria-disabled={blocked || undefined}
+                              title={infoTitle}
+                              tabIndex={blocked ? -1 : 0}
+                              onClick={selectModel}
+                              onKeyDown={(e) => {
+                                if (blocked) return;
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  selectModel();
+                                }
+                              }}
+                              style={{
+                                display: "flex", alignItems: "center", gap: 8,
+                                width: "100%", padding: "7px 12px",
+                                minHeight: isMobile ? 44 : undefined,
+                                background: isActive ? "var(--bg-selected)" : "none",
+                                border: "none",
+                                color: blocked ? "var(--text-dim)" : (isActive ? "var(--text)" : "var(--text-muted)"),
+                                cursor: blocked ? "not-allowed" : "pointer", fontSize: 12, textAlign: "left",
+                                fontWeight: isActive ? 600 : 400,
+                                whiteSpace: "nowrap",
+                                opacity: blocked ? 0.55 : 1,
+                                boxSizing: "border-box",
+                              }}
+                              onMouseEnter={(e) => { if (!isActive && !blocked) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                              onMouseLeave={(e) => { if (!isActive && !blocked) e.currentTarget.style.background = "none"; }}
+                            >
+                              {isActive
+                                ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+                                : <span style={{ width: 10, flexShrink: 0 }} />}
+                              <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{opt.name}</span>
+                              {typeof opt.contextWindow === "number" && (
+                                <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+                                  {formatTokens(opt.contextWindow)}
+                                </span>
+                              )}
+                              {/* 独立按钮：禁止嵌套 interactive，避免吞掉行点击 */}
                               <button
-                                role="option"
-                                aria-selected={isActive}
-                                aria-disabled={blocked || undefined}
+                                type="button"
+                                data-depth-trigger={depthKey}
+                                aria-label={t("input_modelThinkingLevel")}
+                                aria-expanded={depthOpen}
                                 disabled={blocked}
-                                title={infoTitle}
-                                onClick={() => {
-                                  setModelDropdownOpen(false);
-                                  // 键盘选择后焦点回 trigger；指针用户不受程序聚焦影响。
-                                  modelButtonRef.current?.focus({ preventScroll: true });
-                                  if (!isActive || isAutoModelSelection) {
-                                    // 只用该模型缓存；无缓存 = auto，绝不把上一模型深度带过去
-                                    onModelChange(opt.provider, opt.modelId, modelClickThinkingLevel(cached));
-                                  }
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  e.preventDefault();
+                                  if (blocked) return;
+                                  if (depthOpen) closeDepthMenu();
+                                  else openDepthMenu(depthKey, e.currentTarget);
                                 }}
                                 style={{
-                                  display: "flex", alignItems: "center", gap: 8,
-                                  width: "100%", padding: "7px 12px",
-                                  minHeight: isMobile ? 44 : undefined,
-                                  background: isActive ? "var(--bg-selected)" : "none",
+                                  display: "inline-flex", alignItems: "center", gap: 3,
+                                  flexShrink: 0,
+                                  minWidth: 44, minHeight: isMobile ? 44 : 32,
+                                  justifyContent: "center",
+                                  padding: "0 6px",
+                                  borderRadius: 6,
                                   border: "none",
-                                  color: blocked ? "var(--text-dim)" : (isActive ? "var(--text)" : "var(--text-muted)"),
-                                  cursor: blocked ? "not-allowed" : "pointer", fontSize: 12, textAlign: "left",
-                                  fontWeight: isActive ? 600 : 400,
-                                  whiteSpace: "nowrap",
-                                  opacity: blocked ? 0.55 : 1,
+                                  background: depthOpen ? "var(--bg-selected)" : "var(--bg-subtle)",
+                                  color: "var(--text-muted)",
+                                  cursor: blocked ? "not-allowed" : "pointer",
+                                  fontSize: 11,
+                                  fontFamily: "var(--font-mono)",
                                 }}
-                                onMouseEnter={(e) => { if (!isActive && !blocked) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                                onMouseLeave={(e) => { if (!isActive && !blocked) e.currentTarget.style.background = "none"; }}
                               >
-                                {isActive
-                                  ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
-                                  : <span style={{ width: 10, flexShrink: 0 }} />}
-                                {/* 超长模型名省略号收尾，不再被 overflowX:hidden 硬切 */}
-                                <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{opt.name}</span>
-                                {/* 上下文长度说明（模型名后） */}
-                                {typeof opt.contextWindow === "number" && (
-                                  <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
-                                    {formatTokens(opt.contextWindow)}
-                                  </span>
-                                )}
-                                {/* 思考深度按钮：显示缓存/当前深度，点击从右侧弹出深度列表（手机同） */}
-                                <span
-                                  role="button"
-                                  tabIndex={0}
-                                  data-depth-trigger={depthKey}
-                                  aria-label={t("input_modelThinkingLevel")}
-                                  aria-expanded={depthOpen}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    if (depthOpen) closeDepthMenu();
-                                    else openDepthMenu(depthKey, e.currentTarget);
-                                  }}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter" || e.key === " ") {
-                                      e.preventDefault();
-                                      e.stopPropagation();
-                                      if (depthOpen) closeDepthMenu();
-                                      else openDepthMenu(depthKey, e.currentTarget);
-                                    }
-                                  }}
-                                  style={{
-                                    display: "inline-flex", alignItems: "center", gap: 3,
-                                    flexShrink: 0,
-                                    minWidth: 44, minHeight: isMobile ? 44 : 32,
-                                    justifyContent: "center",
-                                    padding: "0 6px",
-                                    borderRadius: 6,
-                                    background: depthOpen ? "var(--bg-selected)" : "var(--bg-subtle)",
-                                    color: "var(--text-muted)",
-                                    cursor: "pointer",
-                                    fontSize: 11,
-                                    fontFamily: "var(--font-mono)",
-                                  }}
-                                >
-                                  {currentLevel}
-                                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6" /></svg>
-                                </span>
+                                {currentLevel}
+                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6" /></svg>
                               </button>
                               {depthOpen && depthMenuPos && createPortal(
                                 <div

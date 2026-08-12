@@ -1776,7 +1776,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setPendingModel({ provider, modelId });
       const localThinking = guidePageThinkingUpdate(thinkingLevel);
       if (localThinking) setThinkingLevel(localThinking as ThinkingLevelOption);
-      const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
+      // ensure 正在跑（首次 prompt 并发）时等它；失败/超时不得吞掉本地模型选择
+      let sid = sessionIdRef.current;
+      if (!sid && ensuringNewSessionRef.current) {
+        try {
+          sid = (await ensuringNewSessionRef.current) ?? null;
+        } catch {
+          sid = null;
+        }
+      }
       if (!sid) return; // 首条消息 ensureNewSession 会带上当前 model/thinkingLevel
       try {
         if (thinkingLevel && thinkingLevel !== "auto") {
