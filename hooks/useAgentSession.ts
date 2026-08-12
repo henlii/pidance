@@ -1767,12 +1767,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 只读会话：set_model 会写会话状态，拦截。
     if (isReadOnly) return;
     if (isNew) {
+      // 引导页常无 live session：本地状态必须先更新（否则无 sid 时直接 return，思考/模型选不中）
       setNewSessionModel({ provider, modelId });
       setPendingModel({ provider, modelId });
-      const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
-      if (!sid) return;
-      // 本地立即同步显示（选择路径不经过 handleThinkingLevelChange）
       if (thinkingLevel) setThinkingLevel(thinkingLevel as ThinkingLevelOption);
+      const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
+      if (!sid) return; // 首条消息 ensureNewSession 会带上当前 model/thinkingLevel
       try {
         if (thinkingLevel && thinkingLevel !== "auto") {
           await sendAgentCommand(sid, { type: "set_thinking_level", level: thinkingLevel });
