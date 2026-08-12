@@ -131,7 +131,7 @@ export function SettingsJsonEditor({ stickyFooter = false }: { stickyFooter?: bo
 
   const textareaStyle: React.CSSProperties = {
     width: "100%",
-    minHeight: stickyFooter ? 420 : 320,
+    minHeight: stickyFooter ? 0 : 320,
     maxHeight: stickyFooter ? "none" : "60vh",
     padding: "10px 12px",
     borderRadius: 7,
@@ -166,45 +166,43 @@ export function SettingsJsonEditor({ stickyFooter = false }: { stickyFooter?: bo
             {t("settingsJson_valid")}
           </div>
         )}
-        {/* 编辑器区：超高内部滚动 */}
-        <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-          <div style={{ display: "flex", alignItems: "stretch", border: "1px solid var(--border)", borderRadius: 7, overflow: "hidden" }}>
-            <div
-              aria-hidden="true"
-              style={{
-                flexShrink: 0,
-                padding: "10px 6px 10px 10px",
-                background: "var(--bg-panel)",
-                borderRight: "1px solid var(--border)",
-                color: "var(--text-dim)",
-                fontSize: 12,
-                lineHeight: 1.55,
-                fontFamily: "var(--font-mono)",
-                textAlign: "right",
-                userSelect: "none",
-                overflow: "hidden",
-                minHeight: 420,
-              }}
-            >
-              {(text ?? "").split("\n").map((_, i) => (
-                <div key={i} style={{ transform: `translateY(-${lineScrollTop}px)` }}>{i + 1}</div>
-              ))}
-            </div>
-            <textarea
-              ref={textareaRef}
-              value={text ?? ""}
-              onChange={(e) => {
-                setText(e.target.value);
-                setError(null);
-                setSavedFlash(false);
-                setValidation(null);
-              }}
-              onScroll={(e) => setLineScrollTop(e.currentTarget.scrollTop)}
-              spellCheck={false}
-              aria-label={t("settingsJson_editorLabel")}
-              style={{ ...textareaStyle, border: "none", borderRadius: 0 }}
-            />
+        {/* 编辑器区：flex 自动扩展占满剩余高度（textarea 自身滚动，行号跟随） */}
+        <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "stretch", border: "1px solid var(--border)", borderRadius: 7, overflow: "hidden" }}>
+          <div
+            aria-hidden="true"
+            style={{
+              flexShrink: 0,
+              padding: "10px 6px 10px 10px",
+              background: "var(--bg-panel)",
+              borderRight: "1px solid var(--border)",
+              color: "var(--text-dim)",
+              fontSize: 12,
+              lineHeight: 1.55,
+              fontFamily: "var(--font-mono)",
+              textAlign: "right",
+              userSelect: "none",
+              overflow: "hidden",
+              minHeight: 0,
+            }}
+          >
+            {(text ?? "").split("\n").map((_, i) => (
+              <div key={i} style={{ transform: `translateY(-${lineScrollTop}px)` }}>{i + 1}</div>
+            ))}
           </div>
+          <textarea
+            ref={textareaRef}
+            value={text ?? ""}
+            onChange={(e) => {
+              setText(e.target.value);
+              setError(null);
+              setSavedFlash(false);
+              setValidation(null);
+            }}
+            onScroll={(e) => setLineScrollTop(e.currentTarget.scrollTop)}
+            spellCheck={false}
+            aria-label={t("settingsJson_editorLabel")}
+            style={{ ...textareaStyle, flex: 1, minHeight: 0, border: "none", borderRadius: 0 }}
+          />
         </div>
         {/* 底部操作区常驻 */}
         <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 10, padding: "12px 0 16px", borderTop: "1px solid var(--border)", marginTop: 12, flexWrap: "wrap" }}>
