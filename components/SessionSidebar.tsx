@@ -1958,6 +1958,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         onClose={() => setEditProjectRoot(null)}
         title={t("sidebar_editProject")}
         width={720}
+        height={620}
         closeLabel={t("dialog_close")}
         description={editProjectRoot
           ? t("sidebar_editProjectDescription", { path: editProjectRoot })

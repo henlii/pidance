@@ -76,6 +76,8 @@ export interface ViewportDialogProps {
   actions?: React.ReactNode;
   /** 桌面面板宽度（默认 560）；任何视口下都不会越过可视区域安全边距 */
   width?: number | string;
+  /** 固定面板高度（默认按内容自适应）；同样受视口安全边距限制 */
+  height?: number | string;
   zIndex?: number;
   /** 点击遮罩关闭，默认 true */
   closeOnBackdrop?: boolean;
@@ -120,6 +122,7 @@ export function ViewportDialog({
   children,
   actions,
   width = 560,
+  height,
   zIndex = 1000,
   closeOnBackdrop = true,
   closeOnEsc = true,
@@ -280,6 +283,12 @@ export function ViewportDialog({
   const panelMaxWidthCss = typeof width === "number"
     ? Math.min(width, safeArea.maxWidth)
     : `min(${widthCss}, ${safeArea.maxWidth}px)`;
+  // 固定高度时同样受安全区约束：手机/小视口自动缩到可用高度，内容区内部滚动
+  const panelHeightCss = height === undefined
+    ? undefined
+    : (typeof height === "number"
+        ? Math.min(height, safeArea.maxHeight)
+        : `min(${height}, ${safeArea.maxHeight}px)`);
 
   return createPortal(
     <div
@@ -316,6 +325,7 @@ export function ViewportDialog({
           width: "100%",
           maxWidth: panelMaxWidthCss,
           maxHeight: safeArea.maxHeight,
+          ...(panelHeightCss !== undefined ? { height: panelHeightCss, minHeight: 0 } : {}),
           display: "flex",
           flexDirection: "column",
           background: "var(--bg)",
