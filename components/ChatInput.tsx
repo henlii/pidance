@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft-store";
 import { setServerPref, useServerPreferences } from "@/lib/server-preferences";
+import { listThinkingDisplayLevel, modelClickThinkingLevel } from "@/lib/thinking-level-policy";
 import { hydrateDraftFromServer } from "@/lib/draft-store";
 import { ensureServerPrefsLoaded } from "@/lib/server-preferences";
 import {
@@ -2137,7 +2138,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                           const cached = cachedThinkingLevel(opt.provider, opt.modelId);
                           // 非当前模型：只显示该模型缓存，无缓存固定 auto（不吃会话级 thinkingLevel）
                           // 当前模型：缓存优先，否则用会话级（刚选手动深度时尚未写缓存）
-                          const currentLevel = cached ?? (isActive ? (thinkingLevel ?? "auto") : "auto");
+                          const currentLevel = listThinkingDisplayLevel(cached, isActive, thinkingLevel);
                           const levels = levelsForModel(opt.provider, opt.modelId);
                           const depthKey = `${opt.provider}:${opt.modelId}`;
                           const depthOpen = depthMenuFor === depthKey;
@@ -2155,7 +2156,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                                   modelButtonRef.current?.focus({ preventScroll: true });
                                   if (!isActive || isAutoModelSelection) {
                                     // 只用该模型缓存；无缓存 = auto，绝不把上一模型深度带过去
-                                    onModelChange(opt.provider, opt.modelId, cached ?? "auto");
+                                    onModelChange(opt.provider, opt.modelId, modelClickThinkingLevel(cached));
                                   }
                                 }}
                                 style={{

@@ -35,6 +35,7 @@ import { useSessionCommands } from "@/hooks/useSessionCommands";
 import { ensureServerPrefsLoaded, getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { resolveDisplayModel, settleModelOverride } from "@/lib/model-selection";
 import { useI18n } from "@/lib/i18n";
+import { guidePageThinkingUpdate, thinkingLevelForEnsureBody } from "@/lib/thinking-level-policy";
 import {
   PROGRAMMATIC_SMOOTH_IGNORE_MS,
   RUN_SETTLE_MS,
@@ -933,7 +934,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // command: undefined（08705ad 曾误删此字段，导致新会话创建 500）。
           type: "ensure_session",
           ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
-          ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
+          ...(() => {
+            const level = thinkingLevelForEnsureBody(thinkingLevel);
+            return level ? { thinkingLevel: level } : {};
+          })(),
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1770,7 +1774,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 引导页常无 live session：本地状态必须先更新（否则无 sid 时直接 return，思考/模型选不中）
       setNewSessionModel({ provider, modelId });
       setPendingModel({ provider, modelId });
-      if (thinkingLevel) setThinkingLevel(thinkingLevel as ThinkingLevelOption);
+      const localThinking = guidePageThinkingUpdate(thinkingLevel);
+      if (localThinking) setThinkingLevel(localThinking as ThinkingLevelOption);
       const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
       if (!sid) return; // 首条消息 ensureNewSession 会带上当前 model/thinkingLevel
       try {
