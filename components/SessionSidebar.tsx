@@ -28,6 +28,7 @@ import {
   type SidebarPreferences,
 } from "@/lib/ui-preferences";
 import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
+import { setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { ProjectAssetsEditor } from "./ProjectAssetsEditor";
 import {
   bumpGroupVisibleCount,
@@ -271,6 +272,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       return next;
     });
   }, []);
+
+  // 项目名别名跨客户端同步：服务端为权威（键级覆盖），localStorage 兜底。
+  // 写路径双写（updatePrefs + setServerPref），保证本机无闪回、他端刷新生效。
+  const serverPrefs = useServerPreferences();
+  const projectAliases = useMemo<Record<string, string>>(() => {
+    const server = serverPrefs.projectAliases;
+    const serverMap =
+      typeof server === "object" && server !== null && !Array.isArray(server)
+        ? (server as Record<string, string>)
+        : {};
+    return { ...prefs.projectAliases, ...serverMap };
+  }, [prefs.projectAliases, serverPrefs]);
 
   const displayMode = prefs.displayMode;
   const showRecentSessions = prefs.showRecentSessions;
@@ -1106,10 +1119,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     () => filterSidebarTree(
       openTree,
       fulltextModeActive ? "" : normalizedSessionQuery,
-      prefs.projectAliases,
+      projectAliases,
       fulltextMatchIds,
     ),
-    [openTree, normalizedSessionQuery, prefs.projectAliases, fulltextMatchIds, fulltextModeActive],
+    [openTree, normalizedSessionQuery, projectAliases, fulltextMatchIds, fulltextModeActive],
   );
 
   /** 全文命中深链：按 id 打开已加载会话；列表尚未包含时忽略（refresh 后可再点）。 */
@@ -1241,25 +1254,24 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   /** 打开编辑项目弹窗：名称初值为 alias 或路径显示名。 */
   const handleOpenEditProject = useCallback((root: string) => {
     setOpenProjectMenuRoot(null);
-    setEditProjectValue(prefs.projectAliases[root] ?? projectDisplayName(root));
+    setEditProjectValue(projectAliases[root] ?? projectDisplayName(root));
     setEditProjectTab("name");
     setEditProjectRoot(root);
-  }, [prefs.projectAliases, homeDir]);
+  }, [projectAliases, homeDir]);
 
-  /** 保存项目 alias：与路径显示名相同则清除 alias，回到默认显示。 */
+  /** 保存项目 alias：与文件夹名相同则清除 alias，回到默认显示；local + 服务端双写。 */
   const handleSaveProjectAlias = useCallback(() => {
     if (!editProjectRoot) return;
     const name = editProjectValue.trim();
     if (!name) return;
     const root = editProjectRoot;
     setEditProjectRoot(null);
-    updatePrefs((prev) => {
-      const nextAliases = { ...prev.projectAliases };
-      if (name === projectDisplayName(root)) delete nextAliases[root];
-      else nextAliases[root] = name;
-      return { ...prev, projectAliases: nextAliases };
-    });
-  }, [editProjectRoot, editProjectValue, homeDir, updatePrefs]);
+    const nextAliases = { ...projectAliases };
+    if (name === projectDisplayName(root)) delete nextAliases[root];
+    else nextAliases[root] = name;
+    updatePrefs((prev) => ({ ...prev, projectAliases: nextAliases }));
+    setServerPref("projectAliases", nextAliases);
+  }, [editProjectRoot, editProjectValue, projectAliases, updatePrefs]);
 
   const setDisplayMode = useCallback((mode: SidebarDisplayMode) => {
     updatePrefs((prev) => (prev.displayMode === mode ? prev : { ...prev, displayMode: mode }));
@@ -1662,7 +1674,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             project={project}
             homeDir={homeDir}
             displayMode={displayMode}
-            projectAliases={prefs.projectAliases}
+            projectAliases={projectAliases}
             selectedSessionId={selectedSessionId}
             runningSessionIds={effectiveRunningSessionIds}
             subagentRunningIds={subagentRunningIds}
