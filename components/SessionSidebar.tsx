@@ -49,7 +49,7 @@ import { useProjectActions, useProjectIdentity } from "./ProjectProvider";
 import { ViewportDialog } from "./ui/ViewportDialog";
 
 import { useI18n } from "@/lib/i18n";
-import { loadUnreadSessionIds, saveUnreadSessionIds } from "@/lib/unread-sessions-storage";
+import { applyRunningUnreadTransition, loadUnreadSessionIds, saveUnreadSessionIds } from "@/lib/unread-sessions-storage";
 import {
   AnimatedDropdown,
   ArchiveIcon,
@@ -550,17 +550,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [sessionRefreshDone, refreshSubagentRunning]);
   useEffect(() => {
     const previous = previousRunningSessionIdsRef.current;
-    const completedInBackground = [...previous].filter((id) => !effectiveRunningSessionIds.has(id) && id !== selectedSessionId);
     const newlyRunning = [...effectiveRunningSessionIds].filter((id) => !previous.has(id));
 
-    if (completedInBackground.length > 0 || newlyRunning.length > 0) {
-      setUnreadSessionIds((prev) => {
-        const next = new Set(prev);
-        newlyRunning.forEach((id) => next.delete(id));
-        completedInBackground.forEach((id) => next.add(id));
-        return next;
-      });
-    }
+    setUnreadSessionIds((prev) =>
+      applyRunningUnreadTransition(prev, previous, effectiveRunningSessionIds, selectedSessionId),
+    );
 
     // 新进入 running（含冷启动 clientRunning）：立刻乐观抬升 modified 并重排，
     // 不等 agent_end / 列表轮询。不在此处 loadSessions——发送瞬间缓存可能仍旧。
