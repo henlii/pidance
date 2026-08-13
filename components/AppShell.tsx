@@ -104,6 +104,8 @@ function AppShellInner() {
   const [optimisticPendingById, setOptimisticPendingById] = useState<Map<string, SessionInfo>>(
     () => new Map(),
   );
+  /** 新会话占位行高亮（真实 sid 尚未写入 selectedSession / URL） */
+  const [pendingHighlightId, setPendingHighlightId] = useState<string | null>(null);
   const optimisticPendingSessions = useMemo(
     () => [...optimisticPendingById.values()],
     [optimisticPendingById],
@@ -549,6 +551,7 @@ function AppShellInner() {
     // 不清理 optimistic pending map：其它真实 id 须保留至 server 回流/显式删除。
     setNewSessionIntent(null);
     newSessionIntentRef.current = null;
+    setPendingHighlightId(null);
     selectedSessionIdRef.current = session.id;
     setSelectedSession(session);
     setSessionKey((k) => k + 1);
@@ -590,6 +593,7 @@ function AppShellInner() {
     setNewSessionIntent(intent);
     // 不清理其它真实 id 的 pending；仅清空当前选中，进入新 intent 空 chat。
     selectedSessionIdRef.current = null;
+    setPendingHighlightId(null);
     setSelectedSession(null);
     setSessionKey((k) => k + 1);
     setBranchTree([]);
@@ -690,16 +694,26 @@ function AppShellInner() {
       removeOptimisticPending(pendingSessionId(intentId));
     }
     upsertOptimisticPending(session);
-    if (isPendingSessionId(session.id)) return;
-    // 立即并入本地缓存：刷新后 SWR 秒渲染新会话（不等 fetch），避免"新会话消失"
+    if (isPendingSessionId(session.id)) {
+      if (promote) setPendingHighlightId(session.id);
+      return;
+    }
+    if (promote) {
+      // 真实 sid：选中列表 + 写 URL。不 bump sessionKey，避免重挂载冲掉正在发送的 ChatWindow。
+      setPendingHighlightId(null);
+      selectedSessionIdRef.current = session.id;
+      setSelectedSession(session);
+      setNewSessionIntent(null);
+      newSessionIntentRef.current = null;
+      router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+    }
     const cached = loadCachedSessionList();
     if (cached) {
       const merged = [session, ...cached.filter((s) => s.id !== session.id)].slice(0, 50);
       saveCachedSessionList(merged);
     }
-    // 仅 session list 刷新；不得带动 worktree preload generation。
     setRefreshKey((k) => k + 1);
-  }, [router, hydrateSelectedSession, upsertOptimisticPending, removeOptimisticPending]);
+  }, [router, upsertOptimisticPending, removeOptimisticPending]);
 
   const handleAgentEnd = useCallback(() => {
     setRefreshKey((k) => k + 1);
@@ -922,7 +936,7 @@ function AppShellInner() {
   const sidebarContent = (
     <>
       <SessionSidebar
-        selectedSessionId={selectedSession?.id ?? null}
+        selectedSessionId={selectedSession?.id ?? pendingHighlightId}
         onSelectSession={handleSelectSession}
         onNewSession={handleNewSession}
         initialSessionId={initialSessionId}
