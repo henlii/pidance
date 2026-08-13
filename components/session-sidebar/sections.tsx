@@ -765,10 +765,10 @@ function SessionItem({
   const startRename = useCallback(() => {
     // 只读会话不允许改名（UI 层 guard；后端仍是权威防线）。
     if (!capabilities.canRename) return;
-    setRenameValue(session.name ?? "");
+    setRenameValue(title);
     setRenaming(true);
     setTimeout(() => inputRef.current?.select(), 0);
-  }, [session.name, capabilities.canRename]);
+  }, [title, capabilities.canRename]);
 
   const commitRename = useCallback(async () => {
     // 即使输入框因竞态仍处于打开状态，只读会话也不能发 PATCH。
