@@ -952,6 +952,7 @@ function ModelDetail({
               value={model.thinkingLevelMap}
               onChange={(v) => set("thinkingLevelMap", v)}
             />
+            <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 6 }}>{t("models_thinkingMapHint")}</div>
           </div>
         </>
       )}

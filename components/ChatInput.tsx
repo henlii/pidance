@@ -6,6 +6,7 @@ import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, Slas
 import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft-store";
 import { getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { listThinkingDisplayLevel, modelClickThinkingLevel } from "@/lib/thinking-level-policy";
+import { thinkingLevelsFromMap } from "@/lib/thinking-levels";
 import { hydrateDraftFromServer } from "@/lib/draft-store";
 import { ensureServerPrefsLoaded } from "@/lib/server-preferences";
 import {
@@ -418,12 +419,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     [t],
   );
 
-  /** 每模型可用思考深度（map 显式 null 时禁用；不含 auto）。 */
+  /** 每模型可用思考深度：仅 map 显式 null 禁用；省略（含 xhigh/max）可用。auto 始终在最前。 */
   const levelsForModel = useCallback(
     (provider: string, modelId: string): string[] => {
       const map = thinkingLevelMaps?.[`${provider}:${modelId}`];
-      const all = THINKING_LEVELS.filter((l) => (map ? (map as unknown as Record<string, string | null>)[l] !== null : true));
-      return all.length > 0 ? all : [...THINKING_LEVELS];
+      return ["auto", ...thinkingLevelsFromMap(true, map ?? undefined)];
     },
     [thinkingLevelMaps],
   );

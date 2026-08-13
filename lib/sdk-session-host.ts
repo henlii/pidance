@@ -40,6 +40,10 @@ import {
 } from "./web-extension-ui";
 import type { NavigationActions } from "./live-session-registry";
 import { resolveSessionModel } from "./resolve-session-model";
+import {
+  applyPassThroughExtendedThinkingInPlace,
+  withPassThroughExtendedThinking,
+} from "./thinking-levels";
 
 export type SdkAgentEvent = {
   type: string;
@@ -382,6 +386,10 @@ export class SdkSessionHost {
         cwd: runtimeCwd,
         agentDir: runtimeAgentDir,
       });
+      // 省略的 xhigh/max 补恒等，让 settings 默认 xhigh 在建 session 时不被 Pi 钳成 high
+      for (const m of services.modelRuntime.getModels()) {
+        applyPassThroughExtendedThinkingInPlace(m);
+      }
       const created = await createAgentSessionFromServices({
         services,
         sessionManager: sm,
@@ -607,12 +615,13 @@ export class SdkSessionHost {
           }
         }
         if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
-        await session.setModel(model);
+        await session.setModel(withPassThroughExtendedThinking(model));
         this.options.onSessionListInvalidate?.();
         return model;
       }
 
       case "set_thinking_level": {
+        if (session.model) applyPassThroughExtendedThinkingInPlace(session.model);
         session.setThinkingLevel(command.level as never);
         this.options.onSessionListInvalidate?.();
         return null;

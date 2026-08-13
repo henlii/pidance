@@ -7,6 +7,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { getModelsPath, getSettingsPath } from "./pi-paths";
 import { loadSettingsFile } from "./settings-store";
 import type { ModelsData } from "./models-cache";
+import { thinkingLevelsFromMap } from "./thinking-levels";
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -69,23 +70,9 @@ export function listModelsFromModelsJson(modelsPath?: string): CatalogModel[] {
   return out;
 }
 
-/**
- * 与 pi-ai getSupportedThinkingLevels 对齐（源码核实）：
- * - 非 reasoning → ["off"]
- * - map[level] === null → 禁用
- * - xhigh / max 仅当 map 显式给出（非 undefined）才可选
- * - 其余级别缺省可用（omit = 走 Pi 默认映射）
- */
-const EXTENDED_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-
+/** 仅 map[level]===null 禁用；省略（含 xhigh/max）视为可用。 */
 export function thinkingLevelsFor(model: CatalogModel): string[] {
-  if (!model.reasoning) return ["off"];
-  return EXTENDED_THINKING_LEVELS.filter((level) => {
-    const mapped = model.thinkingLevelMap?.[level];
-    if (mapped === null) return false;
-    if (level === "xhigh" || level === "max") return mapped !== undefined;
-    return true;
-  });
+  return thinkingLevelsFromMap(model.reasoning === true, model.thinkingLevelMap);
 }
 
 /**

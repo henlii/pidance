@@ -530,6 +530,7 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
                     </option>
                   ))}
                 </select>
+                <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 4 }}>{t("defaults_thinkingHint")}</div>
               </div>
             </div>
           </div>
