@@ -28,13 +28,23 @@ function resourceSummary(pkg: PluginPackageInfo, t: ReturnType<typeof useI18n>["
   return parts.length ? parts.join(" · ") : t("plugins_noResources");
 }
 
-/** 列表/详情版本行：有更新时「当前 → 最新」，否则当前版本 */
+/** 已装版本与 latest 不同才算可更新（避免升级后仍显示 0.22.0 → 0.22.0） */
+function pluginHasNewer(
+  pkg: PluginPackageInfo,
+  update?: { hasUpdate?: boolean; latest?: string | null } | null,
+): boolean {
+  const current = pkg.version ?? "";
+  const latest = update?.latest;
+  return Boolean(update?.hasUpdate && latest && latest !== current);
+}
+
+/** 列表/详情版本行：有更新时「当前 → 最新」，否则只显示当前版本 */
 function versionLine(
   pkg: PluginPackageInfo,
   update?: { hasUpdate?: boolean; latest?: string | null } | null,
 ): string {
   const current = pkg.version ?? "?";
-  if (update?.hasUpdate && update.latest) return `${current} → ${update.latest}`;
+  if (pluginHasNewer(pkg, update) && update?.latest) return `${current} → ${update.latest}`;
   return current;
 }
 
@@ -627,7 +637,7 @@ function PackageDetail({
             <input type="checkbox" checked={locked} onChange={onToggleLock} />
             {t("plugins_lockVersion")}
           </label>
-          {updateInfo?.hasUpdate && (
+          {pluginHasNewer(pkg, updateInfo) && (
             <span
               style={{
                 fontSize: 10, padding: "2px 6px", borderRadius: 999,
@@ -859,6 +869,13 @@ export function PluginsConfig({
       const next = (await res.json()) as PluginsResponse & { error?: string };
       if (!res.ok || next.error) throw new Error(next.error ?? `HTTP ${res.status}`);
       setData(next);
+      if (action === "update") {
+        setPluginUpdates((prev) => {
+          const cur = prev[key];
+          if (!cur) return prev;
+          return { ...prev, [key]: { ...cur, hasUpdate: false } };
+        });
+      }
       if (action === "remove") {
         setSelected(next.packages[0] ? packageKey(next.packages[0]) : null);
         if (next.packages.length === 0) setAddMode(true);
@@ -884,7 +901,7 @@ export function PluginsConfig({
     if (!data) return;
     const updatable = data.packages.filter((p) => {
       const key = packageKey(p);
-      return !locks[key] && pluginUpdates[key]?.hasUpdate;
+      return !locks[key] && pluginHasNewer(p, pluginUpdates[key]);
     });
     if (updatable.length === 0) return;
     setUpdatingAll(true);
@@ -1095,7 +1112,7 @@ export function PluginsConfig({
                             >
                               {pkg.source}
                             </div>
-                            {pluginUpdates[packageKey(pkg)]?.hasUpdate && (
+                            {pluginHasNewer(pkg, pluginUpdates[packageKey(pkg)]) && (
                               <span
                                 style={{
                                   display: "inline-block",
@@ -1162,13 +1179,13 @@ export function PluginsConfig({
                 <button
                   type="button"
                   onClick={() => void upgradeAll()}
-                  disabled={updatingAll || Object.values(pluginUpdates).filter((u) => u.hasUpdate).length === 0}
+                  disabled={updatingAll || packages.every((p) => locks[packageKey(p)] || !pluginHasNewer(p, pluginUpdates[packageKey(p)]))}
                   style={{
                     flex: 1, minHeight: 30, padding: "0 6px", borderRadius: 7,
                     border: "1px solid var(--accent)", background: "var(--accent)",
                     color: "var(--accent-foreground)", fontSize: 11, fontWeight: 600,
-                    cursor: updatingAll || Object.values(pluginUpdates).filter((u) => u.hasUpdate).length === 0 ? "not-allowed" : "pointer",
-                    opacity: updatingAll || Object.values(pluginUpdates).filter((u) => u.hasUpdate).length === 0 ? 0.5 : 1,
+                    cursor: updatingAll || packages.every((p) => locks[packageKey(p)] || !pluginHasNewer(p, pluginUpdates[packageKey(p)])) ? "not-allowed" : "pointer",
+                    opacity: updatingAll || packages.every((p) => locks[packageKey(p)] || !pluginHasNewer(p, pluginUpdates[packageKey(p)])) ? 0.5 : 1,
                   }}
                 >
                   {updatingAll ? t("common_loading") : t("plugins_upgradeAll")}
