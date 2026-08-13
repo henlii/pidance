@@ -3,7 +3,8 @@
 /**
  * 新会话引导选择器（OpenChamber draft-target-selectors 语义）：
  * 空态时在输入框上方提供 项目 + 分支 两个紧凑下拉。
- * - 只选择"目标目录"，不创建会话、不跳转（OpenChamber setNewSessionDraftTarget 语义）
+ * - 选择目标目录；同时经 onTargetChange 同步全局项目身份（文件栏/Git/标题）
+ * - 不创建会话、不跳转路由（发送第一条消息才建会话）
  * - 发送第一条消息时新会话才在目标目录创建（Pidance 懒创建）
  * - 选择持久化到 localStorage（ChatWindow 管理），回到空态自动恢复
  * - 项目下拉：/api/sessions 聚合最近 cwd（去重、按最近使用排序）
@@ -59,8 +60,8 @@ function writePersistedWorktrees(entries: Map<string, PersistedWorktreeEntry>): 
 type Props = {
   /** 当前新会话目标目录（项目根或工作树路径）；null = 未选择 */
    targetCwd: string | null;
-   /** 选择目标（OpenChamber setNewSessionDraftTarget：仅记录，不创建/不跳转） */
-   onTargetChange: (cwd: string | null) => void;
+  /** 选择目标；projectRoot 为所属主仓（工作树时与 cwd 不同） */
+   onTargetChange: (cwd: string | null, projectRoot?: string | null) => void;
  };
 
 /** 项目下拉显示名：取路径末段（项目名）；全路径放 tooltip。 */
@@ -227,7 +228,7 @@ export function NewSessionGuide({ targetCwd, onTargetChange }: Props) {
       // 创建成功：目标直接指向新工作树（bootstrapPendingDirectory 语义），
       // 使默认缓存失效并同步移除持久化条目（避免刷新后旧列表——不含新工作树——
       // 被恢复），再刷新分支列表让新条目出现。
-      onTargetChange(data.path);
+      onTargetChange(data.path, selectedCwd ?? data.path);
       setShowWorktreeForm(false);
       setWorktreeName("");
       clearDefaultWorktreeCache(selectedCwd);
@@ -255,7 +256,7 @@ export function NewSessionGuide({ targetCwd, onTargetChange }: Props) {
             if (cwd) {
               // OpenChamber handleDraftProjectChange：选项目即把目标重置为项目根，
               // 清除旧的分支目标（随后可选分支覆盖）。
-              onTargetChange(cwd);
+              onTargetChange(cwd, cwd);
               void loadWorktrees(cwd);
             }
           }}
@@ -286,7 +287,7 @@ export function NewSessionGuide({ targetCwd, onTargetChange }: Props) {
             disabled={!selectedCwd || loadingWorktrees || worktrees === null}
             onChange={(e) => {
               const path = e.target.value;
-              if (path) onTargetChange(path);
+              if (path) onTargetChange(path, selectedCwd ?? path);
             }}
             aria-label={t("guide_worktreeTitle")}
           >

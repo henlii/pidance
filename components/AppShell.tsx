@@ -603,6 +603,23 @@ function AppShellInner() {
     router.replace("/", { scroll: false });
   }, [router, isMobile, getIdentitySnapshot, setIdentity, invalidateHydrate]);
 
+  /** 引导页改项目/工作树：写入全局 identity，不重建 intent、不重挂载 ChatWindow。 */
+  const handleGuideTargetChange = useCallback((cwd: string, projectRoot?: string | null) => {
+    suppressSessionResetRef.current = true;
+    setIdentity({
+      cwd,
+      projectRoot: projectRoot ?? cwd,
+      status: "ready",
+      error: null,
+    });
+    setGuideDefaultCwd(cwd);
+    if (newSessionIntentRef.current) {
+      const next = { ...newSessionIntentRef.current, cwd };
+      newSessionIntentRef.current = next;
+      setNewSessionIntent(next);
+    }
+  }, [setIdentity]);
+
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
     onNewSession: () => handleNewSession(),
@@ -1192,6 +1209,7 @@ function AppShellInner() {
                 newSessionCwd={effectiveNewSessionCwd}
                 newSessionIntentId={newSessionIntent?.id ?? null}
                 guideDefaultCwd={guideDefaultCwd}
+                onGuideTargetChange={handleGuideTargetChange}
                 onAgentEnd={handleAgentEnd}
                 onAgentRunningChange={handleAgentRunningChange}
                 onSessionCreated={handleSessionCreated}

@@ -37,6 +37,8 @@ interface Props {
   newSessionIntentId?: string | null;
   /** 新会话引导页默认目标项目（入口解析的 cwd；null = 回落 localStorage 上次项目） */
   guideDefaultCwd?: string | null;
+  /** 引导页改项目/工作树：同步到全局项目身份（文件栏、Git、标题） */
+  onGuideTargetChange?: (cwd: string, projectRoot?: string | null) => void;
   onAgentEnd?: () => void;
   /** agentRunning 变化（含冷启动前）→ 侧栏立即显示运行中 */
   onAgentRunningChange?: (running: boolean, sessionId: string | null) => void;
@@ -115,7 +117,7 @@ export function ProcessDetailsGroup({ messageCount, toolCallCount, children, t }
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, onGuideTargetChange, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -135,7 +137,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
       return null;
     }
   });
-  const handleDraftTargetChange = useCallback((cwd: string | null) => {
+  const handleDraftTargetChange = useCallback((cwd: string | null, projectRoot?: string | null) => {
     setDraftTargetCwd(cwd);
     try {
       if (cwd) {
@@ -146,7 +148,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     } catch {
       // localStorage 不可用时仅内存生效
     }
-  }, []);
+    if (cwd) onGuideTargetChange?.(cwd, projectRoot ?? cwd);
+  }, [onGuideTargetChange]);
   // 入口显式目标（顶部新建 = 当前选中项目 / 项目行 = 对应项目）同步进 localStorage，
   // 保证刷新后仍恢复为"上次的项目"（OpenChamber persistDraftTarget 语义）。
   useEffect(() => {
