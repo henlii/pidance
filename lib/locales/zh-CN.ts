@@ -41,11 +41,11 @@ export const zhCN: Record<TranslationKey, string> = {
   update_phaseDownloading: '下载中',
   update_phaseInstalling: '安装中',
   update_phaseLinking: '切换版本',
-  update_phaseRestarting: '重启服务',
+  update_phaseRestarting: '重启服务', update_phaseWaiting: '等待服务就绪',
   update_phaseDone: '完成',
   update_phaseError: '失败',
   update_reload: '刷新页面',
-  update_reloadHint: '服务可能已重启，请刷新以加载新版本。',
+  update_reloadHint: '服务已就绪，正在刷新页面…',
 
   app_showSidebar: '显示侧栏',
   app_hideSidebar: '隐藏侧栏',

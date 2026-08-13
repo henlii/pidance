@@ -3,11 +3,8 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AboutInfo } from "@/lib/about-info";
 import type { PidanceUpdateCheck } from "@/lib/pidance-update";
-import {
-  streamApplyPidanceUpdate,
-  type UpgradeProgressState,
-} from "@/lib/pidance-update-client";
 import { useI18n } from "@/lib/i18n";
+import { usePidanceUpgrade } from "@/hooks/usePidanceUpgrade";
 import { UpgradeOverlay } from "./UpgradeOverlay";
 import { ViewportDialog } from "./ui/ViewportDialog";
 
@@ -52,14 +49,10 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
     homepage: "https://github.com/henlii/pidance#readme",
     repository: "https://github.com/henlii/pidance",
   }));
-  const [updateBusy, setUpdateBusy] = useState(false);
   const [updateChecking, setUpdateChecking] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<PidanceUpdateCheck | null>(null);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
-  const [overlay, setOverlay] = useState(false);
-  const [progress, setProgress] = useState<UpgradeProgressState | null>(null);
-  const [resultMsg, setResultMsg] = useState<string | null>(null);
-  const [doneOk, setDoneOk] = useState<boolean | null>(null);
+  const { overlay, progress, resultMsg, doneOk, busy: updateBusy, run: runSharedUpgrade, close: closeOverlay } = usePidanceUpgrade();
 
   useEffect(() => {
     if (!open) return;
@@ -113,48 +106,10 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
 
   const runUpgrade = useCallback(async () => {
     if (!updateInfo?.updateAvailable || !updateInfo.latestVersion) return;
-    setUpdateBusy(true);
     setUpdateMessage(null);
-    setOverlay(true);
-    setDoneOk(null);
-    setResultMsg(null);
-    setProgress({ phase: "preparing", percent: 3, message: t("update_phasePreparing") });
-    try {
-      const finalResult = await streamApplyPidanceUpdate(updateInfo.latestVersion, setProgress);
-      const ok = Boolean(finalResult.ok && (finalResult.status === "upgraded" || finalResult.status === "already_latest"));
-      setDoneOk(ok);
-      if (ok) {
-        const doneText = t("about_upgradeDone", {
-          version: finalResult.targetVersion ?? updateInfo.latestVersion,
-        });
-        setProgress({ phase: "done", percent: 100, message: doneText });
-        setResultMsg(doneText);
-        setUpdateMessage(doneText);
-        window.setTimeout(() => {
-          window.location.reload();
-        }, 1200);
-      } else if (finalResult.status === "not_supported") {
-        const msg = t("about_upgradeNotSupported");
-        setProgress({ phase: "error", percent: 100, message: msg });
-        setResultMsg(msg);
-        setUpdateMessage(msg);
-      } else {
-        const msg = t("about_upgradeFailed", { message: finalResult.message });
-        setProgress({ phase: "error", percent: 100, message: finalResult.message });
-        setResultMsg(msg);
-        setUpdateMessage(msg);
-      }
-    } catch (e) {
-      const raw = e instanceof Error ? e.message : String(e);
-      const msg = t("about_upgradeFailed", { message: raw });
-      setDoneOk(false);
-      setProgress({ phase: "error", percent: 100, message: raw });
-      setResultMsg(msg);
-      setUpdateMessage(msg);
-    } finally {
-      setUpdateBusy(false);
-    }
-  }, [t, updateInfo]);
+    const outcome = await runSharedUpgrade(updateInfo.latestVersion);
+    setUpdateMessage(outcome.message);
+  }, [updateInfo, runSharedUpgrade]);
 
   const githubUrl = info.repository ?? info.homepage ?? "https://github.com/henlii/pidance";
   const appVersion = pickVersion(info.version, envVersion("NEXT_PUBLIC_APP_VERSION"));
@@ -311,10 +266,7 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
           resultMsg={resultMsg}
           doneOk={doneOk}
           onReload={() => { window.location.reload(); }}
-          onClose={() => {
-            setOverlay(false);
-            setProgress(null);
-          }}
+          onClose={closeOverlay}
         />
       )}
     </>

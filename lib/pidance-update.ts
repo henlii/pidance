@@ -44,6 +44,7 @@ export type UpgradePhase =
   | "installing"
   | "linking"
   | "restarting"
+  | "waiting"
   | "done"
   | "error";
 

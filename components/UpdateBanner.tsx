@@ -1,12 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import type { PidanceUpdateCheck } from "@/lib/pidance-update";
-import {
-  streamApplyPidanceUpdate,
-  type UpgradeProgressState,
-} from "@/lib/pidance-update-client";
+import { usePidanceUpgrade } from "@/hooks/usePidanceUpgrade";
 import { loadAutoUpdateCheck } from "@/lib/ui-preferences";
 import { UpgradeOverlay } from "./UpgradeOverlay";
 
@@ -34,16 +31,13 @@ function markDismissed(latest: string): void {
 
 /**
  * 打开页面自动检测 Pidance 版本；有更新时右下角气泡提示。
- * 点击升级 → 全屏覆盖 + 阶段进度。
+ * 一键升级与关于页共用 usePidanceUpgrade（等服务就绪再刷新）。
  */
 export function UpdateBanner() {
   const { t } = useI18n();
   const [check, setCheck] = useState<PidanceUpdateCheck | null>(null);
   const [visible, setVisible] = useState(false);
-  const [overlay, setOverlay] = useState(false);
-  const [progress, setProgress] = useState<UpgradeProgressState | null>(null);
-  const [resultMsg, setResultMsg] = useState<string | null>(null);
-  const [doneOk, setDoneOk] = useState<boolean | null>(null);
+  const { overlay, progress, resultMsg, doneOk, run, close } = usePidanceUpgrade();
 
   useEffect(() => {
     if (!loadAutoUpdateCheck()) return;
@@ -67,53 +61,18 @@ export function UpdateBanner() {
     };
   }, []);
 
-  // 不用 useCallback：依赖 check 切片时 React Compiler 会跳过 preserve-manual-memoization
   const dismiss = () => {
     if (check?.latestVersion) markDismissed(check.latestVersion);
     setVisible(false);
   };
 
-  const upgrade = useCallback(async () => {
+  const upgrade = async () => {
     if (!check?.updateAvailable || !check.latestVersion) return;
-    setOverlay(true);
     setVisible(false);
-    setDoneOk(null);
-    setResultMsg(null);
-    setProgress({ phase: "preparing", percent: 3, message: t("update_phasePreparing") });
-
-    try {
-      const finalResult = await streamApplyPidanceUpdate(check.latestVersion, setProgress);
-      const ok = Boolean(finalResult.ok && (finalResult.status === "upgraded" || finalResult.status === "already_latest"));
-      setDoneOk(ok);
-      if (ok) {
-        const doneText = t("about_upgradeDone", {
-          version: finalResult.targetVersion ?? check.latestVersion,
-        });
-        setProgress({ phase: "done", percent: 100, message: doneText });
-        setResultMsg(doneText);
-        markDismissed(check.latestVersion);
-        window.setTimeout(() => {
-          window.location.reload();
-        }, 1200);
-      } else {
-        setProgress({
-          phase: "error",
-          percent: 100,
-          message: finalResult.message,
-        });
-        setResultMsg(
-          finalResult.status === "not_supported"
-            ? t("about_upgradeNotSupported")
-            : t("about_upgradeFailed", { message: finalResult.message }),
-        );
-      }
-    } catch (e) {
-      setDoneOk(false);
-      const msg = e instanceof Error ? e.message : String(e);
-      setProgress({ phase: "error", percent: 100, message: msg });
-      setResultMsg(t("about_upgradeFailed", { message: msg }));
-    }
-  }, [check, t]);
+    const outcome = await run(check.latestVersion);
+    if (outcome.ok) markDismissed(check.latestVersion);
+    else setVisible(true);
+  };
 
   const color = "var(--accent)";
 
@@ -183,7 +142,7 @@ export function UpdateBanner() {
                   cursor: "pointer",
                 }}
               >
-                {t("update_bannerUpgrade")}
+                {t("about_upgradeNow")}
               </button>
             )}
           </div>
@@ -199,8 +158,7 @@ export function UpdateBanner() {
           doneOk={doneOk}
           onReload={() => { window.location.reload(); }}
           onClose={() => {
-            setOverlay(false);
-            setProgress(null);
+            close();
             setVisible(true);
           }}
         />
@@ -208,3 +166,4 @@ export function UpdateBanner() {
     </>
   );
 }
+

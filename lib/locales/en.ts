@@ -41,11 +41,11 @@ export const en = {
   update_phaseDownloading: 'Downloading',
   update_phaseInstalling: 'Installing',
   update_phaseLinking: 'Switching version',
-  update_phaseRestarting: 'Restarting service',
+  update_phaseRestarting: 'Restarting service', update_phaseWaiting: 'Waiting for service',
   update_phaseDone: 'Done',
   update_phaseError: 'Failed',
   update_reload: 'Reload page',
-  update_reloadHint: 'The service may have restarted. Reload to use the new version.',
+  update_reloadHint: 'Service is ready. Reloading…',
 
   app_showSidebar: 'Show sidebar',
   app_hideSidebar: 'Hide sidebar',

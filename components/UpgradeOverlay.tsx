@@ -22,6 +22,7 @@ function phaseLabelKey(
   | "update_phaseInstalling"
   | "update_phaseLinking"
   | "update_phaseRestarting"
+  | "update_phaseWaiting"
   | "update_phaseDone"
   | "update_phaseError" {
   switch (phase) {
@@ -35,6 +36,8 @@ function phaseLabelKey(
       return "update_phaseLinking";
     case "restarting":
       return "update_phaseRestarting";
+    case "waiting":
+      return "update_phaseWaiting";
     case "done":
       return "update_phaseDone";
     case "error":
