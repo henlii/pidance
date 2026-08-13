@@ -6,7 +6,7 @@ export const maxDuration = 600;
 /**
  * POST /api/update/apply
  * - Accept: text/event-stream（或 query stream=1）→ SSE 推送进度 + 最终 result
- * - 否则 → JSON 最终结果（兼容关于页旧调用）
+ * - 否则 → JSON 最终结果
  */
 export async function POST(req: Request) {
   let targetVersion: string | undefined;

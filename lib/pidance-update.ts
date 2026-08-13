@@ -4,7 +4,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -57,7 +57,6 @@ export type UpgradeProgressEvent = {
 type CacheEntry = { latest: string; ts: number };
 
 declare global {
-  // eslint-disable-next-line no-var
   var __piPidanceLatestCache: CacheEntry | undefined;
 }
 
@@ -141,16 +140,10 @@ export function readInstalledPidanceVersion(cwd: string = process.cwd()): string
       if (pkg.name === PIDANCE_PACKAGE_NAME && typeof pkg.version === "string" && pkg.version.trim()) {
         return pkg.version.trim();
       }
+      // wrapper package.json（name=pidance-<ver>, version=1.0.0）只认产品依赖号
       const dep = pkg.dependencies?.[PIDANCE_PACKAGE_NAME];
       if (typeof dep === "string" && dep.trim() && !dep.startsWith("file:")) {
         return dep.trim().replace(/^[\^~>=<\s]+/, "");
-      }
-      if (typeof pkg.version === "string" && pkg.version.trim() && pkg.version !== "1.0.0") {
-        // 工作区 @henlii/pidance 自身
-        if (pkg.name === PIDANCE_PACKAGE_NAME || pkg.name === "Pidance") return pkg.version.trim();
-      }
-      if (pkg.name === PIDANCE_PACKAGE_NAME && typeof pkg.version === "string") {
-        return pkg.version.trim();
       }
     } catch {
       /* try next */
@@ -179,6 +172,52 @@ export function detectUpgradeMode(
     /* ignore */
   }
   return { mode: "unknown", installRoot: null };
+}
+
+/**
+ * 升级成功后只留 keepVersions + current 指向的目录。
+ * 不跟随 releases/ 外的符号链接；删失败由调用方忽略。
+ */
+export function pruneOldReleases(installRoot: string, keepVersions: string[]): string[] {
+  const releasesDir = join(installRoot, "releases");
+  if (!existsSync(releasesDir)) return [];
+
+  const keep = new Set(keepVersions.map((v) => v.trim()).filter(Boolean));
+  try {
+    const currentReal = realpathSync(join(installRoot, "current"));
+    const m = /\/releases\/([^/]+)$/.exec(currentReal.replace(/\\/g, "/"));
+    if (m) keep.add(m[1]);
+  } catch {
+    /* current 不存在则只按 keepVersions */
+  }
+
+  let releasesReal = releasesDir;
+  try {
+    releasesReal = realpathSync(releasesDir);
+  } catch {
+    return [];
+  }
+
+  const removed: string[] = [];
+  for (const ent of readdirSync(releasesDir, { withFileTypes: true })) {
+    if (!ent.isDirectory() || ent.isSymbolicLink()) continue;
+    if (ent.name === "." || ent.name === ".." || ent.name.includes("/") || ent.name.includes("\\")) {
+      continue;
+    }
+    if (keep.has(ent.name)) continue;
+    const abs = join(releasesDir, ent.name);
+    let real: string;
+    try {
+      real = realpathSync(abs);
+    } catch {
+      continue;
+    }
+    const prefix = releasesReal.endsWith("/") ? releasesReal : `${releasesReal}/`;
+    if (real !== releasesReal && !real.startsWith(prefix)) continue;
+    rmSync(abs, { recursive: true, force: true });
+    removed.push(ent.name);
+  }
+  return removed;
 }
 
 export function isSelfUpgradeAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -374,31 +413,16 @@ export async function applyPidanceUpdate(options?: {
     writeFileSync(join(releaseDir, "package.json"), `${JSON.stringify(wrapperPkg, null, 2)}\n`, "utf8");
 
     report("downloading", 20, "正在从 npm 下载包…");
-    // npm install 无可靠百分比；下载阶段用定时器缓升，结束后跳到 installing
-    let fake = 20;
-    const tick = setInterval(() => {
-      if (fake < 68) {
-        fake += 2;
-        report("downloading", fake, "正在从 npm 下载包…");
-      } else if (fake < 78) {
-        fake += 1;
-        report("installing", fake, "正在安装依赖…");
-      }
-    }, 800);
-    try {
-      await exec(
-        "npm",
-        ["install", "--omit=dev", `--registry=${registry}`, "--no-fund", "--no-audit"],
-        {
-          cwd: releaseDir,
-          env: { ...env, npm_config_registry: registry },
-          timeout: 600_000,
-          maxBuffer: 8 * 1024 * 1024,
-        },
-      );
-    } finally {
-      clearInterval(tick);
-    }
+    await exec(
+      "npm",
+      ["install", "--omit=dev", `--registry=${registry}`, "--no-fund", "--no-audit"],
+      {
+        cwd: releaseDir,
+        env: { ...env, npm_config_registry: registry },
+        timeout: 600_000,
+        maxBuffer: 8 * 1024 * 1024,
+      },
+    );
     report("installing", 82, "校验安装结果…");
 
     const installedPkg = join(releaseDir, "node_modules", "@henlii", "pidance", "package.json");
@@ -442,9 +466,20 @@ export async function applyPidanceUpdate(options?: {
           message: `已切换到 ${target}，但重启 pidance.service 失败：${msg}`,
           restarted: false,
         };
+        try {
+          pruneOldReleases(installRoot, [target, check.currentVersion]);
+        } catch {
+          /* 旧目录删不掉不影响已切换的 current */
+        }
         report("done", 100, result.message);
         return result;
       }
+    }
+
+    try {
+      pruneOldReleases(installRoot, [target, check.currentVersion]);
+    } catch {
+      /* 旧目录删不掉不影响已切换的 current */
     }
 
     const result = {
