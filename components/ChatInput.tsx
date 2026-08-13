@@ -104,8 +104,10 @@ interface Props {
   isCompacting?: boolean;
   compactError?: string | null;
   compactResult?: CompactResultInfo | null;
-  thinkingLevel?: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-  onThinkingLevelChange?: (level: "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") => void;
+  thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  onThinkingLevelChange?: (level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") => void;
+  /** settings.json defaultThinkingLevel，无会话档/无缓存时的回退 */
+  defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
   availableThinkingLevels?: string[] | null;
   thinkingLevelMap?: Record<string, string | null> | null;
   /** 每模型思考级别映射（provider:modelId → map） */
@@ -150,9 +152,8 @@ function compareModelOptions(a: ModelOption, b: ModelOption): number {
     || MODEL_OPTION_COLLATOR.compare(a.modelId, b.modelId);
 }
 
-const THINKING_LEVELS = ["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-const THINKING_LEVEL_DESC: Record<typeof THINKING_LEVELS[number], "input_usePiDefault" | "input_thinkingOff" | "input_thinkingMinimal" | "input_thinkingLow" | "input_thinkingMedium" | "input_thinkingHigh" | "input_thinkingXhigh" | "input_thinkingMax"> = {
-  auto: "input_usePiDefault",
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const THINKING_LEVEL_DESC: Record<typeof THINKING_LEVELS[number], "input_thinkingOff" | "input_thinkingMinimal" | "input_thinkingLow" | "input_thinkingMedium" | "input_thinkingHigh" | "input_thinkingXhigh" | "input_thinkingMax"> = {
   off: "input_thinkingOff",
   minimal: "input_thinkingMinimal",
   low: "input_thinkingLow",
@@ -291,7 +292,7 @@ function QueuedMessageRow({ kind, text }: { kind: "steer" | "follow-up"; text: s
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelAuthConfigured, onModelChange,
   onAbortCompaction, isCompacting, compactError, compactResult,
-  thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, thinkingLevelMaps,
+  thinkingLevel, onThinkingLevelChange, defaultThinkingLevel, availableThinkingLevels, thinkingLevelMap, thinkingLevelMaps,
   retryInfo, queuedMessages, onRecallQueue, onSendQueueAsSteer,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
@@ -419,11 +420,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     [t],
   );
 
-  /** 每模型可用思考深度：仅 map 显式 null 禁用；省略（含 xhigh/max）可用。auto 始终在最前。 */
+  const thinkingFallback = defaultThinkingLevel ?? "off";
+
+  /** 每模型可用思考深度：仅 map 显式 null 禁用；省略（含 xhigh/max）可用。 */
   const levelsForModel = useCallback(
     (provider: string, modelId: string): string[] => {
       const map = thinkingLevelMaps?.[`${provider}:${modelId}`];
-      return ["auto", ...thinkingLevelsFromMap(true, map ?? undefined)];
+      return thinkingLevelsFromMap(true, map ?? undefined);
     },
     [thinkingLevelMaps],
   );
@@ -1251,11 +1254,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         saved: formatTokenCount(compactSavedTokens),
       })
     : null;
-  const thinkingDisplayLabel = (() => {
-    const lvl = thinkingLevel ?? "auto";
-    if (lvl === "auto" || !thinkingLevelMap) return lvl;
-    return thinkingLevelMap[lvl] ?? lvl;
-  })();
+  const thinkingDisplayLabel = thinkingLevel ?? thinkingFallback;
 
   // ── 视口安全浮层定位 ─────────────────────────────────────────────────────
   // 所有菜单共享 useAnchoredOverlay：visualViewport 感知、上下翻转、边界
@@ -2175,7 +2174,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                           const cached = cachedThinkingLevel(opt.provider, opt.modelId);
                           // 当前模型：与按钮同一套会话级（引导页 auto 不被缓存 xhigh 盖住）
                           // 非当前模型：只显示该模型缓存
-                          const currentLevel = listThinkingDisplayLevel(cached, isActive, thinkingLevel);
+                          const currentLevel = listThinkingDisplayLevel(cached, isActive, thinkingLevel, thinkingFallback);
                           const levels = levelsForModel(opt.provider, opt.modelId);
                           const depthKey = `${opt.provider}:${opt.modelId}`;
                           const depthOpen = depthMenuFor === depthKey;
@@ -2185,7 +2184,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                             closeDepthMenu();
                             modelButtonRef.current?.focus({ preventScroll: true });
                             // 引导页/已有会话一律写入：无缓存 = auto，不把上一模型深度带过去
-                            onModelChange(opt.provider, opt.modelId, modelClickThinkingLevel(cached));
+                            onModelChange(opt.provider, opt.modelId, modelClickThinkingLevel(cached, thinkingFallback));
                           };
                           return (
                             <div

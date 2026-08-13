@@ -37,6 +37,7 @@ import { ensureServerPrefsLoaded, getServerPref, setServerPref, useServerPrefere
 import { resolveDisplayModel, settleModelOverride } from "@/lib/model-selection";
 import { useI18n } from "@/lib/i18n";
 import { guidePageThinkingUpdate, thinkingLevelForEnsureBody } from "@/lib/thinking-level-policy";
+import { isThinkingLevel, type AgentThinkingLevel } from "@/lib/agent-settings";
 import {
   PROGRAMMATIC_SMOOTH_IGNORE_MS,
   RUN_SETTLE_MS,
@@ -206,7 +207,7 @@ export interface UseAgentSessionOptions {
   isMobile?: boolean;
 }
 
-export type ThinkingLevelOption = "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type ThinkingLevelOption = AgentThinkingLevel;
 
 const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
 const PROMPT_SETTLE_POLL_MS = 600;
@@ -361,7 +362,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [modelAuthConfigured, setModelAuthConfigured] = useState<Record<string, boolean>>({});
   const [newSessionModel, setNewSessionModel] = useState<SelectedModel | null>(null);
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
-  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
+  const [settingsDefaultThinking, setSettingsDefaultThinking] = useState<AgentThinkingLevel | null>(null);
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption | null>(null);
+  const resolvedThinking: AgentThinkingLevel = thinkingLevel ?? settingsDefaultThinking ?? "off";
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
@@ -719,7 +722,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (liveState.contextUsage !== undefined) setContextUsage(liveState.contextUsage ?? null);
         if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt ?? null);
         if (liveState.thinkingLevel !== undefined) {
-          setThinkingLevel((liveState.thinkingLevel as ThinkingLevelOption) ?? "auto");
+          if (isThinkingLevel(liveState.thinkingLevel)) setThinkingLevel(liveState.thinkingLevel);
         }
         if (liveState.extensionStatuses !== undefined) {
           patchExtensionUiState({ statuses: liveState.extensionStatuses ?? [] });
@@ -936,7 +939,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           type: "ensure_session",
           ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
           ...(() => {
-            const level = thinkingLevelForEnsureBody(thinkingLevel);
+            const level = thinkingLevelForEnsureBody(resolvedThinking);
             return level ? { thinkingLevel: level } : {};
           })(),
         }),
@@ -955,7 +958,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       ensuringNewSessionRef.current = null;
     }
-  }, [isNew, newSessionModel, newSessionDefaultModel, thinkingLevel]);
+  }, [isNew, newSessionModel, newSessionDefaultModel, resolvedThinking]);
 
   const loadSlashCommands = useCallback(async () => {
     // 只读会话：get_commands 会经 /api/agent 启动 AgentSession，直接返回空集。
@@ -1168,7 +1171,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!state) return;
     if (state.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
     if (state.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt ?? null);
-    if (state.thinkingLevel !== undefined) setThinkingLevel((state.thinkingLevel as ThinkingLevelOption) ?? "auto");
+    if (isThinkingLevel(state.thinkingLevel)) setThinkingLevel(state.thinkingLevel);
     if (state.isCompacting !== undefined) setIsCompacting(state.isCompacting);
     if (state.extensionStatuses !== undefined) patchExtensionUiState({ statuses: state.extensionStatuses ?? [] });
     if (state.extensionWidgets !== undefined) patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
@@ -1811,7 +1814,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       if (!sid) return; // 首条消息 ensureNewSession 会带上当前 model/thinkingLevel
       try {
-        if (thinkingLevel && thinkingLevel !== "auto") {
+        if (thinkingLevel && isThinkingLevel(thinkingLevel)) {
           await sendAgentCommand(sid, { type: "set_thinking_level", level: thinkingLevel });
         }
         await sendAgentCommand(sid, { type: "set_model", provider, modelId });
@@ -1829,7 +1832,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     pendingModelRef.current = { provider, modelId };
     try {
       // 思考深度立即应用（下次 prompt 生效）；auto 表示用配置默认，不发送
-      if (thinkingLevel && thinkingLevel !== "auto") {
+      if (thinkingLevel && isThinkingLevel(thinkingLevel)) {
         await sendAgentCommand(sid, { type: "set_thinking_level", level: thinkingLevel });
       }
       // 旧会话也立即 set_model 落盘：只记 pending 会在刷新/切走后丢失，看起来像切换失败
@@ -2176,7 +2179,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 只读会话：set_thinking_level 会写会话状态，拦截。
     if (isReadOnly) return;
     setThinkingLevel(level);
-    if (level === "auto") return; // "auto" leaves pi's current setting untouched
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
     if (!sid) return;
     try {
@@ -2316,7 +2318,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
             if (agentState.state.contextUsage !== undefined) setContextUsage(agentState.state.contextUsage ?? null);
             if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt ?? null);
-            if (agentState.state.thinkingLevel !== undefined) setThinkingLevel((agentState.state.thinkingLevel as ThinkingLevelOption) ?? "auto");
+            if (isThinkingLevel(agentState.state.thinkingLevel)) setThinkingLevel(agentState.state.thinkingLevel);
             if (agentState.state.extensionStatuses !== undefined) patchExtensionUiState({ statuses: agentState.state.extensionStatuses ?? [] });
             if (agentState.state.extensionWidgets !== undefined) patchExtensionUiState({ widgets: agentState.state.extensionWidgets ?? [] });
             if (agentState.state.queuedMessages !== undefined) {
@@ -2587,6 +2589,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => controller.abort();
   }, [loadModels, modelsRefreshKey]);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/agent-settings")
+      .then((r) => r.json())
+      .then((d: { defaultThinkingLevel?: unknown }) => {
+        if (cancelled || !isThinkingLevel(d.defaultThinkingLevel)) return;
+        setSettingsDefaultThinking(d.defaultThinkingLevel);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Compact error auto-dismiss
   useEffect(() => {
     if (!compactError) return;
@@ -2607,7 +2623,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, historyLoading, hasMoreBefore, error, activeLeafId, messages, entryIds, streamState,
-    agentRunning, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, thinkingLevel,
+    agentRunning, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, thinkingLevel: resolvedThinking, defaultThinkingLevel: settingsDefaultThinking,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,

@@ -175,7 +175,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     loading, historyLoading, hasMoreBefore, error, messages, entryIds, streamState,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
-    isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats,
+    isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, defaultThinkingLevel,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput,
     todos,
@@ -419,6 +419,7 @@ const chatPlan = composeChatPlan({
       compactError={compactError}
       compactResult={compactResult}
       thinkingLevel={thinkingLevel}
+      defaultThinkingLevel={defaultThinkingLevel}
       onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
       availableThinkingLevels={availableThinkingLevels}
       thinkingLevelMap={currentThinkingLevelMap}

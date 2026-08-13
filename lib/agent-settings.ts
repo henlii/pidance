@@ -64,7 +64,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isThinkingLevel(value: unknown): value is AgentThinkingLevel {
+export function isThinkingLevel(value: unknown): value is AgentThinkingLevel {
   return typeof value === "string" && (THINKING_LEVELS as readonly string[]).includes(value);
 }
 

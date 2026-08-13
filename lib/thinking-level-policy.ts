@@ -6,33 +6,42 @@
  * 2. 每模型缓存 serverPrefs[`thinkingLevel.${provider}:${modelId}`]
  * 3. Pi live set_thinking_level（有 host 才发）
  *
- * 本模块只约束 1↔2 的 UI 选择与 ensure 载荷，避免列表串模型、引导页选不中。
+ * 无 auto：缺省一律用 settings.json defaultThinkingLevel（由调用方传入 fallback）。
  */
+
+const DEFAULT_FALLBACK = "off";
+
+function namedLevel(value: string | null | undefined): string | null {
+  if (typeof value !== "string" || !value || value === "auto") return null;
+  return value;
+}
 
 /** 模型列表行右侧显示的深度：当前行与按钮一致（会话级）；非当前只用该模型缓存。 */
 export function listThinkingDisplayLevel(
   cached: string | null | undefined,
   isActive: boolean,
   sessionThinking: string | null | undefined,
+  fallback: string = DEFAULT_FALLBACK,
 ): string {
   if (isActive) {
-    if (sessionThinking && sessionThinking.length > 0) return sessionThinking;
-    return typeof cached === "string" && cached ? cached : "auto";
+    return namedLevel(sessionThinking) ?? namedLevel(cached) ?? fallback;
   }
-  return typeof cached === "string" && cached ? cached : "auto";
+  return namedLevel(cached) ?? fallback;
 }
 
-/** 点击模型行时带给 onModelChange 的深度：只用该模型缓存，无则 auto。 */
-export function modelClickThinkingLevel(cached: string | null | undefined): string {
-  return typeof cached === "string" && cached ? cached : "auto";
+/** 点击模型行时带给 onModelChange 的深度：该模型缓存，否则 settings 默认。 */
+export function modelClickThinkingLevel(
+  cached: string | null | undefined,
+  fallback: string = DEFAULT_FALLBACK,
+): string {
+  return namedLevel(cached) ?? fallback;
 }
 
-/** ensure_session / 新建 body 是否附带 thinkingLevel（auto 表示用 settings 默认，不传）。 */
+/** ensure_session / 新建 body：有具体档位就传，不再传 auto。 */
 export function thinkingLevelForEnsureBody(
   level: string | null | undefined,
 ): string | undefined {
-  if (typeof level !== "string" || !level || level === "auto") return undefined;
-  return level;
+  return namedLevel(level) ?? undefined;
 }
 
 /**
@@ -42,7 +51,6 @@ export function thinkingLevelForEnsureBody(
 export function guidePageThinkingUpdate(
   thinkingLevel: string | null | undefined,
 ): string | null {
-  if (thinkingLevel == null || thinkingLevel === "") return null;
-  return thinkingLevel;
+  return namedLevel(thinkingLevel);
 }
-
+
