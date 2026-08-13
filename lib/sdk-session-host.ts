@@ -39,6 +39,7 @@ import {
   type WebExtensionUIAdapter,
 } from "./web-extension-ui";
 import type { NavigationActions } from "./live-session-registry";
+import { resolveSessionModel } from "./resolve-session-model";
 
 export type SdkAgentEvent = {
   type: string;
@@ -595,8 +596,16 @@ export class SdkSessionHost {
       case "set_model": {
         const provider = String(command.provider ?? "");
         const modelId = String(command.modelId ?? "");
-        const models = await session.modelRuntime.getAvailable();
-        const model = models.find((m) => m.provider === provider && m.id === modelId);
+        // 先查静态目录，避免 getAvailable() 全量刷新偶发失败（旧会话更常见）
+        let model = resolveSessionModel(session.modelRuntime, provider, modelId);
+        if (!model) {
+          try {
+            const available = await session.modelRuntime.getAvailable();
+            model = available.find((m) => m.provider === provider && m.id === modelId);
+          } catch {
+            model = undefined;
+          }
+        }
         if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
         await session.setModel(model);
         this.options.onSessionListInvalidate?.();

@@ -1662,7 +1662,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               modelId: pendingModelToApply.modelId,
             });
           } catch (e) {
-            console.error("Failed to apply pending model:", e);
+            pendingModelRef.current = pendingModelToApply;
+            setPendingModel(pendingModelToApply);
+            addNotice({
+              type: "error",
+              message: t("models_switchFailed", {
+                error: e instanceof Error ? e.message : String(e),
+              }),
+            });
           }
         }
         await sendAgentCommand(session.id, {
@@ -1712,7 +1719,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       return false;
     }
-  }, [isNew, isReadOnly, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, notifyAutoFollowSend, opts.chatInputRef]);
+  }, [isNew, isReadOnly, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, notifyAutoFollowSend, opts.chatInputRef, t]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean): Promise<boolean> => {
     // 只读会话：bash 命令同样会写 session 文件，拦截。
@@ -1800,19 +1807,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     // 本地立即同步显示（选择路径不经过 handleThinkingLevelChange）
     if (thinkingLevel) setThinkingLevel(thinkingLevel as ThinkingLevelOption);
+    setCurrentModelOverride({ provider, modelId });
+    setPendingModel({ provider, modelId });
+    pendingModelRef.current = { provider, modelId };
     try {
       // 思考深度立即应用（下次 prompt 生效）；auto 表示用配置默认，不发送
       if (thinkingLevel && thinkingLevel !== "auto") {
         await sendAgentCommand(sid, { type: "set_thinking_level", level: thinkingLevel });
       }
+      // 旧会话也立即 set_model 落盘：只记 pending 会在刷新/切走后丢失，看起来像切换失败
+      await sendAgentCommand(sid, { type: "set_model", provider, modelId });
     } catch (e) {
-      console.error("Failed to set thinking level:", e);
+      pendingModelRef.current = null;
+      setPendingModel(null);
+      setCurrentModelOverride(null);
+      addNotice({
+        type: "error",
+        message: t("models_switchFailed", {
+          error: e instanceof Error ? e.message : String(e),
+        }),
+      });
     }
-    // 模型切换下一轮生效：只记 pending，不立即 set_model；
-    // 引导（steer）/当前轮保持原模型，下一轮 prompt 前应用。
-    setPendingModel({ provider, modelId });
-    pendingModelRef.current = { provider, modelId };
-  }, [isNew, isReadOnly, setNewSessionModel]);
+  }, [isNew, isReadOnly, setNewSessionModel, addNotice, t]);
 
   const handleCompact = useCallback(async () => {
     // 只读会话：compact 会重写 session 文件，拦截。
