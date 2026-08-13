@@ -9,15 +9,17 @@
  * 本模块只约束 1↔2 的 UI 选择与 ensure 载荷，避免列表串模型、引导页选不中。
  */
 
-/** 模型列表行右侧显示的深度：非当前模型禁止回退会话级。 */
+/** 模型列表行右侧显示的深度：当前行与按钮一致（会话级）；非当前只用该模型缓存。 */
 export function listThinkingDisplayLevel(
   cached: string | null | undefined,
   isActive: boolean,
   sessionThinking: string | null | undefined,
 ): string {
-  if (typeof cached === "string" && cached) return cached;
-  if (isActive) return sessionThinking && sessionThinking.length > 0 ? sessionThinking : "auto";
-  return "auto";
+  if (isActive) {
+    if (sessionThinking && sessionThinking.length > 0) return sessionThinking;
+    return typeof cached === "string" && cached ? cached : "auto";
+  }
+  return typeof cached === "string" && cached ? cached : "auto";
 }
 
 /** 点击模型行时带给 onModelChange 的深度：只用该模型缓存，无则 auto。 */
@@ -43,4 +45,4 @@ export function guidePageThinkingUpdate(
   if (thinkingLevel == null || thinkingLevel === "") return null;
   return thinkingLevel;
 }
-
+

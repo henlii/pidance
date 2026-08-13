@@ -2173,8 +2173,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                           const blocked = authBlocked && !isActive;
                           const infoTitle = blocked ? t("models_authRequiredToViewModels") : modelInfoTitle(opt);
                           const cached = cachedThinkingLevel(opt.provider, opt.modelId);
-                          // 非当前模型：只显示该模型缓存，无缓存固定 auto（不吃会话级 thinkingLevel）
-                          // 当前模型：缓存优先，否则用会话级（刚选手动深度时尚未写缓存）
+                          // 当前模型：与按钮同一套会话级（引导页 auto 不被缓存 xhigh 盖住）
+                          // 非当前模型：只显示该模型缓存
                           const currentLevel = listThinkingDisplayLevel(cached, isActive, thinkingLevel);
                           const levels = levelsForModel(opt.provider, opt.modelId);
                           const depthKey = `${opt.provider}:${opt.modelId}`;
