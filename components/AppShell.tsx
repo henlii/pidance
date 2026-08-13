@@ -57,6 +57,8 @@ import { useI18n } from "@/lib/i18n";
 import { hydrateSessionById } from "@/lib/session-hydrate";
 import {
   createNewSessionIntent,
+  isPendingSessionId,
+  pendingSessionId,
   shouldApplyHydratedSession,
   shouldPromoteSessionCreated,
   type NewSessionIntent,
@@ -683,8 +685,12 @@ function AppShellInner() {
       createdSessionId: session.id,
     });
 
-    // 无论是否仍选中当前 intent：乐观 upsert 进侧栏 multi-pending。
+    // 发送瞬间用 pending:<intent> 占位；真实 sid 到达后换掉占位，避免列表双行。
+    if (intentId && session.id !== pendingSessionId(intentId)) {
+      removeOptimisticPending(pendingSessionId(intentId));
+    }
     upsertOptimisticPending(session);
+    if (isPendingSessionId(session.id)) return;
     // 立即并入本地缓存：刷新后 SWR 秒渲染新会话（不等 fetch），避免"新会话消失"
     const cached = loadCachedSessionList();
     if (cached) {
@@ -693,7 +699,7 @@ function AppShellInner() {
     }
     // 仅 session list 刷新；不得带动 worktree preload generation。
     setRefreshKey((k) => k + 1);
-  }, [router, hydrateSelectedSession, upsertOptimisticPending]);
+  }, [router, hydrateSelectedSession, upsertOptimisticPending, removeOptimisticPending]);
 
   const handleAgentEnd = useCallback(() => {
     setRefreshKey((k) => k + 1);

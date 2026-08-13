@@ -416,7 +416,27 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   // 真实 id 乐观 upsert（多条）：立即进入 pending map，不等全量列表。
   // 父层以 id map/list 传入；单槽覆盖会丢尚未回流的其它真实 session。
+  // pending:<intent> 占位被父层撤掉后，这里同步删掉，避免与真实 sid 双行。
   useEffect(() => {
+    const liveOptimistic = new Set((optimisticSessions ?? []).map((s) => s.id).filter(Boolean));
+    setPendingById((prev) => {
+      let next: Map<string, SessionInfo> | null = null;
+      for (const id of prev.keys()) {
+        if (!id.startsWith("pending:") || liveOptimistic.has(id)) continue;
+        if (!next) next = new Map(prev);
+        next.delete(id);
+      }
+      return next ?? prev;
+    });
+    setPendingIds((prev) => {
+      let next: Set<string> | null = null;
+      for (const id of prev) {
+        if (!id.startsWith("pending:") || liveOptimistic.has(id)) continue;
+        if (!next) next = new Set(prev);
+        next.delete(id);
+      }
+      return next ?? prev;
+    });
     if (!optimisticSessions || optimisticSessions.length === 0) return;
     const batch = optimisticSessions.filter((s) => s?.id);
     if (batch.length === 0) return;

@@ -18,6 +18,7 @@ import type { SessionActivity } from "@/lib/session-activity";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { BranchActions } from "@/lib/branch-bookmarks";
 import { mergeFollowUpForSteer, joinQueueForRecall } from "@/lib/queue-merge";
+import { pendingSessionId } from "@/lib/new-session-intent";
 import { createEventStreamManager, type EventStreamManager, type EventStreamConnectionResult } from "@/lib/event-stream-manager";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import {
@@ -1612,6 +1613,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 不再把刚发出的用户消息 smooth 推到顶部。
     notifyAutoFollowSend();
 
+    // 新会话：ensureLive 可能要数秒，先在侧栏插占位行，避免「消息已发出、列表还没有」
+    if (isNew && newSessionCwdRef.current && newSessionIntentIdRef.current && onSessionCreated) {
+      const intentId = newSessionIntentIdRef.current;
+      const cwd = newSessionCwdRef.current;
+      onSessionCreated({
+        id: pendingSessionId(intentId),
+        path: "",
+        cwd,
+        projectRoot: cwd,
+        created: new Date().toISOString(),
+        modified: new Date().toISOString(),
+        messageCount: 1,
+        firstMessage: trimmedMessage,
+      }, intentId);
+    }
+
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
 
     try {
@@ -1719,7 +1736,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       return false;
     }
-  }, [isNew, isReadOnly, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, notifyAutoFollowSend, opts.chatInputRef, t]);
+  }, [isNew, isReadOnly, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, notifyAutoFollowSend, opts.chatInputRef, t, onSessionCreated]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean): Promise<boolean> => {
     // 只读会话：bash 命令同样会写 session 文件，拦截。

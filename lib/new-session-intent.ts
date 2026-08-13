@@ -24,6 +24,16 @@ export function createNewSessionIntent(
   };
 }
 
+export const PENDING_SESSION_ID_PREFIX = "pending:";
+
+export function pendingSessionId(intentId: string): string {
+  return `${PENDING_SESSION_ID_PREFIX}${intentId}`;
+}
+
+export function isPendingSessionId(id: string): boolean {
+  return id.startsWith(PENDING_SESSION_ID_PREFIX);
+}
+
 function defaultIntentId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
