@@ -28,7 +28,7 @@ import {
   type SidebarPreferences,
 } from "@/lib/ui-preferences";
 import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
-import { setServerPref, useServerPreferences } from "@/lib/server-preferences";
+import { getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { ProjectAssetsEditor } from "./ProjectAssetsEditor";
 import {
   bumpGroupVisibleCount,
@@ -224,6 +224,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     );
   }, [effectiveRunningSessionIds, subagentRunningIds]);
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
+  const unreadHydratedRef = useRef(false);
   // 搜索：查询与开关均为组件瞬时态，不写入偏好
   const [sessionQuery, setSessionQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -494,10 +495,22 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     mountedRef,
   });
 
-  // Persist unread markers so they survive a browser refresh before the user
-  // has actually opened the completed session.
+  // 未读：localStorage 兜底 + 服务端权威（多端 focus 刷新覆盖）。
+  useEffect(() => {
+    const remote = getServerPref<unknown>("unreadSessionIds");
+    if (!Array.isArray(remote)) return;
+    unreadHydratedRef.current = true;
+    const next = new Set(remote.filter((id): id is string => typeof id === "string" && id.length > 0));
+    setUnreadSessionIds((prev) => {
+      if (prev.size === next.size && [...prev].every((id) => next.has(id))) return prev;
+      return next;
+    });
+  }, [serverPrefs]);
+
   useEffect(() => {
     saveUnreadSessionIds(unreadSessionIds);
+    if (!unreadHydratedRef.current) return;
+    setServerPref("unreadSessionIds", [...unreadSessionIds]);
   }, [unreadSessionIds]);
 
   useEffect(() => {
@@ -519,6 +532,26 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
     // On error EventSource auto-reconnects; keep the last known state meanwhile.
     return () => source.close();
+  }, []);
+
+  // 后台标签页会漏 SSE：聚焦时用 GET 对齐运行集（同机多浏览器可见）。
+  useEffect(() => {
+    const refreshRunning = () => {
+      if (document.visibilityState !== "visible") return;
+      void fetch("/api/agent/running", { cache: "no-store" })
+        .then((r) => r.json())
+        .then((d: { runningSessionIds?: unknown }) => {
+          if (!Array.isArray(d.runningSessionIds)) return;
+          setRunningSessionIds(new Set(d.runningSessionIds.filter((id): id is string => typeof id === "string")));
+        })
+        .catch(() => undefined);
+    };
+    window.addEventListener("focus", refreshRunning);
+    document.addEventListener("visibilitychange", refreshRunning);
+    return () => {
+      window.removeEventListener("focus", refreshRunning);
+      document.removeEventListener("visibilitychange", refreshRunning);
+    };
   }, []);
 
   // subagent 活跃运行轮询：异步子会话运行中 → 子会话 + 其主会话显示 running。

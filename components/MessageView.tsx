@@ -814,6 +814,24 @@ const STREAM_BLOCK_MAX_HEIGHT = "min(320px, 45vh)";
 /** 距块底多少 px 内视为仍跟随；用户上滚超出后停止自动向下。 */
 const STREAM_BLOCK_FOLLOW_TOLERANCE_PX = 24;
 
+function isNearStreamBlockBottom(el: HTMLElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= STREAM_BLOCK_FOLLOW_TOLERANCE_PX;
+}
+
+/** 程序化钉底时忽略 onScroll，避免把自动滚到底误判成用户上滚而停跟。 */
+function pinStreamBlockToBottom(
+  el: HTMLElement | null,
+  follow: boolean,
+  pinningRef: { current: boolean },
+): void {
+  if (!el || !follow) return;
+  pinningRef.current = true;
+  el.scrollTop = el.scrollHeight;
+  requestAnimationFrame(() => {
+    pinningRef.current = false;
+  });
+}
+
 function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, blockIndex }: {
   block: ThinkingContent;
   duration?: number;
@@ -830,6 +848,7 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
   const [error, setError] = useState<string | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const followBodyRef = useRef(true);
+  const pinningBodyRef = useRef(false);
 
   // 流式开始展开（默认可见），流式结束折叠；用户手动 toggle 在流式状态不变时不打扰
   useEffect(() => {
@@ -868,11 +887,13 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
     if (nextExpanded && block.deferred && content === null) await loadIfDeferred();
   };
 
+  useEffect(() => {
+    if (expanded) followBodyRef.current = true;
+  }, [expanded]);
+
   // 展开后内容增长时块内自动向下；用户上滚后停止，滚回底部再恢复。
   useEffect(() => {
-    const body = bodyRef.current;
-    if (!expanded || !body || !followBodyRef.current) return;
-    body.scrollTop = body.scrollHeight;
+    pinStreamBlockToBottom(bodyRef.current, expanded && followBodyRef.current, pinningBodyRef);
   }, [expanded, bodyText]);
 
   return (
@@ -911,9 +932,8 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
           ref={bodyRef}
           tabIndex={0}
           onScroll={(event) => {
-            const body = event.currentTarget;
-            followBodyRef.current =
-              body.scrollHeight - body.scrollTop - body.clientHeight <= STREAM_BLOCK_FOLLOW_TOLERANCE_PX;
+            if (pinningBodyRef.current) return;
+            followBodyRef.current = isNearStreamBlockBottom(event.currentTarget);
           }}
           style={{
             padding: "8px 10px",
@@ -954,6 +974,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
   const [detailsLoading, setDetailsLoading] = useState(false);
   const outputRef = useRef<HTMLPreElement>(null);
   const followOutputRef = useRef(true);
+  const pinningOutputRef = useRef(false);
   const isRunning = snapshot?.status === "running" || pending === true;
   const expanded = expandedOverride ?? isRunning;
   const isEditTool = isEditToolName(block.toolName);
@@ -990,9 +1011,11 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
   }, [isRunning]);
 
   useEffect(() => {
-    const output = outputRef.current;
-    if (!expanded || !output || !followOutputRef.current) return;
-    output.scrollTop = output.scrollHeight;
+    if (expanded) followOutputRef.current = true;
+  }, [expanded]);
+
+  useEffect(() => {
+    pinStreamBlockToBottom(outputRef.current, expanded && followOutputRef.current, pinningOutputRef);
   }, [expanded, snapshot?.output, snapshot?.renderedLines, renderedLiveLines]);
 
   // 展开工具卡且 details 被首屏剥离时，按 toolCallId 补全 diff/patch
@@ -1119,8 +1142,8 @@ maxHeight: STREAM_BLOCK_MAX_HEIGHT,
             ref={outputRef}
             tabIndex={0}
             onScroll={(event) => {
-              const output = event.currentTarget;
-              followOutputRef.current = output.scrollHeight - output.scrollTop - output.clientHeight <= STREAM_BLOCK_FOLLOW_TOLERANCE_PX;
+              if (pinningOutputRef.current) return;
+              followOutputRef.current = isNearStreamBlockBottom(event.currentTarget);
             }}
             style={{ margin: 0, padding: "4px 10px 10px", maxHeight: STREAM_BLOCK_MAX_HEIGHT, overflow: "auto", overscrollBehavior: "contain", color: renderedLiveLines || snapshot.output ? "var(--text-muted)" : "var(--text-dim)", background: "var(--tool-bg)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
           >{renderedLiveLines ? renderAnsiLines(renderedLiveLines, "tool-live") : snapshot.output || t("message_toolWaitingOutput")}</pre>
