@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useSyncExternalStore } from "react";
+import { ensureServerPrefsLoaded, getServerPref, setServerPref } from "@/lib/server-preferences";
 
 export type Theme = "light" | "dark";
 export type ThemeMode = Theme | "system";
@@ -98,7 +99,17 @@ function applyAppearance(mode: ThemeMode, style: ThemeStyle): void {
   } catch {
     // 隐私模式、配额等存储错误不影响当前页面切换。
   }
+  setServerPref("theme", { mode, style });
   notify();
+}
+
+if (typeof window !== "undefined") {
+  void ensureServerPrefsLoaded().then(() => {
+    const remote = getServerPref<{ mode?: unknown; style?: unknown }>("theme");
+    const mode = typeof remote?.mode === "string" ? remote.mode : null;
+    const style = typeof remote?.style === "string" ? remote.style : null;
+    if (isThemeMode(mode)) applyAppearance(mode, isThemeStyle(style) ? style : readStyle());
+  });
 }
 
 export function useTheme() {

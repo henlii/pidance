@@ -267,6 +267,41 @@ export function saveSidebarPreferences(prefs: SidebarPreferences): void {
   }
 }
 
+/** 跨客户端同步的侧栏偏好（不含宽度等视口相关字段）。 */
+export type SyncedSidebarUi = {
+  displayMode: SidebarDisplayMode;
+  collapsedProjectRoots: string[];
+  collapsedWorktreePaths: string[];
+  closedProjectRoots: string[];
+  addedProjectRoots: string[];
+  showRecentSessions: boolean;
+};
+
+export function sidebarUiFromPrefs(prefs: SidebarPreferences): SyncedSidebarUi {
+  return {
+    displayMode: prefs.displayMode,
+    collapsedProjectRoots: prefs.collapsedProjectRoots,
+    collapsedWorktreePaths: prefs.collapsedWorktreePaths,
+    closedProjectRoots: prefs.closedProjectRoots,
+    addedProjectRoots: prefs.addedProjectRoots,
+    showRecentSessions: prefs.showRecentSessions,
+  };
+}
+
+export function applySyncedSidebarUi(prefs: SidebarPreferences, remote: unknown): SidebarPreferences {
+  if (typeof remote !== "object" || remote === null || Array.isArray(remote)) return prefs;
+  const parsed = parseSidebarPreferences({ ...prefs, ...remote });
+  return {
+    ...prefs,
+    displayMode: parsed.displayMode,
+    collapsedProjectRoots: parsed.collapsedProjectRoots,
+    collapsedWorktreePaths: parsed.collapsedWorktreePaths,
+    closedProjectRoots: parsed.closedProjectRoots,
+    addedProjectRoots: parsed.addedProjectRoots,
+    showRecentSessions: parsed.showRecentSessions,
+  };
+}
+
 /**
  * 只更新存储中的 sidebarWidth（read-modify-write），其余字段原样保留。
  * sidebarWidth 的唯一 owner 是 AppShell（布局 owner）；侧栏其它偏好写入不得经此函数。

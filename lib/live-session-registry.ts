@@ -165,11 +165,33 @@ export {
   getRunningStartedAt,
 } from "./running-state";
 
+export type PendingExtensionUi = {
+  sessionId: string;
+  requests: Record<string, unknown>[];
+};
+
+export function listPendingExtensionUi(): PendingExtensionUi[] {
+  const out: PendingExtensionUi[] = [];
+  for (const [key, host] of getRegistry()) {
+    const requests = host.listPendingExtensionRequests();
+    if (requests.length === 0) continue;
+    out.push({ sessionId: host.sessionId || key, requests });
+  }
+  return out;
+}
+
 let lastRunningSnapshot = "";
 
 export function notifyRunningChange(): void {
   const ids = getRunningRpcSessionIds();
-  const snapshot = JSON.stringify([...ids].sort());
+  const pending = listPendingExtensionUi();
+  const snapshot = JSON.stringify({
+    ids: [...ids].sort(),
+    pending: pending.map((item) => ({
+      sessionId: item.sessionId,
+      ids: item.requests.map((req) => req.id ?? null),
+    })),
+  });
   if (snapshot === lastRunningSnapshot) return;
   lastRunningSnapshot = snapshot;
   for (const listener of getRunningListeners()) {

@@ -10,10 +10,12 @@ import { clearLeafSidecar, writeLeafSidecar } from "./session-leaf-sidecar";
 import {
   getRpcSession,
   getRunningRpcSessionIds,
+  listPendingExtensionUi,
   startRpcSession,
   subscribeRunningSessions,
   type LiveAgentSession,
   type NavigationActions,
+  type PendingExtensionUi,
 } from "./rpc-manager";
 import {
   cacheSessionPath,
@@ -97,6 +99,7 @@ export type SessionServiceDeps = {
     navigationActions?: NavigationActions,
   ) => Promise<{ session: LiveAgentSession; realSessionId: string }>;
   getRunningRpcSessionIds: () => string[];
+  listPendingExtensionUi: () => PendingExtensionUi[];
   subscribeRunningSessions: (listener: (ids: string[]) => void) => () => void;
   allowFileRoot: (root: string) => void;
   invalidateSessionListCache: () => void;
@@ -116,6 +119,7 @@ const defaultDeps: SessionServiceDeps = {
   getRpcSession,
   startRpcSession,
   getRunningRpcSessionIds,
+  listPendingExtensionUi,
   subscribeRunningSessions,
   allowFileRoot,
   invalidateSessionListCache,
@@ -193,6 +197,7 @@ export type SessionService = {
   ): Promise<{ entryId: string; data: { command: string; ok: boolean; result?: string; version?: number } }>;
   createNew(options: CreateNewSessionOptions): Promise<CreateNewSessionResult>;
   getRunningIds(): string[];
+  listPendingExtensionUi(): PendingExtensionUi[];
   subscribeRunning(listener: (ids: string[]) => void): () => void;
   isReadOnly(sessionId: string): Promise<boolean>;
   /** 精确 leaf 切换（user 叶也停在该 entry，不触发 Pi 的 user 编辑语义） */
@@ -460,6 +465,10 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
 
     getRunningIds() {
       return deps.getRunningRpcSessionIds();
+    },
+
+    listPendingExtensionUi() {
+      return deps.listPendingExtensionUi();
     },
 
     subscribeRunning(listener) {

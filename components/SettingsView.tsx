@@ -12,7 +12,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useTheme } from "@/hooks/useTheme";
 import { loadStreamingEnterAction, saveStreamingEnterAction, type StreamingEnterAction } from "@/lib/ui-preferences";
 import { readSoundEnabled, writeSoundEnabled } from "@/hooks/useAudio";
-import { setServerPref, useServerPreferences } from "@/lib/server-preferences";
+import { getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { useI18n, type Locale } from "@/lib/i18n";
 import { SettingsPageFooter } from "./SettingsPageFooter";
 import { loadAutoUpdateCheck, saveAutoUpdateCheck } from "@/lib/ui-preferences";
@@ -199,7 +199,17 @@ function GeneralPage({ onClose }: { onClose?: () => void }) {
   const [queueFlushAsOne, setQueueFlushAsOne] = useState(() => serverPrefs.queueFlushAsOne === true);
   useEffect(() => {
     setQueueFlushAsOne(serverPrefs.queueFlushAsOne === true);
-  }, [serverPrefs.queueFlushAsOne]);
+    const remoteEnter = getServerPref<unknown>("streamingEnter");
+    if (remoteEnter === "steer" || remoteEnter === "followUp") {
+      setStreamingEnter(remoteEnter);
+      saveStreamingEnterAction(remoteEnter);
+    }
+    const remoteUpdate = getServerPref<unknown>("autoUpdateCheck");
+    if (typeof remoteUpdate === "boolean") {
+      setAutoUpdateCheck(remoteUpdate);
+      saveAutoUpdateCheck(remoteUpdate);
+    }
+  }, [serverPrefs]);
 
   let statusLabel = t("common_loading");
   if (failed) statusLabel = t("general_loginCheckFailed");
@@ -275,6 +285,7 @@ function GeneralPage({ onClose }: { onClose?: () => void }) {
               const next = e.target.checked;
               setAutoUpdateCheck(next);
               saveAutoUpdateCheck(next);
+              setServerPref("autoUpdateCheck", next);
             }}
             style={{ width: 16, height: 16, accentColor: "var(--accent)" }}
           />
@@ -293,6 +304,7 @@ function GeneralPage({ onClose }: { onClose?: () => void }) {
                 const next = e.target.value === "steer" ? "steer" : "followUp";
                 setStreamingEnter(next);
                 saveStreamingEnterAction(next);
+                setServerPref("streamingEnter", next);
                 window.dispatchEvent(new Event("pidance:streaming-enter-changed"));
               }}
               style={{

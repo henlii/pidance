@@ -21,8 +21,10 @@ import {
   type SidebarWorktreeGroup,
 } from "./session-sidebar-model";
 import {
+  applySyncedSidebarUi,
   loadSidebarPreferences,
   saveSidebarPreferences,
+  sidebarUiFromPrefs,
   type ProjectAliases,
   type SidebarDisplayMode,
   type SidebarPreferences,
@@ -268,7 +270,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       if (next !== prev) {
         // sidebarWidth 的唯一 owner 是 AppShell；保存其它偏好时保留存储中的
         // 当前宽度，避免侧栏内存里的过期副本回写覆盖最近一次拖拽结果。
-        saveSidebarPreferences({ ...next, sidebarWidth: loadSidebarPreferences().sidebarWidth });
+        const stored = { ...next, sidebarWidth: loadSidebarPreferences().sidebarWidth };
+        saveSidebarPreferences(stored);
+        setServerPref("sidebarUi", sidebarUiFromPrefs(stored));
       }
       return next;
     });
@@ -285,6 +289,19 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         : {};
     return { ...prefs.projectAliases, ...serverMap };
   }, [prefs.projectAliases, serverPrefs]);
+
+  useEffect(() => {
+    const remote = serverPrefs.sidebarUi;
+    if (remote === undefined) return;
+    setPrefs((prev) => {
+      const next = applySyncedSidebarUi(prev, remote);
+      if (JSON.stringify(sidebarUiFromPrefs(prev)) === JSON.stringify(sidebarUiFromPrefs(next))) {
+        return prev;
+      }
+      saveSidebarPreferences({ ...next, sidebarWidth: loadSidebarPreferences().sidebarWidth });
+      return next;
+    });
+  }, [serverPrefs]);
 
   const displayMode = prefs.displayMode;
   const showRecentSessions = prefs.showRecentSessions;

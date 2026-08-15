@@ -4,6 +4,7 @@ import { createElement, useCallback, useEffect, useMemo, useState } from "react"
 import { createContext, useContext } from "react";
 import { en, type TranslationKey } from "./locales/en";
 import { zhCN } from "./locales/zh-CN";
+import { ensureServerPrefsLoaded, getServerPref, setServerPref } from "./server-preferences";
 
 export const I18N_STORAGE_KEY = "pidance:i18n:v1";
 export type Locale = "en" | "zh-CN";
@@ -93,6 +94,13 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
     const next = stored ?? normalizeLocale(window.navigator.language);
     setLocaleState(next);
     document.documentElement.lang = next;
+    void ensureServerPrefsLoaded().then(() => {
+      const remote = getServerPref<unknown>("locale");
+      if (typeof remote !== "string") return;
+      const normalized = normalizeLocale(remote);
+      setLocaleState(normalized);
+      document.documentElement.lang = normalized;
+    });
   }, []);
 
   const setLocale = useCallback((next: Locale) => {
@@ -104,6 +112,7 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // 隐私模式或禁用存储不应阻止切换语言。
     }
+    setServerPref("locale", normalized);
   }, []);
   const t = useMemo(() => createTranslator(locale), [locale]);
   const value = useMemo(() => ({ locale, setLocale, t }), [locale, setLocale, t]);

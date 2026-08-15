@@ -16,6 +16,7 @@ import type { SettingsPageId } from "./settings-nav";
 import { AboutDialog } from "./AboutDialog";
 import { InstantTooltipHost } from "./InstantTooltipHost";
 import { UpdateBanner } from "./UpdateBanner";
+import { PendingExtensionSync } from "./PendingExtensionSync";
 import { BranchNavigator } from "./BranchNavigator";
 import { useTheme } from "@/hooks/useTheme";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -1346,6 +1347,7 @@ function AppShellInner() {
       />
     )}
     <InstantTooltipHost />
+    <PendingExtensionSync selectedSessionId={selectedSession?.id ?? null} />
     <UpdateBanner />
     <AboutDialog open={aboutOpen} onClose={() => setAboutOpen(false)} />
     <CommandPalette

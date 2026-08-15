@@ -123,6 +123,11 @@ export class SdkSessionHost {
     return this.realSessionFile;
   }
 
+  /** 当前未完成的 Extension UI 请求（多客户端恢复弹窗）。 */
+  listPendingExtensionRequests(): Record<string, unknown>[] {
+    return Array.from(this.extensionUi?.pendingSnapshot.values() ?? []);
+  }
+
   /** 供 SessionService 识别 in-process 写路径 */
   get inner(): { sessionManager: SessionManager } | undefined {
     const session = this.runtime?.session;
@@ -291,6 +296,7 @@ export class SdkSessionHost {
         });
       }
     }
+    this.notifyRunning();
   }
 
   private handleSessionEvent(event: SdkAgentEvent): void {
@@ -761,6 +767,7 @@ export class SdkSessionHost {
         if (!this.extensionUi?.respond(id, response)) {
           // 未知/过期 id：忽略，不抛
         }
+        this.notifyRunning();
         return null;
       }
 

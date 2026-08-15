@@ -736,6 +736,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             followUp: [...localFollowUpRef.current],
           });
         }
+        if (Array.isArray(liveState.pendingExtensionRequests)) {
+          const queue = (liveState.pendingExtensionRequests as AgentEvent[])
+            .filter((e): e is ExtensionUiBlockingRequest => {
+              const method = (e as { method?: string }).method;
+              return method === "select" || method === "confirm" || method === "input" || method === "editor";
+            });
+          if (queue.length > 0) {
+            patchExtensionUiState({
+              blockingQueue: queue,
+              ...projectBlockingHead(queue),
+            });
+          }
+        }
       };
 
       try {

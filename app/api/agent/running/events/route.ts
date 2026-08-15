@@ -15,17 +15,23 @@ export async function GET(req: Request) {
 
       // Subscribe BEFORE taking the initial snapshot so no state change can slip
       // through the gap between snapshot and subscription.
+      const encodeRunning = (ids: string[]) => {
+        encode({
+          type: "running",
+          runningSessionIds: ids,
+          pendingExtensionUi: sessionService.listPendingExtensionUi(),
+        });
+      };
+
       const unsubscribe = sessionService.subscribeRunning((ids) => {
         try {
-          encode({ type: "running", runningSessionIds: ids });
+          encodeRunning(ids);
         } catch {
           // controller already closed
         }
       });
 
-      // Initial snapshot so the client renders the correct state immediately.
-      // (A duplicate frame here is harmless: the client just sets the same set.)
-      encode({ type: "running", runningSessionIds: sessionService.getRunningIds() });
+      encodeRunning(sessionService.getRunningIds());
 
       // Heartbeat to keep the connection alive through proxies/timeouts.
       const heartbeat = setInterval(() => {

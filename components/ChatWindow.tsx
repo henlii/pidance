@@ -15,6 +15,7 @@ import { TodoPanel } from "./TodoPanel";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
 import { useI18n } from "@/lib/i18n";
+import { getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -142,8 +143,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     try {
       if (cwd) {
         localStorage.setItem("pidance.draftTargetCwd", cwd);
+        setServerPref("draftTargetCwd", cwd);
       } else {
         localStorage.removeItem("pidance.draftTargetCwd");
+        setServerPref("draftTargetCwd", null);
       }
     } catch {
       // localStorage 不可用时仅内存生效
@@ -219,7 +222,20 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     } catch {
       /* localStorage 不可用时仅内存生效 */
     }
+    setServerPref("footerCollapsed", footerCollapsed);
   }, [footerCollapsed]);
+
+  const serverPrefs = useServerPreferences();
+  useEffect(() => {
+    const remoteDraft = getServerPref<unknown>("draftTargetCwd");
+    if (typeof remoteDraft === "string" && remoteDraft && remoteDraft !== draftTargetCwd && !guideDefaultCwd) {
+      setDraftTargetCwd(remoteDraft);
+    }
+    const remoteFooter = getServerPref<unknown>("footerCollapsed");
+    if (typeof remoteFooter === "boolean" && remoteFooter !== footerCollapsed) {
+      setFooterCollapsed(remoteFooter);
+    }
+  }, [serverPrefs]);
 
   // 阻塞弹窗（dialog）expiresAt 到达：按 id 从 FIFO 清理并推进；不发送
   // extension_ui_response（服务端 timeout 自结算）。
