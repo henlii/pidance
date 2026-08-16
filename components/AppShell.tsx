@@ -521,6 +521,20 @@ function AppShellInner() {
       }
       return;
     }
+    // cwd 相同 = 用户仍停留在同一工作目录：projectRoot 变化只可能是数据完善
+    // （worktree 预加载把投影回退值修正为权威主仓 root），并非切换项目。
+    // 跟随修正选中会话的 projectRoot，不得清空聊天（否则会出现「目录变了但
+    // 会话内容不显示」的假切换）。
+    if (selectedSession && selectedSession.cwd === current.cwd) {
+      if (current.projectRoot && selectedSession.projectRoot !== current.projectRoot) {
+        setSelectedSession((prev) =>
+          prev && prev.id === selectedSession.id
+            ? { ...prev, projectRoot: current.projectRoot ?? undefined }
+            : prev,
+        );
+      }
+      return;
+    }
     if (selectedSession && (selectedSession.projectRoot ?? selectedSession.cwd) === current.projectRoot) return;
     if (selectedSession) {
       selectedSessionIdRef.current = null;
