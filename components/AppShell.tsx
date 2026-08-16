@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect, useMemo, useReducer, type CSSProperties } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
@@ -71,7 +71,6 @@ export function AppShell() {
 
 function AppShellInner() {
   const { t } = useI18n();
-  const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
   const { toggleTheme } = useTheme();
@@ -464,6 +463,18 @@ function AppShellInner() {
     hydrateAbortRef.current = null;
   }, []);
 
+  /** 静默同步地址栏（?session= / 清空），不触发导航：生产模式 router.replace 会
+   *  触发 Suspense remount loop（page.tsx 的 <Suspense> 内 useSearchParams），
+   *  导致 AppShell 整树重挂载、state 全丢、会话恢复竞态（表现为点击会话后
+   *  聊天区空白但文件目录已跟随 cwd 变化）。 */
+  const syncUrl = useCallback((query: string) => {
+    try {
+      window.history.replaceState(null, "", query);
+    } catch {
+      /* URL 同步失败不影响会话切换 */
+    }
+  }, []);
+
   useEffect(() => {
     const requestedCwd = initialNavigation.requestedCwd;
     if (!requestedCwd) return;
@@ -557,8 +568,8 @@ function AppShellInner() {
     setBranchTree([]);
     setBranchActiveLeafId(null);
     setSystemPrompt(null);
-    router.replace("/", { scroll: false });
-  }, [identity.cwd, identity.projectRoot, router, selectedSession, invalidateHydrate]);
+    syncUrl("/");
+  }, [identity.cwd, identity.projectRoot, selectedSession, invalidateHydrate, syncUrl]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
     invalidateHydrate();
@@ -578,12 +589,12 @@ function AppShellInner() {
       // URL session 恢复会同时建立项目身份；跳过紧随其后的身份 watcher。
       suppressSessionResetRef.current = true;
     }
-    // Skip router.replace when restoring from URL — the param is already correct
-    // and calling replace in production Next.js triggers a Suspense remount loop
+    // 生产模式 router.replace 会触发 Suspense remount loop（见 syncUrl），
+    // 这里统一用 history.replaceState 静默同步 URL；刷新/分享仍可从 ?session= 恢复。
     if (!isRestore) {
-      router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+      syncUrl(`?session=${encodeURIComponent(session.id)}`);
     }
-  }, [router, isMobile, invalidateHydrate]);
+  }, [isMobile, invalidateHydrate, syncUrl]);
 
   const handleNewSession = useCallback((targetCwd?: string) => {
     // 侧栏行内入口（项目行/非主 worktree 行）显式给出目标 cwd；其点击路径已先把
@@ -615,8 +626,8 @@ function AppShellInner() {
     setBranchActiveLeafId(null);
     setSystemPrompt(null);
     if (isMobile) setSidebarOpen(false);
-    router.replace("/", { scroll: false });
-  }, [router, isMobile, getIdentitySnapshot, setIdentity, invalidateHydrate]);
+    syncUrl("/");
+  }, [isMobile, getIdentitySnapshot, setIdentity, invalidateHydrate, syncUrl]);
 
   /** 引导页改项目/工作树：写入全局 identity，不重建 intent、不重挂载 ChatWindow。 */
   const handleGuideTargetChange = useCallback((cwd: string, projectRoot?: string | null) => {
@@ -737,7 +748,7 @@ function AppShellInner() {
       setSelectedSession(session);
       setNewSessionIntent(null);
       newSessionIntentRef.current = null;
-      router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+      syncUrl(`?session=${encodeURIComponent(session.id)}`);
     }
     const cached = loadCachedSessionList();
     if (cached) {
@@ -745,7 +756,7 @@ function AppShellInner() {
       saveCachedSessionList(merged);
     }
     setRefreshKey((k) => k + 1);
-  }, [router, upsertOptimisticPending, removeOptimisticPending]);
+  }, [upsertOptimisticPending, removeOptimisticPending, syncUrl]);
 
   const handleAgentEnd = useCallback(() => {
     setRefreshKey((k) => k + 1);
@@ -782,8 +793,8 @@ function AppShellInner() {
     selectedSessionIdRef.current = newSessionId;
     // fork 复用 targeted hydration，不套 new-intent 门禁。
     hydrateSelectedSession(newSessionId, { forFork: true });
-    router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
-  }, [router, hydrateSelectedSession, invalidateHydrate, activeCwd, upsertOptimisticPending]);
+    syncUrl(`?session=${encodeURIComponent(newSessionId)}`);
+  }, [hydrateSelectedSession, invalidateHydrate, activeCwd, upsertOptimisticPending, syncUrl]);
 
   const handleInitialRestoreDone = useCallback(() => {
     setInitialSessionRestored(true);
@@ -802,9 +813,9 @@ function AppShellInner() {
       setBranchTree([]);
       setBranchActiveLeafId(null);
       setSystemPrompt(null);
-      router.replace("/", { scroll: false });
+      syncUrl("/");
     }
-  }, [selectedSession, router, invalidateHydrate, removeOptimisticPending]);
+  }, [selectedSession, invalidateHydrate, removeOptimisticPending, syncUrl]);
 
   const handleOpenFile = useCallback((filePath: string, fileName: string, sourceSessionId?: string | null, writable = false, mode: "content" | "diff" = "content") => {
     const bufferKey = makeFileBufferKey(filePath, sourceSessionId);
