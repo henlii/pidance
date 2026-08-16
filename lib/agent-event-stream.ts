@@ -30,10 +30,34 @@ export function projectAgentEvent(event: unknown): Record<string, unknown> | nul
   // turn_start / turn_end：客户端不消费，丢弃
   if (type === "turn_start" || type === "turn_end") return null;
 
-  // message_update：去掉 assistantMessageEvent 大字段，保留其余字段（不改原对象）
+  // message_update：去掉 assistantMessageEvent 大字段，保留其余字段（不改原对象）。
+  // 同时剥离流式 thinking 内容：openai-completions 通道（如 deepseek 官方 API）的
+  // reasoning_content 明文完整流式下发，思考块流式默认展开会把整段思考刷进视口；
+  // openai-responses 通道思考内容通常为空/摘要。保留 thinking block 结构与签名、
+  // 只清空内容——消息完成走 message_end / 落盘后的完整消息，历史思考块展开时按需
+  // 加载，思考内容不丢失，前端思考块逻辑不变。
   if (type === "message_update") {
     const slim = { ...record };
     delete slim.assistantMessageEvent;
+    const message = slim.message;
+    if (
+      message && typeof message === "object" && !Array.isArray(message)
+      && Array.isArray((message as { content?: unknown }).content)
+    ) {
+      const content = (message as { content: unknown[] }).content;
+      const nextContent = content.map((block) => {
+        if (block && typeof block === "object" && (block as { type?: unknown }).type === "thinking") {
+          const b = block as Record<string, unknown>;
+          if (typeof b.thinking === "string" && b.thinking.length > 0) {
+            return { ...b, thinking: "" };
+          }
+        }
+        return block;
+      });
+      if (nextContent.some((block, index) => block !== content[index])) {
+        slim.message = { ...(message as Record<string, unknown>), content: nextContent };
+      }
+    }
     return slim;
   }
 
