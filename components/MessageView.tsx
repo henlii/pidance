@@ -842,7 +842,11 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
   blockIndex: number;
 }) {
   const { t } = useI18n();
-  const [expanded, setExpanded] = useState(isStreaming ?? false);
+  // 流式不再默认展开：openai-completions 通道（如 deepseek 官方 API）的
+  // reasoning_content 是明文完整下发，流式展开会把整段思考刷进视口
+  // （openai-responses 通道的思考通常为空/摘要，两种通道显示差异大）。
+  // 统一默认折叠，需要时手动展开。
+  const [expanded, setExpanded] = useState(false);
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -850,10 +854,8 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
   const followBodyRef = useRef(true);
   const pinningBodyRef = useRef(false);
 
-  // 流式开始展开（默认可见），流式结束折叠；用户手动 toggle 在流式状态不变时不打扰
-  useEffect(() => {
-    setExpanded(isStreaming ?? false);
-  }, [isStreaming]);
+  // 流式开始/结束不再自动切换展开（见上方注释：明文思考流式展开刷屏）；
+  // 用户手动 toggle 保持，不打扰。
   const bodyText = loading
     ? t("message_thinkingLoading")
     : error ?? (block.deferred ? content : block.thinking);
