@@ -434,3 +434,46 @@ test("最近会话：excludeIds 与损坏 limit 容错", async () => {
   assert.equal(m.RECENT_SESSIONS_INITIAL_VISIBLE, 5);
   assert.equal(m.RECENT_SESSIONS_LOAD_MORE, 5);
 });
+
+// ── 置顶会话 ──────────────────────────────────────────────────────────────
+
+test("置顶会话：按 pinnedSessionIds 顺序输出仍存在、可见的会话", async () => {
+  const m = await load();
+  const list = [
+    session("first", { projectRoot: "/repo-a" }),
+    session("second", { projectRoot: "/repo-a" }),
+    session("closed", { projectRoot: "/repo-closed" }),
+    session("sub", {
+      subagent: { parentSessionId: "p", runId: "r1", runIndex: 1 },
+    }),
+  ];
+  // 顺序 = pinnedSessionIds 顺序（最新置顶在前）；已删除/归档（不在 sessions）、
+  // subagent、关闭项目内的跳过
+  const pinned = m.derivePinnedSessions({
+    sessions: list,
+    pinnedSessionIds: ["second", "gone", "first", "closed", "sub"],
+    closedProjectRoots: new Set(["/repo-closed"]),
+  });
+  assert.deepEqual(pinned.map((s) => s.id), ["second", "first"]);
+  // 不修改输入数组
+  assert.equal(list.length, 4);
+});
+
+test("置顶会话：空置顶列表与空会话列表安全空态", async () => {
+  const m = await load();
+  assert.deepEqual(m.derivePinnedSessions({ sessions: [], pinnedSessionIds: [] }), []);
+  assert.deepEqual(
+    m.derivePinnedSessions({ sessions: [session("a")], pinnedSessionIds: [] }),
+    [],
+  );
+  assert.deepEqual(
+    m.derivePinnedSessions({ sessions: [], pinnedSessionIds: ["ghost"] }),
+    [],
+  );
+  // 重复 id 不重复输出
+  const dup = m.derivePinnedSessions({
+    sessions: [session("a")],
+    pinnedSessionIds: ["a", "a"],
+  });
+  assert.deepEqual(dup.map((s) => s.id), ["a"]);
+});

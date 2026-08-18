@@ -243,6 +243,46 @@ export function deriveRecentSessions(input: DeriveRecentSessionsInput): SessionI
   return sorted.slice(0, n);
 }
 
+export interface DerivePinnedSessionsInput {
+  /** 全量会话列表（服务端 + 乐观合并后）。 */
+  sessions: readonly SessionInfo[];
+  /** 置顶 id 顺序（最新置顶在前）；结果按此顺序输出。 */
+  pinnedSessionIds: readonly string[];
+  /** 已关闭项目根集合：这些项目内的会话不显示（用户已隐藏）。 */
+  closedProjectRoots?: ReadonlySet<string>;
+}
+
+/**
+ * 置顶会话派生（纯逻辑）：按 pinnedSessionIds 顺序输出仍存在且可见的会话。
+ *
+ * 排除规则：
+ * - 已不在 sessions 中的 id（会话已删除/归档）——静默跳过
+ * - subagent 子会话（只读、不参与置顶）
+ * - 已关闭项目（closedProjectRoots）内的会话
+ *
+ * 本函数不修改输入数组；不存在/被排除的 id 不报错。
+ */
+export function derivePinnedSessions(input: DerivePinnedSessionsInput): SessionInfo[] {
+  const { sessions, pinnedSessionIds, closedProjectRoots } = input;
+  const byId = new Map<string, SessionInfo>();
+  for (const s of sessions) {
+    if (s.subagent) continue;
+    const projectRoot = s.projectRoot ?? s.cwd;
+    if (projectRoot && closedProjectRoots?.has(projectRoot)) continue;
+    byId.set(s.id, s);
+  }
+  const result: SessionInfo[] = [];
+  const seen = new Set<string>();
+  for (const id of pinnedSessionIds) {
+    const s = byId.get(id);
+    if (s && !seen.has(id)) {
+      seen.add(id);
+      result.push(s);
+    }
+  }
+  return result;
+}
+
 // ── 项目 worktree 快照 ─────────────────────────────────────────────────────
 
 export type ProjectWorktreeStatus = "idle" | "loading" | "ready" | "error";

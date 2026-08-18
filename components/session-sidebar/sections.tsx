@@ -113,6 +113,8 @@ function ProjectSection({
   onConfirmRemoveWorktree,
   onCancelRemoveWorktree,
   onSessionArchive,
+  isSessionPinned,
+  onTogglePin,
 }: {
   project: SidebarProjectNode;
   homeDir: string;
@@ -155,6 +157,10 @@ function ProjectSection({
   onConfirmRemoveWorktree: (path: string) => void;
   onCancelRemoveWorktree: () => void;
   onSessionArchive: (sessionId: string) => void;
+  /** 会话是否置顶（id → bool）；不传则不显示置顶菜单。 */
+  isSessionPinned?: (id: string) => boolean;
+  /** 置顶/取消置顶动作；不传则不显示置顶菜单。 */
+  onTogglePin?: (id: string) => void;
 }) {
   const { t } = useI18n();
   const collapsed = isSessionNodeEffectivelyCollapsed(collapsedProjectRoots, project.root, searchActive);
@@ -275,6 +281,8 @@ function ProjectSection({
                 onRenamed={onRenamed}
                 onSessionDeleted={onSessionDeleted}
                 onSessionArchive={onSessionArchive}
+                isSessionPinned={isSessionPinned}
+                onTogglePin={onTogglePin}
                 depth={0}
                 collapsedSessionIds={collapsedSessionIds}
                 searchActive={searchActive}
@@ -321,6 +329,8 @@ function ProjectSection({
               onConfirmRemove={() => onConfirmRemoveWorktree(group.path)}
               onCancelRemove={onCancelRemoveWorktree}
               onSessionArchive={onSessionArchive}
+              isSessionPinned={isSessionPinned}
+              onTogglePin={onTogglePin}
             />
           ))}
 
@@ -419,6 +429,8 @@ function WorktreeGroupSection({
   onConfirmRemove,
   onCancelRemove,
   onSessionArchive,
+  isSessionPinned,
+  onTogglePin,
 }: {
   group: SidebarWorktreeGroup;
   homeDir: string;
@@ -445,6 +457,8 @@ function WorktreeGroupSection({
   onConfirmRemove: () => void;
   onCancelRemove: () => void;
   onSessionArchive: (sessionId: string) => void;
+  isSessionPinned?: (id: string) => boolean;
+  onTogglePin?: (id: string) => void;
 }) {
   const { t } = useI18n();
   const collapsed = isSessionNodeEffectivelyCollapsed(collapsedWorktreePaths, group.path, searchActive);
@@ -585,6 +599,8 @@ function WorktreeGroupSection({
               onRenamed={onRenamed}
               onSessionDeleted={onSessionDeleted}
               onSessionArchive={onSessionArchive}
+              isSessionPinned={isSessionPinned}
+              onTogglePin={onTogglePin}
               depth={0}
               collapsedSessionIds={collapsedSessionIds}
               searchActive={searchActive}
@@ -623,6 +639,8 @@ function SessionTreeItem({
   onRenamed,
   onSessionDeleted,
   onSessionArchive,
+  isSessionPinned,
+  onTogglePin,
   depth,
   collapsedSessionIds,
   searchActive,
@@ -638,6 +656,8 @@ function SessionTreeItem({
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
   onSessionArchive?: (id: string) => void;
+  isSessionPinned?: (id: string) => boolean;
+  onTogglePin?: (id: string) => void;
   depth: number;
   collapsedSessionIds: ReadonlySet<string>;
   searchActive: boolean;
@@ -661,6 +681,8 @@ function SessionTreeItem({
           onRenamed={onRenamed}
           onDeleted={(id) => onSessionDeleted?.(id)}
           onArchive={(id) => onSessionArchive?.(id)}
+          isPinned={isSessionPinned?.(node.session.id)}
+          onTogglePin={() => onTogglePin?.(node.session.id)}
           depth={depth}
           hasChildren={hasChildren}
           collapsed={collapsed}
@@ -682,6 +704,8 @@ function SessionTreeItem({
               onRenamed={onRenamed}
               onSessionDeleted={onSessionDeleted}
               onSessionArchive={onSessionArchive}
+              isSessionPinned={isSessionPinned}
+              onTogglePin={onTogglePin}
               depth={depth + 1}
               collapsedSessionIds={collapsedSessionIds}
               searchActive={searchActive}
@@ -706,6 +730,8 @@ function SessionItem({
   onRenamed,
   onDeleted,
   onArchive,
+  isPinned,
+  onTogglePin,
   depth = 0,
   hasChildren = false,
   collapsed = false,
@@ -722,6 +748,8 @@ function SessionItem({
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
   onArchive?: (id: string) => void;
+  isPinned?: boolean;
+  onTogglePin?: () => void;
   depth?: number;
   hasChildren?: boolean;
   collapsed?: boolean;
@@ -984,7 +1012,7 @@ const handleDeleteConfirm = useCallback(async () => {
         </div>
 
           {/* 写操作与导出统一收口；只读会话仍可复制 ID 和导出。 */}
-          <SessionRowMenu session={session} title={title} canRename={capabilities.canRename} canDelete={capabilities.canDelete} canArchive={archiveCanUse} archiveDisabledReason={archiveDisabledReason} onRename={startRename} onDelete={handleDeleteClick} onArchive={() => onArchive?.(session.id)}/>
+          <SessionRowMenu session={session} title={title} canRename={capabilities.canRename} canDelete={capabilities.canDelete} canArchive={archiveCanUse} archiveDisabledReason={archiveDisabledReason} isPinned={isPinned} onTogglePin={onTogglePin} onRename={startRename} onDelete={handleDeleteClick} onArchive={() => onArchive?.(session.id)}/>
         </>
       )}
     </div>

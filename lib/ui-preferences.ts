@@ -127,6 +127,8 @@ export interface SidebarPreferences {
   changesPanelWidth: number;
   /** 「最近会话」区开/关（项目列表上方的快捷入口）；默认开启。 */
   showRecentSessions: boolean;
+  /** 置顶会话 id（有序：最新置顶在前）。置顶会话从最近区排除，显示在最近区上方。 */
+  pinnedSessionIds: string[];
   /** 文件树按 cwd 记忆的展开路径与滚动位置。 */
   fileExplorerState: FileExplorerState;
 }
@@ -143,6 +145,7 @@ export const DEFAULT_SIDEBAR_PREFERENCES: SidebarPreferences = {
   changesPanelOpen: true,
   changesPanelWidth: CHANGES_PANEL_WIDTH_DEFAULT,
   showRecentSessions: true,
+  pinnedSessionIds: [],
   fileExplorerState: {},
 };
 
@@ -212,6 +215,8 @@ export function parseSidebarPreferences(raw: unknown): SidebarPreferences {
     changesPanelWidth: clampChangesPanelWidth(record.changesPanelWidth),
     // 旧数据无最近会话字段：默认开启（仅显式 false 关闭）。
     showRecentSessions: parseShowRecentSessions(record.showRecentSessions),
+    // 旧数据无置顶字段：默认空列表。
+    pinnedSessionIds: parsePathList(record.pinnedSessionIds),
     // 旧数据无文件树记忆字段：默认空表。
     fileExplorerState: parseFileExplorerState(record.fileExplorerState),
   };
@@ -231,6 +236,7 @@ export function serializeSidebarPreferences(prefs: SidebarPreferences): string {
     changesPanelOpen: parseChangesPanelOpen(prefs.changesPanelOpen),
     changesPanelWidth: clampChangesPanelWidth(prefs.changesPanelWidth),
     showRecentSessions: parseShowRecentSessions(prefs.showRecentSessions),
+    pinnedSessionIds: parsePathList(prefs.pinnedSessionIds),
     fileExplorerState: parseFileExplorerState(prefs.fileExplorerState),
   });
 }
@@ -275,6 +281,7 @@ export type SyncedSidebarUi = {
   closedProjectRoots: string[];
   addedProjectRoots: string[];
   showRecentSessions: boolean;
+  pinnedSessionIds: string[];
 };
 
 export function sidebarUiFromPrefs(prefs: SidebarPreferences): SyncedSidebarUi {
@@ -285,6 +292,7 @@ export function sidebarUiFromPrefs(prefs: SidebarPreferences): SyncedSidebarUi {
     closedProjectRoots: prefs.closedProjectRoots,
     addedProjectRoots: prefs.addedProjectRoots,
     showRecentSessions: prefs.showRecentSessions,
+    pinnedSessionIds: prefs.pinnedSessionIds,
   };
 }
 
@@ -299,6 +307,7 @@ export function applySyncedSidebarUi(prefs: SidebarPreferences, remote: unknown)
     closedProjectRoots: parsed.closedProjectRoots,
     addedProjectRoots: parsed.addedProjectRoots,
     showRecentSessions: parsed.showRecentSessions,
+    pinnedSessionIds: parsed.pinnedSessionIds,
   };
 }
 

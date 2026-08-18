@@ -34,6 +34,7 @@ import { getServerPref, setServerPref, useServerPreferences } from "@/lib/server
 import { ProjectAssetsEditor } from "./ProjectAssetsEditor";
 import {
   bumpGroupVisibleCount,
+  derivePinnedSessions,
   deriveRecentSessions,
   RECENT_SESSIONS_LIMIT,
   RECENT_SESSIONS_INITIAL_VISIBLE,
@@ -64,6 +65,7 @@ import {
   DisplayMenuItem,
   FolderIcon,
   HistoryIcon,
+  PinIcon,
   FolderPlusIcon,
   formatRelativeTime,
   GroupPagination,
@@ -983,6 +985,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   /** 会话删除收口：树与最近区共用同一处理（乐观删除 + 回流刷新）。 */
   const handleSessionDeletedLocal = useCallback((id: string) => {
+    updatePrefs((prev) => (
+      prev.pinnedSessionIds.includes(id)
+        ? { ...prev, pinnedSessionIds: prev.pinnedSessionIds.filter((x) => x !== id) }
+        : prev
+    ));
     setDeletedIds((prev) => {
       const next = new Set(prev);
       next.add(id);
@@ -1002,7 +1009,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     });
     onSessionDeleted?.(id);
     loadSessions();
-  }, [onSessionDeleted, loadSessions]);
+  }, [onSessionDeleted, loadSessions, updatePrefs]);
 
   /** 归档收口：菜单动作 → POST archive → 成功后统一重拉 /api/sessions。
    *  409（running）/ 403（readOnly）等失败按分类展示 i18n 文案。 */
@@ -1022,13 +1029,19 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         );
         return;
       }
+      // 归档后不再显示于列表：同步清理置顶，避免残留。
+      updatePrefs((prev) => (
+        prev.pinnedSessionIds.includes(sessionId)
+          ? { ...prev, pinnedSessionIds: prev.pinnedSessionIds.filter((x) => x !== sessionId) }
+          : prev
+      ));
       loadSessions();
     } catch (e) {
       setArchiveError(e instanceof Error ? e.message : String(e));
     } finally {
       setArchiveBusyId(null);
     }
-  }, [archiveBusyId, loadSessions, t]);
+  }, [archiveBusyId, loadSessions, t, updatePrefs]);
 
   /** Archive 视图开/关：打开时清空上次错误；数据刷新由 ArchiveView 挂载 effect 承担。 */
   const toggleArchiveView = useCallback(() => {
@@ -1043,10 +1056,29 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     updatePrefs((prev) => (prev.showRecentSessions === show ? prev : { ...prev, showRecentSessions: show }));
   }, [updatePrefs]);
 
+  /** 置顶会话 id 集合：置顶会话从最近区排除（不重复出现）。 */
+  const pinnedIds = useMemo(() => new Set(prefs.pinnedSessionIds), [prefs.pinnedSessionIds]);
+
+  /** 置顶会话：按置顶顺序（最新置顶在前）；仅显示仍存在、可见的会话。 */
+  const pinnedSessions = useMemo(
+    () => derivePinnedSessions({ sessions: allSessions, pinnedSessionIds: prefs.pinnedSessionIds, closedProjectRoots: closedRoots }),
+    [allSessions, prefs.pinnedSessionIds, closedRoots],
+  );
+
+  /** 置顶/取消置顶：唯一写入入口经偏好 seam；新置顶插到最前。 */
+  const togglePinSession = useCallback((sessionId: string) => {
+    updatePrefs((prev) => {
+      if (prev.pinnedSessionIds.includes(sessionId)) {
+        return { ...prev, pinnedSessionIds: prev.pinnedSessionIds.filter((id) => id !== sessionId) };
+      }
+      return { ...prev, pinnedSessionIds: [sessionId, ...prev.pinnedSessionIds] };
+    });
+  }, [updatePrefs]);
+
   /** 最近会话：按 modified 降序取 top 20 候选；UI 默认展示 5、每次加载更多 5。 */
   const recentSessions = useMemo(
-    () => deriveRecentSessions({ sessions: allSessions, closedProjectRoots: closedRoots, limit: RECENT_SESSIONS_LIMIT }),
-    [allSessions, closedRoots],
+    () => deriveRecentSessions({ sessions: allSessions, closedProjectRoots: closedRoots, excludeIds: pinnedIds, limit: RECENT_SESSIONS_LIMIT }),
+    [allSessions, closedRoots, pinnedIds],
   );
   // 池变短时收敛可见条数，避免 slice 空档
   useEffect(() => {
@@ -1644,6 +1676,66 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             </div>
           )
         )}
+        {/* 置顶会话区：最近会话区上方的常驻快捷入口；置顶会话已从最近区排除。
+            搜索激活时隐藏；不参与树的分组/折叠状态，选中态/运行/未读与树内同源。 */}
+        {!searchActive && pinnedSessions.length > 0 && (
+          <div style={{ paddingBottom: 5, borderBottom: "1px solid var(--border)", marginBottom: 5 }}>
+            <div
+              data-sidebar-depth={0}
+              className="sidebar-row"
+              style={{
+                display: "flex", alignItems: "center", gap: 6, height: 32,
+                margin: "1px 6px", paddingLeft: sidebarRowPaddingLeft(0), paddingRight: 8,
+                color: "var(--text-muted)", fontSize: 12.5, fontWeight: 600,
+                position: "relative", borderRadius: 6,
+              }}
+            >
+              <span aria-hidden="true" className="sidebar-indicator-icon" style={{ position: "absolute", left: sidebarIndicatorLeft(0), top: "50%", display: "flex", width: SIDEBAR_INDICATOR_SLOT, height: 20, alignItems: "center", justifyContent: "center", transform: "translateY(-50%)", color: "var(--text-dim)" }}><PinIcon size={13} /></span>
+              <span style={{ flex: 1, fontSize: 12.5, fontWeight: 600 }}>{t("sidebar_pinnedSessions")}</span>
+            </div>
+            {pinnedSessions.map((s) => {
+              const node = sessionNodeById.get(s.id);
+              // 置顶区行与项目树同一渲染：有子会话时折叠/展开显示子会话。
+              return node ? (
+                <SessionTreeItem
+                  key={s.id}
+                  node={node}
+                  selectedSessionId={selectedSessionId}
+                  runningSessionIds={effectiveRunningSessionIds}
+                  subagentRunningIds={subagentRunningIds}
+                  unreadSessionIds={unreadSessionIds}
+                  onSelectSession={handleSelectSessionFromList}
+                  onRenamed={loadSessions}
+                  onSessionDeleted={handleSessionDeletedLocal}
+                  onSessionArchive={handleArchiveSession}
+                  isSessionPinned={(id) => pinnedIds.has(id)}
+                  onTogglePin={togglePinSession}
+                  depth={0}
+                  collapsedSessionIds={collapsedSessionIds}
+                  searchActive={searchActive}
+                  onToggleCollapse={toggleSessionCollapse}
+                  displayMode={displayMode}
+                />
+              ) : (
+                <SessionItem
+                  key={s.id}
+                  session={s}
+                  isSelected={s.id === selectedSessionId}
+                  isRunning={effectiveRunningSessionIds.has(s.id) || subagentRunningIds.has(s.id)}
+                  isUnread={unreadSessionIds.has(s.id)}
+                  onClick={() => handleSelectSessionFromList(s)}
+                  onRenamed={loadSessions}
+                  onDeleted={handleSessionDeletedLocal}
+                  onArchive={handleArchiveSession}
+                  isPinned={pinnedIds.has(s.id)}
+                  onTogglePin={() => togglePinSession(s.id)}
+                  depth={0}
+                  displayMode={displayMode}
+                />
+              );
+            })}
+          </div>
+        )}
         {/* 最近会话区：项目列表上方的纯快捷入口（OpenChamber Recent zone 语义）。
             搜索激活时隐藏，只显示匹配树；不参与树的分组/折叠状态，
             选中态、运行/未读徽标与树内同会话共享同一数据源。 */}
@@ -1696,6 +1788,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                     onRenamed={loadSessions}
                     onSessionDeleted={handleSessionDeletedLocal}
                     onSessionArchive={handleArchiveSession}
+                    isSessionPinned={(id) => pinnedIds.has(id)}
+                    onTogglePin={togglePinSession}
                     depth={0}
                     collapsedSessionIds={collapsedSessionIds}
                     searchActive={searchActive}
@@ -1713,6 +1807,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                     onRenamed={loadSessions}
                     onDeleted={handleSessionDeletedLocal}
                     onArchive={handleArchiveSession}
+                    isPinned={pinnedIds.has(s.id)}
+                    onTogglePin={() => togglePinSession(s.id)}
                     depth={0}
                     displayMode={displayMode}
                   />
@@ -1790,6 +1886,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             onConfirmRemoveWorktree={(path) => void handleRemoveWorktree(project.root, path, true)}
             onCancelRemoveWorktree={() => setWtConfirmRemove(null)}
             onSessionArchive={handleArchiveSession}
+            isSessionPinned={(id) => pinnedIds.has(id)}
+            onTogglePin={togglePinSession}
            />
          ))}
        </div>
