@@ -154,7 +154,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [error, setError] = useState<string | null>(null);
   const sessionListFetchGenRef = useRef(0);
   const { cwd: selectedCwd, projectRoot: selectedProjectRoot } = useProjectIdentity();
-  const { setIdentity } = useProjectActions();
+  const { setIdentity, getIdentitySnapshot } = useProjectActions();
   const [homeDir, setHomeDir] = useState<string>("");
   // 添加项目弹窗（ViewportDialog；原生目录选择仅在弹窗内填充输入，不直接提交）
   const [customPathOpen, setCustomPathOpen] = useState(false);
@@ -509,6 +509,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     selectedCwd,
     selectedProjectRoot,
     setIdentity,
+    getIdentitySnapshot,
     mountedRef,
   });
 

@@ -108,6 +108,24 @@ function normalizeIdentity(identity: ProjectIdentitySnapshot): ProjectIdentitySn
   };
 }
 
+/**
+ * worktree 预加载完成后是否可回写 identity。
+ * 必须用「完成当下」的快照，不能用发起请求时的闭包 cwd——否则切到另一会话后，
+ * 迟到的旧项目响应会把 identity 改回去，身份 watcher 清空选中会话，聊天掉进引导页。
+ */
+export function shouldApplyWorktreeIdentityPatch(input: {
+  snapshotCwd: string | null;
+  snapshotProjectRoot: string | null;
+  requestedRoot: string;
+  canonicalRoot: string;
+}): boolean {
+  if (!input.snapshotCwd) return false;
+  return input.snapshotCwd === input.requestedRoot
+    || input.snapshotProjectRoot === input.requestedRoot
+    || input.snapshotCwd === input.canonicalRoot
+    || input.snapshotProjectRoot === input.canonicalRoot;
+}
+
 function sameIdentity(a: ProjectIdentitySnapshot, b: ProjectIdentitySnapshot): boolean {
   return a.status === b.status
     && a.error === b.error

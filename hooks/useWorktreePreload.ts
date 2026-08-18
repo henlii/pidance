@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObjec
 import type { SessionInfo } from "@/lib/types";
 import {
   getRecentProjects,
+  shouldApplyWorktreeIdentityPatch,
   type WorktreeEntry,
   type WorktreeState,
 } from "@/lib/project-context";
@@ -19,6 +20,7 @@ export interface UseWorktreePreloadParams {
   selectedCwd: string | null;
   selectedProjectRoot: string | null;
   setIdentity: (patch: Partial<ProjectIdentitySnapshot>) => void;
+  getIdentitySnapshot: () => ProjectIdentitySnapshot;
   mountedRef: MutableRefObject<boolean>;
 }
 
@@ -43,6 +45,7 @@ export function useWorktreePreload({
   selectedCwd,
   selectedProjectRoot,
   setIdentity,
+  getIdentitySnapshot,
   mountedRef,
 }: UseWorktreePreloadParams): UseWorktreePreloadResult {
   // 每个项目独立的 worktree 快照：缓存优先，后台限流预加载。
@@ -97,11 +100,17 @@ export function useWorktreePreload({
           ? { ...prev, [projectRoot]: metadata }
           : { ...prev, [canonicalRoot]: metadata };
       });
-      if (selectedCwd && (selectedProjectRoot === projectRoot || selectedCwd === projectRoot)) {
+      const snap = getIdentitySnapshot();
+      if (shouldApplyWorktreeIdentityPatch({
+        snapshotCwd: snap.cwd,
+        snapshotProjectRoot: snap.projectRoot,
+        requestedRoot: projectRoot,
+        canonicalRoot,
+      })) {
         setIdentity({
-          cwd: selectedCwd,
+          cwd: snap.cwd,
           projectRoot: canonicalRoot,
-          branch: worktrees.find((worktree) => worktree.path === selectedCwd)?.branch ?? null,
+          branch: worktrees.find((worktree) => worktree.path === snap.cwd)?.branch ?? snap.branch,
           isGit: data.isGit ?? false,
           isTopLevel: data.isTopLevel ?? false,
           status: "ready",
@@ -120,7 +129,7 @@ export function useWorktreePreload({
         worktreeRequestsRef.current.delete(projectRoot);
       }
     }
-  }, [commitWorktreeSnapshots, selectedCwd, selectedProjectRoot, setIdentity, mountedRef]);
+  }, [commitWorktreeSnapshots, getIdentitySnapshot, setIdentity, mountedRef]);
 
   const knownProjectRoots = useMemo(
     () => buildKnownProjectRoots(getRecentProjects(allSessions), selectedCwd, selectedProjectRoot),

@@ -585,10 +585,9 @@ function AppShellInner() {
     setInitialSessionRestored(true);
     // On mobile, collapse the overlay drawer so the chat is revealed after pick.
     if (isMobile && !isRestore) setSidebarOpen(false);
-    if (isRestore) {
-      // URL session 恢复会同时建立项目身份；跳过紧随其后的身份 watcher。
-      suppressSessionResetRef.current = true;
-    }
+    // 显式点选会话：跳过身份 watcher。selectCwd / 迟到的 worktree 预加载回写
+    // 不能把刚选中的会话清掉（否则会掉进引导页，刷新才恢复）。
+    suppressSessionResetRef.current = true;
     // 生产模式 router.replace 会触发 Suspense remount loop（见 syncUrl），
     // 这里统一用 history.replaceState 静默同步 URL；刷新/分享仍可从 ?session= 恢复。
     if (!isRestore) {
