@@ -1099,7 +1099,7 @@ function AppShellInner() {
       </div>
 
       {/* Center: chat */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0, minHeight: 0 }}>
         {/* Top bar with sidebar toggle */}
         <div className="app-top-bar">
           <button
@@ -1226,8 +1226,8 @@ function AppShellInner() {
 
         {/* Chat 固定主区：打开文件/diff/会话信息只展开右栏，Chat 始终可见且保持挂载，
             SSE/流式状态与滚动不丢失（P1 分屏语义，不再有互斥隐藏）。 */}
-        <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-          <div style={{ height: "100%", overflow: "hidden", position: "relative" }}>
+        <div style={{ flex: 1, minHeight: 0, overflow: "hidden", position: "relative" }}>
+          <div style={{ height: "100%", minHeight: 0, overflow: "hidden", position: "relative" }}>
             {showChat ? (
               <ChatWindow
                 key={sessionKey}

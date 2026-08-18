@@ -44,7 +44,10 @@ import {
   canNestedScrollerConsumeUp,
   getBottomZoneSize,
   getDistanceFromBottom,
+  getRealBottomTolerance,
   getScrollDirection,
+  getTouchUpIntentThreshold,
+  isLayoutDrivenScroll,
   reduceAutoFollow,
   shouldShowJumpButton,
   type AutoFollowMode,
@@ -2408,8 +2411,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (touchStartY === null) return;
       const y = event.touches[0]?.clientY;
       if (y === undefined) return;
-      // 手指向下滑动 = 内容向上走 = 向上阅读意图；超过 4px 阈值才判定一次
-      if (y - touchStartY > 4) {
+      // 手指向下滑动 = 内容向上走 = 向上阅读意图；阈值见 getTouchUpIntentThreshold
+      if (y - touchStartY > getTouchUpIntentThreshold(isMobileRef.current)) {
         if (!isInsideNestedUpScrollable(touchTarget, container)) releaseOnUpIntent();
         touchStartY = null;
       }
@@ -2438,32 +2441,32 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => {
     const container = scrollContainerEl;
     if (!container) return;
+    lastScrollTopRef.current = container.scrollTop;
+    lastScrollHeightRef.current = container.scrollHeight;
+    lastClientHeightRef.current = container.clientHeight;
     const onScroll = () => {
       const now = Date.now();
       const previousTop = lastScrollTopRef.current;
       const nextTop = container.scrollTop;
       lastScrollTopRef.current = nextTop;
+      // 高度基准必须每次都更新：prepend 补偿窗口内也有真实增高，
+      // 若拖到窗口结束后才采样，下一次用户上翻会被当成布局滚动吞掉。
+      const previousClientHeight = lastClientHeightRef.current;
+      const previousScrollHeight = lastScrollHeightRef.current;
+      lastClientHeightRef.current = container.clientHeight;
+      lastScrollHeightRef.current = container.scrollHeight;
       if (now < externalWriteUntilRef.current || now < programmaticSmoothUntilRef.current) {
         updateJumpButtonVisibility();
         return;
       }
-      // 布局调整（输入框变高、窗口尺寸变化）引起的 scroll 事件：仅刷新按钮，
-      // 不参与 following/released 状态判定。
-      const clientChanged = container.clientHeight !== lastClientHeightRef.current;
-      lastClientHeightRef.current = container.clientHeight;
-      if (clientChanged) {
-        updateJumpButtonVisibility();
-        return;
-      }
-      // 内容收缩（思考块折叠、流式结束收缩）时浏览器会把 scrollTop clamp 上移；
-      // 这是布局变化不是用户滚动，不得把 following 判为 released，否则自动滚动停在中途。
-      const prevScrollHeight = lastScrollHeightRef.current;
-      lastScrollHeightRef.current = container.scrollHeight;
-      const shrinkClamped =
-        prevScrollHeight > container.scrollHeight &&
-        nextTop < previousTop &&
-        nextTop === Math.max(0, container.scrollHeight - container.clientHeight);
-      if (shrinkClamped) {
+      // 思考/工具块展开、折叠、流式增高、输入框/视口变化：高度变了就不是用户滚动。
+      // 只认收缩钳位不够——展开时浏览器同样可能把 scrollTop 上移，following 会被误释放。
+      if (isLayoutDrivenScroll({
+        previousScrollHeight,
+        nextScrollHeight: container.scrollHeight,
+        previousClientHeight,
+        nextClientHeight: container.clientHeight,
+      })) {
         updateJumpButtonVisibility();
         return;
       }
@@ -2473,6 +2476,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           distance: getDistanceFromBottom(container.scrollHeight, nextTop, container.clientHeight),
           direction: getScrollDirection(previousTop, nextTop),
           zoneSize: getBottomZoneSize(container.clientHeight, isMobileRef.current),
+          bottomTolerance: getRealBottomTolerance(isMobileRef.current),
         }),
       );
       updateJumpButtonVisibility();
@@ -2542,6 +2546,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!container) return;
     const content = container.firstElementChild;
     const onResize = () => {
+      lastScrollHeightRef.current = container.scrollHeight;
+      lastClientHeightRef.current = container.clientHeight;
       const now = Date.now();
       if (autoFollowModeRef.current !== "following") {
         updateJumpButtonVisibility();

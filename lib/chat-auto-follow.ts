@@ -11,9 +11,13 @@
  *   2. up-intent（wheel 向上、触摸下拉、ArrowUp/PageUp/Home）→ 立即 released，
  *      即使此时仍在底部区域内——向上意图优先于任何区域判定；
  *   3. scroll 事件按几何判定：到真实底部恢复；向下进入末端区域恢复；
- *      following 中出现向上位移即 released（内容增长不会改变 scrollTop，
- *      跟随中的向上位移只可能来自用户：滚动条拖拽、minimap 上拖等）；
+ *      following 中出现向上位移即 released（内容高度未变时，向上位移只可能
+ *      来自用户：滚动条拖拽、minimap 上拖等）；
  *   4. released 中的其余滚动一律保持 released，不被吸回。
+ *
+ * 调用方必须在 scrollHeight / clientHeight 变化时忽略 scroll 状态判定：
+ * 思考/工具块自动展开、流式增高、折叠收缩、输入框变高都会改高度，
+ * 浏览器可能顺带把 scrollTop 上移（clamp / 移动端抖动），那不是用户松手。
  */
 
 export type AutoFollowMode = "following" | "released";
@@ -21,6 +25,12 @@ export type ScrollDirection = "up" | "down" | "none";
 
 /** 距底部多少 px 以内视为「真实底部」（包容小数像素与钳位误差）。 */
 export const REAL_BOTTOM_TOLERANCE_PX = 1;
+/** 移动端钉底后的亚像素 / 橡皮筋回弹，1px 会把 following 误判成 released。 */
+export const MOBILE_REAL_BOTTOM_TOLERANCE_PX = 16;
+/** 桌面触摸板/精确指针：超过 4px 的下拉即视为向上阅读。 */
+export const TOUCH_UP_INTENT_PX = 4;
+/** 移动端手指抖动与展开跳变，4px 太容易误释放。 */
+export const MOBILE_TOUCH_UP_INTENT_PX = 12;
 /** 初次打开会话后，内容静止这么久就结束 entry-stick。 */
 export const ENTRY_STICK_QUIET_MS = 600;
 /** entry-stick 硬上限：再慢的资源也不无限钉底。 */
@@ -47,8 +57,31 @@ export function getBottomSpacerHeight(viewportHeight: number, isMobile: boolean)
   return isMobile ? 40 : Math.round(viewportHeight * 0.1);
 }
 
-export function isAtRealBottom(distance: number): boolean {
-  return distance <= REAL_BOTTOM_TOLERANCE_PX;
+export function getRealBottomTolerance(isMobile: boolean): number {
+  return isMobile ? MOBILE_REAL_BOTTOM_TOLERANCE_PX : REAL_BOTTOM_TOLERANCE_PX;
+}
+
+export function getTouchUpIntentThreshold(isMobile: boolean): number {
+  return isMobile ? MOBILE_TOUCH_UP_INTENT_PX : TOUCH_UP_INTENT_PX;
+}
+
+export function isAtRealBottom(distance: number, tolerance: number = REAL_BOTTOM_TOLERANCE_PX): boolean {
+  return distance <= tolerance;
+}
+
+/**
+ * 容器或内容尺寸变了：这次 scroll 是布局结果，不是用户滚动。
+ * previous 为 0 视为尚未采样，不挡首次真实滚动。
+ */
+export function isLayoutDrivenScroll(input: {
+  previousScrollHeight: number;
+  nextScrollHeight: number;
+  previousClientHeight: number;
+  nextClientHeight: number;
+}): boolean {
+  if (input.previousClientHeight > 0 && input.nextClientHeight !== input.previousClientHeight) return true;
+  if (input.previousScrollHeight > 0 && input.nextScrollHeight !== input.previousScrollHeight) return true;
+  return false;
 }
 
 export function getScrollDirection(previousTop: number, nextTop: number): ScrollDirection {
@@ -67,7 +100,7 @@ export type AutoFollowTrigger =
   /** 真实用户向上意图：wheel deltaY<0、触摸下拉、ArrowUp/PageUp/Home */
   | { kind: "up-intent" }
   /** 滚动位置变化（已排除程序化写入窗口） */
-  | { kind: "scroll"; distance: number; direction: ScrollDirection; zoneSize: number };
+  | { kind: "scroll"; distance: number; direction: ScrollDirection; zoneSize: number; bottomTolerance?: number };
 
 export function reduceAutoFollow(mode: AutoFollowMode, trigger: AutoFollowTrigger): AutoFollowMode {
   switch (trigger.kind) {
@@ -81,11 +114,11 @@ export function reduceAutoFollow(mode: AutoFollowMode, trigger: AutoFollowTrigge
       // 先到真实底部：任何路径都恢复跟随。这条必须放在「向上即释放」之前——
       // 移动端键盘弹出导致容器收缩时，浏览器会把 scrollTop 向上钳位，
       // 钳位后正好落在真实底部，不应误判为用户释放。
-      if (isAtRealBottom(trigger.distance)) return "following";
+      if (isAtRealBottom(trigger.distance, trigger.bottomTolerance ?? REAL_BOTTOM_TOLERANCE_PX)) return "following";
       // 用户向下滚进末端区域：恢复跟随。
       if (trigger.direction === "down" && trigger.distance <= trigger.zoneSize) return "following";
-      // following 中出现向上位移即释放：内容增长不会改变 scrollTop，
-      // 平滑程序化滚动已被调用方的时间窗排除，剩下的向上位移只可能来自用户。
+      // following 中出现向上位移即释放。高度变化引起的 scroll 已由调用方
+      // 按 isLayoutDrivenScroll 排除；平滑程序化滚动也有时间窗。剩下的向上位移来自用户。
       if (trigger.direction === "up" && mode === "following") return "released";
       // 其余一律保持现状：released 不被吸回；刚开始向上、仍在底部区域内也不被重新捕获。
       return mode;

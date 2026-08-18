@@ -514,7 +514,7 @@ const chatPlan = composeChatPlan({
 
   return (
     <div
-      className="relative flex h-full flex-col overflow-hidden"
+      className="relative flex h-full min-h-0 flex-col overflow-hidden"
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -602,7 +602,7 @@ const chatPlan = composeChatPlan({
           }}
         />
       )}
-      <div className="relative flex flex-1 overflow-hidden">
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
         <div
           style={{
             position: "absolute",
@@ -620,7 +620,7 @@ const chatPlan = composeChatPlan({
         </div>
         <div
           ref={scrollContainerRef}
-          className="flex-1 overflow-y-auto pt-4 [scrollbar-width:none]"
+          className="min-h-0 flex-1 overflow-y-auto pt-4 [scrollbar-width:none]"
           // overflow-anchor:none：钉底由自动跟随显式负责，浏览器不再自行锚定；
           // overscroll-behavior:contain：滚到底/顶不连锁滚动外层。
           style={{ overflowAnchor: "none", overscrollBehavior: "contain" }}
