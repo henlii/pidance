@@ -15,8 +15,8 @@ export type DisplayContentBlock = {
   type: string;
   thinking?: string;
   text?: string;
+  reasoning?: unknown;
   deferred?: boolean;
-  [key: string]: unknown;
 };
 
 export type DisplayBlockItem = {
