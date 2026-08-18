@@ -109,4 +109,30 @@ child.stdout.on("data", (chunk) => {
   }
 });
 
+// systemd KillMode=control-group 会给包装进程和 next-server 同时发 SIGTERM。
+// next-server 有活跃 SSE/会话时经常不退出，拖到 TimeoutStopSec=120s 才被 SIGKILL，
+// 一键升级的 systemctl restart 会先超时误报失败。包装进程留下做限期回收。
+const CHILD_STOP_GRACE_MS = 8_000;
+let stopping = false;
+function requestChildStop() {
+  if (stopping) return;
+  stopping = true;
+  try {
+    if (child.exitCode == null && !child.killed) child.kill("SIGTERM");
+  } catch {
+    /* already gone */
+  }
+  const force = setTimeout(() => {
+    try {
+      if (child.exitCode == null) child.kill("SIGKILL");
+    } catch {
+      /* ignore */
+    }
+  }, CHILD_STOP_GRACE_MS);
+  if (typeof force.unref === "function") force.unref();
+  child.once("exit", () => clearTimeout(force));
+}
+process.on("SIGTERM", requestChildStop);
+process.on("SIGINT", requestChildStop);
+
 child.on("exit", (code) => process.exit(code ?? 0));

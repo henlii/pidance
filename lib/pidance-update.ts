@@ -12,6 +12,13 @@ const execFileAsync = promisify(execFile);
 
 export const PIDANCE_PACKAGE_NAME = "@henlii/pidance";
 export const DEFAULT_NPM_REGISTRY = "https://registry.npmjs.org/";
+/** 正式安装 systemd unit。 */
+export const OFFICIAL_SERVICE_UNIT = "pidance.service";
+/** 须覆盖 TimeoutStopSec(120s) + 启动余量，避免与 systemd 同时到期误报失败。 */
+export const SERVICE_RESTART_TIMEOUT_MS = 210_000;
+/** restart 命令失败后继续探测 is-active 的窗口（覆盖 SIGKILL 后拉起）。 */
+export const SERVICE_SETTLE_MAX_MS = 60_000;
+export const SERVICE_SETTLE_POLL_MS = 1_500;
 
 export type UpgradeMode = "formal-install" | "workspace" | "unknown";
 
@@ -62,6 +69,94 @@ declare global {
 }
 
 const LATEST_CACHE_TTL_MS = 30 * 60 * 1000;
+
+export function isSystemdUnitActive(stdout: string, status: number | null | undefined): boolean {
+  if (status === 0) return true;
+  return stdout.trim() === "active";
+}
+
+export function interpretServiceRestart(input: {
+  restartOk: boolean;
+  restartError?: string;
+  laterActive: boolean;
+}): { restarted: boolean; message?: string } {
+  if (input.restartOk || input.laterActive) return { restarted: true };
+  const detail = input.restartError?.trim();
+  return {
+    restarted: false,
+    message: detail ? `重启 ${OFFICIAL_SERVICE_UNIT} 失败：${detail}` : `重启 ${OFFICIAL_SERVICE_UNIT} 失败`,
+  };
+}
+
+function execErrorStdout(error: unknown): string {
+  if (error && typeof error === "object" && "stdout" in error) {
+    const stdout = (error as { stdout?: unknown }).stdout;
+    if (typeof stdout === "string") return stdout;
+    if (Buffer.isBuffer(stdout)) return stdout.toString("utf8");
+  }
+  return "";
+}
+
+function execErrorStatus(error: unknown): number | null {
+  if (error && typeof error === "object" && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "number" && Number.isFinite(code)) return code;
+  }
+  return null;
+}
+
+async function probeServiceActive(
+  exec: typeof execFileAsync,
+  env: NodeJS.ProcessEnv,
+): Promise<boolean> {
+  try {
+    const r = await exec("systemctl", ["is-active", OFFICIAL_SERVICE_UNIT], {
+      timeout: 10_000,
+      env,
+    });
+    return isSystemdUnitActive(String(r.stdout ?? ""), 0);
+  } catch (error) {
+    return isSystemdUnitActive(execErrorStdout(error), execErrorStatus(error));
+  }
+}
+
+/**
+ * 重启正式 unit。systemctl 超时不等于失败：有会话/SSE 时旧 next-server
+ * 常拖到 TimeoutStopSec 才被 SIGKILL，命令先返回错误，服务随后已 active。
+ */
+export async function restartOfficialPidanceService(options: {
+  execFileImpl?: typeof execFileAsync;
+  env?: NodeJS.ProcessEnv;
+  sleepImpl?: (ms: number) => Promise<void>;
+  now?: () => number;
+}): Promise<{ restarted: boolean; message?: string }> {
+  const exec = options.execFileImpl ?? execFileAsync;
+  const env = options.env ?? process.env;
+  const sleep = options.sleepImpl ?? ((ms: number) => new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  }));
+  const now = options.now ?? Date.now;
+  try {
+    await exec("systemctl", ["restart", OFFICIAL_SERVICE_UNIT], {
+      timeout: SERVICE_RESTART_TIMEOUT_MS,
+      env,
+    });
+    return interpretServiceRestart({ restartOk: true, laterActive: false });
+  } catch (error) {
+    const restartError = error instanceof Error ? error.message : String(error);
+    const startedAt = now();
+    if (await probeServiceActive(exec, env)) {
+      return interpretServiceRestart({ restartOk: false, restartError, laterActive: true });
+    }
+    while (now() - startedAt < SERVICE_SETTLE_MAX_MS) {
+      await sleep(SERVICE_SETTLE_POLL_MS);
+      if (await probeServiceActive(exec, env)) {
+        return interpretServiceRestart({ restartOk: false, restartError, laterActive: true });
+      }
+    }
+    return interpretServiceRestart({ restartOk: false, restartError, laterActive: false });
+  }
+}
 
 export function getNpmRegistry(env: NodeJS.ProcessEnv = process.env): string {
   const raw = (env.PIDANCE_NPM_REGISTRY || env.npm_config_registry || DEFAULT_NPM_REGISTRY).trim();
@@ -450,21 +545,19 @@ export async function applyPidanceUpdate(options?: {
     let restarted = false;
     const shouldRestart = options?.restartService !== false && env.PIDANCE_SKIP_SERVICE_RESTART !== "1";
     if (shouldRestart) {
-      try {
-        report("restarting", 94, "正在重启服务…");
-        await exec("systemctl", ["restart", "pidance.service"], {
-          timeout: 120_000,
-          env,
-        });
-        restarted = true;
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+      report("restarting", 94, "正在重启服务…");
+      const restart = await restartOfficialPidanceService({
+        execFileImpl: exec,
+        env,
+      });
+      restarted = restart.restarted;
+      if (!restart.restarted) {
         const result = {
           ok: true as const,
           status: "upgraded" as const,
           currentVersion: check.currentVersion,
           targetVersion: target,
-          message: `已切换到 ${target}，但重启 pidance.service 失败：${msg}`,
+          message: `已切换到 ${target}，但${restart.message ?? `重启 ${OFFICIAL_SERVICE_UNIT} 失败`}`,
           restarted: false,
         };
         try {
