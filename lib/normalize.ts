@@ -1,4 +1,5 @@
 import type { AgentMessage, AssistantMessage, ToolCallContent } from "./types";
+import { isThinkingLikeType, toThinkingBlock } from "./thinking-content";
 
 function isObject(val: unknown): val is Record<string, unknown> {
   return typeof val === "object" && val !== null && !Array.isArray(val);
@@ -29,8 +30,12 @@ export function normalizeToolCalls(msg: AgentMessage): AgentMessage {
   const content = (msg as AssistantMessage).content;
   if (!Array.isArray(content)) return msg;
   const normalized = content.map((block) => {
-    const result = normalizeToolCallBlock(block);
-    return result ?? block;
+    const tool = normalizeToolCallBlock(block);
+    if (tool) return tool;
+    if (isObject(block) && isThinkingLikeType(block.type)) {
+      return toThinkingBlock(block) as typeof block;
+    }
+    return block;
   });
   return { ...msg, content: normalized } as AgentMessage;
 }

@@ -15,7 +15,7 @@ import { PIDANCE_COMMAND_CUSTOM_TYPE } from "@/lib/session-command-entry";
 import { getBranchSummaryFileMetadata } from "@/lib/branch-bookmarks";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isEmptyThinkingBlock } from "@/lib/message-display";
-import { getThinkingText } from "@/lib/thinking-content";
+import { getThinkingText, projectDisplayBlocks } from "@/lib/thinking-content";
 import { parseAnsiLine } from "@/lib/ansi";
 import type { ToolExecutionSnapshot, ToolExecutionStatus } from "@/lib/tool-execution-buffer";
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
@@ -485,9 +485,9 @@ function AssistantMessageView({
 }) {
   const { t } = useI18n();
   const time = showTimestamp ? formatTime(message.timestamp) : null;
-  const blockItems = (message.content ?? [])
-    .map((block, originalIndex) => ({ block, originalIndex }))
-    .filter(({ block }) => !isEmptyThinkingBlock(block, { isStreaming }));
+  const blockItems = projectDisplayBlocks(message.content ?? [])
+    .map(({ block, sourceIndex }) => ({ block, originalIndex: sourceIndex }))
+    .filter(({ block }) => !isEmptyThinkingBlock(block as AssistantContentBlock, { isStreaming }));
   const blocks = blockItems.map(({ block }) => block);
   const [hovered, setHovered] = useState(false);
   const [copied, setCopied] = useState(false);

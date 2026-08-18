@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSessionEntries, resolveSessionPath } from "@/lib/session-reader";
-import { getThinkingText } from "@/lib/thinking-content";
+import { getThinkingText, isThinkingLikeType } from "@/lib/thinking-content";
 
 export async function GET(
   req: Request,
@@ -24,7 +24,7 @@ export async function GET(
     }
 
     const block = entry.message.content[blockIndex];
-    if (!block || block.type !== "thinking") {
+    if (!block || !isThinkingLikeType(block.type)) {
       return NextResponse.json({ error: "Thinking block not found" }, { status: 404 });
     }
 

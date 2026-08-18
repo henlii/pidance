@@ -15,8 +15,6 @@
  * - 无合法 type（缺 type / type 非非空字符串 / 非对象）：返回 null，不发送。
  */
 
-import { stripFloodStreamingThinking } from "./thinking-content";
-
 /**
  * 投影单个原始事件为待发送事件。
  * @param event 来自 AgentSession 的原始事件（形状由 Pi SDK 决定，故用 unknown 入参）
@@ -33,22 +31,10 @@ export function projectAgentEvent(event: unknown): Record<string, unknown> | nul
   if (type === "turn_start" || type === "turn_end") return null;
 
   // message_update：去掉 assistantMessageEvent 大字段，保留其余字段（不改原对象）。
-  // 只剥洪水通道（thinkingSignature === reasoning_content）的流式正文；
-  // Anthropic / openai-responses 等其它思考照常下发。展开/折叠逻辑不动。
+  // 思考正文原样下发，由前端收进思考块流式展示，不在这里剥空。
   if (type === "message_update") {
     const slim = { ...record };
     delete slim.assistantMessageEvent;
-    const message = slim.message;
-    if (
-      message && typeof message === "object" && !Array.isArray(message)
-      && Array.isArray((message as { content?: unknown }).content)
-    ) {
-      const content = (message as { content: unknown[] }).content;
-      const nextContent = content.map((block) => stripFloodStreamingThinking(block));
-      if (nextContent.some((block, index) => block !== content[index])) {
-        slim.message = { ...(message as Record<string, unknown>), content: nextContent };
-      }
-    }
     return slim;
   }
 
