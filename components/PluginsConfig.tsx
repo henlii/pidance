@@ -17,6 +17,11 @@ function packageKey(pkg: Pick<PluginPackageInfo, "source" | "scope">): string {
   return `${pkg.scope}\0${pkg.source}`;
 }
 
+function pluginDisplayName(pkg: Pick<PluginPackageInfo, "source" | "packageName">): string {
+  const name = pkg.packageName?.trim();
+  return name || pkg.source;
+}
+
 function resourceSummary(pkg: PluginPackageInfo, t: ReturnType<typeof useI18n>["t"]): string {
   if (pkg.disabled) return t("plugins_disabled");
   const parts = [
@@ -612,7 +617,7 @@ function PackageDetail({
           )}
           <span
             style={{
-              fontFamily: "var(--font-mono)",
+              fontFamily: pkg.packageName ? undefined : "var(--font-mono)",
               fontSize: 12,
               color: "var(--text)",
               overflow: "hidden",
@@ -620,7 +625,7 @@ function PackageDetail({
               whiteSpace: "nowrap",
             }}
           >
-            {pkg.source}
+            {pluginDisplayName(pkg)}
           </span>
         </div>
 
@@ -1104,13 +1109,13 @@ export function PluginsConfig({
                                 fontSize: 12,
                                 fontWeight: isSelected ? 600 : 400,
                                 color: "var(--text)",
-                                fontFamily: "var(--font-mono)",
+                                fontFamily: pkg.packageName ? undefined : "var(--font-mono)",
                                 overflow: "hidden",
                                 textOverflow: "ellipsis",
                                 whiteSpace: "nowrap",
                               }}
                             >
-                              {pkg.source}
+                              {pluginDisplayName(pkg)}
                             </div>
                             {pluginHasNewer(pkg, pluginUpdates[packageKey(pkg)]) && (
                               <span
