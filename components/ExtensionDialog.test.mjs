@@ -121,19 +121,25 @@ test("request id 切换时 resolve 重置 selection/draft", () => {
   assert.equal(same, state);
 });
 
-test("Other 标签识别与去重：Other/其他/locale 文案大小写不敏感", () => {
+test("Other 标签识别与去重：Other/其他/输入内容/编号前缀", () => {
   assert.equal(isOtherOptionLabel("Other", "Other"), true);
   assert.equal(isOtherOptionLabel("OTHER", "Other"), true);
   assert.equal(isOtherOptionLabel("其他", "其他"), true);
   assert.equal(isOtherOptionLabel("  other  ", "Other"), true);
   assert.equal(isOtherOptionLabel("别的", "其他"), false);
   assert.equal(isOtherOptionLabel("别的", "别的"), true);
+  assert.equal(isOtherOptionLabel("输入内容", "其他"), true);
+  assert.equal(isOtherOptionLabel("4. 输入内容", "其他"), true);
+  assert.equal(isOtherOptionLabel("4、输入内容", "其他"), true);
+  assert.equal(isOtherOptionLabel("4. Type something.", "其他"), true);
+  assert.equal(isOtherOptionLabel("在从事护理工作", "其他"), false);
 
   assert.equal(shouldAppendOtherOption(["A", "B"], "Other"), true);
   assert.equal(shouldAppendOtherOption(["A", "Other"], "Other"), false);
   assert.equal(shouldAppendOtherOption(["A", "其他"], "Other"), false);
   assert.equal(shouldAppendOtherOption(["A", "OTHER"], "Other"), false);
   assert.equal(shouldAppendOtherOption(["A", "别的"], "别的"), false);
+  assert.equal(shouldAppendOtherOption(["1. A", "4. 输入内容"], "其他"), false);
 });
 
 // ── SSR / source contract ──────────────────────────────────────────────────
@@ -167,6 +173,17 @@ test("SSR select：options 已含 Other 时不重复附加", () => {
   // 仅一个 Other 文案按钮（不含额外 locale 重复项）
   const otherMatches = html.match(/>Other</g) ?? [];
   assert.equal(otherMatches.length, 1);
+});
+
+test("SSR select：已有「输入内容」哨兵时不附加「其他」，选项竖排", () => {
+  const html = renderCard({
+    request: request("select", { options: ["1. 选项甲", "4. 输入内容"] }),
+    onRespond: () => {},
+  });
+  assert.ok(html.includes("1. 选项甲"));
+  assert.ok(html.includes("4. 输入内容"));
+  assert.equal((html.match(/>其他</g) ?? []).length, 0);
+  assert.ok(html.includes("flex-direction:column"));
 });
 
 test("SSR confirm：原交互保留 Cancel + Confirm，无 select 暂存结构", () => {

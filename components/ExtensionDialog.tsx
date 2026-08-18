@@ -71,17 +71,29 @@ export function canSubmitInlineSelect(state: InlineSelectCardState): boolean {
   return getInlineSelectSubmission(state) !== null;
 }
 
+/** 去掉 ask-user 常见的 "4. " / "4、" 编号前缀，便于识别哨兵项。 */
+export function stripSelectOptionPrefix(label: string): string {
+  return label.trim().replace(/^\d+[\.、.)]\s*/, "").trim();
+}
+
 export function isOtherOptionLabel(label: string, localeOtherText: string): boolean {
-  const normalized = label.trim().toLowerCase();
   const other = localeOtherText.trim().toLowerCase();
-  // 识别 ask-user 等插件的 "N. Type something." 哨兵项（含编号前缀），避免重复附加
-  return (
-    normalized === other ||
-    normalized === "other" ||
-    normalized === "其它" ||
-    normalized === "其他" ||
-    normalized.includes("type something")
-  );
+  // 识别 Other / 其他 / 输入内容，以及 ask-user 的 "N. Type something." / "4. 输入内容"
+  for (const raw of [label.trim(), stripSelectOptionPrefix(label)]) {
+    const normalized = raw.toLowerCase();
+    if (!normalized) continue;
+    if (other && normalized === other) return true;
+    if (
+      normalized === "other"
+      || normalized === "其它"
+      || normalized === "其他"
+      || normalized === "输入内容"
+      || normalized.includes("type something")
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function shouldAppendOtherOption(
@@ -115,17 +127,19 @@ function CloseIcon() {
 }
 
 const optionButtonBaseStyle: CSSProperties = {
+  width: "100%",
   maxWidth: "100%",
   minHeight: 26,
-  padding: "3px 9px",
+  padding: "6px 9px",
   overflow: "hidden",
   border: "1px solid var(--border)",
   borderRadius: 6,
   font: "inherit",
   fontSize: 12,
-  lineHeight: 1.35,
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
+  lineHeight: 1.45,
+  textAlign: "left",
+  whiteSpace: "normal",
+  overflowWrap: "anywhere",
 };
 
 const inputStyle: CSSProperties = {
@@ -455,7 +469,7 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
               <div
                 role="group"
                 aria-label={t("extension_selectAnOption")}
-                style={{ display: "flex", flexWrap: "wrap", gap: 6 }}
+                style={{ display: "flex", flexDirection: "column", gap: 6 }}
               >
                 {selectOptions.map((option, index) => {
                   const isOther = isOtherOptionLabel(option, otherLabel);

@@ -32,6 +32,7 @@ import { useExtensionUiState, type ExtensionUiDialogRequest, type ExtensionUiCus
 import { useNoticeState } from "@/hooks/useNoticeState";
 import { parseTodos } from "@/lib/todo-parser";
 import { getSessionCapabilities } from "@/components/session-capabilities";
+import { isOtherOptionLabel } from "@/components/ExtensionDialog";
 import { useSessionCommands } from "@/hooks/useSessionCommands";
 import { ensureServerPrefsLoaded, getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { resolveDisplayModel, settleModelOverride } from "@/lib/model-selection";
@@ -1059,10 +1060,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       ) {
         pendingOtherInputRef.current = response.value;
         // 哨兵 = 选项里自带的 Other 项（如 "4. Type something."）；无则用最后一项
-        const otherInOptions = request.options.find((o) => {
-          const l = o.trim().toLowerCase();
-          return l === "other" || l === "其它" || l === "其他" || l.includes("type something");
-        });
+        const otherInOptions = request.options.find((o) => isOtherOptionLabel(o, ""));
         effectiveResponse = { value: otherInOptions ?? request.options[request.options.length - 1] };
       }
       await sendAgentCommand(sid, {
