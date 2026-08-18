@@ -15,6 +15,8 @@
  * - 无合法 type（缺 type / type 非非空字符串 / 非对象）：返回 null，不发送。
  */
 
+import { stripFloodStreamingThinking } from "./thinking-content";
+
 /**
  * 投影单个原始事件为待发送事件。
  * @param event 来自 AgentSession 的原始事件（形状由 Pi SDK 决定，故用 unknown 入参）
@@ -31,11 +33,8 @@ export function projectAgentEvent(event: unknown): Record<string, unknown> | nul
   if (type === "turn_start" || type === "turn_end") return null;
 
   // message_update：去掉 assistantMessageEvent 大字段，保留其余字段（不改原对象）。
-  // 同时剥离流式 thinking 内容：openai-completions 通道（如 deepseek 官方 API）的
-  // reasoning_content 明文完整流式下发，思考块流式默认展开会把整段思考刷进视口；
-  // openai-responses 通道思考内容通常为空/摘要。保留 thinking block 结构与签名、
-  // 只清空内容——消息完成走 message_end / 落盘后的完整消息，历史思考块展开时按需
-  // 加载，思考内容不丢失，前端思考块逻辑不变。
+  // 只剥洪水通道（thinkingSignature === reasoning_content）的流式正文；
+  // Anthropic / openai-responses 等其它思考照常下发。展开/折叠逻辑不动。
   if (type === "message_update") {
     const slim = { ...record };
     delete slim.assistantMessageEvent;
@@ -45,15 +44,7 @@ export function projectAgentEvent(event: unknown): Record<string, unknown> | nul
       && Array.isArray((message as { content?: unknown }).content)
     ) {
       const content = (message as { content: unknown[] }).content;
-      const nextContent = content.map((block) => {
-        if (block && typeof block === "object" && (block as { type?: unknown }).type === "thinking") {
-          const b = block as Record<string, unknown>;
-          if (typeof b.thinking === "string" && b.thinking.length > 0) {
-            return { ...b, thinking: "" };
-          }
-        }
-        return block;
-      });
+      const nextContent = content.map((block) => stripFloodStreamingThinking(block));
       if (nextContent.some((block, index) => block !== content[index])) {
         slim.message = { ...(message as Record<string, unknown>), content: nextContent };
       }

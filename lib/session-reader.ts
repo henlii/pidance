@@ -22,6 +22,7 @@ import { resolveProject, type ProjectInfo } from "./worktree";
 import { discoverSubagentSessions } from "./subagent-sessions";
 import { getAgentDir } from "./pi-paths";
 import { openSessionView } from "./pi-session-io";
+import { getThinkingText } from "./thinking-content";
 
 export { getAgentDir };
 
@@ -905,7 +906,7 @@ function entryToUiMessage(
       return {
         ...message,
         content: message.content.map((block) => (
-          block.type === "thinking" && block.thinking.trim() !== ""
+          block.type === "thinking" && getThinkingText(block).trim() !== ""
             ? { ...block, thinking: "", deferred: true }
             : block
         )),

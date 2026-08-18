@@ -15,6 +15,7 @@ import { PIDANCE_COMMAND_CUSTOM_TYPE } from "@/lib/session-command-entry";
 import { getBranchSummaryFileMetadata } from "@/lib/branch-bookmarks";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isEmptyThinkingBlock } from "@/lib/message-display";
+import { getThinkingText } from "@/lib/thinking-content";
 import { parseAnsiLine } from "@/lib/ansi";
 import type { ToolExecutionSnapshot, ToolExecutionStatus } from "@/lib/tool-execution-buffer";
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
@@ -856,7 +857,7 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
   }, [isStreaming]);
   const bodyText = loading
     ? t("message_thinkingLoading")
-    : error ?? (block.deferred ? content : block.thinking);
+    : error ?? (block.deferred ? content : getThinkingText(block));
 
   // deferred 思考内容按需加载（点击展开或流式中默认展开均触发）
   const loadIfDeferred = async () => {
