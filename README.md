@@ -10,7 +10,7 @@
 
 Pidance 是面向 [Pi](https://github.com/badlogic/pi-mono) coding agent 的开源 Web 客户端。它直接读取本机 Pi 会话文件，并沿用 Pi SDK 的会话与运行时语义，把实时对话、项目文件、Git、工作树、子代理和配置管理汇集到一个浏览器工作区。Pi 仍是数据与执行语义的事实来源；Pidance 负责提供更清晰、更完整的操作界面。
 
-> 当前版本：`0.2.4` · npm 包：`@henlii/pidance` · CLI：`pidance`
+> 当前版本：`0.2.5` · npm 包：`@henlii/pidance` · CLI：`pidance`
 
 ## 界面预览
 
