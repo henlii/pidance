@@ -9,6 +9,10 @@ import {
   DEFAULT_CUSTOM_UI_COLUMNS,
   DEFAULT_CUSTOM_UI_ROWS,
 } from "./custom-ui-terminal";
+import {
+  loadPiTheme,
+  renderWidgetFactoryLines,
+} from "./tui-render-bridge";
 
 export type ExtensionUiEmit = (event: Record<string, unknown>) => void;
 
@@ -176,6 +180,15 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
     setWorkingIndicator() {},
     setHiddenThinkingLabel() {},
     setWidget(key: string, content: unknown, options?: { placement?: string }) {
+      // 组件工厂形式（如 pi-subagents async widget 的 buildWidgetComponent）：
+      // headless 渲染为 ANSI 行后走现有 lines 通道；渲染失败静默（不设置不 emit）。
+      // **snapshot-only 范围**：每次 setWidget 调用渲染一次静态行快照，工厂的
+      // state/invalidate 生命周期与事件驱动重渲染不支持；输出受上限约束。
+      if (typeof content === "function") {
+        const lines = renderWidgetFactoryLines(content, loadPiTheme());
+        if (lines === null) return;
+        content = lines;
+      }
       if (content === undefined || Array.isArray(content)) {
         if (content == null) widgets.delete(key);
         else {
@@ -193,7 +206,6 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
           widgetPlacement: options?.placement,
         });
       }
-      // 组件 factory 不支持
     },
     setFooter() {},
     setHeader() {},

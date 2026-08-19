@@ -155,7 +155,8 @@ function isTodoToolResult(message: AgentMessage): message is ToolResultMessage {
  * - todowrite 工具调用（assistant 消息内 toolCall.input.todos）
  * - rpiv-todo 工具结果（toolResult.toolName === "todo" 的 details.tasks）
  */
-export function parseTodos(messages: readonly AgentMessage[]): readonly TodoItem[] {
+/** 找到快照返回数组（可为空列表）；时间线上没有任何合法快照则 null。 */
+export function parseLatestTodoSnapshot(messages: readonly AgentMessage[]): readonly TodoItem[] | null {
   let latest: readonly TodoItem[] = [];
   let snapshotFound = false;
 
@@ -182,5 +183,9 @@ export function parseTodos(messages: readonly AgentMessage[]): readonly TodoItem
     }
   }
 
-  return snapshotFound ? latest : [];
+  return snapshotFound ? latest : null;
+}
+
+export function parseTodos(messages: readonly AgentMessage[]): readonly TodoItem[] {
+  return parseLatestTodoSnapshot(messages) ?? [];
 }

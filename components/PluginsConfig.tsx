@@ -707,6 +707,10 @@ function PackageDetail({
         <div style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", overflowWrap: "anywhere" }}>
           {pkg.packageName ?? t("common_unknown")}
         </div>
+        <div style={{ color: "var(--text-dim)" }}>{t("plugins_source")}</div>
+        <div style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", overflowWrap: "anywhere" }}>
+          {pkg.source}
+        </div>
         <div style={{ color: "var(--text-dim)" }}>{t("common_resources")}</div>
         <div style={{ color: "var(--text-muted)" }}>{resourceSummary(pkg, t)}</div>
         <div style={{ color: "var(--text-dim)" }}>{t("plugins_installedPath")}</div>

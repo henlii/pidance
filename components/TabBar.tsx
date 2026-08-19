@@ -13,7 +13,7 @@ export interface Tab {
    * chat = 会话主 tab（不可关闭、固定在首）；branch/files/git/info = 右栏固定导航 tab
    * （不可关闭）；file 或缺省 = 文件预览 tab（可关闭）。
    */
-  kind?: "chat" | "file" | "branch" | "files" | "git" | "info";
+  kind?: "chat" | "file" | "branch" | "files" | "git" | "info" | "terminal";
   /** 文件 tab 打开时固化的写能力，不能随当前会话切换而变化。 */
   writable?: boolean;
   readOnly?: boolean;

@@ -2006,3 +2006,25 @@ span.linenumber {
   .file-tab-dirty-dot.is-saving,
   .file-save-spinner { animation: none; }
 }
+
+/* xterm.js 终端：填满面板并跟随应用背景 */
+.pidance-terminal-surface {
+  background: var(--bg);
+}
+
+.pidance-terminal-xterm {
+  min-width: 0;
+  min-height: 0;
+}
+
+.pidance-terminal-xterm .xterm {
+  height: 100%;
+}
+
+.pidance-terminal-xterm .xterm-viewport {
+  background: transparent !important;
+}
+
+.pidance-terminal-xterm .xterm-screen {
+  background: transparent;
+}

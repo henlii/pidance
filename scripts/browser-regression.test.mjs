@@ -141,28 +141,35 @@ test("用例1：侧栏项目行点击可折叠/展开", async () => {
 });
 
 test("用例2：会话 kebab 菜单可打开", async () => {
-  const refs = await snapshotRefs();
-  const kebabRef = Object.entries(refs).find(
-    ([, info]) => info?.role === "button" && (info.name ?? "").includes("会话操作"),
-  )?.[0];
-  if (!kebabRef) {
-    // 侧栏可能已折叠，尝试展开项目
-    await ab(["click", "@e14", "--session", SESSION], { json: false }).catch(() => {});
-    await new Promise((r) => setTimeout(r, 600));
-  }
-  let kebabRef2 = null;
-  for (let attempt = 0; attempt < 3 && !kebabRef2; attempt += 1) {
+  // kebab 按钮 aria-label 均为「菜单」：项目行菜单（编辑项目/关闭项目）与
+  // 会话行菜单（重命名/复制/导出/删除）共用文案。项目行按钮通常排在前面，
+  // 逐个点击直到出现会话行菜单（最多 12 个，覆盖 8 个项目行 + 会话行）。
+  let opened = false;
+  // 已尝试过的 ref：项目行菜单按钮（编辑项目/关闭项目）会被 Escape 关闭后
+  // 再次出现在快照中，必须记录并跳过，否则循环会无限点击同一个按钮。
+  const tried = new Set();
+  for (let attempt = 0; attempt < 20 && !opened; attempt += 1) {
     const refsN = await snapshotRefs();
-    kebabRef2 = Object.entries(refsN).find(
-      ([, info]) => info?.role === "button" && (info.name ?? "").includes("会话操作"),
-    )?.[0] ?? null;
-    if (!kebabRef2 && attempt < 2) await new Promise((r) => setTimeout(r, 1000));
+    const kebabRef = Object.entries(refsN).find(
+      ([ref, info]) => info?.role === "button" && info?.name === "菜单" && info?.expanded !== true && !tried.has(ref),
+    )?.[0];
+    if (!kebabRef) {
+      await new Promise((r) => setTimeout(r, 800));
+      continue;
+    }
+    tried.add(kebabRef);
+    await ab(["click", kebabRef, "--session", SESSION], { json: false });
+    await new Promise((r) => setTimeout(r, 900));
+    const menuText = await snapshotText("-i");
+    if (/重命名|导出|删除|复制/.test(menuText)) {
+      opened = true;
+      break;
+    }
+    // 项目行菜单（编辑项目/关闭项目）或未打开：Escape 关闭后尝试下一个
+    await ab(["press", "Escape", "--session", SESSION], { json: false }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 400));
   }
-  assert.ok(kebabRef2, "未找到会话 kebab 按钮（重试 3 次后仍无）");
-  await ab(["click", kebabRef2, "--session", SESSION], { json: false });
-  await new Promise((r) => setTimeout(r, 700));
-  const menuText = await snapshotText("-i");
-  assert.ok(/重命名|导出|删除|复制/.test(menuText), "kebab 菜单未出现（应含重命名/导出/删除等操作）");
+  assert.ok(opened, "kebab 会话菜单未出现（尝试 20 个菜单按钮后仍无重命名/导出/删除等操作）");
   // Escape 关闭
   await ab(["press", "Escape", "--session", SESSION], { json: false });
   await new Promise((r) => setTimeout(r, 400));

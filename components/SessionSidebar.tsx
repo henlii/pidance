@@ -31,7 +31,6 @@ import {
 } from "@/lib/ui-preferences";
 import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
 import { getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
-import { ProjectAssetsEditor } from "./ProjectAssetsEditor";
 import {
   bumpGroupVisibleCount,
   derivePinnedSessions,
@@ -45,11 +44,9 @@ import {
   reconcilePendingSessionIds,
   resetGroupVisibleCount,
   shouldApplySessionListResponse,
-  upsertProjectWorktreeSnapshot,
 } from "./session-sidebar-state";
 import { getSessionCapabilities } from "./session-capabilities";
 import { useProjectActions, useProjectIdentity } from "./ProjectProvider";
-import { ViewportDialog } from "./ui/ViewportDialog";
 
 import { useI18n } from "@/lib/i18n";
 import { applyRunningUnreadTransition, loadUnreadSessionIds, saveUnreadSessionIds } from "@/lib/unread-sessions-storage";
@@ -61,7 +58,6 @@ import {
   ChatPlusIcon,
   CheckIcon,
   ChevronButton,
-  DialogButton,
   DisplayMenuItem,
   FolderIcon,
   HistoryIcon,
@@ -69,7 +65,6 @@ import {
   FolderPlusIcon,
   formatRelativeTime,
   GroupPagination,
-  HomeIcon,
   PathLabel,
   PiWebTitle,
   RefreshIcon,
@@ -85,10 +80,13 @@ import {
 } from "@/components/session-sidebar/display";
 import { ProjectSection, WorktreeGroupSection, SessionTreeItem, SessionItem } from "@/components/session-sidebar/sections";
 import { ProjectRowMenu, SessionRowMenu } from "@/components/session-sidebar/menus";
+import { AddProjectDialog } from "@/components/session-sidebar/AddProjectDialog";
+import { EditProjectDialog } from "@/components/session-sidebar/EditProjectDialog";
 import { ArchiveView } from "@/components/ArchiveView";
 import { canArchiveSession } from "./session-capabilities";
 import { archiveSession, archiveFailureKind } from "@/lib/session-archive-client";
 import { useWorktreePreload } from "@/hooks/useWorktreePreload";
+import { useSidebarWorktreeActions } from "@/hooks/useSidebarWorktreeActions";
 import { trackRunningStartedAt } from "@/lib/running-duration";
 
 /**
@@ -112,15 +110,6 @@ const sidebarRowPaddingLeft = (depth: number) => SIDEBAR_BASE_LEFT + depth * SID
 const sidebarIndicatorLeft = (depth: number) => SIDEBAR_GUTTER + depth * SIDEBAR_DEPTH_STEP;
 
 import { RunningTimeContext } from "@/components/session-sidebar/running-time";
-
-
-declare global {
-  interface Window {
-    piDesktop?: {
-      selectDirectory: () => Promise<string | null>;
-    };
-  }
-}
 
 interface Props {
   selectedSessionId: string | null;
@@ -158,39 +147,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const { cwd: selectedCwd, projectRoot: selectedProjectRoot } = useProjectIdentity();
   const { setIdentity, getIdentitySnapshot } = useProjectActions();
   const [homeDir, setHomeDir] = useState<string>("");
-  // 添加项目弹窗（ViewportDialog；原生目录选择仅在弹窗内填充输入，不直接提交）
   const [customPathOpen, setCustomPathOpen] = useState(false);
-  const [customPathValue, setCustomPathValue] = useState("");
-  const [customPathError, setCustomPathError] = useState<string | null>(null);
-  const [customPathValidating, setCustomPathValidating] = useState(false);
-  const customPathInputRef = useRef<HTMLInputElement>(null);
-  // 目录选择（对齐上游 pi-web 0.8.6 directory-picker：手动 Go/Enter 浏览、
-  // Select 只选已浏览路径；保留 OpenChamber 式 git 状态徽标）
-  const [browseEntries, setBrowseEntries] = useState<Array<{ name: string; path: string }>>([]);
-  const [browseGit, setBrowseGit] = useState<{ isRepo: boolean; branch: string | null } | null>(null);
-  const [browseLoading, setBrowseLoading] = useState(false);
-  const [browseMissing, setBrowseMissing] = useState(false);
-  /** 已浏览确认的路径（服务器 browse 响应的 path）；Select 只允许提交它 */
-  const [browsePath, setBrowsePath] = useState<string | null>(null);
-  /** 服务器返回的 parentPath（.. 导航目标；根目录为 null） */
-  const [browseParentPath, setBrowseParentPath] = useState<string | null>(null);
-  // 桌面端原生目录选择器可用性（仅客户端探测，避免 SSR 水合不一致）
-  const [desktopPickerAvailable, setDesktopPickerAvailable] = useState(false);
   // 项目行三点菜单：同一时刻仅一个打开（root 标识）
   const [openProjectMenuRoot, setOpenProjectMenuRoot] = useState<string | null>(null);
-  // 编辑项目弹窗：目标项目根 + 名称草稿（打开时由 alias/路径显示名初始化）
   const [editProjectRoot, setEditProjectRoot] = useState<string | null>(null);
-  const [editProjectValue, setEditProjectValue] = useState("");
-  const [editProjectTab, setEditProjectTab] = useState<"name" | "rules" | "skills">("name");
-  const editProjectInputRef = useRef<HTMLInputElement>(null);
   const mountedRef = useRef(true);
-  const [wtNewForProject, setWtNewForProject] = useState<string | null>(null);
-  const [wtNewBranch, setWtNewBranch] = useState("");
-  const [wtError, setWtError] = useState<string | null>(null);
-  // worktree 错误归属的项目根：避免同一条错误在每个项目行重复显示。
-  const [wtErrorRoot, setWtErrorRoot] = useState<string | null>(null);
-  const [wtBusy, setWtBusy] = useState(false);
-  const [wtConfirmRemove, setWtConfirmRemove] = useState<string | null>(null);
   const wtNewInputRef = useRef<HTMLInputElement>(null);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
@@ -259,6 +220,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const userTouchedSessionCollapseRef = useRef<Set<string>>(new Set());
   const sessionListRef = useRef<HTMLDivElement>(null);
   const initialSelectionScrollDoneRef = useRef(false);
+  const prevSelectedScrollIdRef = useRef<string | null>(null);
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   // Once the SSE stream has delivered a frame it is the source of truth for
   // running state; late /api/sessions responses must not overwrite it.
@@ -314,10 +276,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const collapsedWorktreePaths = useMemo(() => new Set(prefs.collapsedWorktreePaths), [prefs.collapsedWorktreePaths]);
   // 已关闭项目集合：仅影响侧栏可见性与自动选择，绝不触碰会话/目录/Git 数据
   const closedRoots = useMemo(() => new Set(prefs.closedProjectRoots), [prefs.closedProjectRoots]);
-
-  useEffect(() => {
-    setDesktopPickerAvailable(typeof window !== "undefined" && Boolean(window.piDesktop?.selectDirectory));
-  }, []);
 
   const pendingIdsRef = useRef(pendingIds);
   pendingIdsRef.current = pendingIds;
@@ -698,15 +656,26 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     setIdentity({ cwd, projectRoot: root, status: cwd ? "ready" : "idle", error: null });
   }, [projectRootFor, setIdentity]);
   const selectedProject = selectedProjectRoot ?? projectRootFor(selectedCwd);
-
-  // 切换项目时收起未完成的 worktree 操作行，避免状态串到别的项目。
-  useEffect(() => {
-    setWtNewForProject(null);
-    setWtNewBranch("");
-    setWtError(null);
-    setWtErrorRoot(null);
-    setWtConfirmRemove(null);
-  }, [selectedCwd]);
+  const {
+    wtNewForProject,
+    setWtNewForProject,
+    wtNewBranch,
+    setWtNewBranch,
+    wtError,
+    setWtError,
+    wtErrorRoot,
+    setWtErrorRoot,
+    wtBusy,
+    wtConfirmRemove,
+    setWtConfirmRemove,
+    handleCreateWorktree,
+    handleRemoveWorktree,
+  } = useSidebarWorktreeActions({
+    selectedCwd,
+    selectCwd: (cwd, projectRoot) => selectCwd(cwd, projectRoot),
+    commitWorktreeSnapshots,
+    setWtRefreshKey,
+  });
 
   // Auto-select cwd and restore session from URL on first load
   useEffect(() => {
@@ -718,7 +687,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       restoredRef.current = true;
       const target = allSessions.find((s) => s.id === initialSessionId);
       if (target) {
-        selectCwd(target.cwd, target.projectRoot ?? target.cwd);
+        // URL 恢复同样走 handleSelectSession 统一路径：suppress → setIdentity
+        // → setSelectedSession 原子完成，watcher 不会清空恢复中的会话。
         onSelectSession(target, true);
         return;
       }
@@ -735,8 +705,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   const closeCustomPathPanel = useCallback(() => {
     setCustomPathOpen(false);
-    setCustomPathValue("");
-    setCustomPathError(null);
   }, []);
 
   /** 重新打开已关闭项目：仅移除关闭标记，不触碰任何项目数据。 */
@@ -746,221 +714,21 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       : prev);
   }, [updatePrefs]);
 
-  /** 手动浏览目录（对齐上游 directory-picker：Go/Enter/目录点击/.. 触发）。
-   *  空路径 → 服务器默认 homedir（上游打开弹窗即浏览 home）。 */
-  const browseDirectory = useCallback(async (rawPath: string) => {
-    const cancelled = { current: false };
-    setBrowseLoading(true);
-    setBrowseMissing(false);
-    setCustomPathError(null);
-    try {
-      const res = await fetch(`/api/cwd/browse?path=${encodeURIComponent(rawPath)}`);
-      if (cancelled.current) return;
-      if (!res.ok) {
-        setBrowseEntries([]);
-        setBrowseGit(null);
-        setBrowseMissing(true);
-        setBrowsePath(null);
-        setBrowseParentPath(null);
-        return;
-      }
-      const data = (await res.json()) as {
-        path?: string;
-        parentPath?: string | null;
-        entries?: Array<{ name: string; path: string }>;
-        git?: { isRepo: boolean; branch: string | null };
-      };
-      if (cancelled.current) return;
-      setCustomPathValue(data.path ?? rawPath);
-      setBrowsePath(data.path ?? rawPath);
-      setBrowseParentPath(data.parentPath ?? null);
-      setBrowseEntries(data.entries ?? []);
-      setBrowseGit(data.git ?? null);
-      setBrowseMissing(false);
-    } catch {
-      if (!cancelled.current) {
-        setBrowseEntries([]);
-        setBrowseGit(null);
-        setBrowseMissing(true);
-        setBrowsePath(null);
-        setBrowseParentPath(null);
-      }
-    } finally {
-      if (!cancelled.current) setBrowseLoading(false);
-    }
-    // 竞态防护：本次浏览完成后若已有更新的请求，不覆盖其状态。
-    return () => {
-      cancelled.current = true;
-    };
-  }, []);
+  const handleProjectAdded = useCallback((cwd: string, root: string) => {
+    updatePrefs((prev) =>
+      prev.addedProjectRoots.includes(root)
+        ? prev
+        : { ...prev, addedProjectRoots: [...prev.addedProjectRoots, root] },
+    );
+    restoreClosedProject(root);
+    selectCwd(cwd, root);
+    closeCustomPathPanel();
+    onProjectAdded?.(root);
+  }, [updatePrefs, restoreClosedProject, selectCwd, closeCustomPathPanel, onProjectAdded]);
 
-  /** 上级目录（.. 导航）：直接取服务器返回的 parentPath（0.8.6 对齐） */
-  const browseParent = browseParentPath;
-  const commitCustomPath = useCallback(async (candidate?: string) => {
-    // 上游语义：Select 提交"已浏览"的路径；候选为空时用已浏览路径
-    const path = (candidate ?? browsePath ?? customPathValue).trim();
-    if (!path || customPathValidating) return;
-
-    setCustomPathValidating(true);
-    setCustomPathError(null);
-    try {
-      const res = await fetch("/api/cwd/validate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: path }),
-      });
-      const data = await res.json().catch(() => ({})) as { cwd?: string; error?: string };
-      if (!res.ok || data.error) {
-        setCustomPathError(data.error ?? `HTTP ${res.status}`);
-        return;
-      }
-      const resolvedCwd = data.cwd ?? path;
-      // 重复添加：已打开项目仅切换选中；已关闭项目移除关闭标记后恢复。
-      const root = projectRootFor(resolvedCwd) ?? resolvedCwd;
-      // 持久化「主动添加的项目」：即使无会话也持续显示（项目独立于会话）。
-      updatePrefs((prev) =>
-        prev.addedProjectRoots.includes(root)
-          ? prev
-          : { ...prev, addedProjectRoots: [...prev.addedProjectRoots, root] },
-      );
-      restoreClosedProject(root);
-      selectCwd(resolvedCwd, root);
-      closeCustomPathPanel();
-      // 添加项目成功：进入引导页并选中新项目
-      onProjectAdded?.(root);
-    } catch (e) {
-      setCustomPathError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setCustomPathValidating(false);
-    }
-  }, [browsePath, customPathValue, customPathValidating, projectRootFor, restoreClosedProject, selectCwd, closeCustomPathPanel, onProjectAdded]);
-
-  /** 添加项目按钮：总是打开弹窗，不直接拉起原生目录选择器。 */
   const openAddProjectDialog = useCallback(() => {
-    setCustomPathError(null);
-    setCustomPathValue("");
-    setBrowsePath(null);
-    setBrowseParentPath(null);
-    setBrowseEntries([]);
-    setBrowseGit(null);
-    setBrowseMissing(false);
     setCustomPathOpen(true);
-    // 上游 directory-picker：打开即浏览默认（home）目录
-    void browseDirectory("");
-  }, [browseDirectory]);
-
-  /** 弹窗内「选择目录」：仅调用原生选择器填充输入框，不直接提交。 */
-  const handlePickDirectory = useCallback(async () => {
-    const desktop = window.piDesktop;
-    if (!desktop) return;
-    try {
-      setCustomPathError(null);
-      const path = await desktop.selectDirectory();
-      if (path !== null) {
-        setCustomPathValue(path);
-        void browseDirectory(path);
-      }
-    } catch (e) {
-      setCustomPathError(e instanceof Error ? e.message : String(e));
-    }
-  }, [browseDirectory]);
-
-  const handleDefaultCwd = useCallback(async () => {
-    if (customPathValidating) return;
-    setCustomPathValidating(true);
-    setCustomPathError(null);
-    try {
-      const res = await fetch("/api/default-cwd", { method: "POST" });
-      const data = await res.json().catch(() => ({})) as { cwd?: string; error?: string };
-      if (!res.ok || data.error || !data.cwd) {
-        setCustomPathError(data.error ?? `HTTP ${res.status}`);
-        return;
-      }
-      const root = projectRootFor(data.cwd) ?? data.cwd;
-      restoreClosedProject(root);
-      selectCwd(data.cwd, root);
-      closeCustomPathPanel();
-      onProjectAdded?.(root);
-    } catch (e) {
-      setCustomPathError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setCustomPathValidating(false);
-    }
-  }, [customPathValidating, projectRootFor, restoreClosedProject, selectCwd, closeCustomPathPanel]);
-
-  const handleCreateWorktree = useCallback(async () => {
-    // 目标项目以「打开输入行的项目」为准，而非当前选中项目：
-    // 未选中项目的 worktree 管理入口同样可用。
-    const projectRoot = wtNewForProject;
-    const branch = wtNewBranch.trim();
-    if (!branch || wtBusy || !projectRoot) return;
-    setWtBusy(true);
-    setWtError(null);
-    setWtErrorRoot(null);
-    try {
-      const res = await fetch("/api/worktrees", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: projectRoot, branch }),
-      });
-      const data = await res.json().catch(() => ({})) as { path?: string; error?: string };
-      if (!res.ok || data.error || !data.path) {
-        setWtError(data.error ?? `HTTP ${res.status}`);
-        setWtErrorRoot(projectRoot);
-        return;
-      }
-      setWtNewForProject(null);
-      setWtNewBranch("");
-      // Optimistically register the new worktree so projectRootFor() resolves
-      // it to the main repo before the refetch lands (keeps AppShell from
-      // treating the new cwd as a different project).
-      commitWorktreeSnapshots((prev) => upsertProjectWorktreeSnapshot(prev, projectRoot, {
-        status: "ready",
-        worktrees: [...(prev[projectRoot]?.worktrees ?? []), { path: data.path!, branch, isMain: false }],
-      }));
-      selectCwd(data.path, projectRoot);
-      setWtRefreshKey((k) => k + 1);
-    } catch (e) {
-      setWtError(e instanceof Error ? e.message : String(e));
-      setWtErrorRoot(projectRoot);
-    } finally {
-      setWtBusy(false);
-    }
-  }, [wtNewForProject, wtNewBranch, wtBusy, commitWorktreeSnapshots, selectCwd]);
-
-  const handleRemoveWorktree = useCallback(async (projectRoot: string, path: string, force: boolean) => {
-    // 与创建同理：以分组所属项目根为请求目标，不要求该项目处于选中态。
-    if (wtBusy) return;
-    setWtBusy(true);
-    setWtError(null);
-    setWtErrorRoot(null);
-    try {
-      const res = await fetch("/api/worktrees", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: projectRoot, path, force }),
-      });
-      const data = await res.json().catch(() => ({})) as { error?: string; dirty?: boolean };
-      if (!res.ok) {
-        if (data.dirty && !force) {
-          // Dirty worktree — ask the user to confirm a force removal
-          setWtConfirmRemove(path);
-          return;
-        }
-        setWtError(data.error ?? `HTTP ${res.status}`);
-        setWtErrorRoot(projectRoot);
-        return;
-      }
-      setWtConfirmRemove(null);
-      if (selectedCwd === path) selectCwd(projectRoot, projectRoot);
-      setWtRefreshKey((k) => k + 1);
-    } catch (e) {
-      setWtError(e instanceof Error ? e.message : String(e));
-      setWtErrorRoot(projectRoot);
-    } finally {
-      setWtBusy(false);
-    }
-  }, [wtBusy, selectedCwd, selectCwd]);
+  }, []);
 
   // 点击外部关闭显示模式菜单
   useEffect(() => {
@@ -978,10 +746,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // Done on the click path (not via the selectedCwd prop sync) so it also
   // works when the prop value won't change — e.g. re-clicking the already
   // open session after manually switching worktrees.
+  // identity 切换统一由 AppShell.handleSelectSession 在 suppress 之后完成：
+  // ProjectContext 的 store 更新（useSyncExternalStore）同步触发身份 watcher，
+  // 若在此处先 selectCwd，watcher 会在 suppress 生效前清空刚选中的会话 →
+  // 掉进引导页。worktree 预加载随后修正权威 projectRoot。
   const handleSelectSessionFromList = useCallback((s: SessionInfo) => {
-    if (s.cwd) selectCwd(s.cwd, s.projectRoot ?? s.cwd);
     onSelectSession(s);
-  }, [onSelectSession, selectCwd]);
+  }, [onSelectSession]);
 
   /** 会话删除收口：树与最近区共用同一处理（乐观删除 + 回流刷新）。 */
   const handleSessionDeletedLocal = useCallback((id: string) => {
@@ -1288,10 +1059,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
     const isInitialRestore = !initialSelectionScrollDoneRef.current
       && initialSessionId === selectedSessionId;
+    const selectionChanged = prevSelectedScrollIdRef.current !== selectedSessionId;
+    prevSelectedScrollIdRef.current = selectedSessionId;
     const listRect = list.getBoundingClientRect();
     const rowRect = row.getBoundingClientRect();
     const outsideViewport = rowRect.top < listRect.top || rowRect.bottom > listRect.bottom;
-    if (isInitialRestore || outsideViewport) row.scrollIntoView({ block: "nearest" });
+    // 展开/折叠会改列表高度，不因此 scrollIntoView，否则滚动条乱跳。
+    if (isInitialRestore || (selectionChanged && outsideViewport)) row.scrollIntoView({ block: "nearest" });
     if (isInitialRestore) initialSelectionScrollDoneRef.current = true;
   }, [selectedSessionId, initialSessionId, visibleTree, collapsedProjectRoots, collapsedWorktreePaths, collapsedSessionIds]);
 
@@ -1351,24 +1125,22 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   /** 打开编辑项目弹窗：名称初值为 alias 或路径显示名。 */
   const handleOpenEditProject = useCallback((root: string) => {
     setOpenProjectMenuRoot(null);
-    setEditProjectValue(projectAliases[root] ?? projectDisplayName(root));
-    setEditProjectTab("name");
     setEditProjectRoot(root);
-  }, [projectAliases, homeDir]);
+  }, []);
 
   /** 保存项目 alias：与文件夹名相同则清除 alias，回到默认显示；local + 服务端双写。 */
-  const handleSaveProjectAlias = useCallback(() => {
+  const handleSaveProjectAlias = useCallback((name: string) => {
     if (!editProjectRoot) return;
-    const name = editProjectValue.trim();
-    if (!name) return;
+    const trimmed = name.trim();
+    if (!trimmed) return;
     const root = editProjectRoot;
     setEditProjectRoot(null);
     const nextAliases = { ...projectAliases };
-    if (name === projectDisplayName(root)) delete nextAliases[root];
-    else nextAliases[root] = name;
+    if (trimmed === projectDisplayName(root)) delete nextAliases[root];
+    else nextAliases[root] = trimmed;
     updatePrefs((prev) => ({ ...prev, projectAliases: nextAliases }));
     setServerPref("projectAliases", nextAliases);
-  }, [editProjectRoot, editProjectValue, projectAliases, updatePrefs]);
+  }, [editProjectRoot, projectAliases, updatePrefs]);
 
   const setDisplayMode = useCallback((mode: SidebarDisplayMode) => {
     updatePrefs((prev) => (prev.displayMode === mode ? prev : { ...prev, displayMode: mode }));
@@ -1895,356 +1667,19 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       )}
 
 
-      {/* 添加项目弹窗：总是经 ViewportDialog，不直接拉起原生选择器；
-          「选择目录」仅填充输入，提交仍走 /api/cwd/validate。 */}
-      <ViewportDialog
+      <AddProjectDialog
         open={customPathOpen}
         onClose={closeCustomPathPanel}
-        title={t("sidebar_addProjectDialog")}
-        width={440}
-        closeLabel={t("dialog_close")}
-        initialFocusRef={customPathInputRef}
-        description={t("sidebar_addProjectDescription")}
-        actions={
-          <>
-            <DialogButton onClick={closeCustomPathPanel}>{t("sidebar_cancel")}</DialogButton>
-            {/* 上游 directory-picker：Select 只允许已浏览的路径（输入与浏览
-                不一致时 disabled，title 提示先打开/浏览） */}
-            <span
-              title={
-                !browsePath || customPathValue.trim() !== browsePath
-                  ? t("sidebar_browseOpenBeforeSelect")
-                  : undefined
-              }
-            >
-              <DialogButton
-                primary
-                disabled={customPathValidating || !browsePath || customPathValue.trim() !== browsePath}
-                onClick={() => void commitCustomPath()}
-              >
-                {customPathValidating ? t("sidebar_validating") : t("sidebar_add")}
-              </DialogButton>
-            </span>
-          </>
-        }
-      >
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            // 上游 directory-picker：Enter = 浏览输入路径；只有 Select 按钮提交
-            const raw = customPathValue.trim();
-            if (!raw || raw === browsePath) return;
-            void browseDirectory(raw);
-          }}
-        >
-          <label
-            htmlFor="add-project-path"
-            style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--text)", marginBottom: 6 }}
-          >
-            {t("sidebar_projectPath")}
-          </label>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              id="add-project-path"
-              ref={customPathInputRef}
-              value={customPathValue}
-              onChange={(e) => {
-                setCustomPathValue(e.target.value);
-                setCustomPathError(null);
-              }}
-              onKeyDown={(e) => {
-                // Enter 走 form onSubmit（浏览）；仅 Esc 快速关闭
-                if (e.key === "Escape" && !customPathValidating) {
-                  e.preventDefault();
-                  closeCustomPathPanel();
-                }
-              }}
-              placeholder="/path/to/project"
-              aria-label={t("sidebar_projectPath")}
-              autoComplete="off"
-              spellCheck={false}
-              style={{
-                flex: 1,
-                minWidth: 0,
-                height: 32,
-                fontSize: 12,
-                fontFamily: "var(--font-mono)",
-                padding: "0 10px",
-                border: "1px solid var(--border)",
-                borderRadius: 7,
-                outline: "none",
-                background: "var(--bg-panel)",
-                color: "var(--text)",
-                boxSizing: "border-box",
-              }}
-            />
-            <DialogButton
-              disabled={browseLoading || !customPathValue.trim()}
-              onClick={() => void browseDirectory(customPathValue.trim())}
-            >
-              {browseLoading ? t("sidebar_browseLoading") : t("sidebar_browseGo")}
-            </DialogButton>
-            {desktopPickerAvailable && (
-              <DialogButton onClick={() => void handlePickDirectory()}>
-                {t("sidebar_selectDirectory")}
-              </DialogButton>
-            )}
-          </div>
-          {/* 目录列表（上游 directory-picker：浏览结果区；git 徽标保留） */}
-          {browsePath && (
-            <div style={{ marginTop: 10 }}>
-              {browseLoading && (
-                <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("sidebar_browseLoading")}</div>
-              )}
-              {!browseLoading && browseMissing && (
-                <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("sidebar_browseMissing")}</div>
-              )}
-              {!browseLoading && !browseMissing && browseGit && (
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    fontSize: 11,
-                    marginBottom: 6,
-                    color: browseGit.isRepo ? "var(--text-muted)" : "var(--text-dim)",
-                  }}
-                >
-                  {browseGit.isRepo ? (
-                    <>
-                      <span style={{ color: "var(--accent)", fontWeight: 600 }}>{t("sidebar_browseGitRepo")}</span>
-                      {browseGit.branch && (
-                        <span style={{ fontFamily: "var(--font-mono)", fontSize: 10.5 }}>{browseGit.branch}</span>
-                      )}
-                    </>
-                  ) : (
-                    <span>{t("sidebar_browseNotGit")}</span>
-                  )}
-                </div>
-              )}
-              {!browseLoading && !browseMissing && (
-                <div
-                  style={{
-                    maxHeight: 150,
-                    overflowY: "auto",
-                    overflowX: "hidden",
-                    border: "1px solid var(--border)",
-                    borderRadius: 7,
-                    background: "var(--bg-panel)",
-                    padding: 4,
-                  }}
-                >
-                  {browseParent && (
-                    <button
-                      type="button"
-                      disabled={browseLoading}
-                      onClick={() => {
-                        void browseDirectory(browseParent);
-                      }}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 6,
-                        width: "100%",
-                        padding: "4px 8px",
-                        border: "none",
-                        background: "transparent",
-                        color: "var(--text-muted)",
-                        fontSize: 12,
-                        cursor: "pointer",
-                        borderRadius: 5,
-                        fontFamily: "var(--font-mono)",
-                      }}
-                      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-hover)")}
-                      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-                    >
-                      ..
-                    </button>
-                  )}
-                  {browseEntries.length === 0 ? (
-                    <div style={{ padding: "6px 8px", fontSize: 11, color: "var(--text-dim)" }}>
-                      {t("sidebar_browseEmpty")}
-                    </div>
-                  ) : (
-                    browseEntries.map((entry) => (
-                      <button
-                        key={entry.path}
-                        type="button"
-                        disabled={browseLoading}
-                        onClick={() => {
-                          void browseDirectory(entry.path);
-                        }}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 6,
-                          width: "100%",
-                          padding: "4px 8px",
-                          border: "none",
-                          background: "transparent",
-                          color: "var(--text)",
-                          fontSize: 12,
-                          cursor: "pointer",
-                          borderRadius: 5,
-                          textAlign: "left",
-                          fontFamily: "var(--font-mono)",
-                        }}
-                        onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-hover)")}
-                        onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-                      >
-                        <span style={{ color: "var(--text-dim)", fontSize: 10.5 }}>▸</span>
-                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {entry.name}
-                        </span>
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-          {customPathError && (
-            <div role="alert" style={{ marginTop: 8, color: "var(--status-danger)", fontSize: 12, lineHeight: 1.45, overflowWrap: "anywhere" }}>
-              {customPathError}
-            </div>
-          )}
-          {/* 次级动作：创建默认目录（~/pi-cwd-YYYYMMDD），同样只在弹窗内发起 */}
-          <div style={{
-            marginTop: 14,
-            paddingTop: 12,
-            borderTop: "1px solid var(--border)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 8,
-          }}>
-            <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>{t("sidebar_noExistingDirectory")}</span>
-            <DialogButton disabled={customPathValidating} onClick={() => void handleDefaultCwd()}>
-              <HomeIcon size={13} />
-              {t("sidebar_createDefaultDirectory")}
-            </DialogButton>
-          </div>
-        </form>
-      </ViewportDialog>
-
-      {/* 编辑项目弹窗：仅修改 Pidance 显示名 alias，不动 Pi schema/目录/Git */}
-      <ViewportDialog
-        open={editProjectRoot !== null}
+        resolveProjectRoot={(cwd) => projectRootFor(cwd) ?? cwd}
+        onAdded={handleProjectAdded}
+      />
+      <EditProjectDialog
+        projectRoot={editProjectRoot}
+        initialName={editProjectRoot ? (projectAliases[editProjectRoot] ?? projectDisplayName(editProjectRoot)) : ""}
         onClose={() => setEditProjectRoot(null)}
-        title={t("sidebar_editProject")}
-        width={720}
-        height={620}
-        closeLabel={t("dialog_close")}
-        description={editProjectRoot
-          ? t("sidebar_editProjectDescription", { path: editProjectRoot })
-          : undefined}
-      >
-        {/* 编辑项目：名称 / 项目规则 / 项目技能 */}
-        <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
-          {([
-            ["name", t("sidebar_projectName")],
-            ["rules", t("sidebar_projectRules")],
-            ["skills", t("sidebar_projectSkills")],
-          ] as const).map(([tabId, label]) => (
-            <button
-              key={tabId}
-              type="button"
-              onClick={() => setEditProjectTab(tabId)}
-              style={{
-                minHeight: 28, padding: "0 12px", borderRadius: 6,
-                border: "1px solid var(--border)",
-                background: editProjectTab === tabId ? "var(--bg-selected)" : "var(--bg-panel)",
-                color: editProjectTab === tabId ? "var(--text)" : "var(--text-muted)",
-                cursor: "pointer", fontSize: 12, fontWeight: editProjectTab === tabId ? 600 : 400,
-              }}
-              aria-current={editProjectTab === tabId ? "page" : undefined}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-
-        {editProjectTab === "name" ? (
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              handleSaveProjectAlias();
-            }}
-          >
-            <label
-              htmlFor="edit-project-name"
-              style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--text)", marginBottom: 6 }}
-            >
-              {t("sidebar_projectName")}
-            </label>
-            <input
-              id="edit-project-name"
-              ref={editProjectInputRef}
-              value={editProjectValue}
-              onChange={(e) => setEditProjectValue(e.target.value)}
-              placeholder={t("sidebar_projectName")}
-              aria-label={t("sidebar_projectName")}
-              aria-invalid={!editProjectValue.trim()}
-              autoComplete="off"
-              spellCheck={false}
-              style={{
-                width: "100%",
-                height: 32,
-                fontSize: 12.5,
-                padding: "0 10px",
-                border: "1px solid var(--border)",
-                borderRadius: 7,
-                outline: "none",
-                background: "var(--bg-panel)",
-                color: "var(--text)",
-                boxSizing: "border-box",
-              }}
-            />
-            {!editProjectValue.trim() && (
-              <div style={{ marginTop: 6, fontSize: 11.5, color: "var(--status-danger)" }}>{t("sidebar_projectNameRequired")}</div>
-            )}
-            <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-              <button
-                type="submit"
-                disabled={!editProjectValue.trim()}
-                style={{
-                  minHeight: 30, padding: "0 14px", borderRadius: 7,
-                  border: "1px solid var(--accent)", background: "var(--accent)",
-                  color: "var(--accent-foreground)",
-                  cursor: !editProjectValue.trim() ? "not-allowed" : "pointer",
-                  fontSize: 12, fontWeight: 600,
-                  opacity: !editProjectValue.trim() ? 0.6 : 1,
-                }}
-              >
-                {t("sidebar_save")}
-              </button>
-              <button
-                type="button"
-                onClick={() => setEditProjectRoot(null)}
-                style={{
-                  minHeight: 30, padding: "0 12px", borderRadius: 7,
-                  border: "1px solid var(--border)", background: "var(--bg-panel)",
-                  color: "var(--text-muted)", cursor: "pointer", fontSize: 12,
-                }}
-              >
-                {t("sidebar_cancel")}
-              </button>
-            </div>
-          </form>
-        ) : (
-          editProjectRoot && (
-            <ProjectAssetsEditor
-              cwd={editProjectRoot}
-              tab={editProjectTab === "skills" ? "skills" : "rules"}
-            />
-          )
-        )}
-      </ViewportDialog>
+        onSaveName={handleSaveProjectAlias}
+      />
       </div>
     </RunningTimeContext.Provider>
     );
   }
-
-
-// ── 项目分区（项目行 + 主仓会话 + 非主 worktree 分组） ──────────────────────
-

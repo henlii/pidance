@@ -697,7 +697,7 @@ function AssistantMessageView({
       }}>
         {message.usage && !isStreaming && (
           <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
-            {formatUsage(message.usage)}
+            {formatUsage(message.usage, message)}
           </div>
         )}
         {textContent && !isStreaming && (
@@ -2154,18 +2154,28 @@ function getToolPreview(block: ToolCallContent): string {
   return String(first).slice(0, 120);
 }
 
-function formatUsage(usage: {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-  cost: { total: number };
-}): string {
+function formatUsage(
+  usage: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    cost: { total: number };
+  },
+  message?: Pick<AssistantMessage, "provider" | "model" | "thinkingLevel">,
+): string {
   const parts = [];
   if (usage.input) parts.push(`${usage.input.toLocaleString()} in`);
   if (usage.output) parts.push(`${usage.output.toLocaleString()} out`);
   if (usage.cacheRead) parts.push(`${usage.cacheRead.toLocaleString()} cache`);
   if (usage.cost?.total) parts.push(`$${usage.cost.total.toFixed(4)}`);
+  const provider = message?.provider?.trim();
+  const model = message?.model?.trim();
+  if (provider || model) {
+    parts.push([provider, model].filter(Boolean).join(" / "));
+  }
+  const thinking = message?.thinkingLevel?.trim();
+  if (thinking && thinking !== "off") parts.push(thinking);
   return parts.join(" · ");
 }
 

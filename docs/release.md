@@ -75,6 +75,20 @@ npm run check && npm run build && npm run release:audit
 
 审计失败会列出具体路径与原因并以非零退出。**此时不要**继续 pack/publish。
 
+## 2.5 本地候选包（不发布）
+
+只想先打个本地 tgz（含未提交改动、不 version/tag/push/publish）时，
+用一条命令代替手工 rsync + 构建 + 审计：
+
+```bash
+npm run package:candidate                     # 默认 /tmp/pidance-release-build
+npm run package:candidate -- --build-root /tmp/xxx
+```
+
+脚本自动镜像工作区到中性构建根（增量复用 node_modules / .next）、跑隔离
+webpack 构建、生成前后审计、npm pack 并写 sha256；产物与后续正式发布共用
+同一套审计规则。
+
 ## 3. 生成 tgz + 生成后审计 + 哈希
 
 pre-pack 通过后**显式**打包，再对**真实 tgz** 审计（直接读包内字节，不回读工作区冒充）：

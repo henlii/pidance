@@ -44,24 +44,30 @@
   "scripts": {
     "dev": "next dev -p 31415",
     "build": "next build --webpack",
-    "start": "next start -p 31415",
+    "start": "node bin/pidance.js",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "node --test lib/*.test.mjs components/*.test.mjs hooks/*.test.mjs bin/*.test.mjs",
     "verify:render-bridge": "node scripts/verify-subagent-render-bridge.mjs",
+    "verify:render-bridge:installed": "node scripts/verify-installed-render-bridge.mjs",
     "test:browser": "node --test scripts/browser-regression.test.mjs",
     "check": "npm run typecheck && npm run lint && npm run test",
     "release:audit": "node scripts/audit-release-package.mjs --pre",
     "release:audit:tgz": "node scripts/audit-release-package.mjs --tgz",
+    "package:candidate": "node scripts/make-candidate-package.mjs",
     "release:check": "npm run check && npm run build && npm run release:audit"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.84.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "jiti": "^2.7.0",
     "lucide-react": "^0.562.0",
     "next": "16.2.11",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "undici": "8.5.0"
+    "undici": "8.5.0",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@lobehub/icons": "^5.6.0",
@@ -70,6 +76,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/react-syntax-highlighter": "^15.5.13",
+    "@types/ws": "^8.18.1",
     "eslint": "^9",
     "eslint-config-next": "16.2.11",
     "jiti": "^2.7.0",
@@ -86,5 +93,8 @@
     "remark-math": "^6.0.0",
     "tailwindcss": "^4.2.2",
     "typescript": "^5"
+  },
+  "optionalDependencies": {
+    "node-pty": "^1.1.0"
   }
 }

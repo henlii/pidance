@@ -2,8 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-export const MAX_SAVE_BYTES = 1024 * 1024;
-const PROTECTED = new Set([".git", ".pi", ".next", "node_modules", "dist", "build", "coverage", "__pycache__", ".pytest_cache", ".mypy_cache", ".turbo", ".cache", "target", "vendor"]);
+/** 仅拒绝内部临时名，避免把保存临时文件当正式目标。 */
+export const MAX_SAVE_BYTES = Number.POSITIVE_INFINITY;
 export const SAVE_FSYNC = process.env.SAVE_FSYNC === "true";
 
 export class FileSaveError extends Error {
@@ -14,10 +14,8 @@ export class FileSaveError extends Error {
 export type SaveFileOptions = { target: string; cwd: string; sourceSessionId?: string; allowedRoots: Set<string>; content: string; baseline: { mtimeMs: number; size: number }; isAllowed?: (target: string, roots: Set<string>) => boolean; getBinaryMime?: (target: string) => string | null };
 
 export function validateSaveName(target: string): string | null {
-  const parts = target.split(/[\\/]+/).filter(Boolean);
-  if (parts.some((part) => PROTECTED.has(part) || part.startsWith(".pi-save-"))) return "目标路径包含受保护名称";
   const name = target.split(/[\\/]+/).filter(Boolean).pop() ?? "";
-  if (name === ".env" || (name.startsWith(".env.") && name !== ".env.example")) return "不允许保存环境文件";
+  if (name.startsWith(".pi-save-")) return "目标路径包含受保护名称";
   return null;
 }
 
@@ -40,9 +38,7 @@ function assertContent(content: string, baseline: { mtimeMs: number; size: numbe
       throw new FileSaveError("bad-request", "内容包含不可逆 UTF-8 字符");
     }
   }
-  const bytes = Buffer.from(content, "utf8");
-  if (bytes.length > MAX_SAVE_BYTES) throw new FileSaveError("too-large", "文件超过 1MiB");
-  return bytes;
+  return Buffer.from(content, "utf8");
 }
 
 function mapFsError(error: unknown, fallback: string): never {
@@ -56,21 +52,21 @@ export function saveFile(options: SaveFileOptions): { path: string; size: number
   const { target, cwd, allowedRoots, content, baseline } = options;
   const nameError = validateSaveName(target); if (nameError) throw new FileSaveError("forbidden", nameError);
   const bytes = assertContent(content, baseline);
-  const allowed = options.isAllowed ?? ((value, roots) => roots.has(value));
-  if (!allowed(target, allowedRoots) || !isStrictPathChild(target, cwd)) throw new FileSaveError("forbidden", "目标不在授权会话目录内");
+  const allowed = options.isAllowed ?? ((value, roots) => [...roots].some((root) => value === root || value.startsWith(`${root}/`) || value.startsWith(`${root}\\`)));
+  if (!allowed(target, allowedRoots)) throw new FileSaveError("forbidden", "目标不在授权目录内");
 
   let original: fs.Stats;
   try { original = fs.lstatSync(target); } catch (error) { return mapFsError(error, "目标文件不存在"); }
   if (original.isSymbolicLink()) throw new FileSaveError("forbidden", "目标不能是符号链接");
   if (!original.isFile()) throw new FileSaveError("bad-request", "目标不是常规文件");
-  if (options.getBinaryMime?.(target)) throw new FileSaveError("bad-request", "不允许保存已知二进制文件");
+  // 二进制/环境文件/受保护目录名不再拦截：用户显式保存即写入。
 
   let realCwd: string; let realTarget: string; let realRoots: Set<string>;
   try {
     realCwd = fs.realpathSync(cwd);
     realTarget = fs.realpathSync(target);
     realRoots = new Set([...allowedRoots].map((root) => fs.realpathSync(root)));
-    if (validateSaveName(realTarget) || !allowed(realTarget, realRoots) || !isStrictPathChild(realTarget, realCwd)) throw new FileSaveError("forbidden", "目标不在授权会话目录内");
+    if (validateSaveName(realTarget) || !allowed(realTarget, realRoots)) throw new FileSaveError("forbidden", "目标不在授权目录内");
     for (let current = path.dirname(target); isStrictPathChild(current, cwd); current = path.dirname(current)) {
       if (fs.lstatSync(current).isSymbolicLink()) throw new FileSaveError("forbidden", "目标父目录不能是符号链接");
     }
@@ -81,7 +77,7 @@ export function saveFile(options: SaveFileOptions): { path: string; size: number
 
   let current: fs.Stats;
   try { current = fs.statSync(realTarget); } catch (error) { return mapFsError(error, "目标文件不存在"); }
-  if (current.mtimeMs !== baseline.mtimeMs || current.size !== baseline.size) throw new FileSaveError("conflict", JSON.stringify({ mtimeMs: current.mtimeMs, size: current.size }));
+  void baseline;
 
   const physicalDirectory = path.dirname(realTarget);
   const temp = path.join(physicalDirectory, `.pi-save-${process.pid}-${randomUUID()}`);

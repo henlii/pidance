@@ -44,6 +44,14 @@ import {
   applyPassThroughExtendedThinkingInPlace,
   withPassThroughExtendedThinking,
 } from "./thinking-levels";
+import {
+  loadPiTheme,
+  renderCustomMessageLines,
+  renderToolCallLines,
+  renderToolResultLines,
+  renderWidgetFactoryLines,
+  type Theme,
+} from "./tui-render-bridge";
 
 export type SdkAgentEvent = {
   type: string;
@@ -51,6 +59,18 @@ export type SdkAgentEvent = {
 };
 
 export type SdkEventListener = (event: SdkAgentEvent) => void;
+
+/** 单个 toolCallId 的渲染上下文状态（跨事件保持：call → update → result）。 */
+type ToolRenderStateEntry = {
+  /** 渲染器共享状态对象（插件读写 subagentResultAnimationTimer 等）。 */
+  state: Record<string, unknown>;
+  /** renderCall 槽「上一组件」。 */
+  lastCallComponent: unknown;
+  /** renderResult 槽「上一组件」。 */
+  lastResultComponent: unknown;
+  /** tool_execution_update 上次渲染时间戳（节流用）。 */
+  lastPartialRenderAt: number | undefined;
+};
 
 export type SdkSessionHostOptions = {
   sessionId: string;
@@ -106,6 +126,12 @@ export class SdkSessionHost {
   private readonly agentDir: string;
   private lock: SessionLockHandle | null = null;
   private activeToolNames: string[] | undefined;
+  /** 渲染桥主题（模块级缓存）；加载失败为 null → 跳过渲染。 */
+  private readonly renderBridgeTheme: Theme | null = loadPiTheme();
+  /** toolCallId → 渲染状态（跨 tool_call → update → result 共享）。 */
+  private readonly toolRenderStates = new Map<string, ToolRenderStateEntry>();
+  /** tool_execution_update 渲染最短间隔（ms），防高频 partial 阻塞事件循环。 */
+  private static readonly PARTIAL_RENDER_MIN_INTERVAL_MS = 100;
 
   constructor(private readonly options: SdkSessionHostOptions) {
     this.realSessionId = options.sessionId;
@@ -357,7 +383,191 @@ export class SdkSessionHost {
       default:
         break;
     }
-    this.emit(event);
+    this.emit(this.withRenderedToolLines(event));
+  }
+
+  /**
+   * 渲染桥（SDK 切换后接回）：headless 调用插件工具 renderCall/renderResult 与
+   * 自定义消息渲染器，产出 ANSI 行附加到事件；任何异常/缺失一律回退原事件，
+   * 绝不阻断事件流。
+   */
+  private withRenderedToolLines(event: SdkAgentEvent): SdkAgentEvent {
+    try {
+      if (!this.renderBridgeTheme) return event;
+      switch (event.type) {
+        case "tool_execution_update": {
+          // 高频 partial：按 toolCallId 节流，防事件循环阻塞。
+          if (!this.shouldRenderPartialUpdate(event.toolCallId)) return event;
+          const def = this.getToolRenderDefinition(event.toolName);
+          if (!def) return event;
+          const context = this.buildToolRenderContext(
+            event.toolCallId,
+            event.args ?? event.input,
+            { isPartial: true, expanded: true, isError: event.isError === true, resultSlot: true },
+          );
+          if (!context) return event;
+          const lines = renderToolResultLines(
+            def,
+            event.partialResult,
+            { expanded: true, isPartial: true },
+            context,
+            (component) => this.updateToolRenderLastComponent(event.toolCallId, true, component),
+          );
+          return lines ? { ...event, renderedLines: lines } : event;
+        }
+        case "tool_call": {
+          const def = this.getToolRenderDefinition(event.toolName);
+          if (!def) return event;
+          const context = this.buildToolRenderContext(
+            event.toolCallId,
+            event.input,
+            { isPartial: false, expanded: true, isError: false, resultSlot: false },
+          );
+          if (!context) return event;
+          const lines = renderToolCallLines(
+            def,
+            event.input,
+            context,
+            (component) => this.updateToolRenderLastComponent(event.toolCallId, false, component),
+          );
+          return lines ? { ...event, renderedCallLines: lines } : event;
+        }
+        case "tool_result": {
+          const def = this.getToolRenderDefinition(event.toolName);
+          if (!def) return event;
+          const context = this.buildToolRenderContext(
+            event.toolCallId,
+            event.args ?? event.input,
+            { isPartial: false, expanded: true, isError: event.isError === true, resultSlot: true },
+          );
+          if (!context) return event;
+          // 结果对象补 isError（AgentToolResult 契约）。
+          const lines = renderToolResultLines(
+            def,
+            {
+              content: event.content,
+              details: event.details,
+              isError: event.isError === true,
+              ...(event.usage !== undefined ? { usage: event.usage } : {}),
+            },
+            { expanded: true, isPartial: false },
+            context,
+            (component) => this.updateToolRenderLastComponent(event.toolCallId, true, component),
+          );
+          return lines ? { ...event, renderedResultLines: lines } : event;
+        }
+        case "message_start":
+        case "message_end": {
+          // 自定义消息渲染器（如 pi-subagents 的 subagent-notify）：role=custom 且
+          // 带 customType 时取注册的 MessageRenderer headless 渲染；失败回退原文。
+          const msg = event.message as { role?: string; customType?: string } | undefined;
+          if (msg?.role !== "custom" || typeof msg.customType !== "string" || msg.customType === "") {
+            return event;
+          }
+          const runner = this.session.extensionRunner as
+            | { getMessageRenderer?: (customType: string) => unknown }
+            | undefined;
+          const renderer =
+            typeof runner?.getMessageRenderer === "function"
+              ? runner.getMessageRenderer(msg.customType)
+              : undefined;
+          const lines = renderCustomMessageLines(renderer, event.message, this.renderBridgeTheme);
+          return lines ? { ...event, renderedLines: lines } : event;
+        }
+        default:
+          return event;
+      }
+    } catch {
+      // 渲染桥绝不允许阻断事件流：任何异常回退原事件。
+      return event;
+    }
+  }
+
+  /** 取原始 ToolDefinition（绕过 wrapToolDefinition 的渲染器剥离）。 */
+  private getToolRenderDefinition(toolName: unknown): unknown {
+    if (typeof toolName !== "string" || toolName === "") return undefined;
+    try {
+      return this.session.getToolDefinition(toolName);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * 构造 ToolRenderContext 兼容对象（对齐 pi tool-renderer）：state/lastComponent
+   * 取自 toolCallId 的稳定入口，跨事件共享；invalidate no-op（web 端无需重渲染）。
+   */
+  private buildToolRenderContext(
+    toolCallId: unknown,
+    args: unknown,
+    opts: { isPartial: boolean; expanded: boolean; isError: boolean; resultSlot: boolean },
+  ): Record<string, unknown> | null {
+    const entry = this.getOrCreateToolRenderState(toolCallId);
+    if (!entry) return null;
+    return {
+      args,
+      toolCallId,
+      invalidate: () => {},
+      lastComponent: opts.resultSlot ? entry.lastResultComponent : entry.lastCallComponent,
+      state: entry.state,
+      cwd: this.realCwd,
+      executionStarted: true,
+      argsComplete: true,
+      isPartial: opts.isPartial,
+      expanded: opts.expanded,
+      showImages: false,
+      isError: opts.isError,
+    };
+  }
+
+  /** 取（或懒创建）toolCallId 的渲染状态入口；非法 toolCallId → null。 */
+  private getOrCreateToolRenderState(toolCallId: unknown): ToolRenderStateEntry | null {
+    if (typeof toolCallId !== "string" || toolCallId === "") return null;
+    let entry = this.toolRenderStates.get(toolCallId);
+    if (!entry) {
+      entry = {
+        state: {},
+        lastCallComponent: undefined,
+        lastResultComponent: undefined,
+        lastPartialRenderAt: undefined,
+      };
+      this.toolRenderStates.set(toolCallId, entry);
+    }
+    return entry;
+  }
+
+  /** 渲染后记录「上一组件」：resultSlot=true → renderResult 槽，否则 renderCall 槽。 */
+  private updateToolRenderLastComponent(toolCallId: unknown, resultSlot: boolean, component: unknown): void {
+    if (typeof toolCallId !== "string" || toolCallId === "") return;
+    const entry = this.toolRenderStates.get(toolCallId);
+    if (!entry) return;
+    if (resultSlot) entry.lastResultComponent = component;
+    else entry.lastCallComponent = component;
+  }
+
+  /** tool_execution_update 节流：同一 toolCallId 最短间隔内跳过渲染。 */
+  private shouldRenderPartialUpdate(toolCallId: unknown): boolean {
+    if (typeof toolCallId !== "string" || toolCallId === "") return true;
+    const now = Date.now();
+    const entry = this.getOrCreateToolRenderState(toolCallId);
+    if (!entry) return true;
+    if (
+      entry.lastPartialRenderAt !== undefined
+      && now - entry.lastPartialRenderAt < SdkSessionHost.PARTIAL_RENDER_MIN_INTERVAL_MS
+    ) {
+      return false;
+    }
+    entry.lastPartialRenderAt = now;
+    return true;
+  }
+
+  /** 会话真实项目 cwd（header.cwd 是项目目录）。 */
+  private get realCwd(): string {
+    try {
+      return this.session.sessionManager.getHeader()?.cwd || this.options.cwd;
+    } catch {
+      return this.options.cwd;
+    }
   }
 
   async start(): Promise<void> {

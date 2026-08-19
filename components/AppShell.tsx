@@ -18,6 +18,7 @@ import { InstantTooltipHost } from "./InstantTooltipHost";
 import { UpdateBanner } from "./UpdateBanner";
 import { PendingExtensionSync } from "./PendingExtensionSync";
 import { BranchNavigator } from "./BranchNavigator";
+import { TerminalPanel } from "./TerminalPanel";
 import { useTheme } from "@/hooks/useTheme";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { setDraft } from "@/lib/draft-store";
@@ -572,6 +573,23 @@ function AppShellInner() {
   }, [identity.cwd, identity.projectRoot, selectedSession, invalidateHydrate, syncUrl]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
+    // 显式点选会话：先跳过身份 watcher（必须在本函数任何 state 变更之前）。
+    // selectCwd / 迟到的 worktree 预加载回写不能把刚选中的会话清掉，否则
+    // 会掉进引导页（刷新才恢复）。identity 的 store 更新（useSyncExternalStore）
+    // 会同步触发身份 watcher，因此 suppress 必须先于 setIdentity 生效。
+    suppressSessionResetRef.current = true;
+    // 统一在此同步 identity：会话 cwd 与 projectRoot 成为当前项目上下文。
+    // 调用方（SessionSidebar 点击路径）不再自行 selectCwd，避免 store 同步
+    // 刷新在 suppress 生效前触发 watcher 清空会话；worktree 预加载随后会把
+    // projectRoot 修正为权威主仓 root。
+    if (session.cwd) {
+      setIdentity({
+        cwd: session.cwd,
+        projectRoot: session.projectRoot ?? session.cwd,
+        status: "ready",
+        error: null,
+      });
+    }
     invalidateHydrate();
     // 选中已有会话：使新建 intent 失效，迟到 ensure 不得覆盖当前 chat。
     // 不清理 optimistic pending map：其它真实 id 须保留至 server 回流/显式删除。
@@ -585,9 +603,6 @@ function AppShellInner() {
     setInitialSessionRestored(true);
     // On mobile, collapse the overlay drawer so the chat is revealed after pick.
     if (isMobile && !isRestore) setSidebarOpen(false);
-    // 显式点选会话：跳过身份 watcher。selectCwd / 迟到的 worktree 预加载回写
-    // 不能把刚选中的会话清掉（否则会掉进引导页，刷新才恢复）。
-    suppressSessionResetRef.current = true;
     // 生产模式 router.replace 会触发 Suspense remount loop（见 syncUrl），
     // 这里统一用 history.replaceState 静默同步 URL；刷新/分享仍可从 ?session= 恢复。
     if (!isRestore) {
@@ -602,15 +617,14 @@ function AppShellInner() {
     // worktree 数据权威修正），保证 lazy 新会话落到正确项目。
     const cwd = targetCwd ?? getIdentitySnapshot().cwd;
     if (!cwd) return;
+    // 本路径已建立 intent + remount；先跳过身份 watcher（setIdentity 的 store
+    // 更新会同步触发 watcher，suppress 必须已生效），避免 watcher 二次建 intent。
+    suppressSessionResetRef.current = true;
     // 引导页默认选中本次入口的目标项目（顶部新建 = 当前选中项目；项目行 = 对应项目）
     setGuideDefaultCwd(cwd);
     if (getIdentitySnapshot().cwd !== cwd) {
       setIdentity({ cwd, status: "ready", error: null });
     }
-    // 本路径已建立 intent + remount；跳过 identity watcher 的二次 intent。
-    suppressSessionResetRef.current = true;
-
-    suppressSessionResetRef.current = true;
     invalidateHydrate();
     newSessionIntentGenerationRef.current += 1;
     const intent = createNewSessionIntent(cwd, newSessionIntentGenerationRef.current);
@@ -919,6 +933,7 @@ function AppShellInner() {
     { id: "info", label: t("app_sessionInfo"), filePath: "", kind: "info" },
     { id: "files", label: t("workspace_files"), filePath: "", kind: "files" },
     { id: "git", label: t("workspace_gitChanges"), filePath: "", kind: "git" },
+    { id: "terminal", label: t("workspace_terminal"), filePath: "", kind: "terminal" },
   ], [t]);
 
   const handleSelectRightTab = useCallback((tabId: string) => {
@@ -1336,6 +1351,9 @@ function AppShellInner() {
             systemPrompt={systemPrompt}
           />
         )}
+        terminalContent={
+          <TerminalPanel />
+        }
         branchContent={(
           <BranchNavigator
             tree={branchTree}

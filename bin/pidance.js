@@ -11,9 +11,12 @@ const fs = require("fs");
 const { parseLaunchOptions } = require("./pidance-options");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { shouldRequireAuth, resolvePassword, describeHost } = require("./pidance-auth-gate");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { startPidanceHttpServer } = require("./pidance-http-server");
 
 const pkgDir = path.join(__dirname, "..");
-const nextDir = path.join(pkgDir, ".next");
+const distDirName = process.env.PIDANCE_DIST_DIR || ".next";
+const nextDir = path.join(pkgDir, distDirName);
 
 // Node engine 门禁（与 package.json engines.node 对齐）：低于最低版本直接失败，
 // 避免进入半运行状态。npm engines 默认只警告，这里 fail-closed。
@@ -32,22 +35,12 @@ if (!nodeMeetsMin(process.versions.node)) {
   process.exit(1);
 }
 
-// Resolve next's CLI entry directly to avoid relying on .bin symlinks (which
-// may not exist when installed via npx).
-let nextBin;
-try {
-  nextBin = require.resolve("next/dist/bin/next", { paths: [pkgDir] });
-} catch {
-  // Fallback: locate next package root and derive the bin path manually.
-  try {
-    const nextPkg = require.resolve("next/package.json", { paths: [pkgDir] });
-    nextBin = path.join(path.dirname(nextPkg), "dist", "bin", "next");
-  } catch {
-    nextBin = path.join(pkgDir, "node_modules", "next", "dist", "bin", "next");
-  }
-}
-
 const { port, hostname, openBrowser } = parseLaunchOptions();
+const listenPort = Number.parseInt(String(port), 10);
+if (!Number.isInteger(listenPort) || listenPort <= 0) {
+  console.error(`[pidance] 拒绝启动：无效端口 ${port}`);
+  process.exit(1);
+}
 
 // 启动认证门禁（fail-closed，P0）：非回环监听地址（0.0.0.0 / :: / 局域网 IP / 非回环主机名）
 // 且未设置认证密码时拒绝启动，防止局域网/公网匿名调用 Agent API（创建会话/发 prompt/调工具）。
@@ -73,66 +66,44 @@ if (!fs.existsSync(nextDir)) {
   process.exit(1);
 }
 
-const nextArgs = ["start", "-p", port];
-if (hostname) nextArgs.push("-H", hostname);
+const url = `http://${hostname ?? "localhost"}:${listenPort}`;
 
-// Always run next's JS entry with node directly — avoids .bin symlink issues
-// and path-with-spaces problems on Windows when shell: true is used.
-const child = spawn(process.execPath, [nextBin, ...nextArgs], {
-  cwd: pkgDir,
-  stdio: ["inherit", "pipe", "inherit"],
-  env: { ...process.env },
-});
-
-let browserOpened = false;
-const url = `http://${hostname ?? "localhost"}:${port}`;
-
-child.stdout.on("data", (chunk) => {
-  const text = chunk.toString();
-  process.stdout.write(text);
-  if (openBrowser && !browserOpened && text.includes("Ready")) {
-    browserOpened = true;
-    const isWindows = process.platform === "win32";
-    const isMac = process.platform === "darwin";
-    const openCmd = isWindows ? "start" : isMac ? "open" : "xdg-open";
-    const opener = spawn(openCmd, [url], {
-      shell: isWindows,
-      stdio: "ignore",
-      detached: true,
-    });
-
-    opener.on("error", (error) => {
-      console.warn(`Could not open browser automatically: ${error.message}`);
-    });
-
-    opener.unref();
-  }
-});
-
-// systemd KillMode=control-group 会给包装进程和 next-server 同时发 SIGTERM。
-// next-server 有活跃 SSE/会话时经常不退出，拖到 TimeoutStopSec=120s 才被 SIGKILL，
-// 一键升级的 systemctl restart 会先超时误报失败。包装进程留下做限期回收。
-const CHILD_STOP_GRACE_MS = 8_000;
-let stopping = false;
-function requestChildStop() {
-  if (stopping) return;
-  stopping = true;
-  try {
-    if (child.exitCode == null && !child.killed) child.kill("SIGTERM");
-  } catch {
-    /* already gone */
-  }
-  const force = setTimeout(() => {
-    try {
-      if (child.exitCode == null) child.kill("SIGKILL");
-    } catch {
-      /* ignore */
-    }
-  }, CHILD_STOP_GRACE_MS);
-  if (typeof force.unref === "function") force.unref();
-  child.once("exit", () => clearTimeout(force));
+function openBrowserOnce() {
+  const isWindows = process.platform === "win32";
+  const isMac = process.platform === "darwin";
+  const openCmd = isWindows ? "start" : isMac ? "open" : "xdg-open";
+  const opener = spawn(openCmd, [url], {
+    shell: isWindows,
+    stdio: "ignore",
+    detached: true,
+  });
+  opener.on("error", (error) => {
+    console.warn(`Could not open browser automatically: ${error.message}`);
+  });
+  opener.unref();
 }
-process.on("SIGTERM", requestChildStop);
-process.on("SIGINT", requestChildStop);
 
-child.on("exit", (code) => process.exit(code ?? 0));
+void startPidanceHttpServer({
+  dir: pkgDir,
+  hostname,
+  port: listenPort,
+}).then(({ server }) => {
+  console.log(`Ready on ${url}`);
+  if (openBrowser) openBrowserOnce();
+
+  // 同一进程持有 HTTP：SIGTERM 关 listener，不再 spawn next-server。
+  const STOP_GRACE_MS = 8_000;
+  let stopping = false;
+  function requestStop() {
+    if (stopping) return;
+    stopping = true;
+    server.close(() => process.exit(0));
+    const force = setTimeout(() => process.exit(1), STOP_GRACE_MS);
+    if (typeof force.unref === "function") force.unref();
+  }
+  process.on("SIGTERM", requestStop);
+  process.on("SIGINT", requestStop);
+}).catch((error) => {
+  console.error(`[pidance] 启动失败：${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+});

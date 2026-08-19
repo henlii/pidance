@@ -38,6 +38,8 @@ const nextConfig: NextConfig = {
     "@earendil-works/pi-agent-core",
     "@earendil-works/pi-ai",
     "@earendil-works/pi-tui",
+    "node-pty",
+    "ws",
   ],
   // 仅 webpack 路径使用（`next build --webpack` / 发布）。Turbopack 忽略本回调，
   // 依赖 serverExternalPackages + 原生 node: 处理。

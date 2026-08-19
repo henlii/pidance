@@ -30,29 +30,16 @@ import {
 import type { ExtensionUiBlockingRequest } from "@/lib/extension-ui-bridge";
 import { useExtensionUiState, type ExtensionUiDialogRequest, type ExtensionUiCustomRequest } from "@/hooks/useExtensionUiState";
 import { useNoticeState } from "@/hooks/useNoticeState";
-import { parseTodos } from "@/lib/todo-parser";
+import { parseLatestTodoSnapshot } from "@/lib/todo-parser";
 import { getSessionCapabilities } from "@/components/session-capabilities";
 import { isOtherOptionLabel } from "@/components/ExtensionDialog";
 import { useSessionCommands } from "@/hooks/useSessionCommands";
+import { useChatAutoFollow } from "@/hooks/useChatAutoFollow";
 import { ensureServerPrefsLoaded, getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { resolveDisplayModel, settleModelOverride } from "@/lib/model-selection";
 import { useI18n } from "@/lib/i18n";
 import { guidePageThinkingUpdate, thinkingLevelForEnsureBody } from "@/lib/thinking-level-policy";
 import { isThinkingLevel, type AgentThinkingLevel } from "@/lib/agent-settings";
-import {
-  PROGRAMMATIC_SMOOTH_IGNORE_MS,
-  RUN_SETTLE_MS,
-  canNestedScrollerConsumeUp,
-  getBottomZoneSize,
-  getDistanceFromBottom,
-  getRealBottomTolerance,
-  getScrollDirection,
-  getTouchUpIntentThreshold,
-  isLayoutDrivenScroll,
-  reduceAutoFollow,
-  shouldShowJumpButton,
-  type AutoFollowMode,
-} from "@/lib/chat-auto-follow";
 import {
   beginAgentRunFinish,
   canFinalizeAgentRun,
@@ -220,31 +207,6 @@ const AGENT_STATE_RECONCILE_MS = 15_000;
 const BASH_STATE_RECONCILE_MS = 1_000;
 // 外部 pi 冷启动（fork 会话首次启动进程）可超 5s；15s 覆盖启动窗口。
 const EVENT_STREAM_CONNECT_TIMEOUT_MS = 15_000;
-// 只有明确向上的键才构成 release 意图；向下滚动的键交给 scroll 几何判定恢复跟随。
-const RELEASE_KEYS = new Set(["ArrowUp", "PageUp", "Home"]);
-
-/**
- * wheel/touch 的向上意图若发生在可自己继续向上滚的嵌套区（代码块、工具输出等），
- * 让嵌套区优先消费，外层不 release。
- */
-function isInsideNestedUpScrollable(target: EventTarget | null, container: HTMLElement): boolean {
-  if (!(target instanceof Element)) return false;
-  let el: Element | null = target;
-  while (el && el !== container) {
-    if (el instanceof HTMLElement) {
-      const overflowY = getComputedStyle(el).overflowY;
-      if (
-        (overflowY === "auto" || overflowY === "scroll")
-        && canNestedScrollerConsumeUp({ scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight })
-      ) {
-        return true;
-      }
-    }
-    el = el.parentElement;
-  }
-  return false;
-}
-
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -434,113 +396,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<boolean> | undefined>(undefined);
   /** ask-user 两步协议暂存：select 的 Other 输入内容，自动响应随后到来的 input 请求 */
   const pendingOtherInputRef = useRef<string | null>(null);
-  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
-  // ── OpenChamber 风格自动跟随（纯状态机见 lib/chat-auto-follow.ts）──────────
-  // 唯一 scrollTop 写入方是本控制器的 pinToBottom；明确例外：顶部懒加载 prepend
-  // 补偿（markExternalScrollWrite）与扩展卡片就近滚动（notifyProgrammaticSmooth），
-  // 二者都通过时间窗让 scroll 事件不参与状态判定。minimap 不需要标记：它产生的
-  // 向上位移本就应该 release、向下进入末端区域本就应该恢复。
-  const autoFollowModeRef = useRef<AutoFollowMode>("following");
-  const [jumpButtonVisible, setJumpButtonVisible] = useState(false);
-  const initialScrollDoneRef = useRef(false);
-  const pendingSendPinRef = useRef(false);
-  /** 分支导航成功应用新 context 后，下一次消息提交 effect 做 instant 钉底（与 send 分离，避免普通增长误触发）。 */
-  const pendingResetPinRef = useRef(false);
-  /** agent 执行结束后的会话整体替换（流式形态 → 文件最终形态）完成时钉底一次；仅 following 时生效，released 阅读不拉回。 */
-  const pendingEndPinRef = useRef(false);
-  const lastScrollTopRef = useRef(0);
-  // 布局调整检测：clientHeight 变化（输入框变高/窗口 resize）触发的 scroll 事件
-  // 不是用户滚动，不得把 following 误判为 released（否则输入框回车后自动滚动停止）。
-  const lastClientHeightRef = useRef(0);
-  const lastScrollHeightRef = useRef(0);
-  const externalWriteUntilRef = useRef(0);
-  const programmaticSmoothUntilRef = useRef(0);
-  const runSettleUntilRef = useRef(0);
-  const wasSessionBusyRef = useRef(false);
-  const isMobileRef = useRef(false);
-  const prefersReducedMotionRef = useRef(false);
-  /**
-   * 稳定容器元素：供 wheel/scroll/RO 绑定，避免 messages.length 每次变化断开重绑。
-   * 通过 layout effect 在 loading→容器出现 / 容器替换时从 scrollContainerRef 同步。
-   */
-  const [scrollContainerEl, setScrollContainerEl] = useState<HTMLDivElement | null>(null);
-  // 渲染期同步（与本文件 handleAgentEventRef 等既有模式一致）：事件回调里读最新断点。
-  isMobileRef.current = opts.isMobile ?? false;
-
-  // ── 自动跟随控制器 ────────────────────────────────────────────────────────
-  // following：内容增长（ResizeObserver，paint 前）instant 钉底，绝不对 token 用 smooth。
-  // released：流式增长、工具块重排、懒加载 prepend 都不回拉；只有用户向下进入
-  // 末端区域或到真实底部才恢复（几何判定在 lib/chat-auto-follow.ts）。
-
-  /** 回到底部按钮可见性：可滚动 + released + 不在末端区域。state 相同则不触发重渲染。 */
-  const updateJumpButtonVisibility = useCallback(() => {
-    const container = scrollContainerRef.current;
-    if (!container) {
-      setJumpButtonVisible(false);
-      return;
-    }
-    const show = shouldShowJumpButton(
-      autoFollowModeRef.current,
-      container.scrollHeight - container.clientHeight,
-      getDistanceFromBottom(container.scrollHeight, container.scrollTop, container.clientHeight),
-      getBottomZoneSize(container.clientHeight, isMobileRef.current),
-    );
-    setJumpButtonVisible((prev) => (prev === show ? prev : show));
-  }, []);
-
-  const applyAutoFollowMode = useCallback((mode: AutoFollowMode) => {
-    if (autoFollowModeRef.current === mode) return;
-    autoFollowModeRef.current = mode;
-    updateJumpButtonVisibility();
-  }, [updateJumpButtonVisibility]);
-
-  /** 唯一钉底写入。instant 直接赋值（RO 回调内 paint 前生效）；smooth 标记程序化窗口。 */
-  const pinToBottom = useCallback((behavior: ScrollBehavior = "instant") => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const top = Math.max(0, container.scrollHeight - container.clientHeight);
-    if (behavior === "smooth") {
-      programmaticSmoothUntilRef.current = Date.now() + PROGRAMMATIC_SMOOTH_IGNORE_MS;
-      container.scrollTo({ top, behavior: "smooth" });
-      return;
-    }
-    // 预登记目标位置，pin 自身的 scroll 事件方向为 down/none，不参与状态判定。
-    lastScrollTopRef.current = top;
-    container.scrollTop = top;
-  }, []);
-
-  /** 发送消息：无论此前是否 released，立即回到 following；pin 等 DOM 就绪后在 messages effect 执行。 */
-  const notifyAutoFollowSend = useCallback(() => {
-    autoFollowModeRef.current = "following";
-    pendingSendPinRef.current = true;
-    setJumpButtonVisible(false);
-  }, []);
-
-  /**
-   * 分支导航 / leaf 切换：在实际开始应用新 context 时调用（fetch 失败不调用）。
-   * 恢复 following、隐藏 jump、标记 pendingReset 钉底，并重新 arm entry-stick 以覆盖异步重排。
-   */
-  const notifyAutoFollowBranchReset = useCallback(() => {
-    autoFollowModeRef.current = "following";
-    pendingResetPinRef.current = true;
-    setJumpButtonVisible(false);
-  }, []);
-
-  /** 回到底部按钮：smooth 到底并恢复 following；prefers-reduced-motion 时 instant。 */
-  const jumpToBottom = useCallback(() => {
-    applyAutoFollowMode(reduceAutoFollow(autoFollowModeRef.current, { kind: "jump-button" }));
-    pinToBottom(prefersReducedMotionRef.current ? "instant" : "smooth");
-  }, [applyAutoFollowMode, pinToBottom]);
-
-  /** 顶部懒加载 prepend 补偿写入前的标记：随后的 scroll 事件不参与状态判定。 */
-  const markExternalScrollWrite = useCallback(() => {
-    externalWriteUntilRef.current = Date.now() + 150;
-  }, []);
-
-  /** 扩展 inline 卡片「附近才滚到可见」的 smooth 滚动：不覆盖用户 released 状态。 */
-  const notifyProgrammaticSmooth = useCallback(() => {
-    programmaticSmoothUntilRef.current = Date.now() + PROGRAMMATIC_SMOOTH_IGNORE_MS;
-  }, []);
+  const {
+    scrollContainerRef,
+    jumpButtonVisible,
+    jumpToBottom,
+    notifyAutoFollowSend,
+    notifyAutoFollowBranchReset,
+    notifyAutoFollowEnd,
+    markExternalScrollWrite,
+    notifyProgrammaticSmooth,
+  } = useChatAutoFollow({
+    isMobile: opts.isMobile ?? false,
+    loading,
+    isNew,
+    messages,
+    agentRunning,
+    bashRunning,
+  });
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
   const newSessionPromotedRef = useRef(false);
   const promptRunIdRef = useRef(0);
@@ -554,12 +426,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   /** prompt 命令已提交成功（防止切走/收尾竞态把已发送消息回滚成失败） */
   const promptSubmittedRef = useRef(false);
 
+  const lastTodosBySessionRef = useRef<{ sessionId: string; todos: readonly import("@/lib/todo-parser").TodoItem[] } | null>(null);
   const todos = useMemo(() => {
     const todoMessages = streamState.streamingMessage
       ? [...messages, streamState.streamingMessage as AgentMessage]
       : messages;
-    return parseTodos(todoMessages);
-  }, [messages, streamState.streamingMessage]);
+    const snapshot = parseLatestTodoSnapshot(todoMessages);
+    const sid = session?.id ?? sessionIdRef.current ?? "";
+    if (snapshot) {
+      lastTodosBySessionRef.current = { sessionId: sid, todos: snapshot };
+      return snapshot;
+    }
+    // 尾页加载可能切掉更早的 todowrite：同会话保留上一合法快照，避免待办面板闪没。
+    const cached = lastTodosBySessionRef.current;
+    return cached && cached.sessionId === sid ? cached.todos : [];
+  }, [messages, streamState.streamingMessage, session?.id]);
 
   // SSE 连接管理交由可注入、可独立测试的 EventStreamManager（见
   // lib/event-stream-manager.ts）。这里只保留 lazy 初始化的 ref 通过引用
@@ -1223,8 +1104,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // end-pin。pendingEndPin 无条件下发，following/released 门禁已在 messages
         // effect 处理，released 阅读不会被拉回。
         if (runId !== promptRunIdRef.current) return;
-        runSettleUntilRef.current = Date.now() + RUN_SETTLE_MS;
-        pendingEndPinRef.current = true;
+        notifyAutoFollowEnd();
       });
       // includeState 已刷新大部分附属字段；applyAgentStateSnapshot 统一补齐
       // loadSession 未覆盖的 isCompacting（其余字段幂等重跑无害）。
@@ -1251,7 +1131,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       onAgentEnd?.();
     }
-  }, [loadSession, onAgentEnd, applyAgentStateSnapshot, dispatch, setAgentRunning, setAgentPhase, setRetryInfo]);
+  }, [loadSession, onAgentEnd, applyAgentStateSnapshot, dispatch, setAgentRunning, setAgentPhase, setRetryInfo, notifyAutoFollowEnd]);
 
   const waitForPromptSettlement = useCallback(async (sid: string, runId?: number) => {
     await delay(PROMPT_SETTLE_INITIAL_DELAY_MS);
@@ -2376,112 +2256,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     onBranchDataChange(data?.tree ?? [], activeLeafId, handleLeafChange, branchActions);
   }, [data?.tree, activeLeafId, handleLeafChange, branchActions, onBranchDataChange]);
 
-  // 同步稳定容器元素：loading 结束 / 空会话→有消息 时容器才挂载；仅元素身份变化才更新 state。
-  useEffect(() => {
-    const el = scrollContainerRef.current;
-    setScrollContainerEl((prev) => (prev === el ? prev : el));
-  }, [loading, messages.length, isNew]);
-
-  // 向上意图监听：wheel deltaY<0、触摸下拉、ArrowUp/PageUp/Home 立即 release。
-  // 发生在可自己向上滚的嵌套区时让嵌套区优先消费，不误 release。
-  // 依赖 scrollContainerEl（非 messages.length），避免每条消息断开重绑。
-  useEffect(() => {
-    const container = scrollContainerEl;
-    if (!container) return;
-
-    const releaseOnUpIntent = () => {
-      applyAutoFollowMode(reduceAutoFollow(autoFollowModeRef.current, { kind: "up-intent" }));
-    };
-
-    const onWheel = (event: WheelEvent) => {
-      if (event.deltaY >= 0) return;
-      if (isInsideNestedUpScrollable(event.target, container)) return;
-      releaseOnUpIntent();
-    };
-
-    let touchStartY: number | null = null;
-    let touchTarget: EventTarget | null = null;
-    const onTouchStart = (event: TouchEvent) => {
-      touchStartY = event.touches[0]?.clientY ?? null;
-      touchTarget = event.target;
-    };
-    const onTouchMove = (event: TouchEvent) => {
-      if (touchStartY === null) return;
-      const y = event.touches[0]?.clientY;
-      if (y === undefined) return;
-      // 手指向下滑动 = 内容向上走 = 向上阅读意图；阈值见 getTouchUpIntentThreshold
-      if (y - touchStartY > getTouchUpIntentThreshold(isMobileRef.current)) {
-        if (!isInsideNestedUpScrollable(touchTarget, container)) releaseOnUpIntent();
-        touchStartY = null;
-      }
-    };
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (!RELEASE_KEYS.has(event.key)) return;
-      if (event.target instanceof Element && event.target.closest("input, textarea, [contenteditable='true']")) return;
-      releaseOnUpIntent();
-    };
-
-    container.addEventListener("wheel", onWheel, { passive: true });
-    container.addEventListener("touchstart", onTouchStart, { passive: true });
-    container.addEventListener("touchmove", onTouchMove, { passive: true });
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      container.removeEventListener("wheel", onWheel);
-      container.removeEventListener("touchstart", onTouchStart);
-      container.removeEventListener("touchmove", onTouchMove);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [scrollContainerEl, applyAutoFollowMode]);
-
-  // scroll 几何判定：程序化写入窗口（prepend 补偿、扩展卡片、smooth pin）内不判状态。
-  // 其余规则：到真实底部恢复；向下进入末端区域恢复；following 中向上位移即 release。
-  useEffect(() => {
-    const container = scrollContainerEl;
-    if (!container) return;
-    lastScrollTopRef.current = container.scrollTop;
-    lastScrollHeightRef.current = container.scrollHeight;
-    lastClientHeightRef.current = container.clientHeight;
-    const onScroll = () => {
-      const now = Date.now();
-      const previousTop = lastScrollTopRef.current;
-      const nextTop = container.scrollTop;
-      lastScrollTopRef.current = nextTop;
-      // 高度基准必须每次都更新：prepend 补偿窗口内也有真实增高，
-      // 若拖到窗口结束后才采样，下一次用户上翻会被当成布局滚动吞掉。
-      const previousClientHeight = lastClientHeightRef.current;
-      const previousScrollHeight = lastScrollHeightRef.current;
-      lastClientHeightRef.current = container.clientHeight;
-      lastScrollHeightRef.current = container.scrollHeight;
-      if (now < externalWriteUntilRef.current || now < programmaticSmoothUntilRef.current) {
-        updateJumpButtonVisibility();
-        return;
-      }
-      // 思考/工具块展开、折叠、流式增高、输入框/视口变化：高度变了就不是用户滚动。
-      // 只认收缩钳位不够——展开时浏览器同样可能把 scrollTop 上移，following 会被误释放。
-      if (isLayoutDrivenScroll({
-        previousScrollHeight,
-        nextScrollHeight: container.scrollHeight,
-        previousClientHeight,
-        nextClientHeight: container.clientHeight,
-      })) {
-        updateJumpButtonVisibility();
-        return;
-      }
-      applyAutoFollowMode(
-        reduceAutoFollow(autoFollowModeRef.current, {
-          kind: "scroll",
-          distance: getDistanceFromBottom(container.scrollHeight, nextTop, container.clientHeight),
-          direction: getScrollDirection(previousTop, nextTop),
-          zoneSize: getBottomZoneSize(container.clientHeight, isMobileRef.current),
-          bottomTolerance: getRealBottomTolerance(isMobileRef.current),
-        }),
-      );
-      updateJumpButtonVisibility();
-    };
-    container.addEventListener("scroll", onScroll, { passive: true });
-    return () => container.removeEventListener("scroll", onScroll);
-  }, [scrollContainerEl, applyAutoFollowMode, updateJumpButtonVisibility]);
 
   // 队列自动投递：agent 执行结束（空闲）且 follow-up 队列非空时自动逐条发出
   const autoFlushingQueueRef = useRef(false);
@@ -2516,86 +2290,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     })();
   }, [agentRunning, bashRunning, updateLocalFollowUp]);
 
-  // agent/bash 结束后的 settle 窗口 + 双 rAF 补钉：
-  // 结束瞬间 process group 从「扁平流式」切到折叠结构、streaming 槽卸除，高度会突变；
-  // 若只 pin 一次且过早，视口会停在中间，表现为「滚动条向上跳很长」。
-  useEffect(() => {
-    const busy = agentRunning || bashRunning;
-    if (wasSessionBusyRef.current && !busy) {
-      runSettleUntilRef.current = Date.now() + RUN_SETTLE_MS;
-      if (autoFollowModeRef.current === "following") {
-        requestAnimationFrame(() => {
-          pinToBottom("instant");
-          requestAnimationFrame(() => {
-            if (autoFollowModeRef.current === "following") pinToBottom("instant");
-          });
-        });
-      }
-    }
-    wasSessionBusyRef.current = busy;
-  }, [agentRunning, bashRunning, pinToBottom]);
-
-  // 内容尺寸监听：following 时布局变化即 instant 钉底（与 chat-auto-follow 注释一致）。
-  // 不再仅限 busy/settle/entry——agent 结束后的滞后重排也要补钉；released 时只更新按钮。
-  // ResizeObserver 回调在 paint 前触发，钉底不产生可见跳动。
-  // 依赖 scrollContainerEl，不因 messages.length 断开重绑。
-  useEffect(() => {
-    const container = scrollContainerEl;
-    if (!container) return;
-    const content = container.firstElementChild;
-    const onResize = () => {
-      lastScrollHeightRef.current = container.scrollHeight;
-      lastClientHeightRef.current = container.clientHeight;
-      const now = Date.now();
-      if (autoFollowModeRef.current !== "following") {
-        updateJumpButtonVisibility();
-        return;
-      }
-      if (now < programmaticSmoothUntilRef.current) return;
-      // prepend 等外部 scrollTop 写入窗口内：只刷新 jump 按钮，禁止钉底覆盖补偿。
-      if (now < externalWriteUntilRef.current) {
-        updateJumpButtonVisibility();
-        return;
-      }
-      pinToBottom("instant");
-      updateJumpButtonVisibility();
-    };
-    const observer = new ResizeObserver(onResize);
-    observer.observe(container);
-    if (content) observer.observe(content);
-    return () => observer.disconnect();
-  }, [scrollContainerEl, pinToBottom, updateJumpButtonVisibility]);
-
-  // DOM 就绪后的 instant pin：发送消息 / 分支重置 / end-pin / 初次打开。
-  // following 期间后续增长由 ResizeObserver 负责。
-  // 依赖 messages（非仅 length）：分支切换条数不变时仍能消费 pendingResetPinRef。
-  useEffect(() => {
-    if (messages.length === 0) return;
-    if (!scrollContainerRef.current) return;
-    if (pendingSendPinRef.current || pendingResetPinRef.current || pendingEndPinRef.current) {
-      pendingSendPinRef.current = false;
-      pendingResetPinRef.current = false;
-      pendingEndPinRef.current = false;
-      initialScrollDoneRef.current = true;
-      // end-pin 尊重 released：执行结束后用户若已向上阅读，绝不强行拉回底部。
-      if (autoFollowModeRef.current === "following") pinToBottom("instant");
-    } else if (!initialScrollDoneRef.current) {
-      initialScrollDoneRef.current = true;
-      pinToBottom("instant");
-    }
-    updateJumpButtonVisibility();
-  }, [messages, pinToBottom, updateJumpButtonVisibility]);
-
-  useEffect(() => {
-    if (typeof window === "undefined" || !window.matchMedia) return;
-    const mql = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const update = () => {
-      prefersReducedMotionRef.current = mql.matches;
-    };
-    update();
-    mql.addEventListener("change", update);
-    return () => mql.removeEventListener("change", update);
-  }, []);
 
   // Load model list
   useEffect(() => {

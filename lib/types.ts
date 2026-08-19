@@ -78,6 +78,8 @@ export interface AssistantMessage {
   stopReason?: string;
   errorMessage?: string;
   timestamp?: number;
+  /** 该条消息产生时的思考档（由会话路径上最近一次 thinking_level_change 投影）。 */
+  thinkingLevel?: string;
   usage?: {
     input: number;
     output: number;

@@ -774,10 +774,23 @@ export function buildSessionContext(
   // fork/navigation targets aligned while preserving compaction ordering.
   const messages: AgentMessage[] = [];
   const entryIds: string[] = [];
+  // 沿路径重放思考档：settings 是路径末尾值，不能套到全部历史消息。
+  const thinkingByEntryId = new Map<string, string>();
+  let replayThinking = "off";
+  for (const entry of path) {
+    if (entry.type === "thinking_level_change" && typeof (entry as { thinkingLevel?: string }).thinkingLevel === "string") {
+      replayThinking = (entry as { thinkingLevel: string }).thinkingLevel;
+    }
+    thinkingByEntryId.set(entry.id, replayThinking);
+  }
   for (const entry of contextEntries) {
     const m = entryToUiMessage(entry, options);
     if (m) {
-      messages.push(m);
+      messages.push(
+        m.role === "assistant"
+          ? { ...m, thinkingLevel: thinkingByEntryId.get(entry.id) ?? replayThinking }
+          : m,
+      );
       entryIds.push(entry.id);
     }
   }
