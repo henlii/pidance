@@ -60,17 +60,20 @@ pidance -p 8080 -H 127.0.0.1
 pidance --no-open
 ```
 
-也可使用 `PORT` 与 `PIDANCE_NO_OPEN=1`。Pidance 默认读取 `~/.pi/agent`；可通过 `PI_CODING_AGENT_DIR` 指向其他 Pi agent 目录。
+也可使用 `PORT` 与 `PIDANCE_NO_OPEN=1`。监听端口同样可在 **设置 → 通用 → 服务与远程访问** 中配置
+（默认 31415，重启后生效）。Pidance 默认读取 `~/.pi/agent`；可通过 `PI_CODING_AGENT_DIR` 指向其他 Pi agent 目录。
 
 ### 远程或局域网访问
 
-绑定 `0.0.0.0`、`::`、局域网 IP 或其他非回环地址时，必须设置认证密码，否则 CLI 会拒绝启动：
+默认仅绑定 `127.0.0.1`（本机），无需密码。推荐在 **设置 → 通用 → 服务与远程访问** 中设置密码并
+开启「远程访问」开关（监听 `0.0.0.0`，重启后生效）；也可用 CLI 显式绑定并设置密码：
 
 ```bash
 PIDANCE_PASSWORD='请使用强密码' pidance --hostname 0.0.0.0
 ```
 
-仅本机访问时建议显式绑定 `127.0.0.1`。兼容旧变量 `PI_WEB_PASSWORD`，新部署优先使用 `PIDANCE_PASSWORD`。
+绑定 `0.0.0.0`、`::`、局域网 IP 或其他非回环地址且未设置密码时，CLI 会拒绝启动
+（fail-closed）。兼容旧变量 `PI_WEB_PASSWORD`，新部署优先使用 `PIDANCE_PASSWORD`。
 
 ### HTTP 代理
 

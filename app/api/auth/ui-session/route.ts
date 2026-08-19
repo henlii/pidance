@@ -1,19 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
+import { randomBytes } from "node:crypto";
 import { resolvePassword, passwordEnabled } from "@/lib/request-guard";
+import { readServerConfig, verifyConfigPassword } from "@/lib/pidance-server-config";
 import {
   buildSetCookieHeader,
   checkLoginRateLimit,
   clearLoginFailures,
   clientIpFromHeaders,
+  deviceLabelFromUserAgent,
   getOrCreateJwtSecret,
   isSecureRequest,
+  isUiSessionActive,
   parseCookieValue,
   recordLoginFailure,
   resolveSessionTtlMs,
+  saveUiSessionDevice,
   signUiSessionJwt,
   UI_SESSION_COOKIE_NAME,
   verifyPassword,
-  verifyUiSessionJwt,
 } from "@/lib/ui-session";
 
 export const dynamic = "force-dynamic";
@@ -35,12 +39,11 @@ function clearCookieHeader(req: NextRequest): string {
 
 /** GET：会话状态（未登录 401；未设密码时 authenticated:true, passwordRequired:false）。 */
 export async function GET(req: NextRequest) {
-  if (!passwordEnabled(process.env)) {
+  if (!passwordEnabled(process.env, readServerConfig())) {
     return NextResponse.json({ authenticated: true, passwordRequired: false });
   }
   const secret = getOrCreateJwtSecret(process.env);
-  const token = parseCookieValue(req.headers.get("cookie"), UI_SESSION_COOKIE_NAME);
-  if (token && verifyUiSessionJwt(token, secret)) {
+  if (isUiSessionActive(req.headers.get("cookie"), secret)) {
     return NextResponse.json({ authenticated: true, passwordRequired: true });
   }
   return NextResponse.json(
@@ -49,13 +52,15 @@ export async function GET(req: NextRequest) {
   );
 }
 
-/** POST：登录 { password, trustDevice? }。 */
+/** POST：登录 { password, trustDevice? }。env 密码优先，回退配置文件哈希。 */
 export async function POST(req: NextRequest) {
-  if (!passwordEnabled(process.env)) {
+  const config = readServerConfig();
+  if (!passwordEnabled(process.env, config)) {
     return NextResponse.json({ authenticated: true, passwordRequired: false });
   }
   const expected = resolvePassword(process.env);
-  if (!expected) {
+  const storedHash = expected ? null : config.passwordHash;
+  if (!expected && !storedHash) {
     return NextResponse.json({ error: "Password not configured" }, { status: 500 });
   }
 
@@ -85,7 +90,8 @@ export async function POST(req: NextRequest) {
     trustDevice?: unknown;
   } | null;
   const candidate = typeof body?.password === "string" ? body.password : "";
-  if (!verifyPassword(candidate, expected)) {
+  const valid = expected ? verifyPassword(candidate, expected) : verifyConfigPassword(candidate, storedHash!);
+  if (!valid) {
     recordLoginFailure(rateKey);
     const res = NextResponse.json(
       { error: "Invalid credentials", authenticated: false },
@@ -99,7 +105,15 @@ export async function POST(req: NextRequest) {
   const trustDevice = body?.trustDevice === true;
   const ttlMs = resolveSessionTtlMs(trustDevice);
   const secret = getOrCreateJwtSecret(process.env);
-  const token = signUiSessionJwt(secret, ttlMs);
+  // 带 jti 的会话注册到设备列表（登录管理可逐设备删除）
+  const jti = randomBytes(16).toString("hex");
+  const token = signUiSessionJwt(secret, ttlMs, Date.now(), jti);
+  saveUiSessionDevice({
+    id: jti,
+    label: deviceLabelFromUserAgent(req.headers.get("user-agent")),
+    createdAt: Date.now(),
+    expiresAt: Date.now() + ttlMs,
+  });
   const res = NextResponse.json(
     { authenticated: true, passwordRequired: true, trustDevice },
     { status: 200, headers: { "Cache-Control": "no-store" } },
@@ -111,7 +125,7 @@ export async function POST(req: NextRequest) {
 /** DELETE：登出，清除 Cookie。 */
 export async function DELETE(req: NextRequest) {
   const res = NextResponse.json(
-    { authenticated: false, passwordRequired: passwordEnabled(process.env) },
+    { authenticated: false, passwordRequired: passwordEnabled(process.env, readServerConfig()) },
     { headers: { "Cache-Control": "no-store" } },
   );
   res.headers.set("Set-Cookie", clearCookieHeader(req));

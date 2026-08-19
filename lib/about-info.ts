@@ -61,7 +61,7 @@ export function buildAboutInfo(pkg: unknown): AboutInfo {
 
   const repository = normalizeRepositoryUrl(record.repository);
 
-  // 内置 Pi SDK 版本：从 dependencies 精确读取（P2 起为必需依赖 0.83.0）
+  // 内置 Pi SDK 版本：从 dependencies 精确读取（SDK 为必需运行时依赖，基线见 AGENTS.md）
   const piSdkVersion = readDependencyVersion(record, "@earendil-works/pi-coding-agent");
 
   return {

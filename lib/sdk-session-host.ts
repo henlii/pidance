@@ -687,7 +687,16 @@ export class SdkSessionHost {
       ),
       extensionWidgets: Array.from(
         this.extensionUi?.widgets.entries() ?? [],
-        ([key, content]) => ({ key, content }),
+        ([key, content]) => {
+          // 热 state 投影与 SSE setWidget 事件对齐（{key, lines, placement}）；
+          // adapter 内部 Map value 为 {lines, placement}，含未知类型，逐字段窄化。
+          const widget = content as { lines?: unknown; placement?: string } | null;
+          return {
+            key,
+            lines: Array.isArray(widget?.lines) ? (widget.lines as string[]) : [],
+            placement: widget?.placement === "belowEditor" ? "belowEditor" : "aboveEditor",
+          };
+        },
       ),
       pendingExtensionRequests: Array.from(
         this.extensionUi?.pendingSnapshot.values() ?? [],

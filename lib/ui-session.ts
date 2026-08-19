@@ -153,20 +153,25 @@ export function rotateJwtSecret(
   return secret;
 }
 
-export function signUiSessionJwt(secret: string, ttlMs: number, nowMs = Date.now()): string {
+export function signUiSessionJwt(secret: string, ttlMs: number, nowMs = Date.now(), jti?: string): string {
   const iat = Math.floor(nowMs / 1000);
   const exp = iat + Math.max(1, Math.floor(ttlMs / 1000));
   const header = b64urlJson({ alg: "HS256", typ: "JWT" });
-  const payload = b64urlJson({ type: "ui-session", iat, exp });
+  const payload = b64urlJson({ type: "ui-session", iat, exp, ...(jti ? { jti } : {}) });
   const data = `${header}.${payload}`;
   const sig = createHmac("sha256", secret).update(data).digest();
   return `${data}.${b64url(sig)}`;
 }
 
-export function verifyUiSessionJwt(token: string, secret: string, nowMs = Date.now()): boolean {
-  if (!token || !secret) return false;
+/** 解析并验签 UI 会话 JWT，返回有效性与 jti（设备 id；旧 token 无 jti）。 */
+export function readUiSessionJwt(
+  token: string | null,
+  secret: string,
+  nowMs = Date.now(),
+): { valid: boolean; jti: string | null } {
+  if (!token || !secret) return { valid: false, jti: null };
   const parts = token.split(".");
-  if (parts.length !== 3) return false;
+  if (parts.length !== 3) return { valid: false, jti: null };
   const [header, payload, sig] = parts;
   const data = `${header}.${payload}`;
   const expected = createHmac("sha256", secret).update(data).digest();
@@ -174,20 +179,27 @@ export function verifyUiSessionJwt(token: string, secret: string, nowMs = Date.n
   try {
     actual = Buffer.from(sig, "base64url");
   } catch {
-    return false;
+    return { valid: false, jti: null };
   }
-  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return false;
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    return { valid: false, jti: null };
+  }
   try {
     const body = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as {
       type?: string;
       exp?: number;
+      jti?: string;
     };
-    if (body.type !== "ui-session") return false;
-    if (typeof body.exp !== "number" || body.exp * 1000 <= nowMs) return false;
-    return true;
+    if (body.type !== "ui-session") return { valid: false, jti: null };
+    if (typeof body.exp !== "number" || body.exp * 1000 <= nowMs) return { valid: false, jti: null };
+    return { valid: true, jti: typeof body.jti === "string" && body.jti.length > 0 ? body.jti : null };
   } catch {
-    return false;
+    return { valid: false, jti: null };
   }
+}
+
+export function verifyUiSessionJwt(token: string, secret: string, nowMs = Date.now()): boolean {
+  return readUiSessionJwt(token, secret, nowMs).valid;
 }
 
 export function verifyPassword(candidate: string, expected: string): boolean {
@@ -266,4 +278,169 @@ export function clientIpFromHeaders(headers: {
   const real = headers["x-real-ip"];
   if (typeof real === "string" && real.trim()) return real.trim().replace(/^::ffff:/, "");
   return "unknown";
+}
+
+// —— UI 会话设备（设置 → 通用 → 登录管理）——
+
+/**
+ * 已登录设备注册表：~/.pi/agent/pidance-ui-sessions.json（与 JWT secret 同目录）。
+ * 结构：{ devices: [{ id: <jti>, label, createdAt, expiresAt }] }；0600 原子写。
+ * 登录签发带 jti 的会话时注册；删除设备即从注册表移除，该 cookie 随即失效（middleware 每请求校验）。
+ * 过期设备惰性清理（读写时过滤）；损坏/缺失降级为空列表。
+ */
+export const UI_SESSIONS_FILE_NAME = "pidance-ui-sessions.json";
+
+export type UiSessionDevice = {
+  id: string;
+  label: string;
+  createdAt: number;
+  expiresAt: number;
+};
+
+export type DeviceFileStore = {
+  existsSync: (p: string) => boolean;
+  readFileSync: (p: string, enc: "utf8") => string;
+  writeFileSync: (p: string, data: string, opts: { mode: number }) => void;
+  renameSync: (from: string, to: string) => void;
+  mkdirSync: (p: string, opts: { recursive: boolean }) => void;
+};
+
+const defaultDeviceStore: DeviceFileStore = {
+  existsSync: (p) => fs.existsSync(p),
+  readFileSync: (p, enc) => fs.readFileSync(p, enc),
+  writeFileSync: (p, data, opts) => fs.writeFileSync(p, data, opts),
+  renameSync: (from, to) => fs.renameSync(from, to),
+  mkdirSync: (p, opts) => { fs.mkdirSync(p, opts); },
+};
+
+export function uiSessionsFilePath(agentDir?: string): string {
+  const root = agentDir
+    ?? process.env.PI_CODING_AGENT_DIR
+    ?? path.join(homedir(), ".pi", "agent");
+  return path.join(root, UI_SESSIONS_FILE_NAME);
+}
+
+function parseDevices(raw: string, nowMs: number): UiSessionDevice[] {
+  const parsed = JSON.parse(raw) as { devices?: unknown };
+  if (!parsed || !Array.isArray(parsed.devices)) return [];
+  const out: UiSessionDevice[] = [];
+  for (const d of parsed.devices) {
+    if (
+      d && typeof d === "object"
+      && typeof (d as UiSessionDevice).id === "string"
+      && typeof (d as UiSessionDevice).label === "string"
+      && typeof (d as UiSessionDevice).createdAt === "number"
+      && typeof (d as UiSessionDevice).expiresAt === "number"
+      && (d as UiSessionDevice).expiresAt > nowMs
+    ) {
+      out.push(d as UiSessionDevice);
+    }
+  }
+  return out;
+}
+
+function writeDevices(devices: UiSessionDevice[], filePath: string, store: DeviceFileStore): void {
+  store.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.tmp-${process.pid}`;
+  store.writeFileSync(tmp, JSON.stringify({ devices }, null, 2), { mode: 0o600 });
+  store.renameSync(tmp, filePath);
+}
+
+/** 读取有效设备（过滤已过期）；缺失/损坏 → 空列表。 */
+export function readUiSessionDevices(
+  filePath = uiSessionsFilePath(),
+  store: DeviceFileStore = defaultDeviceStore,
+  nowMs = Date.now(),
+): UiSessionDevice[] {
+  try {
+    if (!store.existsSync(filePath)) return [];
+    return parseDevices(store.readFileSync(filePath, "utf8"), nowMs);
+  } catch {
+    return [];
+  }
+}
+
+/** 注册设备（登录成功后）。 */
+export function saveUiSessionDevice(
+  device: UiSessionDevice,
+  filePath = uiSessionsFilePath(),
+  store: DeviceFileStore = defaultDeviceStore,
+  nowMs = Date.now(),
+): void {
+  const devices = readUiSessionDevices(filePath, store, nowMs).filter((d) => d.id !== device.id);
+  devices.push(device);
+  writeDevices(devices, filePath, store);
+}
+
+/** 删除设备（登出该设备）。 */
+export function removeUiSessionDevice(
+  id: string,
+  filePath = uiSessionsFilePath(),
+  store: DeviceFileStore = defaultDeviceStore,
+  nowMs = Date.now(),
+): void {
+  const devices = readUiSessionDevices(filePath, store, nowMs).filter((d) => d.id !== id);
+  writeDevices(devices, filePath, store);
+}
+
+/** 清空设备注册表（改密码轮换 secret 后所有旧会话已失效，同步清列表）。 */
+export function clearUiSessionDevices(
+  filePath = uiSessionsFilePath(),
+  store: DeviceFileStore = defaultDeviceStore,
+): void {
+  writeDevices([], filePath, store);
+}
+
+/** 设备是否有效（登录校验用）。 */
+export function hasUiSessionDevice(
+  id: string,
+  filePath = uiSessionsFilePath(),
+  store: DeviceFileStore = defaultDeviceStore,
+  nowMs = Date.now(),
+): boolean {
+  if (!id) return false;
+  return readUiSessionDevices(filePath, store, nowMs).some((d) => d.id === id);
+}
+
+/** 从 User-Agent 生成设备标签（浏览器 + 系统），不可解析时回退 "Unknown device"。 */
+export function deviceLabelFromUserAgent(ua: string | null | undefined): string {
+  if (!ua) return "Unknown device";
+  const browser =
+    /Edg\/(\d+)/.exec(ua)?.[1]
+    ?? /Chrome\/(\d+)/.exec(ua)?.[1]
+    ?? /Firefox\/(\d+)/.exec(ua)?.[1]
+    ?? /Safari\/(\d+)/.exec(ua)?.[1];
+  const browserName = browser
+    ? (ua.includes("Edg/") ? "Edge" : ua.includes("Chrome/") ? "Chrome" : ua.includes("Firefox/") ? "Firefox" : "Safari")
+    : "Browser";
+  const os =
+    /Windows NT (\d+\.?\d*)/.exec(ua)
+    ? "Windows"
+    : /Mac OS X/.test(ua)
+      ? "macOS"
+      : /Android/.test(ua)
+        ? "Android"
+        : /iPhone|iPad|iPod/.test(ua)
+          ? "iOS"
+          : /Linux/.test(ua)
+            ? "Linux"
+            : null;
+  const label = os ? `${browserName} · ${os}` : browserName;
+  return label.length > 60 ? `${label.slice(0, 57)}...` : label;
+}
+
+/** Cookie 会话是否有效（验签 + 设备注册校验；无 jti 的旧 cookie 兼容放行）。filePath/store 可注入以便测试。 */
+export function isUiSessionActive(
+  cookieHeader: string | null | undefined,
+  secret: string,
+  nowMs = Date.now(),
+  filePath?: string,
+  store?: DeviceFileStore,
+): boolean {
+  const token = parseCookieValue(cookieHeader, UI_SESSION_COOKIE_NAME);
+  if (!token) return false;
+  const { valid, jti } = readUiSessionJwt(token, secret, nowMs);
+  if (!valid) return false;
+  if (!jti) return true;
+  return hasUiSessionDevice(jti, filePath, store, nowMs);
 }

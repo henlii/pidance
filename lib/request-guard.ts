@@ -4,7 +4,9 @@
  *   （防 DNS rebinding）
  * - CSRF：API 请求校验 origin/sec-fetch-site（cross-site 拒绝、origin 须与 Host 同源；
  *   会话导出的 navigate GET 豁免；无跨站信号的非浏览器客户端放行）
- * - 可选认证：设置 PIDANCE_PASSWORD（优先，兼容旧变量 PI_WEB_PASSWORD）即启用
+ * - 可选认证：设置 PIDANCE_PASSWORD（优先，兼容旧变量 PI_WEB_PASSWORD）即启用；
+ *   未设 env 密码时回退 ~/.pi/agent/pidance-server.json 中保存的 scrypt 密码哈希
+ *   （设置 → 通用 中配置；见 lib/pidance-server-config.ts）
  *   （#18）UI 会话 Cookie（pidance_ui_session JWT）或 Basic Auth（用户名固定 "pi"）
  * - 兜底认证：未设置密码时仅放行回环（loopback）请求；非回环请求一律 auth-required，
  *   防止服务误绑 0.0.0.0 时局域网/公网匿名调用（P0 fail-closed，即使 CLI 门禁被绕过）
@@ -14,10 +16,16 @@ import { createHash, timingSafeEqual } from "crypto";
 import { isIP } from "net";
 import {
   getOrCreateJwtSecret,
+  hasUiSessionDevice,
   parseCookieValue,
+  readUiSessionJwt,
   UI_SESSION_COOKIE_NAME,
-  verifyUiSessionJwt,
 } from "./ui-session";
+import {
+  passwordHashConfigured,
+  verifyConfigPassword,
+  type ServerConfig,
+} from "./pidance-server-config";
 
 export const EXPORT_NAVIGATE_RE = /^\/api\/sessions\/[^/]+\/export$/;
 /** 未登录也可访问的 API（登录/会话状态）。 */
@@ -125,8 +133,11 @@ export function resolvePassword(env: Record<string, string | undefined>): string
   return typeof p === "string" && p.length > 0 ? p : null;
 }
 
-export function passwordEnabled(env: Record<string, string | undefined>): boolean {
-  return resolvePassword(env) !== null;
+export function passwordEnabled(
+  env: Record<string, string | undefined>,
+  config?: ServerConfig | null,
+): boolean {
+  return resolvePassword(env) !== null || passwordHashConfigured(config);
 }
 
 function sha256(input: string): Buffer {
@@ -137,10 +148,15 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(sha256(a), sha256(b));
 }
 
-/** Basic Auth 校验：Authorization: Basic base64("pi:<password>")。 */
-export function checkBasicAuth(req: RequestGuardHeaders, env: Record<string, string | undefined>): boolean {
-  const password = resolvePassword(env);
-  if (!passwordEnabled(env) || !password) return false;
+/** Basic Auth 校验：Authorization: Basic base64("pi:<password>")。env 密码优先，回退配置哈希。 */
+export function checkBasicAuth(
+  req: RequestGuardHeaders,
+  env: Record<string, string | undefined>,
+  config?: ServerConfig | null,
+): boolean {
+  const envPassword = resolvePassword(env);
+  const storedHash = config?.passwordHash ?? null;
+  if (!envPassword && !storedHash) return false;
   const auth = req.authorization;
   if (!auth) return false;
   const match = /^Basic\s+(\S+)$/i.exec(auth);
@@ -155,20 +171,35 @@ export function checkBasicAuth(req: RequestGuardHeaders, env: Record<string, str
   }
   const idx = decoded.indexOf(":");
   if (idx === -1) return false;
-  return safeEqual(decoded.slice(0, idx), "pi") && safeEqual(decoded.slice(idx + 1), password);
+  if (!safeEqual(decoded.slice(0, idx), "pi")) return false;
+  const candidate = decoded.slice(idx + 1);
+  return envPassword ? safeEqual(candidate, envPassword) : verifyConfigPassword(candidate, storedHash!);
 }
 
-/** UI 会话 Cookie 校验（#18）。jwtSecret 可注入以便测试。 */
+/** 设备注册表查询接口（middleware 用默认实现读文件；测试可注入内存实现）。 */
+export type UiSessionDeviceStore = { has: (id: string) => boolean };
+
+/**
+ * UI 会话 Cookie 校验（#18 + 设备管理）。jwtSecret / deviceStore 可注入以便测试。
+ * 带 jti 的新会话必须仍在设备注册表中（删除设备即失效）；无 jti 的旧会话仅验签兼容放行。
+ */
 export function checkUiSessionCookie(
   req: RequestGuardHeaders,
   env: Record<string, string | undefined>,
   jwtSecret?: string,
+  config?: ServerConfig | null,
+  deviceStore?: UiSessionDeviceStore | null,
 ): boolean {
-  if (!passwordEnabled(env)) return false;
+  if (!passwordEnabled(env, config)) return false;
   const token = parseCookieValue(req.cookie, UI_SESSION_COOKIE_NAME);
   if (!token) return false;
   const secret = jwtSecret ?? getOrCreateJwtSecret(env);
-  return verifyUiSessionJwt(token, secret);
+  const { valid, jti } = readUiSessionJwt(token, secret);
+  if (!valid) return false;
+  if (!jti) return true;
+  if (deviceStore === null) return true; // 显式跳过设备校验（内部/测试）
+  const store = deviceStore ?? { has: (id) => hasUiSessionDevice(id) };
+  return store.has(jti);
 }
 
 /** Cookie 会话或 Basic 任一通过即认证成功。 */
@@ -176,8 +207,13 @@ export function checkAuthenticated(
   req: RequestGuardHeaders,
   env: Record<string, string | undefined>,
   jwtSecret?: string,
+  config?: ServerConfig | null,
+  deviceStore?: UiSessionDeviceStore | null,
 ): boolean {
-  return checkUiSessionCookie(req, env, jwtSecret) || checkBasicAuth(req, env);
+  return (
+    checkUiSessionCookie(req, env, jwtSecret, config, deviceStore)
+    || checkBasicAuth(req, env, config)
+  );
 }
 
 export function isPublicAuthApi(pathname: string): boolean {
@@ -190,7 +226,7 @@ export type GuardVerdict = "ok" | "untrusted-host" | "csrf" | "auth-required";
 export function guardRequest(
   req: RequestGuardHeaders,
   env: Record<string, string | undefined>,
-  options?: { jwtSecret?: string },
+  options?: { jwtSecret?: string; config?: ServerConfig | null; deviceStore?: UiSessionDeviceStore | null },
 ): GuardVerdict {
   if (!isTrustedHost(req.host, env)) return "untrusted-host";
   const isApi = req.pathname === "/api" || req.pathname.startsWith("/api/");
@@ -205,8 +241,10 @@ export function guardRequest(
     }
     return "ok";
   }
-  if (passwordEnabled(env)) {
-    if (!checkAuthenticated(req, env, options?.jwtSecret)) return "auth-required";
+  if (passwordEnabled(env, options?.config)) {
+    if (!checkAuthenticated(req, env, options?.jwtSecret, options?.config, options?.deviceStore)) {
+      return "auth-required";
+    }
   } else if (!isLoopbackHost(req.host)) {
     // fail-closed 兜底：未设置密码时仅放行回环请求；非回环请求一律要求认证，
     // 即使 CLI 启动门禁被绕过（如直接 next start -H 0.0.0.0）也保护 Agent API。

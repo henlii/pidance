@@ -16,5 +16,7 @@ export async function register(): Promise<void> {
       "[pidance] 未解析到包内 Pi CLI（@earendil-works/pi-coding-agent/dist/cli.js）。subagent 可能失败。",
     );
   }
-  console.log("[pidance] 主 Agent runtime: 同进程 Pi SDK 0.83.0");
+  // 版本号与 SDK 基线同步（AGENTS.md 锁定 0.84.1；升级 SDK 时同步此日志）。
+  // 不用 require(package.json)：webpack 产物中无法解析包外模块路径。
+  console.log("[pidance] 主 Agent runtime: 同进程 Pi SDK 0.84.1");
 }

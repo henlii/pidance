@@ -1,5 +1,6 @@
 "use client";
 
+import { createPortal } from "react-dom";
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
@@ -42,11 +43,44 @@ export function ProjectRowMenu({ open, onOpenChange, projectName, onEdit, onClos
   const wrapperRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState<{ top: number; right: number } | null>(null);
+  const anchorRef = useRef<{ top: number; bottom: number; right: number } | null>(null);
 
   const closeMenu = useCallback((restoreFocus: boolean) => {
     onOpenChange(false);
     if (restoreFocus) triggerRef.current?.focus();
   }, [onOpenChange]);
+
+  const openMenu = useCallback(() => {
+    if (open) {
+      closeMenu(true);
+      return;
+    }
+    const rect = triggerRef.current?.getBoundingClientRect();
+    if (rect) {
+      // 与 SessionRowMenu 同一适配：项目行可能在侧栏滚动容器深处，absolute
+      // 向下展开会被容器裁切/超出视口；改为 fixed，先按向下展开定位，
+      // 渲染后按实际菜单高度校正（估算高度会造成翻转位置偏差）。
+      anchorRef.current = { top: rect.top, bottom: rect.bottom, right: rect.right };
+      setPosition({ top: rect.bottom + 4, right: Math.max(8, window.innerWidth - rect.right) });
+    }
+    onOpenChange(true);
+  }, [open, closeMenu, onOpenChange]);
+
+  // 渲染后按实际菜单高度校正：底部空间不足时向上翻转（offsetHeight 不受
+  // 展开动画 transform 影响，避免 scale 导致测量偏差）。
+  useEffect(() => {
+    if (!open || !anchorRef.current) return;
+    const frame = requestAnimationFrame(() => {
+      const menu = menuRef.current;
+      const anchor = anchorRef.current;
+      if (!menu || !anchor) return;
+      const height = menu.offsetHeight;
+      if (anchor.bottom + 4 + height <= window.innerHeight) return;
+      setPosition((prev) => (prev ? { ...prev, top: Math.max(8, anchor.top - height - 4) } : prev));
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [open]);
 
   // 点击外部关闭（不抢焦点：点击目标自然获得焦点）
   useEffect(() => {
@@ -91,39 +125,42 @@ export function ProjectRowMenu({ open, onOpenChange, projectName, onEdit, onClos
         buttonRef={triggerRef}
         onClick={(e) => {
           e.stopPropagation();
-          onOpenChange(!open);
+          openMenu();
         }}
       >
         <MoreVerticalIcon size={14} />
       </SidebarIconButton>
-      <AnimatedDropdown
-        open={open}
-        style={{
-          position: "absolute",
-          top: "calc(100% + 4px)",
-          right: 0,
-          zIndex: 100,
-          background: "var(--bg-elevated)",
-          border: "1px solid var(--border)",
-          borderRadius: "var(--radius-md)",
-          boxShadow: "var(--shadow-float)",
-          overflow: "hidden",
-          minWidth: 148,
-        }}
-      >
-        <div ref={menuRef} role="menu" aria-label={t("sidebar_projectMenuLabel", { project: projectName })}>
-          <ProjectMenuItem
-            icon={<PencilIcon size={13} />}
-            label={t("sidebar_editProject")}
-            onClick={() => { closeMenu(true); onEdit(); }}
-          />
-          <ProjectMenuItem
-            icon={<XIcon size={13} />}
-            label={t("sidebar_closeProject")}
-            onClick={() => { closeMenu(true); onClose(); }}
-          />
-        </div>
-      </AnimatedDropdown>
+      {open && createPortal(
+        <AnimatedDropdown
+          open={open}
+          style={{
+            position: "fixed",
+            top: position?.top ?? 0,
+            right: position?.right ?? 0,
+            zIndex: 600,
+            background: "var(--bg-elevated)",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-md)",
+            boxShadow: "var(--shadow-float)",
+            overflow: "hidden",
+            minWidth: 148,
+          }}
+        >
+          <div ref={menuRef} role="menu" aria-label={t("sidebar_projectMenuLabel", { project: projectName })}>
+            <ProjectMenuItem
+              icon={<PencilIcon size={13} />}
+              label={t("sidebar_editProject")}
+              onClick={() => { closeMenu(true); onEdit(); }}
+            />
+            <ProjectMenuItem
+              icon={<XIcon size={13} />}
+              label={t("sidebar_closeProject")}
+              onClick={() => { closeMenu(true); onClose(); }}
+            />
+          </div>
+        </AnimatedDropdown>,
+        document.body,
+      )}
     </div>
   );
 }
@@ -132,10 +169,25 @@ export function SessionRowMenu({ session, title, canRename, canDelete, canArchiv
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<{ top: number; right: number } | null>(null);
+  const anchorRef = useRef<{ top: number; bottom: number; right: number } | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const label = t("sidebar_sessionMenuLabel", { session: title });
   const close = useCallback((focus = false) => { setOpen(false); if (focus) triggerRef.current?.focus(); }, []);
+
+  // 渲染后按实际菜单高度校正：底部空间不足时向上翻转（估算高度会造成位置偏差）。
+  useEffect(() => {
+    if (!open || !anchorRef.current) return;
+    const frame = requestAnimationFrame(() => {
+      const menu = menuRef.current;
+      const anchor = anchorRef.current;
+      if (!menu || !anchor) return;
+      const height = menu.offsetHeight;
+      if (anchor.bottom + 4 + height <= window.innerHeight) return;
+      setPosition((prev) => (prev ? { ...prev, top: Math.max(8, anchor.top - height - 4) } : prev));
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -155,12 +207,10 @@ export function SessionRowMenu({ session, title, canRename, canDelete, canArchiv
     if (open) { close(); return; }
     const rect = triggerRef.current?.getBoundingClientRect();
     if (rect) {
-      // 菜单靠近视口底部时向上翻转，避免最后几行的删除项被裁切。
-      const estimatedMenuHeight = 212;
-      const top = rect.bottom + 4 + estimatedMenuHeight <= window.innerHeight
-        ? rect.bottom + 4
-        : Math.max(8, rect.top - estimatedMenuHeight - 4);
-      setPosition({ top, right: Math.max(8, window.innerWidth - rect.right) });
+      // fixed 定位 + 渲染后按实际高度翻转校正（见上方 effect），
+      // 避免最后几行的删除项被裁切。
+      anchorRef.current = { top: rect.top, bottom: rect.bottom, right: rect.right };
+      setPosition({ top: rect.bottom + 4, right: Math.max(8, window.innerWidth - rect.right) });
     }
     setOpen(true);
   };
@@ -173,7 +223,8 @@ export function SessionRowMenu({ session, title, canRename, canDelete, canArchiv
 
   return <div style={{ display: "flex", flexShrink: 0 }} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape" && open) { event.preventDefault(); close(true); } }}>
     <SidebarIconButton label={label} active={open} expanded={open} haspopup="menu" hoverReveal buttonRef={triggerRef} onClick={(event) => { event.stopPropagation(); openMenu(); }}><MoreVerticalIcon size={14}/></SidebarIconButton>
-    {open && position && <div ref={menuRef} role="menu" aria-label={label} style={{ position: "fixed", top: position.top, right: position.right, zIndex: 600, minWidth: 190, padding: 4, background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: "var(--radius-md)", boxShadow: "var(--shadow-float)" }}>
+    {open && position && createPortal(
+      <div ref={menuRef} role="menu" aria-label={label} style={{ position: "fixed", top: position.top, right: position.right, zIndex: 600, minWidth: 190, padding: 4, background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: "var(--radius-md)", boxShadow: "var(--shadow-float)" }}>
       {canRename && <button type="button" role="menuitem" style={itemStyle} {...hover} onClick={() => { close(); onRename(); }}>{menuIcon(<PencilIcon size={13}/>)}{t("sidebar_renameSession")}</button>}
       <button type="button" role="menuitem" style={itemStyle} {...hover} onClick={() => { close(); void copyText(session.id); }}>{menuIcon(<svg {...iconProps(13)}><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>)}{t("sidebar_copySessionId")}</button>
       {!session.subagent && onTogglePin && <button type="button" role="menuitem" style={itemStyle} {...hover} onClick={() => { close(); onTogglePin(); }}>{menuIcon(<PinIcon size={13}/>)}{t(isPinned ? "sidebar_unpinSession" : "sidebar_pinSession")}</button>}
@@ -181,6 +232,8 @@ export function SessionRowMenu({ session, title, canRename, canDelete, canArchiv
       {canExportSession(session) && <><a role="menuitem" href={buildSessionExportHtmlHref(session.id)} download style={itemStyle} {...hover} onClick={() => close()}>{menuIcon(<svg {...iconProps(13)}><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>)}{t("sidebar_exportSessionHtml")}</a>
       <a role="menuitem" href={buildSessionExportJsonlHref(session.id, null)} download style={itemStyle} {...hover} onClick={() => close()}>{menuIcon(<svg {...iconProps(13)}><path d="M8 3H7a2 2 0 0 0-2 2v4a2 2 0 0 1-2 2 2 2 0 0 1 2 2v4a2 2 0 0 0 2 2h1"/><path d="M16 21h1a2 2 0 0 0 2-2v-4a2 2 0 0 1 2-2 2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1"/></svg>)}{t("sidebar_exportSessionJsonl")}</a></>}
       {canDelete && <><div style={{ height: 1, margin: "4px 6px", background: "var(--border)" }}/><button type="button" role="menuitem" style={{ ...itemStyle, color: "var(--status-danger)" }} onClick={() => { close(); onDelete(); }}>{menuIcon(<TrashIcon size={13}/>)}{t("sidebar_deleteSession")}</button></>}
-    </div>}
+      </div>,
+      document.body,
+    )}
   </div>;
 }

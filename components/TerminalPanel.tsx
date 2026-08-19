@@ -36,12 +36,16 @@ export function TerminalPanel() {
   const sendRef = useRef<(data: string) => boolean>(() => false);
   const [status, setStatus] = useState<PtyStatus>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [queueNotice, setQueueNotice] = useState(false);
   const [pad, setPad] = useState<TerminalPadConfig>(() => loadTerminalPadConfig());
   const [configOpen, setConfigOpen] = useState(false);
   const [kbInset, setKbInset] = useState(0);
   const [lastSent, setLastSent] = useState<string | null>(null);
   const [commandDraft, setCommandDraft] = useState("");
   const composingRef = useRef(false);
+  // 主 effect（mount 一次性）内的错误文案需要最新 t；ref 避免加入依赖重建终端。
+  const tRef = useRef(t);
+  tRef.current = t;
 
   const send = useCallback((data: string) => {
     sendRef.current(data);
@@ -94,6 +98,7 @@ export function TerminalPanel() {
     let socket: WebSocket | null = null;
     let retryTimer: number | null = null;
     const queue: string[] = [];
+    const everOpenedRef = { current: false };
 
     // 防止 StrictMode 二次挂载在同一个容器里留下多个 xterm 实例。
     container.innerHTML = "";
@@ -144,6 +149,7 @@ export function TerminalPanel() {
         const data = queue.shift();
         if (data) socket.send(JSON.stringify({ type: "in", d: data }));
       }
+      setQueueNotice(false);
     };
 
     const sendData = (data: string) => {
@@ -151,7 +157,10 @@ export function TerminalPanel() {
         socket.send(JSON.stringify({ type: "in", d: data }));
         return true;
       }
+      // 连接未建立/已断开：入队等待重连后补发，但必须明确告知用户——
+      // 此前静默入队，手机端网络/代理拦截 WS 时表现为「无法发送命令」。
       queue.push(data);
+      setQueueNotice(true);
       if (!socket || socket.readyState === WebSocket.CLOSED) connect();
       return true;
     };
@@ -191,6 +200,7 @@ export function TerminalPanel() {
       socket = ws;
       ws.onopen = () => {
         if (closed || socket !== ws) return;
+        everOpenedRef.current = true;
         setStatus("open");
         ws.send(JSON.stringify({ type: "rs", cols: term.cols, rows: term.rows }));
         flush();
@@ -230,10 +240,23 @@ export function TerminalPanel() {
             term.write(text);
           });
       };
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         if (closed || socket !== ws) return;
-        setStatus("connecting");
+        // 从未成功连接过（认证被拒/网络拦截/PTY 不可用）：显示明确错误，
+        // 不再无限「连接中」误导用户以为会恢复；仍保留重试（短暂抖动可自愈）。
+        if (!everOpenedRef.current) {
+          setStatus("error");
+          setError(event.code === 1006 ? tRef.current("terminal_wsRefused") : tRef.current("terminal_wsFailed"));
+        } else {
+          setStatus("connecting");
+        }
         retryTimer = window.setTimeout(connect, 600);
+      };
+      ws.onerror = () => {
+        // 具体原因由 onclose 汇总展示；此处仅标记，避免错误被吞。
+        if (closed || socket !== ws) return;
+        setStatus("error");
+        setError(tRef.current("terminal_wsFailed"));
       };
     };
     connect();
@@ -286,6 +309,7 @@ export function TerminalPanel() {
         {status === "open" && t("terminal_connected")}
         {status === "closed" && t("terminal_disconnected")}
         {status === "error" && (error ?? t("terminal_unavailable"))}
+        {queueNotice && status !== "open" && <span style={{ marginLeft: 8, color: "var(--status-warning)" }}>{t("terminal_queuedOffline")}</span>}
         {lastSent && status === "open" && <span style={{ marginLeft: 8 }}>· {t("terminal_sent", { value: lastSent })}</span>}
       </div>
       <div

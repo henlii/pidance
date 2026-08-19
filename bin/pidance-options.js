@@ -21,8 +21,9 @@ function parseLaunchOptions(args = process.argv.slice(2), env = process.env) {
   });
 
   return {
-    // Pidance 产品默认 31415；30141 留给上游 pi-web，避免同机抢端口。
-    port: cliArgs.port ?? env.PORT ?? "31415",
+    // 显式端口（-p / PORT env）；未指定时由 pidance.js 回退到配置文件 port，再回退产品默认 31415。
+    // 30141 留给上游 pi-web，避免同机抢端口。
+    port: cliArgs.port ?? env.PORT ?? null,
     hostname: cliArgs.hostname ?? env.HOSTNAME ?? null,
     // PIDANCE_NO_OPEN 为产品正式变量。
     openBrowser:

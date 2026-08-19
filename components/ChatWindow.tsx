@@ -460,7 +460,10 @@ const chatPlan = composeChatPlan({
     </>
   );
 
-  const todoPanelElement = todos.length === 0 ? null : (
+  // TodoPanel 是 rpiv-todo 快照的内置镜像（无扩展 widget 时兜底展示）；
+  // 扩展已提供 todo 类 widget（如 rpiv-todos 任务清单）时隐藏，避免同一列表双份渲染。
+  const hasTodoWidget = extensionWidgets.some((widget) => /todo/i.test(widget.key));
+  const todoPanelElement = todos.length === 0 || hasTodoWidget ? null : (
     <div
       style={{
         flexShrink: 0,

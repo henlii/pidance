@@ -1,6 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
 import type { SessionInfo } from "@/lib/types";
 import { displayCwd, getRecentProjects, projectDisplayName } from "@/lib/project-context";
 import {
@@ -137,6 +138,8 @@ interface Props {
 export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, onProjectAdded, optimisticSessions, clientRunningSessionId }: Props) {
   const { t } = useI18n();
   const [serverSessions, setServerSessions] = useState<SessionInfo[]>([]);
+  /** 服务器权威列表是否已应用（区分 localStorage 缓存首帧与服务器完整列表）。 */
+  const [serverListLoaded, setServerListLoaded] = useState(false);
   const serverSessionsRef = useRef<SessionInfo[]>([]);
   const [pendingById, setPendingById] = useState<Map<string, SessionInfo>>(() => new Map());
   const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set());
@@ -209,7 +212,23 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const searchInputRef = useRef<HTMLInputElement>(null);
   // 显示模式菜单
   const [displayMenuOpen, setDisplayMenuOpen] = useState(false);
+  const [displayMenuPosition, setDisplayMenuPosition] = useState<{ top: number; right: number } | null>(null);
   const displayMenuRef = useRef<HTMLDivElement>(null);
+  const displayMenuBodyRef = useRef<HTMLDivElement>(null);
+  const displayMenuAnchorRef = useRef<{ top: number; bottom: number; right: number } | null>(null);
+  // 渲染后按实际菜单高度校正：底部空间不足时向上翻转（估算高度会造成偏差）。
+  useEffect(() => {
+    if (!displayMenuOpen || !displayMenuAnchorRef.current) return;
+    const frame = requestAnimationFrame(() => {
+      const menu = displayMenuBodyRef.current;
+      const anchor = displayMenuAnchorRef.current;
+      if (!menu || !anchor) return;
+      const height = menu.offsetHeight;
+      if (anchor.bottom + 4 + height <= window.innerHeight) return;
+      setDisplayMenuPosition((prev) => (prev ? { ...prev, top: Math.max(8, anchor.top - height - 4) } : prev));
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [displayMenuOpen]);
   // 跨刷新偏好：显示模式 + 项目/worktree 折叠集合（独立 seam）
   const [prefs, setPrefs] = useState<SidebarPreferences>(() => loadSidebarPreferences());
   // 每个主仓/非主 worktree group 的展开条数均为瞬时态，不写偏好。
@@ -304,6 +323,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       if (!mountedRef.current || !shouldApplySessionListResponse(gen, sessionListFetchGenRef.current)) return;
       setServerSessions(data.sessions);
       serverSessionsRef.current = data.sessions;
+      // 服务器权威列表已应用：URL 恢复可据此判定目标会话真实存在与否（localStorage
+      // 缓存只存最近 50 条，旧会话刷新时缓存缺失是常态，不能就此放弃恢复）。
+      setServerListLoaded(true);
       saveCachedSessionList(data.sessions);
       setArchivedSessions(data.archivedSessions ?? []);
       setArchivedCount(data.archivedCount ?? 0);
@@ -361,6 +383,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     } catch (e) {
       if (!mountedRef.current || !shouldApplySessionListResponse(gen, sessionListFetchGenRef.current)) return;
       setError(String(e));
+      // 服务器列表获取失败（网络/认证）：也视为“完整列表已判定”，
+      // 否则 URL 恢复会永远停留在等待态，聊天区既不恢复也不显示占位。
+      setServerListLoaded(true);
     } finally {
       if (
         mountedRef.current
@@ -684,15 +709,20 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     // URL 恢复必须优先于 cwd 自动选择；requestedCwd 已先建立身份时，
     // selectedCwd 不再为空，但仍不能跳过目标会话恢复。
     if (initialSessionId && !restoredRef.current) {
-      restoredRef.current = true;
       const target = allSessions.find((s) => s.id === initialSessionId);
       if (target) {
+        restoredRef.current = true;
         // URL 恢复同样走 handleSelectSession 统一路径：suppress → setIdentity
         // → setSelectedSession 原子完成，watcher 不会清空恢复中的会话。
         onSelectSession(target, true);
         return;
       }
+      // 首帧 localStorage 缓存只保留最近 50 条，旧会话缺失是常态：必须等
+      // 服务器完整列表到达后再判定目标会话不存在，否则刷新旧会话/分享链接
+      // 会直接掉进空聊天/引导页（此前 restoredRef 一旦置位永不重试）。
+      if (!serverListLoaded) return;
       // Session not found — notify parent so it can show the placeholder
+      restoredRef.current = true;
       onInitialRestoreDone?.();
     }
     if (selectedCwd === null) {
@@ -701,7 +731,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       const next = projects.find((root) => !closedRoots.has(root));
       if (next) selectCwd(next);
     }
-  }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, selectCwd, closedRoots]);
+  }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, selectCwd, closedRoots, serverListLoaded]);
 
   const closeCustomPathPanel = useCallback(() => {
     setCustomPathOpen(false);
@@ -1226,26 +1256,39 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 label={t("sidebar_displayOptions")}
                 active={displayMenuOpen}
                 expanded={displayMenuOpen}
-                onClick={() => setDisplayMenuOpen((open) => !open)}
+                onClick={() => {
+                  const next = !displayMenuOpen;
+                  setDisplayMenuOpen(next);
+                  if (next) {
+                    const rect = displayMenuRef.current?.getBoundingClientRect();
+                    if (rect) {
+                      // 侧栏 header 固定不随列表滚动，但视口较矮时向下展开仍会
+                      // 超出显示区域：fixed 定位，渲染后按实际高度翻转校正。
+                      displayMenuAnchorRef.current = { top: rect.top, bottom: rect.bottom, right: rect.right };
+                      setDisplayMenuPosition({ top: rect.bottom + 4, right: Math.max(8, window.innerWidth - rect.right) });
+                    }
+                  }
+                }}
               >
                 <SlidersIcon size={18} />
               </SidebarIconButton>
-              <AnimatedDropdown
-                open={displayMenuOpen}
-                style={{
-                  position: "absolute",
-                  top: "calc(100% + 4px)",
-                  right: 0,
-                  zIndex: 100,
-                  background: "var(--bg)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 8,
-                  boxShadow: "0 6px 20px rgba(0,0,0,0.10)",
-                  overflow: "hidden",
-                  minWidth: 168,
-                }}
-              >
-                <div onKeyDown={(e) => { if (e.key === "Escape") setDisplayMenuOpen(false); }}>
+              {displayMenuOpen && createPortal(
+                <AnimatedDropdown
+                  open={displayMenuOpen}
+                  style={{
+                    position: "fixed",
+                    top: displayMenuPosition?.top ?? 0,
+                    right: displayMenuPosition?.right ?? 0,
+                    zIndex: 600,
+                    background: "var(--bg)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 8,
+                    boxShadow: "0 6px 20px rgba(0,0,0,0.10)",
+                    overflow: "hidden",
+                    minWidth: 168,
+                  }}
+                >
+                  <div ref={displayMenuBodyRef} onKeyDown={(e) => { if (e.key === "Escape") setDisplayMenuOpen(false); }}>
                   <DisplayMenuItem
                     label={t("sidebar_standard")}
                     checked={displayMode === "standard"}
@@ -1271,8 +1314,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                     checked={showRecentSessions}
                     onClick={() => { setShowRecentSessions(!showRecentSessions); setDisplayMenuOpen(false); }}
                   />
-                </div>
-              </AnimatedDropdown>
+                  </div>
+                </AnimatedDropdown>,
+                document.body,
+              )}
             </div>
             {/* 刷新按钮已移除：会话列表 30s 自动刷新（见下方轮询 effect） */}
         </div>

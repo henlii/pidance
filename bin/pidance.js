@@ -10,6 +10,8 @@ const fs = require("fs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { parseLaunchOptions } = require("./pidance-options");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
+const { loadServerConfig } = require("./pidance-server-config");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const { shouldRequireAuth, resolvePassword, describeHost } = require("./pidance-auth-gate");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { startPidanceHttpServer } = require("./pidance-http-server");
@@ -35,7 +37,13 @@ if (!nodeMeetsMin(process.versions.node)) {
   process.exit(1);
 }
 
-const { port, hostname, openBrowser } = parseLaunchOptions();
+const { port: explicitPort, hostname: explicitHostname, openBrowser } = parseLaunchOptions();
+const serverConfig = loadServerConfig();
+// 默认绑定：设置 → 通用 开启远程服务 → 0.0.0.0；否则仅本机 127.0.0.1（免密码）。
+// 显式 --hostname / -H / HOSTNAME env 优先；显式 0.0.0.0 仍走密码门禁。
+const hostname = explicitHostname ?? (serverConfig.remoteEnabled ? "0.0.0.0" : "127.0.0.1");
+// 端口优先级：显式 -p / PORT env → 配置文件 port → 产品默认 31415。
+const port = explicitPort ?? (serverConfig.port ? String(serverConfig.port) : "31415");
 const listenPort = Number.parseInt(String(port), 10);
 if (!Number.isInteger(listenPort) || listenPort <= 0) {
   console.error(`[pidance] 拒绝启动：无效端口 ${port}`);
@@ -44,8 +52,8 @@ if (!Number.isInteger(listenPort) || listenPort <= 0) {
 
 // 启动认证门禁（fail-closed，P0）：非回环监听地址（0.0.0.0 / :: / 局域网 IP / 非回环主机名）
 // 且未设置认证密码时拒绝启动，防止局域网/公网匿名调用 Agent API（创建会话/发 prompt/调工具）。
-// 仅本机使用：--hostname 127.0.0.1（或 localhost）可省略密码。
-if (shouldRequireAuth(hostname, resolvePassword(process.env))) {
+// 默认仅绑定 127.0.0.1（本机），无需密码；远程服务在设置 → 通用 中开启（须先设置密码）。
+if (shouldRequireAuth(hostname, resolvePassword(process.env), serverConfig)) {
   console.error(
     "[pidance] 拒绝启动：监听地址 " +
       describeHost(hostname) +
@@ -56,7 +64,10 @@ if (shouldRequireAuth(hostname, resolvePassword(process.env))) {
       "（兼容旧变量 PI_WEB_PASSWORD）。",
   );
   console.error(
-    "仅本机访问可省略密码并使用回环地址：pidance --hostname 127.0.0.1（或 localhost）。",
+    "也可以在设置 → 通用 中设置密码并开启远程服务（重启后监听 0.0.0.0）。",
+  );
+  console.error(
+    "仅本机访问默认绑定 127.0.0.1，直接运行 pidance 即可（或 --hostname 127.0.0.1 / localhost）。",
   );
   process.exit(1);
 }
@@ -66,13 +77,16 @@ if (!fs.existsSync(nextDir)) {
   process.exit(1);
 }
 
-const url = `http://${hostname ?? "localhost"}:${listenPort}`;
+const url = `http://${hostname}:${listenPort}`;
+// 浏览器打开用回环地址（0.0.0.0 在多数浏览器不可直达）
+const browserHost = hostname === "0.0.0.0" || hostname === "::" ? "localhost" : hostname;
+const browserUrl = `http://${browserHost}:${listenPort}`;
 
 function openBrowserOnce() {
   const isWindows = process.platform === "win32";
   const isMac = process.platform === "darwin";
   const openCmd = isWindows ? "start" : isMac ? "open" : "xdg-open";
-  const opener = spawn(openCmd, [url], {
+  const opener = spawn(openCmd, [browserUrl], {
     shell: isWindows,
     stdio: "ignore",
     detached: true,

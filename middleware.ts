@@ -1,10 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { guardRequest, type RequestGuardHeaders } from "@/lib/request-guard";
+import { readServerConfig } from "@/lib/pidance-server-config";
 
 // 请求安全中间件（对齐上游 pi-web 0.8.6 + P0 fail-closed + #18 UI 会话）：
 // 1. Host 白名单（localhost/IP/PI_WEB_HOSTNAME/PI_WEB_ALLOWED_HOSTS）——防 DNS rebinding
 // 2. API 请求 CSRF 防护（origin/sec-fetch-site 校验；会话导出 navigate 豁免）
-// 3. 认证：PIDANCE_PASSWORD / PI_WEB_PASSWORD 启用时接受 Cookie 会话或 Basic（用户名 pi）
+// 3. 认证：PIDANCE_PASSWORD / PI_WEB_PASSWORD，或设置 → 通用 保存的服务端密码
+//    （~/.pi/agent/pidance-server.json）启用时接受 Cookie 会话或 Basic（用户名 pi）
 // 4. 兜底：未设密码时仅回环；非回环 401
 // 5. 页面未认证：放行到前端由页内登录处理（不再弹 Basic 对话框）；API 未认证返回 401 JSON
 export const runtime = "nodejs";
@@ -27,7 +29,9 @@ function toHeaders(req: NextRequest): RequestGuardHeaders {
 
 export function middleware(req: NextRequest) {
   const isApi = req.nextUrl.pathname === "/api" || req.nextUrl.pathname.startsWith("/api/");
-  const verdict = guardRequest(toHeaders(req), process.env);
+  const verdict = guardRequest(toHeaders(req), process.env, {
+    config: readServerConfig(),
+  });
   switch (verdict) {
     case "untrusted-host":
       return isApi
