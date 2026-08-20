@@ -22,6 +22,7 @@ import {
   normalizeFilePathSlashes,
 } from "@/lib/file-paths";
 import { copyText } from "@/lib/clipboard";
+import { FileTreePicker } from "./FileTreePicker";
 import type { GitFileStatus, GitFileStatusKind, GitStatusResponse } from "@/lib/git-types";
 import { useI18n } from "@/lib/i18n";
 import { loadSidebarPreferences, saveFileExplorerState } from "@/lib/ui-preferences";
@@ -211,11 +212,11 @@ function DismissButton({ onClick, title }: { onClick: () => void; title: string 
 // 文件行菜单：postFileOp / NameDraftRow / FileRowMenu
 // ---------------------------------------------------------------------------
 
-/** 文件创建/重命名操作统一入口：POST /api/files/...?type=create-file|create-dir|rename */
+/** 文件创建/重命名/移动/复制统一入口：POST /api/files/...?type=... */
 async function postFileOp(
   filePath: string,
-  type: "create-file" | "create-dir" | "rename",
-  body: { name?: string; newName?: string },
+  type: "create-file" | "create-dir" | "rename" | "move" | "copy",
+  body: { name?: string; newName?: string; targetDirectory?: string },
 ): Promise<{ path: string; name: string }> {
   const res = await fetch(`/api/files/${encodeFilePathForApi(filePath)}?type=${type}`, {
     method: "POST",
@@ -290,7 +291,7 @@ function NameDraftRow({ targetPath, type, defaultName, placeholder, paddingLeft,
             onDoneRef.current(false);
           }
         }}
-        onBlur={() => { if (!value.trim() && !busy) onDoneRef.current(false); }}
+        onBlur={() => { if (!busy) onDoneRef.current(false); }}
         placeholder={placeholder}
         disabled={busy}
         aria-label={placeholder}
@@ -313,22 +314,69 @@ function NameDraftRow({ targetPath, type, defaultName, placeholder, paddingLeft,
           <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4" />
         </svg>
       )}
+      {!busy && (
+        <>
+          <button
+            type="button"
+            disabled={!value.trim()}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => void submit()}
+            aria-label={t("files_confirmRename")}
+            title={t("files_confirmRename")}
+            style={draftActionButtonStyle}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="m5 12 4 4L19 6" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => onDoneRef.current(false)}
+            aria-label={t("files_cancelRename")}
+            title={t("files_cancelRename")}
+            style={draftActionButtonStyle}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M18 6 6 18" />
+              <path d="m6 6 12 12" />
+            </svg>
+          </button>
+        </>
+      )}
     </div>
   );
 }
+
+const draftActionButtonStyle: CSSProperties = {
+  flexShrink: 0,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: 20,
+  height: 20,
+  padding: 0,
+  border: "none",
+  borderRadius: 4,
+  background: "transparent",
+  color: "var(--text-dim)",
+  cursor: "pointer",
+};
 
 /**
  * 文件行三点菜单（风格对齐 SessionRowMenu）：fixed 定位，视口底部不足时向上翻转。
  * 下载（文件/目录均 tar.gz 由 ?type=download 统一处理）、重命名、复制路径；
  * 目录另有新建文件/新建文件夹。触发按钮带 data-menu-open 供 CSS 保持操作区可见。
  */
-function FileRowMenu({ entryPath, name, isDir, cwd, onRename, onCreate, t }: {
+function FileRowMenu({ entryPath, name, isDir, cwd, onRename, onCreate, onMove, onCopy, t }: {
   entryPath: string;
   name: string;
   isDir: boolean;
   cwd: string;
   onRename: () => void;
   onCreate: (kind: "create-file" | "create-dir") => void;
+  onMove: () => void;
+  onCopy: () => void;
   t: ReturnType<typeof useI18n>["t"];
 }) {
   const [open, setOpen] = useState(false);
@@ -475,6 +523,23 @@ function FileRowMenu({ entryPath, name, isDir, cwd, onRename, onCreate, t }: {
             {menuIcon(<PencilIcon size={13} />)}
             {t("files_rename")}
           </button>
+          <button type="button" role="menuitem" style={itemStyle} {...hover} onClick={() => { close(); onMove(); }}>
+            {menuIcon(
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M5 4h4l3 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" />
+              </svg>
+            )}
+            {t("files_move")}
+          </button>
+          <button type="button" role="menuitem" style={itemStyle} {...hover} onClick={() => { close(); onCopy(); }}>
+            {menuIcon(
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <rect x="9" y="9" width="13" height="13" rx="2" />
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+              </svg>
+            )}
+            {t("files_copy")}
+          </button>
         </div>,
         document.body,
       )}
@@ -495,6 +560,8 @@ function TreeNode({
   gitStatusByPath,
   changedDirectoryPaths,
   onMutated,
+  onMoveEntry,
+  onCopyEntry,
   t,
 }: {
   node: FileNode;
@@ -510,6 +577,9 @@ function TreeNode({
   changedDirectoryPaths: Set<string>;
   /** 文件创建/重命名成功后回调，用于刷新树。 */
   onMutated: () => void;
+  /** 打开移动/复制目标选择弹窗。 */
+  onMoveEntry: (path: string, name: string) => void;
+  onCopyEntry: (path: string, name: string) => void;
   t: ReturnType<typeof useI18n>["t"];
 }) {
   const open = expandedPaths.has(node.fullPath);
@@ -522,6 +592,8 @@ function TreeNode({
   const [children, setChildren] = useState<FileNode[]>(node.children ?? []);
   const [loaded, setLoaded] = useState(node.loaded ?? false);
   const [loading, setLoading] = useState(false);
+  /** 拖拽悬停高亮（仅目录可放置）。 */
+  const [dragOver, setDragOver] = useState(false);
   /** 内联命名草稿：rename 替换当前行；create-file/create-dir 在目录行下方新建。 */
   const [draft, setDraft] = useState<{ kind: "create-file" | "create-dir" | "rename" } | null>(null);
 
@@ -588,8 +660,37 @@ function TreeNode({
         role="treeitem"
         tabIndex={0}
         aria-expanded={node.isDir ? open : undefined}
+        aria-selected={false}
+        draggable
         onClick={handleClick}
         onKeyDown={handleKeyDown}
+        onDragStart={(event) => {
+          // 拖拽移动：记录源路径；目录行 onDrop 执行 move。
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", node.fullPath);
+        }}
+        onDragOver={(event) => {
+          if (!node.isDir) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(event) => {
+          if (!node.isDir) return;
+          event.preventDefault();
+          setDragOver(false);
+          const source = event.dataTransfer.getData("text/plain");
+          if (!source || source === node.fullPath) return;
+          void (async () => {
+            try {
+              await postFileOp(source, "move", { targetDirectory: node.fullPath });
+              onMutated();
+            } catch (error) {
+              window.alert(`${t("files_moveFailed")}: ${error instanceof Error ? error.message : String(error)}`);
+            }
+          })();
+        }}
         style={{
           position: "relative",
           display: "flex",
@@ -600,6 +701,9 @@ function TreeNode({
           height: 24,
           cursor: "pointer",
           userSelect: "none",
+          outline: dragOver ? "1px solid var(--accent)" : undefined,
+          borderRadius: dragOver ? 5 : undefined,
+          background: dragOver ? "var(--bg-selected)" : undefined,
         }}
       >
         {node.isDir && (
@@ -697,6 +801,8 @@ function TreeNode({
             cwd={cwd}
             onRename={() => setDraft({ kind: "rename" })}
             onCreate={(kind) => setDraft({ kind })}
+            onMove={() => onMoveEntry(node.fullPath, node.name)}
+            onCopy={() => onCopyEntry(node.fullPath, node.name)}
             t={t}
           />
         </div>
@@ -730,6 +836,8 @@ function TreeNode({
               gitStatusByPath={gitStatusByPath}
               changedDirectoryPaths={changedDirectoryPaths}
               onMutated={onMutated}
+              onMoveEntry={onMoveEntry}
+              onCopyEntry={onCopyEntry}
               t={t}
             />
           ))}
@@ -779,6 +887,14 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [pendingConflict, setPendingConflict] = useState<PendingConflict | null>(null);
   const prevCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  /** 上传目标目录：默认项目根，上传前可经目录选择器变更。 */
+  const uploadTargetDirRef = useRef<string>(cwd);
+  /** 目录选择弹窗：上传目标 / 移动 / 复制共用。 */
+  const [picker, setPicker] = useState<{
+    mode: "upload" | "move" | "copy";
+    sourcePath?: string;
+    initialPath: string;
+  } | null>(null);
   const refreshToken = `${refreshKey ?? 0}:${treeRefreshKey}`;
   const uploadBusy = uploadPhase !== "idle";
 
@@ -854,10 +970,11 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     setUploadSummary({ uploaded, skipped, errors });
 
     if (uploaded.length > 0) {
-      setHighlightedPaths(new Set(uploaded.map((name) => joinFilePath(cwd, name))));
+      const targetDir = uploadTargetDirRef.current;
+      setHighlightedPaths(new Set(uploaded.map((name) => joinFilePath(targetDir, name))));
       setTreeRefreshKey((key) => key + 1);
     }
-  }, [cwd]);
+  }, []);
 
   const performUpload = useCallback(async (
     files: File[],
@@ -869,7 +986,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     setUploadPhase("uploading");
 
     try {
-      const { status, data } = await uploadFiles(cwd, files, strategy, setUploadProgress, t);
+      const targetDir = uploadTargetDirRef.current;
+      const { status, data } = await uploadFiles(targetDir, files, strategy, setUploadProgress, t);
       if (status === 409 && data.conflicts?.length) {
         setPendingConflict({
           files,
@@ -888,7 +1006,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     } finally {
       setUploadPhase("idle");
     }
-  }, [applyUploadResult, cwd, t]);
+  }, [applyUploadResult, t]);
 
   const prepareUpload = useCallback(async (files: File[]) => {
     if (files.length === 0 || uploadBusy) return;
@@ -900,8 +1018,9 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     setUploadPhase("checking");
 
     try {
+      const targetDir = uploadTargetDirRef.current;
       const res = await fetch(
-        `/api/files/${encodeFilePathForApi(cwd)}?type=upload-check`,
+        `/api/files/${encodeFilePathForApi(targetDir)}?type=upload-check`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -926,7 +1045,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     } finally {
       setUploadPhase("idle");
     }
-  }, [cwd, performUpload, t, uploadBusy]);
+  }, [performUpload, t, uploadBusy]);
 
   const handleUploadInput = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -936,7 +1055,9 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
 
   useImperativeHandle(ref, () => ({
     openUploadPicker() {
-      if (!uploadBusy) uploadInputRef.current?.click();
+      // 上传前先选目标目录（不再固定项目根）。
+      if (uploadBusy) return;
+      setPicker({ mode: "upload", initialPath: cwd });
     },
     /** 在项目根 cwd 下开始新建文件（内联输入）。 */
     startCreateFile() {
@@ -946,7 +1067,32 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     startCreateDir() {
       setRootCreateKind("create-dir");
     },
-  }), [uploadBusy]);
+  }), [uploadBusy, cwd]);
+
+  /** 目录选择器确认：上传 → 触发文件选择；移动/复制 → 执行操作。 */
+  const handlePickerSelect = useCallback(async (directory: string) => {
+    const active = picker;
+    setPicker(null);
+    if (!active) return;
+    if (active.mode === "upload") {
+      uploadTargetDirRef.current = directory;
+      uploadInputRef.current?.click();
+      return;
+    }
+    if (!active.sourcePath) return;
+    try {
+      await postFileOp(active.sourcePath, active.mode, { targetDirectory: directory });
+      handleMutated();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      window.alert(`${active.mode === "move" ? t("files_moveFailed") : t("files_copyFailed")}: ${message}`);
+    }
+  }, [picker, handleMutated, t]);
+
+  /** 移动/复制：打开目录选择器（初始为条目所在目录）。 */
+  const openEntryPicker = useCallback((mode: "move" | "copy", entryPath: string) => {
+    setPicker({ mode, sourcePath: entryPath, initialPath: getFileDirectory(entryPath) });
+  }, []);
 
   useEffect(() => {
     onUploadBusyChange?.(uploadBusy);
@@ -1034,6 +1180,15 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   return (
     <div ref={scrollRef} onScroll={handleScroll} style={{ height: "100%", overflowY: "auto", overflowX: "hidden" }}>
       <input ref={uploadInputRef} type="file" multiple hidden onChange={handleUploadInput} />
+      {picker && (
+        <FileTreePicker
+          open
+          title={picker.mode === "upload" ? t("files_pickerUploadTitle") : picker.mode === "move" ? t("files_pickerMoveTitle") : t("files_pickerCopyTitle")}
+          initialPath={picker.initialPath}
+          onSelect={handlePickerSelect}
+          onClose={() => setPicker(null)}
+        />
+      )}
       {showUploadFeedback && (
         <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--border)" }}>
         {uploadBusy && (
@@ -1185,6 +1340,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                   gitStatusByPath={gitStatusByPath}
                   changedDirectoryPaths={changedDirectoryPaths}
                   onMutated={handleMutated}
+                  onMoveEntry={(path) => openEntryPicker("move", path)}
+                  onCopyEntry={(path) => openEntryPicker("copy", path)}
                   t={t}
                 />
               ))}

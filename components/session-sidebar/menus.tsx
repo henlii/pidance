@@ -86,7 +86,13 @@ export function ProjectRowMenu({ open, onOpenChange, projectName, onEdit, onClos
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
-      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+      // 菜单 portal 到 body：点击菜单本体（菜单项）不算外部，否则 mousedown 先
+      // 关闭菜单导致菜单项 click 丢失（表现为「点了没反应」）。
+      if (
+        wrapperRef.current
+        && !wrapperRef.current.contains(e.target as Node)
+        && !menuRef.current?.contains(e.target as Node)
+      ) {
         onOpenChange(false);
       }
     };

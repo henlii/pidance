@@ -710,6 +710,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     // selectedCwd 不再为空，但仍不能跳过目标会话恢复。
     if (initialSessionId && !restoredRef.current) {
       const target = allSessions.find((s) => s.id === initialSessionId);
+      if (typeof window !== "undefined") {
+      }
       if (target) {
         restoredRef.current = true;
         // URL 恢复同样走 handleSelectSession 统一路径：suppress → setIdentity
@@ -745,16 +747,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [updatePrefs]);
 
   const handleProjectAdded = useCallback((cwd: string, root: string) => {
+    // 只追加项目列表并恢复关闭态，不切换当前项目/会话（避免覆盖用户正在看的项目）。
     updatePrefs((prev) =>
       prev.addedProjectRoots.includes(root)
         ? prev
         : { ...prev, addedProjectRoots: [...prev.addedProjectRoots, root] },
     );
     restoreClosedProject(root);
-    selectCwd(cwd, root);
     closeCustomPathPanel();
     onProjectAdded?.(root);
-  }, [updatePrefs, restoreClosedProject, selectCwd, closeCustomPathPanel, onProjectAdded]);
+  }, [updatePrefs, restoreClosedProject, closeCustomPathPanel, onProjectAdded]);
 
   const openAddProjectDialog = useCallback(() => {
     setCustomPathOpen(true);
@@ -764,7 +766,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   useEffect(() => {
     if (!displayMenuOpen) return;
     const handler = (e: MouseEvent) => {
-      if (displayMenuRef.current && !displayMenuRef.current.contains(e.target as Node)) {
+      // 菜单 portal 到 body：菜单本体（菜单项）不算外部，避免 mousedown 先关闭
+      // 菜单导致菜单项 click 丢失。
+      if (
+        displayMenuRef.current
+        && !displayMenuRef.current.contains(e.target as Node)
+        && !displayMenuBodyRef.current?.contains(e.target as Node)
+      ) {
         setDisplayMenuOpen(false);
       }
     };

@@ -447,6 +447,9 @@ function AppShellInner() {
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
   // URL 恢复和首次身份建立不应清理当前聊天。
   const suppressSessionResetRef = useRef(false);
+  /** 最近一次显式点选会话的 cwd 与时间：watcher 据此区分「点击引发的 identity 跟随」与真实切项目。 */
+  const lastClickedSessionCwdRef = useRef<string | null>(null);
+  const lastClickedSessionAtRef = useRef(0);
 
   // selectedSessionIdRef / newSessionIntentRef 在事件路径即时写入；
   // effect 仅作 state 回流后的兜底同步（同 tick 读必须走事件路径）。
@@ -518,6 +521,8 @@ function AppShellInner() {
     const cwdChanged = previous.cwd !== current.cwd;
     const projectChanged = previous.projectRoot !== current.projectRoot;
     if (!cwdChanged && !projectChanged) return;
+    if (typeof window !== "undefined") {
+    }
     if (suppressSessionResetRef.current) {
       suppressSessionResetRef.current = false;
       return;
@@ -547,6 +552,20 @@ function AppShellInner() {
       return;
     }
     if (selectedSession && (selectedSession.projectRoot ?? selectedSession.cwd) === current.projectRoot) return;
+    // 会话点击引发的 identity 跟随（迟到的 store flush / worktree 回写中间态）：
+    // 当前选中的会话就是最近点击的会话、且发生在点击后短暂窗口内时，不再往下走
+    // ——快速连点不同项目会话时，前一次点击的 setIdentity 可能迟到 flush，watcher
+    // 在中间态看到 cwd 不匹配而清空刚选中的会话（表现为切换掉进引导页）；
+    // 「新建会话后立即点会话」时 selectedSession 尚未应用（仍为 null）也可能被
+    // 误判成切项目重建引导页。窗口外（用户稳定后真实切项目/工作树）照常清空。
+    if (
+      selectedSession
+      && lastClickedSessionCwdRef.current !== null
+      && lastClickedSessionCwdRef.current === selectedSession.cwd
+      && Date.now() - lastClickedSessionAtRef.current < 800
+    ) {
+      return;
+    }
     if (selectedSession) {
       selectedSessionIdRef.current = null;
       setSelectedSession(null);
@@ -572,11 +591,20 @@ function AppShellInner() {
   }, [identity.cwd, identity.projectRoot, selectedSession, invalidateHydrate, syncUrl]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
+    if (typeof window !== "undefined") {
+    }
     // 显式点选会话：先跳过身份 watcher（必须在本函数任何 state 变更之前）。
     // selectCwd / 迟到的 worktree 预加载回写不能把刚选中的会话清掉，否则
-    // 会掉进引导页（刷新才恢复）。identity 的 store 更新（useSyncExternalStore）
-    // 会同步触发身份 watcher，因此 suppress 必须先于 setIdentity 生效。
+    // 会掉进引导页（刷新才恢复）。
     suppressSessionResetRef.current = true;
+    // 先落 selectedSession（state 排队），再 setIdentity：setIdentity 走
+    // useSyncExternalStore 会同步 flush 整个根——若 identity 先变而
+    // selectedSession 未变，watcher 在中间态看到 cwd 不匹配会把刚选中的
+    // 会话清空（快速连点两个不同项目会话可稳定复现掉引导页）。
+    lastClickedSessionCwdRef.current = session.cwd ?? null;
+    lastClickedSessionAtRef.current = Date.now();
+    selectedSessionIdRef.current = session.id;
+    setSelectedSession(session);
     // 统一在此同步 identity：会话 cwd 与 projectRoot 成为当前项目上下文。
     // 调用方（SessionSidebar 点击路径）不再自行 selectCwd，避免 store 同步
     // 刷新在 suppress 生效前触发 watcher 清空会话；worktree 预加载随后会把
@@ -595,8 +623,6 @@ function AppShellInner() {
     setNewSessionIntent(null);
     newSessionIntentRef.current = null;
     setPendingHighlightId(null);
-    selectedSessionIdRef.current = session.id;
-    setSelectedSession(session);
     setSessionKey((k) => k + 1);
     setSystemPrompt(null);
     setInitialSessionRestored(true);
@@ -1000,7 +1026,7 @@ function AppShellInner() {
         onInitialRestoreDone={handleInitialRestoreDone}
         refreshKey={refreshKey}
         onSessionDeleted={handleSessionDeleted}
-        onProjectAdded={(cwd) => handleNewSession(cwd)}
+        onProjectAdded={() => setRefreshKey((k) => k + 1)}
         optimisticSessions={optimisticPendingSessions}
         clientRunningSessionId={clientRunningSessionId}
       />

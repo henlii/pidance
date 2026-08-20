@@ -214,6 +214,129 @@ export function renameEntry(
 }
 
 /**
+ * 跨目录移动（文件/目录）：源 → 目标目录。源与目标均须在 allow-list 内；
+ * 拒绝 symlink 源；目标已存在 → conflict；目录不可移入自身子目录。
+ */
+export function moveEntry(
+  source: string,
+  targetDirectory: string,
+  allowedRoots: AllowedRoots,
+): { path: string; name: string } {
+  const roots = asRootSet(allowedRoots);
+  const realRoots = realpathRoots(allowedRoots);
+  if (!isFilePathAllowed(source, roots)) {
+    throw new FileOpsError("forbidden", "Access denied");
+  }
+
+  let sourceStat: fs.Stats;
+  try {
+    sourceStat = fs.lstatSync(source);
+  } catch (error) {
+    return mapFsError(error, "Not found");
+  }
+  if (sourceStat.isSymbolicLink()) {
+    throw new FileOpsError("forbidden", "Symbolic links are not allowed");
+  }
+
+  let realSource: string;
+  try {
+    realSource = fs.realpathSync(source);
+  } catch (error) {
+    return mapFsError(error, "Not found");
+  }
+  if (!isFilePathAllowed(realSource, realRoots)) {
+    throw new FileOpsError("forbidden", "Access denied");
+  }
+  assertNoSymlinkParents(path.dirname(realSource), realSource);
+
+  const realTargetDir = resolveWritableDirectory(targetDirectory, allowedRoots);
+  const destination = path.join(realTargetDir, path.basename(realSource));
+  if (destination === realSource) {
+    return { path: realSource, name: path.basename(realSource) };
+  }
+  if (!isFilePathAllowed(destination, realRoots)) {
+    throw new FileOpsError("forbidden", "Access denied");
+  }
+  // 目录不可移入自身或自身子目录（rename 到自身子目录会破坏结构）。
+  if (sourceStat.isDirectory()) {
+    const rel = path.relative(realSource, realTargetDir);
+    if (rel === "" || (!rel.startsWith("..") && rel !== ".." && !path.isAbsolute(rel))) {
+      throw new FileOpsError("bad-request", "Cannot move a directory into itself");
+    }
+  }
+  if (fs.existsSync(destination)) {
+    throw new FileOpsError("conflict", "Already exists");
+  }
+
+  try {
+    fs.renameSync(realSource, destination);
+  } catch (error) {
+    return mapFsError(error, "Move failed");
+  }
+  return { path: destination, name: path.basename(destination) };
+}
+
+/**
+ * 复制（文件/目录）：源 → 目标目录。源与目标均须在 allow-list 内；
+ * 拒绝 symlink 源（含目录内）；目标已存在 → conflict。
+ */
+export function copyEntry(
+  source: string,
+  targetDirectory: string,
+  allowedRoots: AllowedRoots,
+): { path: string; name: string } {
+  const roots = asRootSet(allowedRoots);
+  const realRoots = realpathRoots(allowedRoots);
+  if (!isFilePathAllowed(source, roots)) {
+    throw new FileOpsError("forbidden", "Access denied");
+  }
+
+  let sourceStat: fs.Stats;
+  try {
+    sourceStat = fs.lstatSync(source);
+  } catch (error) {
+    return mapFsError(error, "Not found");
+  }
+  if (sourceStat.isSymbolicLink()) {
+    throw new FileOpsError("forbidden", "Symbolic links are not allowed");
+  }
+
+  let realSource: string;
+  try {
+    realSource = fs.realpathSync(source);
+  } catch (error) {
+    return mapFsError(error, "Not found");
+  }
+  if (!isFilePathAllowed(realSource, realRoots)) {
+    throw new FileOpsError("forbidden", "Access denied");
+  }
+  assertNoSymlinkParents(path.dirname(realSource), realSource);
+
+  const realTargetDir = resolveWritableDirectory(targetDirectory, allowedRoots);
+  const destination = path.join(realTargetDir, path.basename(realSource));
+  if (destination === realSource) {
+    throw new FileOpsError("bad-request", "Cannot copy onto itself");
+  }
+  if (!isFilePathAllowed(destination, realRoots)) {
+    throw new FileOpsError("forbidden", "Access denied");
+  }
+  if (fs.existsSync(destination)) {
+    throw new FileOpsError("conflict", "Already exists");
+  }
+
+  try {
+    if (sourceStat.isDirectory()) {
+      fs.cpSync(realSource, destination, { recursive: true, dereference: false });
+    } else {
+      fs.copyFileSync(realSource, destination, fs.constants.COPYFILE_EXCL);
+    }
+  } catch (error) {
+    return mapFsError(error, "Copy failed");
+  }
+  return { path: destination, name: path.basename(destination) };
+}
+
+/**
  * 将目录打成 gzip tar 流（依赖系统 tar）。
  * 调用方须已完成 allow-list / realpath 校验。
  */

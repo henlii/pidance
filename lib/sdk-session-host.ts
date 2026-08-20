@@ -26,15 +26,9 @@ import {
   writeLeafSidecar,
 } from "./session-leaf-sidecar";
 import {
-  SESSION_LOCKED_MESSAGE,
-  releaseUnwantedLockKeys,
-  tryAcquireSessionOwnership,
-  type SessionLockHandle,
-} from "./session-ownership-lock";
-import {
+  materializeSessionFile,
   openSessionManager,
   createSessionManager,
-  materializeSessionFile,
 } from "./pi-session-io";
 import {
   createWebExtensionUIAdapter,
@@ -148,7 +142,6 @@ export class SdkSessionHost {
   private realSessionFile: string;
   private readonly idleTimeoutMs: number;
   private readonly agentDir: string;
-  private lock: SessionLockHandle | null = null;
   private activeToolNames: string[] | undefined;
   /** 渲染桥主题（模块级缓存）；加载失败为 null → 跳过渲染。 */
   private readonly renderBridgeTheme: Theme | null = loadPiTheme();
@@ -254,28 +247,6 @@ export class SdkSessionHost {
     return this.runtime.services;
   }
 
-  private ownershipKeys(): string[] {
-    const keys: string[] = [];
-    for (const key of [this.realSessionId, this.realSessionFile]) {
-      if (key && !keys.includes(key)) keys.push(key);
-    }
-    return keys;
-  }
-
-  /** 身份变化时先抢新钥匙再放旧钥匙，始终同时持有 id 与文件路径。 */
-  private relockToIdentity(): void {
-    const keys = this.ownershipKeys();
-    if (keys.length === 0) return;
-    const current = this.lock?.keys ?? [];
-    if (current.length === keys.length && keys.every((key) => current.includes(key))) return;
-    const next = tryAcquireSessionOwnership(keys, this.agentDir, this.lock);
-    if (!next) {
-      throw new Error(SESSION_LOCKED_MESSAGE);
-    }
-    releaseUnwantedLockKeys(this.lock, keys);
-    this.lock = next;
-  }
-
   private syncIdentityFromSession(): void {
     const session = this.session;
     const id = session.sessionId || this.realSessionId;
@@ -284,7 +255,6 @@ export class SdkSessionHost {
     this.realSessionId = id;
     this.realSessionFile = file;
     if (file) this.options.cacheSessionPath?.(id, file);
-    this.relockToIdentity();
     if (oldId !== id) {
       this.options.onSessionRekeyed?.(oldId, id, this);
     }
@@ -641,12 +611,6 @@ export class SdkSessionHost {
   }
 
   async start(): Promise<void> {
-    const initialKeys = this.ownershipKeys();
-    this.lock = tryAcquireSessionOwnership(initialKeys, this.agentDir);
-    if (!this.lock) {
-      throw new Error(SESSION_LOCKED_MESSAGE);
-    }
-
     try {
       const sessionManager = openSessionManagerForHost(
         this.realSessionFile,
@@ -1200,8 +1164,6 @@ export class SdkSessionHost {
         console.error("[pidance] sdk runtime dispose error:", err);
       }
     }
-    this.lock?.release();
-    this.lock = null;
     this.promptRunning = false;
     this.bashRunning = false;
     this.bashCommand = null;

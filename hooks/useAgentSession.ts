@@ -299,10 +299,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   newSessionIntentIdRef.current = newSessionIntentId ?? null;
   // 只读（subagent 持久化）会话能力：UI 层先行拦截一切会产生 AgentSession
   // 或写会话的操作；后端 requireWritableSession 仍是权威防线。
-  const [writeLocked, setWriteLocked] = useState(false);
-  const capabilities = getSessionCapabilities(session, writeLocked);
-  // subagent 只读 + 外进程写锁：写入口一律早退。浏览仍走磁盘 getReadView。
-  const isReadOnly = capabilities.readOnly || capabilities.writeLocked;
+  const capabilities = getSessionCapabilities(session);
+  const isReadOnly = capabilities.readOnly;
 
   const [data, setData] = useState<SessionData | null>(null);
   const [loading, setLoading] = useState(!isNew);
@@ -515,7 +513,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (includeState) {
         setSystemPrompt(null);
         setContextUsage(null);
-        setWriteLocked(false);
       }
       // tail-first：首屏只拉最新 N 条，尽快结束 loading；更旧历史按需 prepend。
       const params = new URLSearchParams({
@@ -642,11 +639,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (hotRes.ok) {
           const hot = await hotRes.json() as {
             running: boolean;
-            writeLocked?: boolean;
             state?: AgentStateResponse;
           };
           if (sessionIdRef.current !== sid) return null;
-          setWriteLocked(hot.writeLocked === true);
           if (hot.running && hot.state) {
             applyLiveState(hot.state);
             return hot;
@@ -654,8 +649,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (!hot.running) {
             setQueuedMessages({ steering: [], followUp: [...localFollowUpRef.current] });
           }
-        } else {
-          setWriteLocked(false);
         }
 
         return { running: false };
@@ -2143,36 +2136,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       wakeAbortRef.current = null;
     }
     previousLiveSessionIdRef.current =
-      session && session.readOnly !== true && !writeLocked ? session.id : null;
-  }, [session?.id, session?.readOnly, writeLocked]);
+      session && session.readOnly !== true ? session.id : null;
+  }, [session?.id, session?.readOnly]);
 
-  useEffect(() => {
-    if (!writeLocked) return;
-    const sid = session?.id;
-    if (!sid) return;
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
-        if (!res.ok || cancelled) return;
-        const data = await res.json() as { running?: boolean; writeLocked?: boolean };
-        if (cancelled) return;
-        setWriteLocked(data.running === true ? false : data.writeLocked === true);
-      } catch {
-        /* 探测失败保持现状 */
-      }
-    };
-    const timer = setInterval(() => { void tick(); }, 4000);
-    const onVis = () => {
-      if (document.visibilityState === "visible") void tick();
-    };
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVis);
-    };
-  }, [writeLocked, session?.id]);
 
   useEffect(() => {
     if (session) {
@@ -2348,7 +2314,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // P4a 实时工具执行快照（插入序；run 结束保留至下一个 run 开始，agent_start 清空）
     toolExecutionSnapshots,
     isNew,
-    writeLocked,
     // Refs
     sessionIdRef, eventSourceRef, scrollContainerRef,
     // 自动跟随

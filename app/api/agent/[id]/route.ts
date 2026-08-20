@@ -34,12 +34,11 @@ export async function GET(
     if (!session) {
       return NextResponse.json({
         running: false,
-        writeLocked: await sessionService.isWriteLocked(id),
       });
     }
 
     const state = await session.send({ type: "get_state" });
-    return NextResponse.json({ running: true, state, writeLocked: false });
+    return NextResponse.json({ running: true, state });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

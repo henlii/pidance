@@ -49,7 +49,6 @@ import {
   type SessionArchiveFs,
   realArchiveFs,
 } from "./session-archive";
-import { findForeignSessionLockPid, isSessionLockedError } from "./session-ownership-lock";
 
 export type SessionCommand = Record<string, unknown> & { type: string };
 
@@ -66,12 +65,11 @@ export async function requireWritableSession(
   if (await isReadOnly(sessionId)) throw new ReadOnlySubagentError();
 }
 
-/** Route 层：只读 403、缺失 404、跨进程写锁 409，其余 500。 */
+/** Route 层：只读 403、缺失 404，其余 500。 */
 export function httpStatusForSessionError(error: unknown): number {
   const message = error instanceof Error ? error.message : String(error);
   if (error instanceof ReadOnlySubagentError || message === READ_ONLY_SUBAGENT_ERROR) return 403;
   if (message.includes("Session not found")) return 404;
-  if (isSessionLockedError(error)) return 409;
   return 500;
 }
 
@@ -211,7 +209,6 @@ export type SessionService = {
   subscribeRunning(listener: (ids: string[]) => void): () => void;
   isReadOnly(sessionId: string): Promise<boolean>;
   /** 外进程占写锁：本进程可只读浏览，不得 ensureLive。本进程已 live 则 false。 */
-  isWriteLocked(sessionId: string): Promise<boolean>;
   /** 精确 leaf 切换（user 叶也停在该 entry，不触发 Pi 的 user 编辑语义） */
   selectLeafExact(sessionId: string, entryId: string): Promise<{ cancelled: boolean }>;
   /** assistant 轮末分支：computeTurnEnd 后 navigateTree */
@@ -313,12 +310,6 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
     async isReadOnly(sessionId) {
       const session = (await deps.listAllSessions()).find((item) => item.id === sessionId);
       return session?.readOnly === true;
-    },
-
-    async isWriteLocked(sessionId) {
-      if (service.getLive(sessionId)) return false;
-      const filePath = await deps.resolveSessionPath(sessionId);
-      return findForeignSessionLockPid([sessionId, filePath]) !== null;
     },
 
     async getReadView(sessionId) {

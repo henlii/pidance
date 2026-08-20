@@ -26,11 +26,13 @@ import {
 } from "@/lib/file-read";
 import { handleSaveRequest } from "@/lib/file-save-route";
 import {
+  copyEntry,
   createDirectory,
   createDirectoryTarGzStream,
   createEmptyFile,
   FileOpsError,
   fileOpsStatus,
+  moveEntry,
   renameEntry,
 } from "@/lib/file-ops";
 import {
@@ -158,7 +160,7 @@ export async function POST(
     }
 
     // 创建/重命名：独立于 upload，避免误走 multipart 解析。
-    if (type === "create-file" || type === "create-dir" || type === "rename") {
+    if (type === "create-file" || type === "create-dir" || type === "rename" || type === "move" || type === "copy") {
       const allowedRoots = await getAllowedFileRoots();
       const body = await request.json().catch(() => null);
       try {
@@ -169,6 +171,17 @@ export async function POST(
             return NextResponse.json({ error: "newName is required" }, { status: 400 });
           }
           const result = renameEntry(target, newName, allowedRoots);
+          return NextResponse.json({ path: result.path, name: result.name });
+        }
+        if (type === "move" || type === "copy") {
+          const source = filePathFromSegments(segments);
+          const targetDirectory = parseOpsName(body, "targetDirectory");
+          if (!targetDirectory) {
+            return NextResponse.json({ error: "targetDirectory is required" }, { status: 400 });
+          }
+          const result = type === "move"
+            ? moveEntry(source, targetDirectory, allowedRoots)
+            : copyEntry(source, targetDirectory, allowedRoots);
           return NextResponse.json({ path: result.path, name: result.name });
         }
         const directory = filePathFromSegments(segments);

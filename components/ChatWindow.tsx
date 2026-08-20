@@ -185,7 +185,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     isAutoModelSelection,
     agentPhase, toolExecutionSnapshots,
     isNew,
-    writeLocked,
     sessionIdRef, scrollContainerRef,
     jumpButtonVisible, jumpToBottom, markExternalScrollWrite, notifyProgrammaticSmooth,
     loadOlderHistory,
@@ -201,7 +200,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
     isMobile,
   });
-  const writesDisabled = isReadOnly || writeLocked;
+  const writesDisabled = isReadOnly;
   const sessionBusy = agentRunning || bashRunning;
   const [todosCollapsed, setTodosCollapsed] = useState(true);
   const todoCollapseScope = session?.id ?? (effectiveNewSessionCwd ? `new:${effectiveNewSessionCwd}` : "new-session");
@@ -416,8 +415,6 @@ const chatPlan = composeChatPlan({
     <>
       {isReadOnly && session ? (
         <ReadOnlySessionBar session={session} isMobile={isMobile} />
-      ) : writeLocked && session ? (
-        <WriteLockedSessionBar isMobile={isMobile} />
       ) : (
         <ChatInput
       ref={chatInputRef}
@@ -838,41 +835,6 @@ const chatPlan = composeChatPlan({
  * 只读会话的紧凑提示条，整体替代编辑器：说明这是什么会话、能做什么、
  * 什么被关掉。文案保持具体直白，与现有英文界面一致。
  */
-function WriteLockedSessionBar({ isMobile }: { isMobile: boolean }) {
-  const { t } = useI18n();
-  return (
-    <div style={{ flexShrink: 0, padding: "0 16px 8px", paddingRight: isMobile ? 16 : CHAT_INPUT_RIGHT_PADDING }}>
-      <div style={{ maxWidth: 820, margin: "0 auto" }}>
-        <div
-          role="note"
-          aria-label={t("chat_sessionWriteLocked")}
-          style={{
-            display: "flex",
-            alignItems: "flex-start",
-            gap: 8,
-            border: "1px solid var(--border)",
-            borderRadius: 10,
-            background: "var(--bg-panel)",
-            padding: "8px 12px",
-            fontSize: 12,
-            lineHeight: 1.5,
-            color: "var(--text-muted)",
-          }}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 2, color: "var(--text-dim)" }} aria-hidden="true">
-            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-          </svg>
-          <span style={{ minWidth: 0 }}>
-            <span style={{ color: "var(--text)", fontWeight: 600 }}>{t("chat_sessionWriteLocked")}</span>
-            {`. ${t("chat_sessionWriteLockedDescription")}`}
-          </span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function ReadOnlySessionBar({ session, isMobile }: { session: SessionInfo; isMobile: boolean }) {
   const { t } = useI18n();
   const sub = session.subagent;

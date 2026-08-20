@@ -32,12 +32,11 @@ export async function GET(
     if (!live) {
       return NextResponse.json({
         running: false,
-        writeLocked: await sessionService.isWriteLocked(id),
       });
     }
 
     const state = await live.send({ type: "get_state" });
-    return NextResponse.json({ running: true, state, writeLocked: false });
+    return NextResponse.json({ running: true, state });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ error: message }, { status: httpStatusForSessionError(error) });
