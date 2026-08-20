@@ -13,13 +13,10 @@ const execFileAsync = promisify(execFile);
 
 // Same skip lists as /api/files — only used for the non-git readdir fallback.
 // Git-tracked repos rely on .gitignore instead (matches the TUI's fd behavior).
-const IGNORED_NAMES = new Set([
-  "node_modules", ".git", ".next", "dist", "build", "__pycache__",
-  ".turbo", ".cache", "coverage", ".pytest_cache", ".mypy_cache",
-  "target", "vendor", ".DS_Store",
-]);
+// 文件索引与文件管理一致：不再隐藏 node_modules/dist/build 等目录。
+const IGNORED_NAMES = new Set<string>();
 
-const IGNORED_SUFFIXES = [".pyc"];
+const IGNORED_SUFFIXES: string[] = [];
 
 /** Cap on the plain (no-query) response used as the client-side index */
 const MAX_FILES = 5000;

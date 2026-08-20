@@ -12,23 +12,8 @@ const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 5_000;
 const MAX_ENTRIES = 400;
 
-/** 与 /api/files 一致的忽略集（避免把 node_modules/.git 等大目录带进预览）。 */
-export const BROWSE_IGNORED_NAMES = new Set([
-	"node_modules",
-	".git",
-	".next",
-	"dist",
-	"build",
-	"__pycache__",
-	".turbo",
-	".cache",
-	"coverage",
-	".pytest_cache",
-	".mypy_cache",
-	"target",
-	"vendor",
-	".DS_Store",
-]);
+/** 目录浏览已与 PTY 同等开放：不再隐藏 node_modules/dist/build 等目录。 */
+export const BROWSE_IGNORED_NAMES = new Set<string>();
 
 export type BrowseEntry = { name: string; path: string };
 

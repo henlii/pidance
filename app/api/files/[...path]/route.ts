@@ -41,13 +41,10 @@ import {
   validateUploadFileNames,
 } from "@/lib/file-upload";
 
-const IGNORED_NAMES = new Set([
-  "node_modules", ".git", ".next", "dist", "build", "__pycache__",
-  ".turbo", ".cache", "coverage", ".pytest_cache", ".mypy_cache",
-  "target", "vendor", ".DS_Store", ".git",
-]);
+// 文件管理已与 PTY 同等开放：不再隐藏 node_modules/dist/build 等目录。
+const IGNORED_NAMES = new Set<string>();
 
-const IGNORED_SUFFIXES = [".pyc"];
+const IGNORED_SUFFIXES: string[] = [];
 
 const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview", "watch"] as const;
 type FileRequestType = typeof FILE_REQUEST_TYPES[number];
