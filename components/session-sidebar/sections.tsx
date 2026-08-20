@@ -115,6 +115,7 @@ function ProjectSection({
   onSessionArchive,
   isSessionPinned,
   onTogglePin,
+  onProjectDrop,
 }: {
   project: SidebarProjectNode;
   homeDir: string;
@@ -161,6 +162,8 @@ function ProjectSection({
   isSessionPinned?: (id: string) => boolean;
   /** 置顶/取消置顶动作；不传则不显示置顶菜单。 */
   onTogglePin?: (id: string) => void;
+  /** 项目行拖放到另一项目时回调；缺省则不可拖。 */
+  onProjectDrop?: (fromRoot: string, toRoot: string) => void;
 }) {
   const { t } = useI18n();
   const collapsed = isSessionNodeEffectivelyCollapsed(collapsedProjectRoots, project.root, searchActive);
@@ -182,6 +185,25 @@ function ProjectSection({
         tabIndex={0}
         aria-expanded={!collapsed}
         aria-label={collapseLabel}
+        draggable={Boolean(onProjectDrop)}
+        onDragStart={(event) => {
+          if (!onProjectDrop) return;
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/pidance-project", project.root);
+          event.dataTransfer.setData("text/plain", project.root);
+        }}
+        onDragOver={(event) => {
+          if (!onProjectDrop) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+        }}
+        onDrop={(event) => {
+          if (!onProjectDrop) return;
+          event.preventDefault();
+          event.stopPropagation();
+          const from = event.dataTransfer.getData("text/pidance-project") || event.dataTransfer.getData("text/plain");
+          if (from) onProjectDrop(from, project.root);
+        }}
         onClick={() => onToggleProject(project.root)}
         onMouseEnter={(event) => { event.currentTarget.style.background = "var(--bg-hover)"; }}
         onMouseLeave={(event) => { event.currentTarget.style.background = "transparent"; }}

@@ -8,6 +8,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { mergeUnreadSessionState, parseUnreadSessionState } from "./unread-sessions-storage";
 
 export type ServerPrefs = Record<string, unknown>;
 
@@ -159,7 +160,15 @@ export function useServerPreferences(): ServerPrefs {
       if (document.visibilityState !== "visible") return;
       void fetchPrefs()
         .then((remote) => {
-          singletonPrefs = remote;
+          const local = singletonPrefs;
+          const merged: ServerPrefs = { ...remote };
+          if (local) {
+            merged.unreadSessionState = mergeUnreadSessionState(
+              parseUnreadSessionState(local.unreadSessionState),
+              parseUnreadSessionState(remote.unreadSessionState ?? remote.unreadSessionIds),
+            );
+          }
+          singletonPrefs = merged;
           singletonLoaded = true;
           notify();
         })

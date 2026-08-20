@@ -56,6 +56,6 @@ test("shouldRequireAuth：非回环 + 无密码 → 拒绝启动；有密码或�
 
 test("describeHost：未指定地址给出 Next 默认说明", () => {
 	assert.equal(describeHost("0.0.0.0"), "0.0.0.0");
-	assert.equal(describeHost(null).includes("0.0.0.0"), true);
-	assert.equal(describeHost(undefined).includes("0.0.0.0"), true);
+	assert.equal(describeHost(null).includes("127.0.0.1"), true);
+	assert.equal(describeHost(undefined).includes("127.0.0.1"), true);
 });

@@ -10,6 +10,7 @@ import {
   buildSessionExportJsonlHref,
   canExportSession,
 } from "../session-export-links";
+import { didMenuAnchorMove } from "@/lib/menu-anchor";
 import {
   AnimatedDropdown,
   ArchiveIcon,
@@ -96,8 +97,19 @@ export function ProjectRowMenu({ open, onOpenChange, projectName, onEdit, onClos
         onOpenChange(false);
       }
     };
+    const onScrollOrResize = () => {
+      const rect = triggerRef.current?.getBoundingClientRect();
+      if (!didMenuAnchorMove(anchorRef.current, rect ? { top: rect.top, right: rect.right } : null)) return;
+      onOpenChange(false);
+    };
     document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    window.addEventListener("scroll", onScrollOrResize, true);
+    window.addEventListener("resize", onScrollOrResize);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize);
+    };
   }, [open, onOpenChange]);
 
   // 打开后焦点移入第一个菜单项（菜单键盘可达；Esc 由 wrapper onKeyDown 拦截）
@@ -201,12 +213,16 @@ export function SessionRowMenu({ session, title, canRename, canDelete, canArchiv
       const target = event.target as Node;
       if (!menuRef.current?.contains(target) && !triggerRef.current?.contains(target)) close();
     };
-    const viewport = () => close();
+    const onScrollOrResize = () => {
+      const rect = triggerRef.current?.getBoundingClientRect();
+      if (!didMenuAnchorMove(anchorRef.current, rect ? { top: rect.top, right: rect.right } : null)) return;
+      close();
+    };
     document.addEventListener("mousedown", outside);
-    window.addEventListener("resize", viewport);
-    window.addEventListener("scroll", viewport, true);
+    window.addEventListener("resize", onScrollOrResize);
+    window.addEventListener("scroll", onScrollOrResize, true);
     const frame = requestAnimationFrame(() => menuRef.current?.querySelector<HTMLElement>("[role='menuitem']")?.focus());
-    return () => { cancelAnimationFrame(frame); document.removeEventListener("mousedown", outside); window.removeEventListener("resize", viewport); window.removeEventListener("scroll", viewport, true); };
+    return () => { cancelAnimationFrame(frame); document.removeEventListener("mousedown", outside); window.removeEventListener("resize", onScrollOrResize); window.removeEventListener("scroll", onScrollOrResize, true); };
   }, [close, open]);
 
   const openMenu = () => {

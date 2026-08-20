@@ -3,7 +3,6 @@
  * 不依赖 ModelRuntime；内置目录来自 pi-ai providers/all（经 pi-builtin-models）。
  */
 
-import { stat } from "fs/promises";
 import { resolve } from "path";
 import { getAuthPath, getModelsPath, getSettingsPath } from "@/lib/pi-paths";
 import { isProviderConfigured, listCredentialProviders } from "@/lib/auth-store";
@@ -133,17 +132,8 @@ const EMPTY_MODELS: ModelsData = {
 export async function GET(req: Request) {
   const requestedCwd = new URL(req.url).searchParams.get("cwd") || process.cwd();
   const cwd = resolve(requestedCwd);
-
-  let cwdStat;
-  try {
-    cwdStat = await stat(cwd);
-  } catch {
-    return Response.json({ error: `Directory does not exist: ${cwd}` }, { status: 400 });
-  }
-  if (!cwdStat.isDirectory()) {
-    return Response.json({ error: `Not a directory: ${cwd}` }, { status: 400 });
-  }
-
+  // cwd 只作缓存键；loadModels 不读该目录。会话 cwd 已删时仍须返回目录，
+  // 否则 ChatInput 因 modelList 为空把模型选择器整栏卸掉。
   try {
     return Response.json(await loadModelsWithCache(cwd, () => loadModels(cwd)));
   } catch {

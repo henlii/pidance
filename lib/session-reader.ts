@@ -748,6 +748,7 @@ function getSessionContextSettingsLocal(path: SessionEntry[]): {
 } {
   let thinkingLevel: string | undefined;
   let model: { provider?: string; modelId?: string; id?: string } | undefined;
+  let lastAssistantModel: { provider: string; modelId: string; id: string } | undefined;
   for (const e of path) {
     if (e.type === "thinking_level_change" && typeof (e as { thinkingLevel?: string }).thinkingLevel === "string") {
       thinkingLevel = (e as { thinkingLevel: string }).thinkingLevel;
@@ -758,8 +759,14 @@ function getSessionContextSettingsLocal(path: SessionEntry[]): {
         model = { provider: m.provider, modelId: m.modelId, id: m.modelId };
       }
     }
+    if (e.type === "message") {
+      const msg = (e as { message?: { role?: string; provider?: string; model?: string } }).message;
+      if (msg?.role === "assistant" && typeof msg.provider === "string" && msg.provider && typeof msg.model === "string" && msg.model) {
+        lastAssistantModel = { provider: msg.provider, modelId: msg.model, id: msg.model };
+      }
+    }
   }
-  return { thinkingLevel, model };
+  return { thinkingLevel, model: model ?? lastAssistantModel };
 }
 export function buildSessionContext(
   entries: SessionEntry[],
@@ -799,7 +806,7 @@ export function buildSessionContext(
     messages,
     entryIds,
     thinkingLevel: settings.thinkingLevel ?? "off",
-    model: settings.model as SessionContext["model"],
+    model: (settings.model as SessionContext["model"]) ?? null,
   };
 }
 

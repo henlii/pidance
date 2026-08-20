@@ -236,7 +236,7 @@ test("实时工具：运行中默认展开终端输出，并优先展示快照�
   assert.match(html, /<pre[^>]*tabindex="0"[^>]*max-height:min\(320px, 45vh\)/);
 });
 
-test("TUI 渲染桥：ANSI 调用、实时与结果行优先于原始输出和结构化结果", () => {
+test("TUI 渲染桥：ANSI 调用/实时行优先于原始输出；有 result 后工具块收回", () => {
   const message = toolMessage("原始命令");
   message.content[0].renderedCallLines = ["\u001b[36m插件调用\u001b[0m"];
   const html = renderMessage(message, {
@@ -256,12 +256,32 @@ test("TUI 渲染桥：ANSI 调用、实时与结果行优先于原始输出和�
     }],
   });
 
-  assert.ok(html.includes("插件调用"));
-  assert.ok(html.includes("插件实时输出"));
-  assert.ok(html.includes("插件结果"));
+  // P2 行为：工具有 result 即已结束，工具块默认收回，不展示调用/实时/结果明细。
+  assert.ok(html.includes('aria-expanded="false"'));
+  assert.ok(!html.includes("插件调用"));
+  assert.ok(!html.includes("插件实时输出"));
+  assert.ok(!html.includes("插件结果"));
   assert.ok(!html.includes("原始实时输出"));
   assert.ok(!html.includes("原始结果"));
-  assert.match(html, /color:[^;]*(?:rgb|#|var\()/);
+
+  // 无 result 且 running 时，ANSI 调用/实时行优先于原始实时输出。
+  const runningMessage = toolMessage("原始命令");
+  runningMessage.content[0].renderedCallLines = ["\u001b[36m插件调用\u001b[0m"];
+  const runningHtml = renderMessage(runningMessage, {
+    toolExecutionSnapshots: [{
+      toolCallId: "tool-1",
+      toolName: "bash",
+      output: "原始实时输出",
+      renderedLines: ["\u001b[33m插件实时输出\u001b[0m"],
+      startedAt: Date.now() - 500,
+      status: "running",
+    }],
+  });
+  assert.ok(runningHtml.includes('aria-expanded="true"'));
+  assert.ok(runningHtml.includes("插件调用"));
+  assert.ok(runningHtml.includes("插件实时输出"));
+  assert.ok(!runningHtml.includes("原始实时输出"));
+  assert.match(runningHtml, /color:[^;]*(?:rgb|#|var\()/);
 });
 
 test("实时工具：终态默认折叠为状态、命令与固定耗时摘要", () => {

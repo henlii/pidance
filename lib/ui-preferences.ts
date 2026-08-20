@@ -7,6 +7,7 @@
  */
 
 export type SidebarDisplayMode = "standard" | "compact";
+export type ProjectSortMode = "recent" | "az" | "za" | "fixed";
 
 /** 项目显示名 alias：projectRoot → 用户命名。纯 UI 层数据，与 Pi schema/磁盘/Git 无关。 */
 export type ProjectAliases = Record<string, string>;
@@ -131,6 +132,10 @@ export interface SidebarPreferences {
   pinnedSessionIds: string[];
   /** 文件树按 cwd 记忆的展开路径与滚动位置。 */
   fileExplorerState: FileExplorerState;
+  /** 侧栏项目排序：近期 / 名称 / 固定。 */
+  projectSort: ProjectSortMode;
+  /** 固定排序时的项目根顺序；fixed 以外模式可为空。 */
+  projectOrder: string[];
 }
 export const DEFAULT_SIDEBAR_PREFERENCES: SidebarPreferences = {
   displayMode: "standard",
@@ -147,6 +152,8 @@ export const DEFAULT_SIDEBAR_PREFERENCES: SidebarPreferences = {
   showRecentSessions: true,
   pinnedSessionIds: [],
   fileExplorerState: {},
+  projectSort: "recent",
+  projectOrder: [],
 };
 
 export const STORAGE_KEY = "pidance:sidebar-preferences";
@@ -219,7 +226,15 @@ export function parseSidebarPreferences(raw: unknown): SidebarPreferences {
     pinnedSessionIds: parsePathList(record.pinnedSessionIds),
     // 旧数据无文件树记忆字段：默认空表。
     fileExplorerState: parseFileExplorerState(record.fileExplorerState),
+    projectSort: parseProjectSortMode(record.projectSort),
+    projectOrder: parsePathList(record.projectOrder),
   };
+}
+
+function parseProjectSortMode(value: unknown): ProjectSortMode {
+  return value === "az" || value === "za" || value === "fixed" || value === "recent"
+    ? value
+    : DEFAULT_SIDEBAR_PREFERENCES.projectSort;
 }
 
 export function serializeSidebarPreferences(prefs: SidebarPreferences): string {
@@ -238,6 +253,8 @@ export function serializeSidebarPreferences(prefs: SidebarPreferences): string {
     showRecentSessions: parseShowRecentSessions(prefs.showRecentSessions),
     pinnedSessionIds: parsePathList(prefs.pinnedSessionIds),
     fileExplorerState: parseFileExplorerState(prefs.fileExplorerState),
+    projectSort: parseProjectSortMode(prefs.projectSort),
+    projectOrder: parsePathList(prefs.projectOrder),
   });
 }
 
@@ -282,6 +299,8 @@ export type SyncedSidebarUi = {
   addedProjectRoots: string[];
   showRecentSessions: boolean;
   pinnedSessionIds: string[];
+  projectSort: ProjectSortMode;
+  projectOrder: string[];
 };
 
 export function sidebarUiFromPrefs(prefs: SidebarPreferences): SyncedSidebarUi {
@@ -293,6 +312,8 @@ export function sidebarUiFromPrefs(prefs: SidebarPreferences): SyncedSidebarUi {
     addedProjectRoots: prefs.addedProjectRoots,
     showRecentSessions: prefs.showRecentSessions,
     pinnedSessionIds: prefs.pinnedSessionIds,
+    projectSort: prefs.projectSort,
+    projectOrder: prefs.projectOrder,
   };
 }
 
@@ -308,6 +329,8 @@ export function applySyncedSidebarUi(prefs: SidebarPreferences, remote: unknown)
     addedProjectRoots: parsed.addedProjectRoots,
     showRecentSessions: parsed.showRecentSessions,
     pinnedSessionIds: parsed.pinnedSessionIds,
+    projectSort: parsed.projectSort,
+    projectOrder: parsed.projectOrder,
   };
 }
 

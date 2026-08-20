@@ -2046,8 +2046,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               </button>
             )}
             {/* Model selector — 运行中也可改，下次发送/引导/队列生效 */}
-            {modelOptions.length > 0 && currentName && onModelChange && (
-                <div ref={dropdownRef} style={{ position: "relative", flex: "0 1 auto", minWidth: 0 }}>
+            {modelOptions.length > 0 && onModelChange && (
+                <div ref={dropdownRef} style={{ position: "relative", flex: "0 1 auto", minWidth: isMobile ? 96 : 140 }}>
                   <button
                     ref={modelButtonRef}
                     aria-haspopup="listbox"
@@ -2069,7 +2069,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                         : (model
                             ? modelInfoTitle({
                                 modelId: model.modelId,
-                                name: currentName,
+                                name: currentName ?? model.modelId,
                                 provider: model.provider,
                                 contextWindow: modelList?.find(
                                   (m) => m.provider === model?.provider && m.id === model?.modelId,
@@ -2116,7 +2116,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
                       <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
                     </svg>
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{currentName}</span>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{currentName ?? t("input_modelTitle")}</span>
                     {/* 思考深度并入模型选择按钮显示（外层已保证 onModelChange 存在） */}
                     <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginLeft: 2 }}>
                       ·{thinkingDisplayLabel}

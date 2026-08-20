@@ -299,6 +299,24 @@ export function clearToolExecutions(state: ToolExecutionBufferState): ToolExecut
 }
 
 /**
+ * 将仍 running 的快照收成 cancelled。agent 整轮结束后立刻收回工具块，
+ * 不要等到下一次 agent_start 才 clear。
+ */
+export function finalizeRunningToolExecutions(
+  state: ToolExecutionBufferState,
+  now = Date.now(),
+): ToolExecutionBufferState {
+  let changed = false;
+  const next = new Map(state);
+  for (const [id, snap] of next) {
+    if (snap.status !== "running") continue;
+    next.set(id, { ...snap, status: "cancelled", endedAt: snap.endedAt ?? now });
+    changed = true;
+  }
+  return changed ? next : state;
+}
+
+/**
  * 导出快照数组（插入序 = 工具启动顺序）。每次返回新数组，调用方可直接 setState。
  */
 export function getToolExecutionSnapshots(state: ToolExecutionBufferState): ToolExecutionSnapshot[] {

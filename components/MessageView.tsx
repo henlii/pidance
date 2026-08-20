@@ -14,7 +14,7 @@ import {
 import { PIDANCE_COMMAND_CUSTOM_TYPE } from "@/lib/session-command-entry";
 import { getBranchSummaryFileMetadata } from "@/lib/branch-bookmarks";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
-import { isEmptyThinkingBlock } from "@/lib/message-display";
+import { isActiveStreamBlock, isEmptyThinkingBlock } from "@/lib/message-display";
 import { getThinkingText, projectDisplayBlocks } from "@/lib/thinking-content";
 import { parseAnsiLine } from "@/lib/ansi";
 import type { ToolExecutionSnapshot, ToolExecutionStatus } from "@/lib/tool-execution-buffer";
@@ -660,8 +660,8 @@ function AssistantMessageView({
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {blockItems.map(({ block, originalIndex }) => (
-          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block as AssistantContentBlock} toolResults={toolResults} toolExecutionMap={toolExecutionMap} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} toolsActive={toolsActive} startedAt={message.timestamp} />
+        {blockItems.map(({ block, originalIndex }, blockOffset) => (
+          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block as AssistantContentBlock} toolResults={toolResults} toolExecutionMap={toolExecutionMap} isStreaming={isStreaming} activeStreamBlock={isActiveStreamBlock(isStreaming, blockOffset, blockItems.length)} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} toolsActive={toolsActive} startedAt={message.timestamp} />
         ))}
       </div>
 
@@ -777,12 +777,12 @@ function AssistantMessageView({
   );
 }
 
-function BlockView({ block, toolResults, toolExecutionMap, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex, toolsActive, startedAt }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; toolExecutionMap?: Map<string, ToolExecutionSnapshot>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; toolsActive?: boolean; startedAt?: number }) {
+function BlockView({ block, toolResults, toolExecutionMap, isStreaming, activeStreamBlock, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex, toolsActive, startedAt }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; toolExecutionMap?: Map<string, ToolExecutionSnapshot>; isStreaming?: boolean; activeStreamBlock?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; toolsActive?: boolean; startedAt?: number }) {
   if (block.type === "text") {
     return <TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} />;
   }
   if (block.type === "thinking") {
-    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} isStreaming={isStreaming} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} />;
+    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} isStreaming={Boolean(activeStreamBlock)} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} />;
   }
   if (block.type === "toolCall") {
     const tc = block as ToolCallContent;
@@ -836,7 +836,7 @@ function pinStreamBlockToBottom(
 function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, blockIndex }: {
   block: ThinkingContent;
   duration?: number;
-  /** 所在消息正在流式生成：思考块默认展开、流式结束自动折叠 */
+  /** 本思考块仍是流式消息的最后一块：默认展开；本块输出结束（后续块出现或整段结束）立刻折叠 */
   isStreaming?: boolean;
   sessionId?: string;
   entryId?: string;
@@ -976,7 +976,8 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
   const outputRef = useRef<HTMLPreElement>(null);
   const followOutputRef = useRef(true);
   const pinningOutputRef = useRef(false);
-  const isRunning = snapshot?.status === "running" || pending === true;
+  // 有 result 即本块输出已结束：立刻收回，不等下一轮模型调用或残留 running 快照。
+  const isRunning = !result && (snapshot?.status === "running" || pending === true);
   const expanded = expandedOverride ?? isRunning;
   const isEditTool = isEditToolName(block.toolName);
   // 首屏可能 deferredHeavy：展开后懒加载完整 details 再算 diff
