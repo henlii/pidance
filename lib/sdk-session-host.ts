@@ -26,7 +26,9 @@ import {
   writeLeafSidecar,
 } from "./session-leaf-sidecar";
 import {
-  tryAcquireSessionLock,
+  SESSION_LOCKED_MESSAGE,
+  releaseUnwantedLockKeys,
+  tryAcquireSessionOwnership,
   type SessionLockHandle,
 } from "./session-ownership-lock";
 import {
@@ -89,6 +91,28 @@ export type SdkSessionHostOptions = {
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
+}
+
+/** 自动命名用：从消息 content 提取首条用户输入（string 或 text 块），折叠空白并截断。 */
+const AUTO_NAME_MAX_LENGTH = 60;
+function firstUserText(content: unknown): string | undefined {
+  let text = "";
+  if (typeof content === "string") {
+    text = content;
+  } else if (Array.isArray(content)) {
+    text = content
+      .filter(
+        (block): block is { type?: string; text?: string } =>
+          typeof block === "object" && block !== null && block.type === "text" && typeof block.text === "string",
+      )
+      .map((block) => block.text)
+      .join("\n");
+  }
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return undefined;
+  return normalized.length > AUTO_NAME_MAX_LENGTH
+    ? `${normalized.slice(0, AUTO_NAME_MAX_LENGTH)}…`
+    : normalized;
 }
 
 /** 打开或创建 SessionManager，并在创建 AgentSession 前应用 leaf sidecar。 */
@@ -230,6 +254,28 @@ export class SdkSessionHost {
     return this.runtime.services;
   }
 
+  private ownershipKeys(): string[] {
+    const keys: string[] = [];
+    for (const key of [this.realSessionId, this.realSessionFile]) {
+      if (key && !keys.includes(key)) keys.push(key);
+    }
+    return keys;
+  }
+
+  /** 身份变化时先抢新钥匙再放旧钥匙，始终同时持有 id 与文件路径。 */
+  private relockToIdentity(): void {
+    const keys = this.ownershipKeys();
+    if (keys.length === 0) return;
+    const current = this.lock?.keys ?? [];
+    if (current.length === keys.length && keys.every((key) => current.includes(key))) return;
+    const next = tryAcquireSessionOwnership(keys, this.agentDir, this.lock);
+    if (!next) {
+      throw new Error(SESSION_LOCKED_MESSAGE);
+    }
+    releaseUnwantedLockKeys(this.lock, keys);
+    this.lock = next;
+  }
+
   private syncIdentityFromSession(): void {
     const session = this.session;
     const id = session.sessionId || this.realSessionId;
@@ -238,6 +284,7 @@ export class SdkSessionHost {
     this.realSessionId = id;
     this.realSessionFile = file;
     if (file) this.options.cacheSessionPath?.(id, file);
+    this.relockToIdentity();
     if (oldId !== id) {
       this.options.onSessionRekeyed?.(oldId, id, this);
     }
@@ -325,6 +372,28 @@ export class SdkSessionHost {
     this.notifyRunning();
   }
 
+  /**
+   * 自动命名：会话尚无名字（session_info）时，用第一条用户输入作为会话名。
+   * 思维锚（flash-anchor 等 custom 预热条目）不进入 buildSessionContext 的
+   * messages（role 非 user），天然被跳过，不会被当成用户输入。
+   * 仅在 agent_end 时对无名会话执行一次；命名失败不阻断运行。
+   */
+  private maybeAutoNameSession(): void {
+    try {
+      const manager = this.session?.sessionManager;
+      if (!manager) return;
+      if (manager.getSessionName()) return;
+      const context = manager.buildSessionContext() as {
+        messages?: Array<{ role?: string; content?: unknown }>;
+      };
+      const firstUser = (context.messages ?? []).find((message) => message.role === "user");
+      const text = firstUserText(firstUser?.content);
+      if (text) manager.appendSessionInfo(text);
+    } catch {
+      /* 自动命名失败不阻断 */
+    }
+  }
+
   private handleSessionEvent(event: SdkAgentEvent): void {
     switch (event.type) {
       case "agent_start":
@@ -337,6 +406,7 @@ export class SdkSessionHost {
         clearRunningStartedAt(this.realSessionId);
         this.options.onSessionListInvalidate?.();
         if (this.realSessionFile) clearLeafSidecar(this.realSessionFile);
+        this.maybeAutoNameSession();
         this.notifyRunning();
         this.emit({ type: "prompt_done" });
         break;
@@ -571,84 +641,75 @@ export class SdkSessionHost {
   }
 
   async start(): Promise<void> {
-    const lockKey = this.realSessionFile || this.realSessionId || this.options.cwd;
-    this.lock = tryAcquireSessionLock(lockKey, this.agentDir);
+    const initialKeys = this.ownershipKeys();
+    this.lock = tryAcquireSessionOwnership(initialKeys, this.agentDir);
     if (!this.lock) {
-      throw new Error(
-        "Session is locked by another Pidance process (writable host ownership)",
-      );
+      throw new Error(SESSION_LOCKED_MESSAGE);
     }
 
-    const sessionManager = openSessionManagerForHost(
-      this.realSessionFile,
-      this.options.cwd,
-    );
-    const cwd = sessionManager.getCwd() || this.options.cwd;
-    const agentDir = this.agentDir;
-    const toolNames = this.activeToolNames;
+    try {
+      const sessionManager = openSessionManagerForHost(
+        this.realSessionFile,
+        this.options.cwd,
+      );
+      const cwd = sessionManager.getCwd() || this.options.cwd;
+      const agentDir = this.agentDir;
+      const toolNames = this.activeToolNames;
 
-    const createRuntime = async ({
-      cwd: runtimeCwd,
-      agentDir: runtimeAgentDir,
-      sessionManager: sm,
-      sessionStartEvent,
-    }: {
-      cwd: string;
-      agentDir: string;
-      sessionManager: SessionManager;
-      sessionStartEvent?: unknown;
-    }) => {
-      const services = await createAgentSessionServices({
+      const createRuntime = async ({
         cwd: runtimeCwd,
         agentDir: runtimeAgentDir,
-      });
-      // 省略的 xhigh/max 补恒等，让 settings 默认 xhigh 在建 session 时不被 Pi 钳成 high
-      for (const m of services.modelRuntime.getModels()) {
-        applyPassThroughExtendedThinkingInPlace(m);
-      }
-      const created = await createAgentSessionFromServices({
-        services,
         sessionManager: sm,
-        sessionStartEvent: sessionStartEvent as never,
-        tools: toolNames && toolNames.length > 0 ? toolNames : undefined,
-        noTools: toolNames && toolNames.length === 0 ? "all" : undefined,
-      });
-      return {
-        ...created,
-        services,
-        diagnostics: services.diagnostics,
+        sessionStartEvent,
+      }: {
+        cwd: string;
+        agentDir: string;
+        sessionManager: SessionManager;
+        sessionStartEvent?: unknown;
+      }) => {
+        const services = await createAgentSessionServices({
+          cwd: runtimeCwd,
+          agentDir: runtimeAgentDir,
+        });
+        // 省略的 xhigh/max 补恒等，让 settings 默认 xhigh 在建 session 时不被 Pi 钳成 high
+        for (const m of services.modelRuntime.getModels()) {
+          applyPassThroughExtendedThinkingInPlace(m);
+        }
+        const created = await createAgentSessionFromServices({
+          services,
+          sessionManager: sm,
+          sessionStartEvent: sessionStartEvent as never,
+          tools: toolNames && toolNames.length > 0 ? toolNames : undefined,
+          noTools: toolNames && toolNames.length === 0 ? "all" : undefined,
+        });
+        return {
+          ...created,
+          services,
+          diagnostics: services.diagnostics,
+        };
       };
-    };
 
-    this.runtime = await createAgentSessionRuntime(createRuntime, {
-      cwd,
-      agentDir,
-      sessionManager,
-    });
-    this.runtime.setRebindSession(async () => {
+      this.runtime = await createAgentSessionRuntime(createRuntime, {
+        cwd,
+        agentDir,
+        sessionManager,
+      });
+      this.runtime.setRebindSession(async () => {
+        await this.rebindSession();
+      });
+      this.runtime.setBeforeSessionInvalidate(() => {
+        this.extensionUi?.dispose();
+        this.unsubscribe?.();
+        this.unsubscribe = null;
+      });
+
       await this.rebindSession();
-    });
-    this.runtime.setBeforeSessionInvalidate(() => {
-      this.extensionUi?.dispose();
-      this.unsubscribe?.();
-      this.unsubscribe = null;
-    });
-
-    await this.rebindSession();
-    this.syncIdentityFromSession();
-    // 新会话：用真实 id 重新拿锁
-    if (this.realSessionId && this.realSessionId !== lockKey) {
-      this.lock.release();
-      this.lock = tryAcquireSessionLock(this.realSessionId, this.agentDir)
-        ?? tryAcquireSessionLock(this.realSessionFile || this.realSessionId, this.agentDir);
-      if (!this.lock) {
-        await this.destroyAsync();
-        throw new Error(
-          "Session is locked by another Pidance process (writable host ownership)",
-        );
-      }
+      this.syncIdentityFromSession();
+      this.resetIdleTimer();
+    } catch (error) {
+      await this.destroyAsync();
+      throw error;
     }
-    this.resetIdleTimer();
   }
 
   private projectState(): Record<string, unknown> {

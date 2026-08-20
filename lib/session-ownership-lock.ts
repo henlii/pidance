@@ -1,6 +1,9 @@
 /**
  * Pidance 进程级 session 所有权锁（31415/31416 共享 agentDir 时防双写）。
  * 外部 Pi CLI 不识别此锁；运维上禁止与 Pidance 并发写同一 session。
+ *
+ * 同一会话必须同时锁 session id 与 session 文件路径。只锁其中一个时，
+ * 另一实例会把另一把钥匙当成空闲而启动第二套 writable host。
  */
 import {
   closeSync,
@@ -14,10 +17,23 @@ import {
 import { join } from "node:path";
 import { getAgentDir } from "./pi-paths";
 
+export const SESSION_LOCKED_MESSAGE =
+  "Session is locked by another Pidance process (writable host ownership)";
+
+export function isSessionLockedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("locked by another Pidance process");
+}
+
 export type SessionLockHandle = {
   release: () => void;
   path: string;
+  keys: string[];
 };
+
+type LockPart = { key: string; release: () => void; path: string };
+
+const partsByHandle = new WeakMap<SessionLockHandle, LockPart[]>();
 
 function lockDir(agentDir: string): string {
   return join(agentDir, "pidance-session-locks");
@@ -45,6 +61,33 @@ function readLockPid(path: string): number | null {
   } catch {
     return null;
   }
+}
+
+function uniqueKeys(keys: Array<string | undefined | null>): string[] {
+  const out: string[] = [];
+  for (const key of keys) {
+    if (typeof key === "string" && key && !out.includes(key)) out.push(key);
+  }
+  return out;
+}
+
+function attachParts(handle: SessionLockHandle, parts: LockPart[]): SessionLockHandle {
+  partsByHandle.set(handle, parts);
+  return handle;
+}
+
+function composeHandle(parts: LockPart[]): SessionLockHandle {
+  let released = false;
+  const handle: SessionLockHandle = {
+    path: parts[0]?.path ?? "",
+    keys: parts.map((part) => part.key),
+    release: () => {
+      if (released) return;
+      released = true;
+      for (const part of parts) part.release();
+    },
+  };
+  return attachParts(handle, parts);
 }
 
 /**
@@ -87,7 +130,8 @@ export function tryAcquireSessionLock(
         return null;
       }
       let released = false;
-      return {
+      const part: LockPart = {
+        key: sessionKey,
         path,
         release: () => {
           if (released) return;
@@ -104,6 +148,7 @@ export function tryAcquireSessionLock(
           }
         },
       };
+      return composeHandle([part]);
     } catch {
       return null;
     }
@@ -124,3 +169,67 @@ export function tryAcquireSessionLock(
   }
   return null;
 }
+
+/**
+ * 同时锁住一组钥匙（通常是 session id + session 文件路径）。
+ * `held` 已持有的钥匙会保留 fd，不会先放后抢，避免换钥窗口被另一进程插入。
+ * 失败时不释放 `held`。
+ */
+export function tryAcquireSessionOwnership(
+  keys: Array<string | undefined | null>,
+  agentDir: string = getAgentDir(),
+  held?: SessionLockHandle | null,
+): SessionLockHandle | null {
+  const wanted = uniqueKeys(keys);
+  if (wanted.length === 0) return null;
+  const heldParts = held ? (partsByHandle.get(held) ?? []) : [];
+  const heldByKey = new Map(heldParts.map((part) => [part.key, part]));
+  const acquired: LockPart[] = [];
+  for (const key of wanted) {
+    const existing = heldByKey.get(key);
+    if (existing) {
+      acquired.push(existing);
+      continue;
+    }
+    const next = tryAcquireSessionLock(key, agentDir);
+    if (!next) {
+      for (const part of acquired) {
+        if (!heldByKey.has(part.key)) part.release();
+      }
+      return null;
+    }
+    const parts = partsByHandle.get(next) ?? [];
+    acquired.push(...parts);
+  }
+  return composeHandle(acquired);
+}
+
+/** 只读探测：外进程是否占着任一把钥匙。本进程持有的锁不算占用。 */
+export function findForeignSessionLockPid(
+  keys: Array<string | undefined | null>,
+  agentDir: string = getAgentDir(),
+  selfPid: number = process.pid,
+): number | null {
+  for (const key of uniqueKeys(keys)) {
+    const path = lockPath(agentDir, key);
+    if (!existsSync(path)) continue;
+    const pid = readLockPid(path);
+    if (pid === null || pid === selfPid || !isPidAlive(pid)) continue;
+    return pid;
+  }
+  return null;
+}
+
+/** 释放 held 中不再属于 wanted 的钥匙；wanted 内的钥匙转交给新 handle。 */
+export function releaseUnwantedLockKeys(
+  held: SessionLockHandle | null | undefined,
+  wanted: Array<string | undefined | null>,
+): void {
+  if (!held) return;
+  const wantedSet = new Set(uniqueKeys(wanted));
+  const parts = partsByHandle.get(held) ?? [];
+  for (const part of parts) {
+    if (!wantedSet.has(part.key)) part.release();
+  }
+}
+

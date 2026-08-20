@@ -1,4 +1,4 @@
-import { sessionService, READ_ONLY_SUBAGENT_ERROR, requireWritableSession } from "@/lib/session-service";
+import { sessionService, READ_ONLY_SUBAGENT_ERROR, requireWritableSession, httpStatusForSessionError } from "@/lib/session-service";
 import { projectAgentEvent } from "@/lib/agent-event-stream";
 
 export const dynamic = "force-dynamic";
@@ -14,10 +14,12 @@ export async function GET(
   try {
     await requireWritableSession(id, sessionService.isReadOnly);
   } catch (error) {
-    if (String(error) === READ_ONLY_SUBAGENT_ERROR) {
-      return new Response(JSON.stringify({ error: READ_ONLY_SUBAGENT_ERROR }), { status: 403, headers: { "Content-Type": "application/json" } });
-    }
-    return new Response(JSON.stringify({ error: String(error) }), { status: 500, headers: { "Content-Type": "application/json" } });
+    const status = httpStatusForSessionError(error);
+    const message = error instanceof Error ? error.message : String(error);
+    return new Response(JSON.stringify({ error: status === 403 ? READ_ONLY_SUBAGENT_ERROR : message }), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   // ensureLive：复用 alive 或 resolve/start；Route 不再直接 import rpc-manager
@@ -25,12 +27,16 @@ export async function GET(
   try {
     session = await sessionService.ensureLive(id);
   } catch (error) {
-    if (String(error) === READ_ONLY_SUBAGENT_ERROR) {
-      return new Response(JSON.stringify({ error: READ_ONLY_SUBAGENT_ERROR }), { status: 403, headers: { "Content-Type": "application/json" } });
-    }
+    const status = httpStatusForSessionError(error);
     const message = error instanceof Error ? error.message : String(error);
-    if (message.includes("Session not found")) {
+    if (status === 404) {
       return new Response("Session not found", { status: 404 });
+    }
+    if (status !== 500) {
+      return new Response(JSON.stringify({ error: message }), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
     }
     return new Response(`Failed to start agent: ${error}`, { status: 500 });
   }

@@ -9,6 +9,7 @@ test("普通会话与空值（新会话）全部能力开放", async () => {
   for (const session of [undefined, null, {}, { readOnly: undefined }]) {
     const caps = getSessionCapabilities(session);
     assert.equal(caps.readOnly, false);
+    assert.equal(caps.writeLocked, false);
     assert.equal(caps.canPrompt, true);
     assert.equal(caps.canFork, true);
     assert.equal(caps.canCompact, true);
@@ -27,6 +28,7 @@ test("readOnly 会话全部写/连接能力关闭", async () => {
   const { getSessionCapabilities } = await jiti.import("./session-capabilities.ts");
   const caps = getSessionCapabilities({ readOnly: true });
   assert.equal(caps.readOnly, true);
+  assert.equal(caps.writeLocked, false);
   assert.equal(caps.canPrompt, false);
   assert.equal(caps.canFork, false);
   assert.equal(caps.canCompact, false);
@@ -36,6 +38,16 @@ test("readOnly 会话全部写/连接能力关闭", async () => {
   assert.equal(caps.canRename, false);
   assert.equal(caps.canAutoName, false);
   assert.equal(caps.canDelete, false);
+  assert.equal(caps.canConnectEvents, false);
+  assert.equal(caps.canSendSessionCommands, false);
+});
+
+test("writeLocked 关闭写/连接，但不标成 subagent 只读", async () => {
+  const { getSessionCapabilities } = await jiti.import("./session-capabilities.ts");
+  const caps = getSessionCapabilities({}, true);
+  assert.equal(caps.readOnly, false);
+  assert.equal(caps.writeLocked, true);
+  assert.equal(caps.canPrompt, false);
   assert.equal(caps.canConnectEvents, false);
   assert.equal(caps.canSendSessionCommands, false);
 });

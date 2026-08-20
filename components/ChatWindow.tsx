@@ -185,6 +185,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     isAutoModelSelection,
     agentPhase, toolExecutionSnapshots,
     isNew,
+    writeLocked,
     sessionIdRef, scrollContainerRef,
     jumpButtonVisible, jumpToBottom, markExternalScrollWrite, notifyProgrammaticSmooth,
     loadOlderHistory,
@@ -200,6 +201,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
     isMobile,
   });
+  const writesDisabled = isReadOnly || writeLocked;
   const sessionBusy = agentRunning || bashRunning;
   const [todosCollapsed, setTodosCollapsed] = useState(true);
   const todoCollapseScope = session?.id ?? (effectiveNewSessionCwd ? `new:${effectiveNewSessionCwd}` : "new-session");
@@ -366,9 +368,9 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   useEffect(() => () => { onContextUsageChange?.(null); }, [onContextUsageChange]);
 
   const onDrop = useCallback((files: File[]) => {
-    if (sessionBusy || isReadOnly) return;
+    if (sessionBusy || writesDisabled) return;
     chatInputRef?.current?.addImages(files);
-  }, [sessionBusy, isReadOnly, chatInputRef]);
+  }, [sessionBusy, writesDisabled, chatInputRef]);
 
   const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);
 
@@ -414,6 +416,8 @@ const chatPlan = composeChatPlan({
     <>
       {isReadOnly && session ? (
         <ReadOnlySessionBar session={session} isMobile={isMobile} />
+      ) : writeLocked && session ? (
+        <WriteLockedSessionBar isMobile={isMobile} />
       ) : (
         <ChatInput
       ref={chatInputRef}
@@ -523,7 +527,7 @@ const chatPlan = composeChatPlan({
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      {isDragOver && !sessionBusy && !isReadOnly && (
+      {isDragOver && !sessionBusy && !writesDisabled && (
         <div className="pointer-events-none absolute inset-0 z-50 flex animate-[drop-zone-in_0.15s_ease_both] items-center justify-center bg-[color-mix(in_srgb,var(--accent)_6%,transparent)] backdrop-blur-[1px]">
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             {[0, 0.8, 1.6].map((delay) => (
@@ -599,7 +603,7 @@ const chatPlan = composeChatPlan({
       {extensionDialog && (
         <ExtensionDialog
           request={extensionDialog}
-          disabled={isReadOnly || !sessionIdRef.current}
+          disabled={writesDisabled || !sessionIdRef.current}
           onRespond={(response) => {
             void respondToExtensionUi(extensionDialog, response);
           }}
@@ -672,10 +676,10 @@ const chatPlan = composeChatPlan({
                     entryId={isLive ? undefined : entryIds[idx]}
                     // 只读/忙碌：分支写入口一律不下发（hook 侧另有 guard）；
                     // live 项无 entryId、不参与分支 action。
-                    onBranchHere={!isLive && !sessionBusy && !isNew && !isReadOnly ? handleBranchHere : undefined}
-                    onNewSessionFromHere={!isLive && !sessionBusy && !isNew && !isReadOnly ? handleNewSessionFromHere : undefined}
-                    onBranchFromAssistant={!isLive && !sessionBusy && !isNew && !isReadOnly ? handleBranchFromAssistant : undefined}
-                    onNewSessionFromAnswer={!isLive && !sessionBusy && !isNew && !isReadOnly ? handleNewSessionFromAnswer : undefined}
+                    onBranchHere={!isLive && !sessionBusy && !isNew && !writesDisabled ? handleBranchHere : undefined}
+                    onNewSessionFromHere={!isLive && !sessionBusy && !isNew && !writesDisabled ? handleNewSessionFromHere : undefined}
+                    onBranchFromAssistant={!isLive && !sessionBusy && !isNew && !writesDisabled ? handleBranchFromAssistant : undefined}
+                    onNewSessionFromAnswer={!isLive && !sessionBusy && !isNew && !writesDisabled ? handleNewSessionFromAnswer : undefined}
                     forking={!isLive && forkingEntryId === entryIds[idx]}
                     showTimestamp={item.showTimestamp}
                     prevTimestamp={!isLive && idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
@@ -834,6 +838,41 @@ const chatPlan = composeChatPlan({
  * 只读会话的紧凑提示条，整体替代编辑器：说明这是什么会话、能做什么、
  * 什么被关掉。文案保持具体直白，与现有英文界面一致。
  */
+function WriteLockedSessionBar({ isMobile }: { isMobile: boolean }) {
+  const { t } = useI18n();
+  return (
+    <div style={{ flexShrink: 0, padding: "0 16px 8px", paddingRight: isMobile ? 16 : CHAT_INPUT_RIGHT_PADDING }}>
+      <div style={{ maxWidth: 820, margin: "0 auto" }}>
+        <div
+          role="note"
+          aria-label={t("chat_sessionWriteLocked")}
+          style={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 8,
+            border: "1px solid var(--border)",
+            borderRadius: 10,
+            background: "var(--bg-panel)",
+            padding: "8px 12px",
+            fontSize: 12,
+            lineHeight: 1.5,
+            color: "var(--text-muted)",
+          }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 2, color: "var(--text-dim)" }} aria-hidden="true">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+          </svg>
+          <span style={{ minWidth: 0 }}>
+            <span style={{ color: "var(--text)", fontWeight: 600 }}>{t("chat_sessionWriteLocked")}</span>
+            {`. ${t("chat_sessionWriteLockedDescription")}`}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ReadOnlySessionBar({ session, isMobile }: { session: SessionInfo; isMobile: boolean }) {
   const { t } = useI18n();
   const sub = session.subagent;
@@ -906,34 +945,112 @@ function ExtensionStatusBar({ statuses }: { statuses: Array<{ key: string; text:
 }
 
 function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: string[] }> }) {
+  const { t } = useI18n();
+  // 折叠状态按 widget key 记忆（localStorage，跨会话/刷新）；默认展开。
+  const [collapsedKeys, setCollapsedKeys] = useState<Set<string>>(() => loadCollapsedWidgetKeys());
+
+  const toggleCollapse = useCallback((key: string) => {
+    setCollapsedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      saveCollapsedWidgetKeys(next);
+      return next;
+    });
+  }, []);
+
   if (widgets.length === 0) return null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
-      {widgets.map((widget) => (
-        <div
-          key={widget.key}
-          style={{
-            border: "1px solid var(--border)",
-            borderRadius: 7,
-            background: "var(--bg-panel)",
-            overflow: "hidden",
-          }}
-        >
-          <div style={{ padding: "5px 9px", borderBottom: "1px solid var(--border)", color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
-            {widget.key}
+      {widgets.map((widget) => {
+        const collapsed = collapsedKeys.has(widget.key);
+        return (
+          <div
+            key={widget.key}
+            style={{
+              border: "1px solid var(--border)",
+              borderRadius: 7,
+              background: "var(--bg-panel)",
+              overflow: "hidden",
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => toggleCollapse(widget.key)}
+              aria-expanded={!collapsed}
+              aria-label={collapsed ? t("extension_widgetExpand", { name: widget.key }) : t("extension_widgetCollapse", { name: widget.key })}
+              title={collapsed ? t("extension_widgetExpand", { name: widget.key }) : t("extension_widgetCollapse", { name: widget.key })}
+              style={{
+                display: "flex",
+                width: "100%",
+                alignItems: "center",
+                gap: 6,
+                padding: "5px 9px",
+                border: "none",
+                borderBottom: collapsed ? "none" : "1px solid var(--border)",
+                background: "transparent",
+                color: "var(--text-dim)",
+                fontSize: 11,
+                fontFamily: "var(--font-mono)",
+                cursor: "pointer",
+                textAlign: "left",
+              }}
+            >
+              <svg
+                width="10"
+                height="10"
+                viewBox="0 0 12 12"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+                style={{ flexShrink: 0, transform: collapsed ? "none" : "rotate(90deg)", transition: "transform 0.15s ease" }}
+              >
+                <polyline points="4 2.5 7.5 6 4 9.5" />
+              </svg>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{widget.key}</span>
+            </button>
+            {!collapsed && (
+              <pre style={{ margin: 0, padding: "8px 9px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--font-mono)" }}>
+                {widget.lines.map((line, index, lines) => (
+                  <Fragment key={index}>
+                    {renderAnsiLine(line, `widget-${widget.key}-line-${index}`)}
+                    {index < lines.length - 1 ? "\n" : null}
+                  </Fragment>
+                ))}
+              </pre>
+            )}
           </div>
-          <pre style={{ margin: 0, padding: "8px 9px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--font-mono)" }}>
-            {widget.lines.map((line, index, lines) => (
-              <Fragment key={index}>
-                {renderAnsiLine(line, `widget-${widget.key}-line-${index}`)}
-                {index < lines.length - 1 ? "\n" : null}
-              </Fragment>
-            ))}
-          </pre>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
+}
+
+const COLLAPSED_WIDGET_KEYS_STORAGE = "pidance.collapsedWidgetKeys.v1";
+
+function loadCollapsedWidgetKeys(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = window.localStorage.getItem(COLLAPSED_WIDGET_KEYS_STORAGE);
+    const parsed = raw ? (JSON.parse(raw) as unknown) : null;
+    if (Array.isArray(parsed)) {
+      return new Set(parsed.filter((item): item is string => typeof item === "string"));
+    }
+  } catch {
+    /* 损坏忽略 */
+  }
+  return new Set();
+}
+
+function saveCollapsedWidgetKeys(keys: Set<string>): void {
+  try {
+    window.localStorage.setItem(COLLAPSED_WIDGET_KEYS_STORAGE, JSON.stringify([...keys]));
+  } catch {
+    /* 隐私模式忽略 */
+  }
 }
 
 type PersistedActivityItem = { key: string; activity: SessionActivity; timestamp?: number };

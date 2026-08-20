@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { resolveSessionPath } from "@/lib/session-reader";
 import {
   sessionService,
-  READ_ONLY_SUBAGENT_ERROR,
+  httpStatusForSessionError,
 } from "@/lib/session-service";
 
 /**
@@ -30,22 +30,16 @@ export async function GET(
       : sessionService.getLive(id);
 
     if (!live) {
-      return NextResponse.json({ running: false });
+      return NextResponse.json({
+        running: false,
+        writeLocked: await sessionService.isWriteLocked(id),
+      });
     }
 
     const state = await live.send({ type: "get_state" });
-    return NextResponse.json({ running: true, state });
+    return NextResponse.json({ running: true, state, writeLocked: false });
   } catch (error) {
-    if (String(error) === READ_ONLY_SUBAGENT_ERROR) {
-      return NextResponse.json({ error: READ_ONLY_SUBAGENT_ERROR }, { status: 403 });
-    }
     const message = error instanceof Error ? error.message : String(error);
-    if (message.includes("Session not found")) {
-      return NextResponse.json({ error: "Session not found" }, { status: 404 });
-    }
-    if (message.includes("locked by another")) {
-      return NextResponse.json({ error: message }, { status: 409 });
-    }
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: httpStatusForSessionError(error) });
   }
 }

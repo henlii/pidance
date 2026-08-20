@@ -7,6 +7,8 @@ import type { SessionInfo } from "@/lib/types";
  */
 export interface SessionCapabilities {
   readOnly: boolean;
+  /** 外进程占写锁：可浏览，输入与写操作关闭 */
+  writeLocked: boolean;
   /** 发送 / steer / follow-up / bash，任何会产生 prompt 的入口 */
   canPrompt: boolean;
   canFork: boolean;
@@ -25,6 +27,7 @@ export interface SessionCapabilities {
 
 const WRITABLE_CAPABILITIES: SessionCapabilities = {
   readOnly: false,
+  writeLocked: false,
   canPrompt: true,
   canFork: true,
   canCompact: true,
@@ -40,6 +43,7 @@ const WRITABLE_CAPABILITIES: SessionCapabilities = {
 
 const READ_ONLY_CAPABILITIES: SessionCapabilities = {
   readOnly: true,
+  writeLocked: false,
   canPrompt: false,
   canFork: false,
   canCompact: false,
@@ -53,10 +57,19 @@ const READ_ONLY_CAPABILITIES: SessionCapabilities = {
   canSendSessionCommands: false,
 };
 
+const WRITE_LOCKED_CAPABILITIES: SessionCapabilities = {
+  ...READ_ONLY_CAPABILITIES,
+  readOnly: false,
+  writeLocked: true,
+};
+
 export function getSessionCapabilities(
   session: Pick<SessionInfo, "readOnly"> | null | undefined,
+  writeLocked = false,
 ): SessionCapabilities {
-  return session?.readOnly === true ? READ_ONLY_CAPABILITIES : WRITABLE_CAPABILITIES;
+  if (session?.readOnly === true) return READ_ONLY_CAPABILITIES;
+  if (writeLocked) return WRITE_LOCKED_CAPABILITIES;
+  return WRITABLE_CAPABILITIES;
 }
 
 /**

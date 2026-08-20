@@ -16,93 +16,6 @@ export interface ExtensionDialogProps {
   onRespond: (response: ExtensionDialogResponse) => void;
 }
 
-/** select 弹窗 request-scoped 暂存态（纯函数，便于单测） */
-export type InlineSelectCardState = {
-  requestId: string;
-  selectedValue: string | null;
-  otherSelected: boolean;
-  otherDraft: string;
-};
-
-export function createInlineSelectState(requestId: string): InlineSelectCardState {
-  return { requestId, selectedValue: null, otherSelected: false, otherDraft: "" };
-}
-
-/** request id 切换时重置 selection/draft */
-export function resolveInlineSelectState(
-  state: InlineSelectCardState,
-  requestId: string,
-): InlineSelectCardState {
-  return state.requestId === requestId ? state : createInlineSelectState(requestId);
-}
-
-export function selectInlineOption(
-  state: InlineSelectCardState,
-  value: string,
-): InlineSelectCardState {
-  return { ...state, selectedValue: value, otherSelected: false };
-}
-
-export function selectInlineOther(state: InlineSelectCardState): InlineSelectCardState {
-  return { ...state, otherSelected: true, selectedValue: null };
-}
-
-export function setInlineOtherDraft(
-  state: InlineSelectCardState,
-  draft: string,
-): InlineSelectCardState {
-  return { ...state, otherDraft: draft };
-}
-
-export function getInlineSelectSubmission(
-  state: InlineSelectCardState,
-): { value: string } | null {
-  if (state.otherSelected) {
-    const trimmed = state.otherDraft.trim();
-    return trimmed ? { value: trimmed } : null;
-  }
-  if (state.selectedValue !== null) {
-    return { value: state.selectedValue };
-  }
-  return null;
-}
-
-export function canSubmitInlineSelect(state: InlineSelectCardState): boolean {
-  return getInlineSelectSubmission(state) !== null;
-}
-
-/** 去掉 ask-user 常见的 "4. " / "4、" 编号前缀，便于识别哨兵项。 */
-export function stripSelectOptionPrefix(label: string): string {
-  return label.trim().replace(/^\d+[\.、.)]\s*/, "").trim();
-}
-
-export function isOtherOptionLabel(label: string, localeOtherText: string): boolean {
-  const other = localeOtherText.trim().toLowerCase();
-  // 识别 Other / 其他 / 输入内容，以及 ask-user 的 "N. Type something." / "4. 输入内容"
-  for (const raw of [label.trim(), stripSelectOptionPrefix(label)]) {
-    const normalized = raw.toLowerCase();
-    if (!normalized) continue;
-    if (other && normalized === other) return true;
-    if (
-      normalized === "other"
-      || normalized === "其它"
-      || normalized === "其他"
-      || normalized === "输入内容"
-      || normalized.includes("type something")
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-export function shouldAppendOtherOption(
-  options: readonly string[],
-  localeOtherText: string,
-): boolean {
-  return !options.some((option) => isOtherOptionLabel(option, localeOtherText));
-}
-
 function requestHasExpired(request: ExtensionUiDialogRequest): boolean {
   return typeof request.expiresAt === "number"
     && Number.isFinite(request.expiresAt)
@@ -170,9 +83,6 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
     requestId: request.id,
     value: "",
   });
-  const [selectState, setSelectState] = useState<InlineSelectCardState>(() =>
-    createInlineSelectState(request.id),
-  );
   /** editor 长文本草稿（prefill 初始值）。 */
   const [editorDraft, setEditorDraft] = useState<{ requestId: string; value: string }>({
     requestId: request.id,
@@ -181,7 +91,6 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
   const editorValue = editorDraft.requestId === request.id ? editorDraft.value : "";
 
   const value = draft.requestId === request.id ? draft.value : "";
-  const scopedSelect = resolveInlineSelectState(selectState, request.id);
   const expired = requestHasExpired(request);
   const responded = respondedRequestId === request.id;
   const inert = disabled || expired || responded;
@@ -203,22 +112,10 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
     setDraft({ requestId: request.id, value: nextValue });
   };
 
-  const patchSelect = (next: InlineSelectCardState) => {
-    setSelectState(next.requestId === request.id ? next : createInlineSelectState(request.id));
-  };
-
-  const otherLabel = t("extension_other");
-  const appendOther = request.method === "select"
-    && shouldAppendOtherOption(request.options, otherLabel);
-  // ask-user 等场景：存在 Other/Type something 选项时只保留手动输入项
-  // （用户直接输入回答，不再显示冗余预设选项）；其余 select 原样展示。
-  // 选项完整展示（预设选项 + Other/Type something 手动输入项）；
-  // 选中 Other 后显示输入框，提交内容经哨兵+自动 input 响应回到 agent（#28）
-  const selectOptions = request.method === "select"
-    ? (appendOther ? [...request.options, otherLabel] : request.options)
-    : [];
-  const selectSubmission = getInlineSelectSubmission(scopedSelect);
-  const selectCanSubmit = selectSubmission !== null;
+  // 对齐 TUI 原生 select（extension-selector）：纯选项列表，选项点击即返回；
+  // 无 Submit 按钮、无 Other/Type something 特殊输入框（哨兵是普通选项，
+  // 选中返回原文由插件自己处理）；取消按钮对应 TUI 的 Esc 取消。
+  const selectOptions = request.method === "select" ? request.options : [];
 
   const statusMessage = expired
     ? t("extension_expired")
@@ -471,120 +368,36 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
                 aria-label={t("extension_selectAnOption")}
                 style={{ display: "flex", flexDirection: "column", gap: 6 }}
               >
-                {selectOptions.map((option, index) => {
-                  const isOther = isOtherOptionLabel(option, otherLabel);
-                  const isPressed = isOther
-                    ? scopedSelect.otherSelected
-                    : !scopedSelect.otherSelected && scopedSelect.selectedValue === option;
-                  return (
-                    <button
-                      key={`${index}-${option}`}
-                      type="button"
-                      disabled={inert}
-                      title={option}
-                      aria-pressed={isPressed}
-                      onClick={() => {
-                        if (isOther) patchSelect(selectInlineOther(scopedSelect));
-                        else patchSelect(selectInlineOption(scopedSelect, option));
-                      }}
-                      onMouseEnter={(event) => {
-                        if (!inert && !isPressed) {
-                          event.currentTarget.style.background = "var(--bg-hover)";
-                        }
-                      }}
-                      onMouseLeave={(event) => {
-                        event.currentTarget.style.background = isPressed
-                          ? "var(--bg-selected)"
-                          : "var(--bg)";
-                      }}
-                      style={{
-                        ...optionButtonBaseStyle,
-                        background: isPressed ? "var(--bg-selected)" : "var(--bg)",
-                        color: inert ? "var(--text-dim)" : "var(--text)",
-                        cursor: inert ? "not-allowed" : "pointer",
-                      }}
-                    >
-                      {option}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {scopedSelect.otherSelected && (
-                <div style={{ display: "flex", flexDirection: "column", minWidth: 0, gap: 5 }}>
-                  <textarea
-                    value={scopedSelect.otherDraft}
+                {selectOptions.map((option, index) => (
+                  <button
+                    key={`${index}-${option}`}
+                    type="button"
                     disabled={inert}
-                    placeholder={t("extension_otherPlaceholder")}
-                    aria-label={t("extension_other")}
-                    autoComplete="off"
-                    autoFocus
-                    rows={1}
-                    onChange={(event) => {
-                      patchSelect(setInlineOtherDraft(scopedSelect, event.target.value));
-                      // 自动高度（最多 4 行）。
-                      const el = event.currentTarget;
-                      el.style.height = "auto";
-                      el.style.height = `${Math.min(el.scrollHeight, 96)}px`;
+                    title={option}
+                    onClick={() => {
+                      // 对齐 TUI（extension-selector）：选项点击/Enter 即返回所选字符串；
+                      // 多级菜单由插件收到响应后发起下一级 select；无选中+确认两步。
+                      respondOnce({ value: option });
                     }}
-                    onKeyDown={(event) => {
-                      if (event.nativeEvent.isComposing) return;
-                      if (event.key === "Enter" && !event.shiftKey) {
-                        event.preventDefault();
-                        const submission = getInlineSelectSubmission(
-                          setInlineOtherDraft(scopedSelect, event.currentTarget.value),
-                        );
-                        if (submission) respondOnce(submission);
-                        return;
-                      }
-                      if (event.key === "Escape") {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        if (scopedSelect.otherDraft.length > 0) {
-                          patchSelect(setInlineOtherDraft(scopedSelect, ""));
-                        } else {
-                          event.currentTarget.blur();
-                        }
-                      }
+                    onMouseEnter={(event) => {
+                      if (!inert) event.currentTarget.style.background = "var(--bg-hover)";
+                    }}
+                    onMouseLeave={(event) => {
+                      event.currentTarget.style.background = "var(--bg)";
                     }}
                     style={{
-                      minWidth: 0,
-                      width: "100%",
-                      minHeight: 28,
-                      maxHeight: 96,
-                      padding: "6px 8px",
-                      border: "1px solid var(--border)",
-                      borderRadius: 6,
-                      outline: "none",
+                      ...optionButtonBaseStyle,
                       background: "var(--bg)",
-                      color: "var(--text)",
-                      font: "inherit",
-                      fontSize: 12,
-                      lineHeight: 1.5,
-                      resize: "none",
-                      overflowY: "auto",
-                      boxSizing: "border-box",
+                      color: inert ? "var(--text-dim)" : "var(--text)",
+                      cursor: inert ? "not-allowed" : "pointer",
                     }}
-                  />
-                </div>
-              )}
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
 
               <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 5 }}>
-                <button
-                  type="button"
-                  className="extension-card-btn"
-                  disabled={inert || !selectCanSubmit}
-                  title={selectCanSubmit ? t("extension_submit") : t("extension_selectAnOption")}
-                  aria-label={t("extension_submit")}
-                  onClick={() => {
-                    const submission = getInlineSelectSubmission(scopedSelect);
-                    if (submission) respondOnce(submission);
-                  }}
-                  style={{ color: "var(--accent)", borderColor: "var(--accent)", opacity: selectCanSubmit ? 1 : 0.45 }}
-                >
-                  <CheckIcon />
-                  {t("extension_submit")}
-                </button>
                 <button
                   type="button"
                   className="extension-card-btn"

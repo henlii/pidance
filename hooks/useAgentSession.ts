@@ -32,7 +32,6 @@ import { useExtensionUiState, type ExtensionUiDialogRequest, type ExtensionUiCus
 import { useNoticeState } from "@/hooks/useNoticeState";
 import { parseLatestTodoSnapshot } from "@/lib/todo-parser";
 import { getSessionCapabilities } from "@/components/session-capabilities";
-import { isOtherOptionLabel } from "@/components/ExtensionDialog";
 import { useSessionCommands } from "@/hooks/useSessionCommands";
 import { useChatAutoFollow } from "@/hooks/useChatAutoFollow";
 import { ensureServerPrefsLoaded, getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
@@ -300,8 +299,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   newSessionIntentIdRef.current = newSessionIntentId ?? null;
   // 只读（subagent 持久化）会话能力：UI 层先行拦截一切会产生 AgentSession
   // 或写会话的操作；后端 requireWritableSession 仍是权威防线。
-  const capabilities = getSessionCapabilities(session);
-  const isReadOnly = capabilities.readOnly;
+  const [writeLocked, setWriteLocked] = useState(false);
+  const capabilities = getSessionCapabilities(session, writeLocked);
+  // subagent 只读 + 外进程写锁：写入口一律早退。浏览仍走磁盘 getReadView。
+  const isReadOnly = capabilities.readOnly || capabilities.writeLocked;
 
   const [data, setData] = useState<SessionData | null>(null);
   const [loading, setLoading] = useState(!isNew);
@@ -394,8 +395,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleAgentEventRef = useRef<((event: AgentEvent, eventRunId?: number) => void) | null>(null);
   const handleFollowUpRef = useRef<(message: string, images?: AttachedImage[]) => Promise<void>>(async () => {});
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<boolean> | undefined>(undefined);
-  /** ask-user 两步协议暂存：select 的 Other 输入内容，自动响应随后到来的 input 请求 */
-  const pendingOtherInputRef = useRef<string | null>(null);
   const {
     scrollContainerRef,
     jumpButtonVisible,
@@ -516,6 +515,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (includeState) {
         setSystemPrompt(null);
         setContextUsage(null);
+        setWriteLocked(false);
       }
       // tail-first：首屏只拉最新 N 条，尽快结束 loading；更旧历史按需 prepend。
       const params = new URLSearchParams({
@@ -637,11 +637,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       };
 
       try {
-        // 1) 热：不 wake，仅已 live 时立刻拿 systemPrompt / 运行态（重连流式）
+        // 热：不 wake。打开会话只读投影，不抢写锁；发送时再 ensureLive。
         const hotRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
         if (hotRes.ok) {
-          const hot = await hotRes.json() as { running: boolean; state?: AgentStateResponse };
+          const hot = await hotRes.json() as {
+            running: boolean;
+            writeLocked?: boolean;
+            state?: AgentStateResponse;
+          };
           if (sessionIdRef.current !== sid) return null;
+          setWriteLocked(hot.writeLocked === true);
           if (hot.running && hot.state) {
             applyLiveState(hot.state);
             return hot;
@@ -649,29 +654,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (!hot.running) {
             setQueuedMessages({ steering: [], followUp: [...localFollowUpRef.current] });
           }
+        } else {
+          setWriteLocked(false);
         }
 
-        // 2) 冷：后台 wake=1（ensureLive 可能 0.5–数秒），不阻塞消息 UI
-        wakeAbortRef.current?.abort();
-        const ac = new AbortController();
-        wakeAbortRef.current = ac;
-        void (async () => {
-          try {
-            const wakeRes = await fetch(
-              `/api/sessions/${encodeURIComponent(sid)}/state?wake=1`,
-              { signal: ac.signal },
-            );
-            if (!wakeRes.ok || ac.signal.aborted) return;
-            const woken = await wakeRes.json() as { running: boolean; state?: AgentStateResponse };
-            if (sessionIdRef.current !== sid || ac.signal.aborted) return;
-            if (woken.state) applyLiveState(woken.state);
-          } catch (e) {
-            if (e instanceof Error && e.name === "AbortError") return;
-            console.error("Failed to wake agent state:", e);
-          }
-        })();
-
-        // 消息已就绪；运行态待后台 wake / 或发送时 ensureLive
         return { running: false };
       } catch (e) {
         console.error("Failed to load agent state:", e);
@@ -905,6 +891,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 同上：连接建立时捕获 runId（handleSend 在连接前已递增 promptRunIdRef）。
     const streamRunId = promptRunIdRef.current;
     try {
+      // EventSource 读不到 409 正文；先 JSON 预热 live，锁冲突才能显示可读错误。
+      const wake = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state?wake=1`);
+      const wakeBody = (await wake.json().catch(() => ({}))) as { error?: string };
+      if (!wake.ok) {
+        const err = typeof wakeBody.error === "string" && wakeBody.error
+          ? wakeBody.error
+          : `HTTP ${wake.status}`;
+        throw new Error(err.includes("locked by another") ? t("chat_sessionLocked") : err);
+      }
       await eventStreamManagerRef.current!.ensureConnected(sid, (event) => {
         handleAgentEventRef.current?.(event as unknown as AgentEvent, streamRunId);
       });
@@ -912,7 +907,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 同步外部可见的 eventSourceRef，保留清理与既有消费者的读取契约。
       eventSourceRef.current = eventStreamManagerRef.current?.getCurrentSource() as unknown as EventSource | null;
     }
-  }, [capabilities.canConnectEvents]);
+  }, [capabilities.canConnectEvents, t]);
 
   const respondToExtensionUi = useCallback(async (
     request: ExtensionUiDialogRequest,
@@ -927,27 +922,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     commitExtensionUiState(nextState);
     if (!sid) return;
     try {
-      // ask-user 两步协议：select 的 Other（手动输入）提交时，插件期望收到
-      // 选项里的哨兵文本（如 "4. Type something"），随后再发 input 请求收内容。
-      // 用户输入内容暂存，自动响应后续 input；select 响应发哨兵，避免插件把
-      // 自由文本当选项解析失败而放弃（表现为"已放弃提问"+工具卡到超时）。
-      let effectiveResponse = response;
-      if (
-        request.method === "select" &&
-        "value" in response &&
-        typeof response.value === "string" &&
-        request.options?.length &&
-        !request.options.includes(response.value)
-      ) {
-        pendingOtherInputRef.current = response.value;
-        // 哨兵 = 选项里自带的 Other 项（如 "4. Type something."）；无则用最后一项
-        const otherInOptions = request.options.find((o) => isOtherOptionLabel(o, ""));
-        effectiveResponse = { value: otherInOptions ?? request.options[request.options.length - 1] };
-      }
+      // 对齐 TUI：select/confirm/input/editor 的响应原样回传插件（选项点击即返回，
+      // 无 Other 哨兵改写——ask-user 的自由文本由插件自行发起 input 请求）。
       await sendAgentCommand(sid, {
         type: "extension_ui_response",
         id: request.id,
-        ...effectiveResponse,
+        ...response,
       });
       // OpenChamber 语义：取消问题块 = 终止当前执行（agent 阻塞在扩展请求上）。
       // 防护：若取消响应期间 agent 已自行停止（或用户已先停止），不再补发 abort，
@@ -1015,21 +995,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   });
 
   const handleExtensionUiRequest = useCallback((request: ExtensionUiRequest) => {
-    // ask-user 两步协议：select Other 提交后插件会发 input 请求收内容——
-    // 用暂存内容自动响应（不渲染弹窗），用户只需输入一次。
-    const pendingOther = pendingOtherInputRef.current;
-    if (request.method === "input" && pendingOther != null && request.id) {
-      pendingOtherInputRef.current = null;
-      const sid = sessionIdRef.current;
-      if (sid) {
-        sendAgentCommand(sid, {
-          type: "extension_ui_response",
-          id: request.id,
-          value: pendingOther,
-        }).catch((e) => console.error("Failed to auto-respond input:", e));
-      }
-      return;
-    }
     const result = applyExtensionUiRequest(extensionUiStateRef.current, request);
     commitExtensionUiState(result.state);
     for (const effect of result.effects) {
@@ -1626,7 +1591,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (restoreDraft) {
         opts.chatInputRef?.current?.insertIfEmpty(trimmedMessage);
       }
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      {
+        const message = e instanceof Error ? e.message : String(e);
+        addNotice({
+          type: "error",
+          message: message.includes("locked by another") ? t("chat_sessionLocked") : message,
+        });
+      }
       agentRunningRef.current = false;
       setAgentRunning(false);
       setAgentPhase(null);
@@ -2172,8 +2143,36 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       wakeAbortRef.current = null;
     }
     previousLiveSessionIdRef.current =
-      session && session.readOnly !== true ? session.id : null;
-  }, [session?.id, session?.readOnly]);
+      session && session.readOnly !== true && !writeLocked ? session.id : null;
+  }, [session?.id, session?.readOnly, writeLocked]);
+
+  useEffect(() => {
+    if (!writeLocked) return;
+    const sid = session?.id;
+    if (!sid) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
+        if (!res.ok || cancelled) return;
+        const data = await res.json() as { running?: boolean; writeLocked?: boolean };
+        if (cancelled) return;
+        setWriteLocked(data.running === true ? false : data.writeLocked === true);
+      } catch {
+        /* 探测失败保持现状 */
+      }
+    };
+    const timer = setInterval(() => { void tick(); }, 4000);
+    const onVis = () => {
+      if (document.visibilityState === "visible") void tick();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [writeLocked, session?.id]);
 
   useEffect(() => {
     if (session) {
@@ -2349,6 +2348,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // P4a 实时工具执行快照（插入序；run 结束保留至下一个 run 开始，agent_start 清空）
     toolExecutionSnapshots,
     isNew,
+    writeLocked,
     // Refs
     sessionIdRef, eventSourceRef, scrollContainerRef,
     // 自动跟随
