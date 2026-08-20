@@ -49,6 +49,7 @@ import {
   applyToolExecutionEnd,
   applyToolExecutionResultRender,
   clearToolExecutions,
+  finalizeRunningToolExecutions,
   getToolExecutionSnapshots,
   type ToolExecutionBufferState,
   type ToolExecutionSnapshot,
@@ -359,7 +360,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
   // 本地 follow-up 队列（Codex 风格：发送入队、引导/取回消费）。
   // 外部 Pi 无 clear_queue RPC，队列自管才能支持“整队合并引导发送”而不双发。
-  const [localFollowUpQueue, setLocalFollowUpQueue] = useState<string[]>([]);
+  const [, setLocalFollowUpQueue] = useState<string[]>([]);
   const localFollowUpRef = useRef<string[]>([]);
   const updateLocalFollowUp = useCallback((next: string[]) => {
     localFollowUpRef.current = next;
@@ -370,6 +371,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (sid) {
       setServerPref(`sessionQueue.${sid}`, next);
+      // 同步给 live Host：整组替换，便于 Host 在 settled 后立即投递（late-enqueue）。
+      void sendAgentCommand(sid, { type: "set_follow_up_queue", items: next }).catch((error) => {
+        console.error("[pidance] failed to sync follow-up queue to host:", error);
+      });
     }
   }, []);
   // 分支切换/总结进行中：树节点、发送与再次导航全部暂停，避免与 navigateTree 并发写。
@@ -456,7 +461,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // 新会话发送中携带的选择（pending），再其次磁盘持久化 model_change
   // （context.model），最后才是默认配置。extension 通知/subagent 完成提示/
   // activity/custom 消息都不会写入 override，因此不会覆盖用户选择。
-  const currentModel = resolveDisplayModel(currentModelOverride, pendingModel, data?.context.model);
+  const currentModel = resolveDisplayModel(currentModelOverride, pendingModel, data?.context.model, newSessionDefaultModel);
   const displayModel = isNew ? (newSessionModel ?? newSessionDefaultModel) : currentModel;
 
   const sessionStats = useMemo(() => {
@@ -1086,6 +1091,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentRunning(false);
       setAgentPhase(null);
       setRetryInfo(null);
+      {
+        const nextSnapshots = finalizeRunningToolExecutions(toolExecutionBufferRef.current);
+        toolExecutionBufferRef.current = nextSnapshots;
+        setToolExecutionSnapshots(getToolExecutionSnapshots(nextSnapshots));
+      }
       dispatch({ type: "end" });
       onAgentEnd?.();
     }
@@ -1235,6 +1245,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void finishAgentRun(sessionIdRef.current, eventRunId ?? promptRunIdRef.current);
         break;
       case "prompt_error":
+        if (sessionIdRef.current) setServerPref(`sessionQueueHold.${sessionIdRef.current}`, true);
         // P0-1：prompt 异步失败且乐观 bubble 未被 message_end 消费（消息未确认
         // 落盘）时移除假 bubble，避免永久 pending；真实消息以磁盘权威为准，
         // finishAgentRun 的 loadSession 会重建列表。已消费（消息已确认）时 no-op。
@@ -1251,6 +1262,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         addNotice({ type: "error", message: (event.errorMessage as string | undefined) ?? "Command failed" });
         break;
       case "extension_error":
+        if (sessionIdRef.current) setServerPref(`sessionQueueHold.${sessionIdRef.current}`, true);
         addNotice({
           type: "error",
           message: (event.error as string | undefined) ?? "Extension command failed",
@@ -1381,6 +1393,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         break;
       }
+      case "follow_up_flushed": {
+        // Host 已确认被投递 run 的 user 消息落盘/settled；按 remaining 清本地队列，
+        // 避免在 prompt preflight 阶段提前清队导致失败后队列丢失。
+        const remaining = Array.isArray(event.remaining)
+          ? (event.remaining as unknown[]).filter((item): item is string => typeof item === "string")
+          : [];
+        localFollowUpRef.current = remaining;
+        setLocalFollowUpQueue(remaining);
+        setQueuedMessages((prev) => ({ ...prev, followUp: remaining }));
+        if (sessionIdRef.current) {
+          setServerPref(`sessionQueue.${sessionIdRef.current}`, remaining);
+        }
+        break;
+      }
+      case "follow_up_flush_error":
+        addNotice({
+          type: "error",
+          message: (event.errorMessage as string | undefined) ?? "Follow-up queue flush failed",
+        });
+        break;
       case "queue_update":
         // followUp 以本地队列为准（Pidance 自管）；steering 仍来自 Pi 进程队列
         setQueuedMessages({
@@ -1489,7 +1521,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       let sentSessionId: string | null = null;
       if (isNew && newSessionCwdRef.current) {
-        const selectedModel = newSessionModel;
+        const selectedModel = newSessionModel ?? newSessionDefaultModel;
         const existingSid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
         const sid = existingSid ?? await ensureNewSession();
         // 发送期间捕获 intent：切走后仍把消息发到已创建会话，不 promote 到新 intent
@@ -1551,6 +1583,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         promptSubmittedRef.current = true;
       }
+      if (promptSubmittedRef.current && sentSessionId) {
+        setServerPref(`sessionQueueHold.${sentSessionId}`, null);
+      }
       if (isSlashCommandPrompt && sentSessionId) {
         void waitForPromptSettlement(sentSessionId, promptRunId);
       }
@@ -1597,7 +1632,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       return false;
     }
-  }, [isNew, isReadOnly, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, notifyAutoFollowSend, opts.chatInputRef, t, onSessionCreated]);
+  }, [isNew, isReadOnly, newSessionModel, newSessionDefaultModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, notifyAutoFollowSend, opts.chatInputRef, t, onSessionCreated]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean): Promise<boolean> => {
     // 只读会话：bash 命令同样会写 session 文件，拦截。
@@ -1637,6 +1672,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (isReadOnly) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
+    setServerPref(`sessionQueueHold.${sid}`, true);
     if (bashRunningRef.current) {
       try {
         await sendAgentCommand(sid, { type: "abort_bash" });
@@ -1740,18 +1776,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setModelAuthConfigured(d.authConfigured ?? {});
     const nextModelList = d.modelList ?? [];
     setModelList(nextModelList);
-    if (isNew) {
-      const match = d.defaultModel
-        ? nextModelList.find((m) => m.id === d.defaultModel?.modelId && m.provider === d.defaultModel?.provider)
-        : undefined;
-      // 默认模型优先落在已认证 provider 上：未认证且无环境凭据的模型必失败，不作为新会话默认。
-      const configuredMap = d.authConfigured ?? {};
-      const displayModel = match
-        ?? nextModelList.find((m) => configuredMap[m.provider] !== false)
-        ?? nextModelList[0];
-      setNewSessionDefaultModel(displayModel ? { provider: displayModel.provider, modelId: displayModel.id } : null);
-    }
-  }, [isNew, newSessionCwd, session?.cwd]);
+    const match = d.defaultModel
+      ? nextModelList.find((m) => m.id === d.defaultModel?.modelId && m.provider === d.defaultModel?.provider)
+      : undefined;
+    // 目录默认：已有会话无 model_change 时也用它兜底，避免选择器整栏消失。
+    const configuredMap = d.authConfigured ?? {};
+    const catalogDefault = match
+      ?? nextModelList.find((m) => configuredMap[m.provider] !== false)
+      ?? nextModelList[0];
+    setNewSessionDefaultModel(catalogDefault ? { provider: catalogDefault.provider, modelId: catalogDefault.id } : null);
+  }, [newSessionCwd, session?.cwd]);
 
   // 命令条目持久化：斜杠命令成功后追加 pidance.command 到会话时间线（type:"custom"）。
   // 写入失败静默（命令已执行成功，条目只是展示）。
@@ -2220,40 +2254,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!onBranchDataChange) return;
     onBranchDataChange(data?.tree ?? [], activeLeafId, handleLeafChange, branchActions);
   }, [data?.tree, activeLeafId, handleLeafChange, branchActions, onBranchDataChange]);
-
-
-  // 队列自动投递：agent 执行结束（空闲）且 follow-up 队列非空时自动逐条发出
-  const autoFlushingQueueRef = useRef(false);
-  useEffect(() => {
-    if (agentRunning || bashRunning) return;
-    if (autoFlushingQueueRef.current) return;
-    const queue = localFollowUpRef.current;
-    if (queue.length === 0) return;
-    const sid = sessionIdRef.current;
-    if (!sid) return;
-    autoFlushingQueueRef.current = true;
-    void (async () => {
-      try {
-        // 一次性投递开关（settings 配置）：开启时合并所有队列消息为一条 prompt
-        const flushAsOne = getServerPref<boolean>("queueFlushAsOne") === true;
-        if (flushAsOne) {
-          await sendAgentCommand(sid, { type: "prompt", message: queue.join("\n\n") }).catch((e) => {
-            console.error("Failed to send queued messages:", e);
-          });
-        } else {
-          for (const text of queue) {
-            await sendAgentCommand(sid, { type: "prompt", message: text }).catch((e) => {
-              console.error("Failed to send queued message:", e);
-            });
-          }
-        }
-        // 全部投递完成后清空本地与服务端队列
-        updateLocalFollowUp([]);
-      } finally {
-        autoFlushingQueueRef.current = false;
-      }
-    })();
-  }, [agentRunning, bashRunning, updateLocalFollowUp]);
 
 
   // Load model list

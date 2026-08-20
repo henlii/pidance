@@ -10,6 +10,7 @@
  *   孤儿/循环降级原样保留，本文件绝不修改 SessionInfo 或 Pi schema。
  */
 import type { SessionInfo } from "@/lib/types";
+import type { ProjectAliases, ProjectSortMode } from "@/lib/ui-preferences";
 import {
   buildSessionDisplayTree,
   collectSubagentParentIds,
@@ -181,7 +182,81 @@ export function buildSidebarTree(
   return projects;
 }
 
+const PROJECT_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+function projectSortName(project: SidebarProjectNode, aliases?: Readonly<Record<string, string>>): string {
+  if (aliases?.[project.root]) return aliases[project.root];
+  const clean = project.root.replaceAll("\\", "/").replace(/\/+$/, "");
+  const idx = clean.lastIndexOf("/");
+  return (idx >= 0 ? clean.slice(idx + 1) : clean) || project.root;
+}
+
+/**
+ * 按显示选项对项目树排序。recent 沿用 buildSidebarTree 的最近活动；
+ * az/za 按显示名（alias 优先）；fixed 按 projectOrder，未入序的新项目跟在后面。
+ */
+export function sortSidebarProjects(
+  projects: SidebarProjectNode[],
+  options: {
+    mode: ProjectSortMode;
+    order?: readonly string[];
+    aliases?: ProjectAliases;
+    selectedRoot?: string | null;
+  },
+): SidebarProjectNode[] {
+  const { mode, order = [], aliases, selectedRoot = null } = options;
+  const copy = [...projects];
+  if (mode === "az" || mode === "za") {
+    copy.sort((a, b) => {
+      const cmp = PROJECT_NAME_COLLATOR.compare(projectSortName(a, aliases), projectSortName(b, aliases));
+      return mode === "az" ? cmp : -cmp;
+    });
+    return copy;
+  }
+  if (mode === "fixed") {
+    const index = new Map(order.map((root, i) => [root, i]));
+    copy.sort((a, b) => {
+      const ia = index.has(a.root) ? index.get(a.root)! : Number.MAX_SAFE_INTEGER;
+      const ib = index.has(b.root) ? index.get(b.root)! : Number.MAX_SAFE_INTEGER;
+      if (ia !== ib) return ia - ib;
+      return b.latestActivity.localeCompare(a.latestActivity);
+    });
+    return copy;
+  }
+  copy.sort((a, b) => {
+    if (!a.latestActivity && !b.latestActivity) return a.root.localeCompare(b.root);
+    if (!a.latestActivity) return a.root === selectedRoot ? -1 : 1;
+    if (!b.latestActivity) return b.root === selectedRoot ? 1 : -1;
+    return b.latestActivity.localeCompare(a.latestActivity);
+  });
+  return copy;
+}
+
+/** 把 fromRoot 挪到 toRoot 的位置（插入到目标处）。 */
+export function moveProjectInOrder(order: readonly string[], fromRoot: string, toRoot: string): string[] {
+  const next = [...order];
+  const from = next.indexOf(fromRoot);
+  const to = next.indexOf(toRoot);
+  if (from < 0 || to < 0 || from === to) return next;
+  next.splice(from, 1);
+  next.splice(to, 0, fromRoot);
+  return next;
+}
+
 // ── 项目关闭过滤（纯 UI 隐藏，不触碰任何会话数据） ─────────────────────────
+
+/**
+ * 项目是否还有运行中会话。projectRoot 已含 worktree 归主仓语义，
+ * 因此 worktree 内 running 也会命中主项目根，阻止关闭整个项目。
+ */
+export function projectHasRunningSession(
+  sessions: readonly SessionInfo[],
+  runningIds: ReadonlySet<string> | readonly string[],
+  root: string,
+): boolean {
+  const running = runningIds instanceof Set ? runningIds : new Set(runningIds);
+  return sessions.some((session) => (session.projectRoot ?? session.cwd) === root && running.has(session.id));
+}
 
 /**
  * 从项目树中过滤已关闭项目。closedRoots 为空时原样返回（引用相等）。

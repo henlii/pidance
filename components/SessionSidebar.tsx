@@ -17,7 +17,10 @@ import {
   filterClosedProjects,
   filterSidebarTree,
   locateSessionInSidebarTree,
+  moveProjectInOrder,
   pickProjectRootAfterClose,
+  projectHasRunningSession,
+  sortSidebarProjects,
   type SidebarProjectNode,
   type SidebarWorktreeGroup,
 } from "./session-sidebar-model";
@@ -27,11 +30,12 @@ import {
   saveSidebarPreferences,
   sidebarUiFromPrefs,
   type ProjectAliases,
+  type ProjectSortMode,
   type SidebarDisplayMode,
   type SidebarPreferences,
 } from "@/lib/ui-preferences";
 import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
-import { getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
+import { flushServerPrefs, getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import {
   bumpGroupVisibleCount,
   derivePinnedSessions,
@@ -50,7 +54,18 @@ import { getSessionCapabilities } from "./session-capabilities";
 import { useProjectActions, useProjectIdentity } from "./ProjectProvider";
 
 import { useI18n } from "@/lib/i18n";
-import { applyRunningUnreadTransition, loadUnreadSessionIds, saveUnreadSessionIds } from "@/lib/unread-sessions-storage";
+import {
+  applyRunningUnreadStateTransition,
+  loadUnreadSessionIds,
+  markSessionRead,
+  mergeUnreadSessionState,
+  parseUnreadSessionState,
+  pruneUnreadSessionState,
+  saveUnreadSessionIds,
+  unreadIdsFromState,
+  type UnreadSessionState,
+} from "@/lib/unread-sessions-storage";
+
 import {
   AnimatedDropdown,
   ArchiveIcon,
@@ -191,8 +206,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       trackRunningStartedAt(prev, [...effectiveRunningSessionIds, ...subagentRunningIds], now),
     );
   }, [effectiveRunningSessionIds, subagentRunningIds]);
-  const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
+  const [unreadState, setUnreadState] = useState<UnreadSessionState>(() => {
+    const ids = loadUnreadSessionIds();
+    return parseUnreadSessionState([...ids]);
+  });
   const unreadHydratedRef = useRef(false);
+  const unreadSessionIds = useMemo(() => {
+    const ids = unreadIdsFromState(unreadState);
+    for (const id of effectiveRunningSessionIds) ids.delete(id);
+    return ids;
+  }, [unreadState, effectiveRunningSessionIds]);
   // 搜索：查询与开关均为组件瞬时态，不写入偏好
   const [sessionQuery, setSessionQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -365,12 +388,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       // pending 仍在的 id 不得因 stale server 列表被清掉。
       const existingIds = new Set(data.sessions.map((s) => s.id));
       const pendingSnapshot = pendingIdsRef.current;
-      setUnreadSessionIds((prev) => {
-        if (prev.size === 0) return prev;
-        const next = new Set(
-          [...prev].filter((id) => existingIds.has(id) || pendingSnapshot.has(id)),
-        );
-        return next.size === prev.size ? prev : next;
+      setUnreadState((prev) => {
+        const keep = new Set([...existingIds, ...pendingSnapshot]);
+        return pruneUnreadSessionState(prev, keep);
       });
       setError(null);
       if (!showLoading) {
@@ -498,23 +518,27 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     mountedRef,
   });
 
-  // 未读：localStorage 兜底 + 服务端权威（多端 focus 刷新覆盖）。
+  // 未读：时钟结构跨端按较新时间戳合并，避免后写者把已读覆盖成未读。
   useEffect(() => {
-    const remote = getServerPref<unknown>("unreadSessionIds");
-    if (!Array.isArray(remote)) return;
+    const remoteState = getServerPref<unknown>("unreadSessionState");
+    const remoteLegacy = getServerPref<unknown>("unreadSessionIds");
+    if (remoteState === undefined && !Array.isArray(remoteLegacy)) return;
     unreadHydratedRef.current = true;
-    const next = new Set(remote.filter((id): id is string => typeof id === "string" && id.length > 0));
-    setUnreadSessionIds((prev) => {
-      if (prev.size === next.size && [...prev].every((id) => next.has(id))) return prev;
-      return next;
-    });
+    const remote = mergeUnreadSessionState(
+      parseUnreadSessionState(remoteState),
+      parseUnreadSessionState(remoteLegacy),
+    );
+    setUnreadState((prev) => mergeUnreadSessionState(prev, remote));
   }, [serverPrefs]);
 
   useEffect(() => {
-    saveUnreadSessionIds(unreadSessionIds);
+    const ids = unreadIdsFromState(unreadState);
+    saveUnreadSessionIds(ids);
     if (!unreadHydratedRef.current) return;
-    setServerPref("unreadSessionIds", [...unreadSessionIds]);
-  }, [unreadSessionIds]);
+    setServerPref("unreadSessionState", unreadState);
+    setServerPref("unreadSessionIds", [...ids]);
+    flushServerPrefs();
+  }, [unreadState]);
 
   useEffect(() => {
     // Live running status via SSE — no polling. The server pushes the current
@@ -608,8 +632,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     const previous = previousRunningSessionIdsRef.current;
     const newlyRunning = [...effectiveRunningSessionIds].filter((id) => !previous.has(id));
 
-    setUnreadSessionIds((prev) =>
-      applyRunningUnreadTransition(prev, previous, effectiveRunningSessionIds, selectedSessionId),
+    setUnreadState((prev) =>
+      applyRunningUnreadStateTransition(
+        prev,
+        previous,
+        effectiveRunningSessionIds,
+        selectedSessionId,
+        new Date().toISOString(),
+      ),
     );
 
     // 新进入 running（含冷启动 clientRunning）：立刻乐观抬升 modified 并重排，
@@ -646,12 +676,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   useEffect(() => {
     if (!selectedSessionId) return;
-    setUnreadSessionIds((prev) => {
-      if (!prev.has(selectedSessionId)) return prev;
-      const next = new Set(prev);
-      next.delete(selectedSessionId);
-      return next;
-    });
+    setUnreadState((prev) => markSessionRead(prev, selectedSessionId, new Date().toISOString()));
   }, [selectedSessionId]);
 
   useEffect(() => {
@@ -1021,14 +1046,23 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     ? fulltextSessionIds.length > 0 || fulltextLoading || Boolean(fulltextError)
     : normalizedSessionQuery.length > 0;
   // 项目 alias 参与元数据搜索；全文模式按命中 id 保留祖先链。
+  const sortedOpenTree = useMemo(
+    () => sortSidebarProjects(openTree, {
+      mode: prefs.projectSort,
+      order: prefs.projectOrder,
+      aliases: projectAliases,
+      selectedRoot: selectedProject,
+    }),
+    [openTree, prefs.projectSort, prefs.projectOrder, projectAliases, selectedProject],
+  );
   const visibleTree = useMemo(
     () => filterSidebarTree(
-      openTree,
+      sortedOpenTree,
       fulltextModeActive ? "" : normalizedSessionQuery,
       projectAliases,
       fulltextMatchIds,
     ),
-    [openTree, normalizedSessionQuery, projectAliases, fulltextMatchIds, fulltextModeActive],
+    [sortedOpenTree, normalizedSessionQuery, projectAliases, fulltextMatchIds, fulltextModeActive],
   );
 
   /** 全文命中深链：按 id 打开已加载会话；列表尚未包含时忽略（refresh 后可再点）。 */
@@ -1142,6 +1176,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
    */
   const handleCloseProject = useCallback((root: string) => {
     setOpenProjectMenuRoot(null);
+    // 运行中关项目会藏掉控制面：拒绝关闭，与归档 running→409 对齐。
+    if (projectHasRunningSession(allSessions, effectiveRunningSessionIds, root)) {
+      setError(t("sidebar_closeProjectRunning"));
+      return;
+    }
     const nextClosedRoots = new Set(prefs.closedProjectRoots);
     nextClosedRoots.add(root);
     updatePrefs((prev) => (prev.closedProjectRoots.includes(root)
@@ -1158,7 +1197,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         onNewSession?.();
       }
     }
-  }, [prefs.closedProjectRoots, selectedProject, sidebarTree, updatePrefs, selectCwd, onNewSession]);
+  }, [prefs.closedProjectRoots, selectedProject, sidebarTree, updatePrefs, selectCwd, onNewSession, allSessions, effectiveRunningSessionIds, t]);
 
   /** 打开编辑项目弹窗：名称初值为 alias 或路径显示名。 */
   const handleOpenEditProject = useCallback((root: string) => {
@@ -1183,6 +1222,35 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const setDisplayMode = useCallback((mode: SidebarDisplayMode) => {
     updatePrefs((prev) => (prev.displayMode === mode ? prev : { ...prev, displayMode: mode }));
   }, [updatePrefs]);
+
+  const setProjectSort = useCallback((mode: ProjectSortMode) => {
+    updatePrefs((prev) => {
+      if (prev.projectSort === mode && mode !== "fixed") return prev;
+      const order = mode === "fixed"
+        ? (prev.projectOrder.length > 0 ? prev.projectOrder : visibleTree.map((p) => p.root))
+        : prev.projectOrder;
+      return { ...prev, projectSort: mode, projectOrder: order };
+    });
+  }, [updatePrefs, visibleTree]);
+
+  const handleProjectDrop = useCallback((fromRoot: string, toRoot: string) => {
+    if (!fromRoot || !toRoot || fromRoot === toRoot) return;
+    updatePrefs((prev) => {
+      const base = prev.projectSort === "fixed" && prev.projectOrder.length > 0
+        ? [...prev.projectOrder]
+        : visibleTree.map((p) => p.root);
+      for (const project of visibleTree) {
+        if (!base.includes(project.root)) base.push(project.root);
+      }
+      if (!base.includes(fromRoot)) base.push(fromRoot);
+      if (!base.includes(toRoot)) base.push(toRoot);
+      return {
+        ...prev,
+        projectSort: "fixed",
+        projectOrder: moveProjectInOrder(base, fromRoot, toRoot),
+      };
+    });
+  }, [updatePrefs, visibleTree]);
 
   const collapseAll = useCallback(() => {
     const ids = collectAllCollapseIds(openTree);
@@ -1306,6 +1374,30 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                     label={t("sidebar_compact")}
                     checked={displayMode === "compact"}
                     onClick={() => { setDisplayMode("compact"); setDisplayMenuOpen(false); }}
+                  />
+                  <div style={{ borderTop: "1px solid var(--border)", margin: "2px 0" }} />
+                  <div style={{ padding: "6px 10px 2px", fontSize: 10, fontWeight: 600, color: "var(--text-dim)", letterSpacing: "0.04em" }}>
+                    {t("sidebar_projectSort")}
+                  </div>
+                  <DisplayMenuItem
+                    label={t("sidebar_projectSortRecent")}
+                    checked={prefs.projectSort === "recent"}
+                    onClick={() => { setProjectSort("recent"); setDisplayMenuOpen(false); }}
+                  />
+                  <DisplayMenuItem
+                    label={t("sidebar_projectSortAz")}
+                    checked={prefs.projectSort === "az"}
+                    onClick={() => { setProjectSort("az"); setDisplayMenuOpen(false); }}
+                  />
+                  <DisplayMenuItem
+                    label={t("sidebar_projectSortZa")}
+                    checked={prefs.projectSort === "za"}
+                    onClick={() => { setProjectSort("za"); setDisplayMenuOpen(false); }}
+                  />
+                  <DisplayMenuItem
+                    label={t("sidebar_projectSortFixed")}
+                    checked={prefs.projectSort === "fixed"}
+                    onClick={() => { setProjectSort("fixed"); setDisplayMenuOpen(false); }}
                   />
                   <div style={{ borderTop: "1px solid var(--border)", margin: "2px 0" }} />
                   <DisplayMenuItem
@@ -1713,6 +1805,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             onSessionArchive={handleArchiveSession}
             isSessionPinned={(id) => pinnedIds.has(id)}
             onTogglePin={togglePinSession}
+            onProjectDrop={searchActive ? undefined : handleProjectDrop}
            />
          ))}
        </div>

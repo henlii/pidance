@@ -13,6 +13,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "./pi-paths";
 import {
+  getPidancePref,
+  readPidancePrefs,
+  updatePidancePref,
+} from "./pidance-prefs-file";
+import {
   clearRunningStartedAt,
   recordRunningStartedAt,
 } from "./running-state";
@@ -127,6 +132,17 @@ export class SdkSessionHost {
   private onDestroyCallback: (() => void) | null = null;
   private _alive = true;
   private promptRunning = false;
+  /** 最近一次 prompt 结束原因：队列自动投递只认 completed。 */
+  private lastStopReason: "completed" | "aborted" | "error" | null = null;
+  /** 本地 follow-up 队列执行缓存（持久层仍是 prefs）。 */
+  private followUpQueue: string[] = [];
+  private followUpQueueHydrated = false;
+  private flushingFollowUp = false;
+  private followUpFlushBatch: string[] = [];
+  private followUpFlushCursor = 0;
+  private followUpFlushConfirmed = false;
+  private followUpFlushAsOne = false;
+  private followUpFlushOriginal: string[] = [];
   private bashRunning = false;
   private bashCommand: {
     command: string;
@@ -233,8 +249,149 @@ export class SdkSessionHost {
         this.resetIdleTimer();
         return;
       }
+      // 队列非空且未被 hold 时不能 idle dispose：Host 是队列自动投递的 owner，
+      // 释放后重启虽可从 prefs 水合，但会丢失“已 settled 立即投递”的时机。
+      if (this.followUpQueue.length > 0 && !this.isFollowUpHeld()) {
+        this.resetIdleTimer();
+        return;
+      }
       void this.destroyAsync();
     }, this.idleTimeoutMs);
+  }
+
+  private isSettled(): boolean {
+    if (!this.runtime || !this._alive) return false;
+    return !this.isRunning();
+  }
+
+  private isFollowUpHeld(): boolean {
+    const prefs = readPidancePrefs(this.agentDir);
+    return getPidancePref(prefs, `sessionQueueHold.${this.realSessionId}`) === true;
+  }
+
+  private hydrateFollowUpQueue(): void {
+    if (this.followUpQueueHydrated) return;
+    this.followUpQueueHydrated = true;
+    const prefs = readPidancePrefs(this.agentDir);
+    const raw = getPidancePref(prefs, `sessionQueue.${this.realSessionId}`);
+    this.followUpQueue = Array.isArray(raw)
+      ? raw.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      : [];
+  }
+
+  private persistFollowUpQueue(): void {
+    try {
+      updatePidancePref(
+        `sessionQueue.${this.realSessionId}`,
+        this.followUpQueue,
+        this.agentDir,
+      );
+    } catch (error) {
+      console.error("[pidance] failed to persist follow-up queue:", error);
+    }
+  }
+
+  private scheduleFollowUpFlush(): void {
+    if (!this._alive || !this.runtime) return;
+    if (this.flushingFollowUp) return;
+    if (this.followUpQueue.length === 0) return;
+    if (this.isFollowUpHeld()) return;
+    if (!this.isSettled()) return;
+    this.flushingFollowUp = true;
+    this.followUpFlushAsOne = readPidancePrefs(this.agentDir).queueFlushAsOne === true;
+    this.followUpFlushOriginal = [...this.followUpQueue];
+    this.followUpFlushBatch = this.followUpFlushAsOne
+      ? [this.followUpFlushOriginal.join("\n\n")]
+      : [...this.followUpFlushOriginal];
+    this.followUpFlushCursor = 0;
+    this.followUpFlushConfirmed = false;
+    void this.sendNextFollowUp();
+  }
+
+  private async sendNextFollowUp(): Promise<void> {
+    if (!this.flushingFollowUp) return;
+    if (this.isFollowUpHeld()) {
+      this.abortFollowUpFlush();
+      return;
+    }
+    const item = this.followUpFlushBatch[this.followUpFlushCursor];
+    if (item === undefined) {
+      this.finishFollowUpFlush();
+      return;
+    }
+    if (!this.isSettled()) return;
+    this.followUpFlushConfirmed = false;
+    try {
+      await this.send({ type: "prompt", message: item });
+      // send() 在 preflight 后即返回；真正的确认由 message_end(user) 或
+      // agent_settled(completed) 驱动，避免在 prompt preflight 阶段清队。
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.emit({ type: "follow_up_flush_error", errorMessage });
+      this.abortFollowUpFlush();
+    }
+  }
+
+  private confirmFollowUpFlush(): void {
+    if (!this.flushingFollowUp || this.followUpFlushConfirmed) return;
+    const item = this.followUpFlushBatch[this.followUpFlushCursor];
+    if (item === undefined) return;
+    this.followUpFlushConfirmed = true;
+    if (this.followUpFlushAsOne) {
+      // flushAsOne：整组作为一条 prompt 发出，确认后只清空本次快照条目；
+      // 快照之后新入队的条目保留，避免 set_follow_up_queue 整组替换时丢新消息。
+      const original = new Set(this.followUpFlushOriginal);
+      this.followUpQueue = this.followUpQueue.filter((item) => !original.has(item));
+    } else {
+      // 只移除已确认落盘/已 settled 的当前条目；未确认条目保留。
+      const idx = this.followUpQueue.indexOf(item);
+      if (idx >= 0) this.followUpQueue.splice(idx, 1);
+    }
+    const remaining = [...this.followUpQueue];
+    this.persistFollowUpQueue();
+    this.emit({
+      type: "follow_up_flushed",
+      sessionId: this.realSessionId,
+      item,
+      remaining,
+    });
+    if (this.followUpFlushAsOne) {
+      this.finishFollowUpFlush();
+      return;
+    }
+    this.followUpFlushCursor += 1;
+    if (this.followUpFlushCursor >= this.followUpFlushBatch.length) {
+      this.finishFollowUpFlush();
+    } else {
+      void this.sendNextFollowUp();
+    }
+  }
+
+  private abortFollowUpFlush(): void {
+    if (!this.flushingFollowUp) return;
+    this.flushingFollowUp = false;
+    this.followUpFlushBatch = [];
+    this.followUpFlushCursor = 0;
+    this.followUpFlushConfirmed = false;
+    this.followUpFlushAsOne = false;
+    this.followUpFlushOriginal = [];
+    // 未确认条目已在 followUpQueue 中保留；persist 确保 prefs 与内存一致。
+    this.persistFollowUpQueue();
+    this.resetIdleTimer();
+  }
+
+  private finishFollowUpFlush(): void {
+    this.flushingFollowUp = false;
+    this.followUpFlushBatch = [];
+    this.followUpFlushCursor = 0;
+    this.followUpFlushConfirmed = false;
+    this.followUpFlushAsOne = false;
+    this.followUpFlushOriginal = [];
+    this.persistFollowUpQueue();
+    this.resetIdleTimer();
+    if (this.followUpQueue.length > 0 && !this.isFollowUpHeld()) {
+      this.scheduleFollowUpFlush();
+    }
   }
 
   private get session(): AgentSession {
@@ -364,6 +521,27 @@ export class SdkSessionHost {
     }
   }
 
+  /**
+   * 从 SDK agent_end.messages 最后一条 assistant 消息读取 stopReason。
+   * 兼容 messages 为 [{message:{stopReason}}] 与 [{stopReason}] 两种形状。
+   */
+  private readStopReasonFromAgentEnd(event: SdkAgentEvent): "completed" | "aborted" | "error" | null {
+    const messages = (event as { messages?: unknown }).messages;
+    if (!Array.isArray(messages)) return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const entry = messages[i] as
+        | { message?: { stopReason?: unknown }; stopReason?: unknown }
+        | undefined;
+      const stop = entry?.message?.stopReason ?? entry?.stopReason;
+      if (typeof stop === "string") {
+        if (stop === "aborted") return "aborted";
+        if (stop === "error" || stop === "prompt_error") return "error";
+        return "completed";
+      }
+    }
+    return null;
+  }
+
   private handleSessionEvent(event: SdkAgentEvent): void {
     switch (event.type) {
       case "agent_start":
@@ -373,6 +551,7 @@ export class SdkSessionHost {
         break;
       case "agent_end":
         this.promptRunning = false;
+        this.lastStopReason = this.readStopReasonFromAgentEnd(event) ?? this.lastStopReason ?? "completed";
         clearRunningStartedAt(this.realSessionId);
         this.options.onSessionListInvalidate?.();
         if (this.realSessionFile) clearLeafSidecar(this.realSessionFile);
@@ -383,6 +562,16 @@ export class SdkSessionHost {
       case "agent_settled":
         this.promptRunning = false;
         this.notifyRunning();
+        // 触发点必须是 agent_settled；agent_end 只记录本轮结果。
+        if (this.lastStopReason === "completed") {
+          if (this.flushingFollowUp) {
+            void this.sendNextFollowUp();
+          } else {
+            this.scheduleFollowUpFlush();
+          }
+        } else if (this.flushingFollowUp && (this.lastStopReason === "aborted" || this.lastStopReason === "error")) {
+          this.abortFollowUpFlush();
+        }
         break;
       case "compaction_start":
       case "auto_compaction_start":
@@ -397,6 +586,8 @@ export class SdkSessionHost {
         // 延后一帧再 materialize，确保 header+user 一同落盘（避免列表只见空会话/消失）。
         const msg = (event as { message?: { role?: string } }).message;
         if (msg?.role === "user") {
+          // follow-up 投递的 user 消息确认：这里才推进队列，不能在 prompt preflight 清队。
+          this.confirmFollowUpFlush();
           setImmediate(() => {
             try {
               materializeSessionFile(this.session.sessionManager);
@@ -669,7 +860,12 @@ export class SdkSessionHost {
 
       await this.rebindSession();
       this.syncIdentityFromSession();
+      this.hydrateFollowUpQueue();
       this.resetIdleTimer();
+      // 服务端重启/热重载后从 prefs 水合：空闲且未被 hold 时立即投递。
+      if (this.followUpQueue.length > 0 && !this.isFollowUpHeld() && this.isSettled()) {
+        this.scheduleFollowUpFlush();
+      }
     } catch (error) {
       await this.destroyAsync();
       throw error;
@@ -693,6 +889,7 @@ export class SdkSessionHost {
       isStreaming: session.isStreaming,
       isCompacting: session.isCompacting,
       isPromptRunning: this.promptRunning,
+      lastStopReason: this.lastStopReason,
       isBashRunning: this.bashRunning,
       pendingBash: this.bashCommand,
       autoCompactionEnabled: session.autoCompactionEnabled,
@@ -787,11 +984,26 @@ export class SdkSessionHost {
           throw new Error("Cannot send a prompt while a shell command is running");
         }
         this.promptRunning = true;
+        this.lastStopReason = null;
         recordRunningStartedAt(this.realSessionId, Date.now());
         this.notifyRunning();
         try {
           await new Promise<void>((resolve, reject) => {
             let settled = false;
+            const clearIdlePrompt = () => {
+              // 配置类 slash（如 multimodal-proxy）预检后 HTTP 已返回，prompt() 结束时
+              // 可能没有 agent_start/agent_end：必须在这里清 running，否则会话页一直
+              // 「正在运行命令」。真正的模型回合由 agent_end 清；此处仅在已空闲时补清。
+              if (session.isStreaming || session.isCompacting || this.bashRunning) return;
+              if (!this.promptRunning) return;
+              this.promptRunning = false;
+              if (this.lastStopReason !== "aborted" && this.lastStopReason !== "error") {
+                this.lastStopReason = "completed";
+              }
+              clearRunningStartedAt(this.realSessionId);
+              this.notifyRunning();
+              this.emit({ type: "prompt_done" });
+            };
             void session
               .prompt(String(command.message ?? ""), {
                 images: command.images as never,
@@ -820,8 +1032,11 @@ export class SdkSessionHost {
                   this.options.onSessionListInvalidate?.();
                   resolve();
                 }
+                clearIdlePrompt();
               })
               .catch((error) => {
+                if (this.lastStopReason !== "aborted") this.lastStopReason = "error";
+                clearIdlePrompt();
                 if (!settled) {
                   settled = true;
                   reject(error);
@@ -831,6 +1046,7 @@ export class SdkSessionHost {
           return null;
         } catch (error) {
           this.promptRunning = false;
+          this.lastStopReason = this.lastStopReason === "aborted" ? "aborted" : "error";
           clearRunningStartedAt(this.realSessionId);
           this.notifyRunning();
           const errorMessage = error instanceof Error ? error.message : String(error);
@@ -841,6 +1057,7 @@ export class SdkSessionHost {
       }
 
       case "abort": {
+        this.lastStopReason = "aborted";
         this.promptRunning = false;
         this.notifyRunning();
         await session.abort();
@@ -890,6 +1107,17 @@ export class SdkSessionHost {
       case "steer": {
         await session.steer(String(command.message ?? ""), command.images as never);
         return null;
+      }
+
+      case "set_follow_up_queue": {
+        const items = Array.isArray(command.items)
+          ? (command.items as unknown[]).filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+          : [];
+        this.followUpQueue = items;
+        this.persistFollowUpQueue();
+        // late-enqueue：如果已经 settled/空闲，立即调度一次投递。
+        if (this.isSettled()) this.scheduleFollowUpFlush();
+        return { ok: true, queued: this.followUpQueue.length };
       }
 
       case "follow_up": {
@@ -1167,6 +1395,12 @@ export class SdkSessionHost {
     this.promptRunning = false;
     this.bashRunning = false;
     this.bashCommand = null;
+    this.flushingFollowUp = false;
+    this.followUpFlushBatch = [];
+    this.followUpFlushCursor = 0;
+    this.followUpFlushConfirmed = false;
+    this.followUpFlushAsOne = false;
+    this.followUpFlushOriginal = [];
     clearRunningStartedAt(this.realSessionId);
     this.onDestroyCallback?.();
     this.notifyRunning();

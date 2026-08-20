@@ -1,24 +1,19 @@
 import { NextResponse } from "next/server";
-import { readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { join, resolve } from "path";
+import { statSync } from "fs";
 import {
   resolveSessionPath,
   resolveSessionIdByPath,
-  invalidateSessionPathCache,
   invalidateSessionListCache,
-  readSessionHeader,
   listAllSessions,
   buildSessionNavigationSnapshot,
 } from "@/lib/session-reader";
 import { openSessionView } from "@/lib/pi-session-io";
-import { clearLeafSidecar } from "@/lib/session-leaf-sidecar";
 import {
   parseContextLimitParam,
   sliceContextTail,
   DEFAULT_SESSION_TAIL_LIMIT,
 } from "@/lib/session-context-window";
 import { sessionService, READ_ONLY_SUBAGENT_ERROR, requireWritableSession } from "@/lib/session-service";
-import { collectSubagentTree, deleteValidatedSubagents } from "@/lib/subagent-sessions";
 
 export async function GET(
   req: Request,
@@ -133,50 +128,8 @@ export async function DELETE(
 ) {
   const { id } = await params;
   try {
-    await requireWritableSession(id, sessionService.isReadOnly);
-    const filePath = await resolveSessionPath(id);
-    if (!filePath) {
-      return NextResponse.json({ error: "Session not found" }, { status: 404 });
-    }
-
-    // Read only the bounded header before deleting.
-    const parentSessionPath = readSessionHeader(filePath)?.parentSession;
-
-    const verifiedChildren = readSessionHeader(filePath)?.id === id
-      ? collectSubagentTree(filePath, id)
-      : [];
-
-    // Re-attach all direct children to this session's parent (cascade re-parent)
-    // Scan sibling files in the same directory
-    const dir = filePath.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
-    try {
-      const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl") && join(dir, f) !== filePath);
-      for (const file of files) {
-        const childPath = join(dir, file);
-        try {
-          const content = readFileSync(childPath, "utf8");
-          const lines = content.split("\n");
-          const header = JSON.parse(lines[0]) as { type?: string; parentSession?: string };
-          if (header.type === "session" && header.parentSession === filePath) {
-            // Rewrite header with new parentSession
-            header.parentSession = parentSessionPath;
-            lines[0] = JSON.stringify(header);
-            writeFileSync(childPath, lines.join("\n"));
-          }
-        } catch { /* skip malformed */ }
-      }
-    } catch { /* skip if dir unreadable */ }
-
-    sessionService.destroy(id);
-    unlinkSync(filePath);
-    clearLeafSidecar(filePath);
-    const parentRoot = resolve(filePath.slice(0, -6));
-    const skippedSubagents = deleteValidatedSubagents(verifiedChildren, parentRoot, invalidateSessionPathCache);
-    invalidateSessionPathCache(id);
-    // 永久删除成功后同步清理归档 sidecar（D8.4）；删除失败时 sidecar 保留。
-    sessionService.removeArchiveRecordAfterPermanentDelete(id);
-    invalidateSessionListCache();
-    return NextResponse.json({ ok: true, skippedSubagents });
+    const result = await sessionService.deleteSession(id);
+    return NextResponse.json({ ok: true, skippedSubagents: result.skippedSubagents });
   } catch (error) {
     if (String(error) === READ_ONLY_SUBAGENT_ERROR) {
       return NextResponse.json({ error: READ_ONLY_SUBAGENT_ERROR }, { status: 403 });

@@ -1,4 +1,5 @@
-import { existsSync } from "fs";
+import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { join, resolve } from "path";
 import { allowFileRoot } from "./file-access";
 import { getAgentDir } from "./pi-paths";
 import {
@@ -20,6 +21,7 @@ import {
 import {
   cacheSessionPath,
   invalidateSessionListCache,
+  invalidateSessionPathCache,
   listAllSessions,
   readSessionHeader,
   resolveSessionPath,
@@ -39,6 +41,8 @@ import {
 import { computeTurnEnd } from "./turn-end";
 import type { SessionInfo } from "./types";
 import { shouldInheritModel } from "./model-selection";
+import { updatePidancePref } from "./pidance-prefs-file";
+import { collectSubagentTree, deleteValidatedSubagents } from "./subagent-sessions";
 import {
   archivedSessionIdsFor,
   createArchiveActions,
@@ -177,6 +181,10 @@ export type SessionService = {
   ensureLive(sessionId: string): Promise<LiveAgentSession>;
   /** 销毁 alive/dead wrapper；不存在 no-op；不走 readOnly 门禁 */
   destroy(sessionId: string): void;
+  /** 可等待销毁：DELETE running 等需要先 abort 再等 runtime dispose 完成。 */
+  destroyAsync(sessionId: string): Promise<void>;
+  /** 永久删除会话（Service 编排：abort → destroy → 重挂子会话 → unlink → 清队列）。 */
+  deleteSession(sessionId: string): Promise<{ skippedSubagents: number }>;
   start(
     sessionId: string,
     sessionFile: string,
@@ -366,6 +374,87 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
     destroy(sessionId) {
       // 含 dead wrapper；不存在 no-op；不走 readOnly
       deps.getRpcSession(sessionId)?.destroy();
+    },
+
+    async destroyAsync(sessionId) {
+      const session = deps.getRpcSession(sessionId);
+      if (!session) return;
+      if (typeof (session as { destroyAsync?: unknown }).destroyAsync === "function") {
+        await (session as { destroyAsync: () => Promise<void> }).destroyAsync();
+      } else {
+        session.destroy();
+      }
+    },
+
+    async deleteSession(sessionId) {
+      await requireWritableSession(sessionId, service.isReadOnly);
+      const filePath = await deps.resolveSessionPath(sessionId);
+      if (!filePath) throw new Error("Session not found");
+
+      // 只读有界 header；删除前收集 subagent 树。
+      const parentSessionPath = readSessionHeader(filePath)?.parentSession;
+      const verifiedChildren = readSessionHeader(filePath)?.id === sessionId
+        ? collectSubagentTree(filePath, sessionId)
+        : [];
+
+      // 1. running 先 abort（不 flush）；abort 失败只记录并继续删除。
+      const live = deps.getRpcSession(sessionId);
+      if (live?.isAlive?.() && deps.getRunningRpcSessionIds().includes(sessionId)) {
+        try {
+          await live.send({ type: "abort" });
+        } catch (error) {
+          console.error("[pidance] abort before delete failed:", error);
+        }
+      }
+
+      // 2. 等待 abort 完成后 await destroy。
+      await service.destroyAsync(sessionId);
+
+      // 3. 子会话重挂到本会话的 parent（cascade re-parent）。
+      const dir = filePath.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
+      try {
+        const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl") && join(dir, f) !== filePath);
+        for (const file of files) {
+          const childPath = join(dir, file);
+          try {
+            const content = readFileSync(childPath, "utf8");
+            const lines = content.split("\n");
+            const header = JSON.parse(lines[0]) as { type?: string; parentSession?: string };
+            if (header.type === "session" && header.parentSession === filePath) {
+              header.parentSession = parentSessionPath;
+              lines[0] = JSON.stringify(header);
+              writeFileSync(childPath, lines.join("\n"));
+            }
+          } catch {
+            /* skip malformed */
+          }
+        }
+      } catch {
+        /* skip if dir unreadable */
+      }
+
+      // 4. 删除会话文件与 sidecar；unlink 失败不清队列 prefs。
+      unlinkSync(filePath);
+      clearLeafSidecar(filePath);
+      const parentRoot = resolve(filePath.slice(0, -6));
+      const skippedSubagents = deleteValidatedSubagents(
+        verifiedChildren,
+        parentRoot,
+        invalidateSessionPathCache,
+      );
+
+      // 5. 删除成功后才清队列/hold。
+      try {
+        updatePidancePref(`sessionQueue.${sessionId}`, null);
+        updatePidancePref(`sessionQueueHold.${sessionId}`, null);
+      } catch (error) {
+        console.error("[pidance] failed to clear queue prefs after delete:", error);
+      }
+
+      invalidateSessionPathCache(sessionId);
+      deps.invalidateSessionListCache();
+      service.removeArchiveRecordAfterPermanentDelete(sessionId);
+      return { skippedSubagents };
     },
 
     async start(sessionId, sessionFile, cwd, toolNames) {

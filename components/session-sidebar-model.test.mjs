@@ -347,3 +347,31 @@ test("全文模式：按 session id 集合保留祖先链，不按 name/alias �
   // 空集合：全文模式无命中 → 空树。
   assert.deepEqual(filterSidebarTree(tree, "", undefined, new Set()), []);
 });
+
+test("项目排序：az/za 按显示名，fixed 按指定顺序，拖动改序", async () => {
+  const { buildSidebarTree, sortSidebarProjects, moveProjectInOrder } = await jiti.import("./session-sidebar-model.ts");
+  const a = session("a1", { cwd: "/alpha", projectRoot: "/alpha", modified: "2026-07-01T00:00:00.000Z" });
+  const b = session("b1", { cwd: "/beta", projectRoot: "/beta", modified: "2026-07-09T00:00:00.000Z" });
+  const tree = buildSidebarTree([a, b]);
+  assert.deepEqual(sortSidebarProjects(tree, { mode: "az" }).map((p) => p.root), ["/alpha", "/beta"]);
+  assert.deepEqual(sortSidebarProjects(tree, { mode: "za" }).map((p) => p.root), ["/beta", "/alpha"]);
+  assert.deepEqual(
+    sortSidebarProjects(tree, { mode: "fixed", order: ["/alpha", "/beta"] }).map((p) => p.root),
+    ["/alpha", "/beta"],
+  );
+  assert.deepEqual(moveProjectInOrder(["/alpha", "/beta", "/gamma"], "/gamma", "/alpha"), ["/gamma", "/alpha", "/beta"]);
+});
+
+
+test("projectHasRunningSession：worktree 归主 projectRoot，running 命中阻止关闭", async () => {
+  const { projectHasRunningSession } = await jiti.import("./session-sidebar-model.ts");
+  const main = session("s1", { cwd: "/repo", projectRoot: "/repo" });
+  const wt = session("s2", { cwd: "/repo-worktrees/feat", projectRoot: "/repo" });
+  const other = session("s3", { cwd: "/other", projectRoot: "/other" });
+  const sessions = [main, wt, other];
+  assert.equal(projectHasRunningSession(sessions, new Set(["s1"]), "/repo"), true);
+  assert.equal(projectHasRunningSession(sessions, new Set(["s2"]), "/repo"), true);
+  assert.equal(projectHasRunningSession(sessions, new Set(["s3"]), "/repo"), false);
+  assert.equal(projectHasRunningSession(sessions, ["s2"], "/repo"), true);
+  assert.equal(projectHasRunningSession(sessions, [], "/repo"), false);
+});

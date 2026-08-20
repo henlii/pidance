@@ -20,3 +20,14 @@ export function joinQueueForRecall(items: readonly string[]): string {
     .filter((s) => s.length > 0)
     .join("\n\n");
 }
+
+/** 会话结束原因：只有正常完成才自动投递队列；中止/异常保留队列。 */
+export type QueueAutoFlushReason = "completed" | "aborted" | "error";
+
+export function shouldAutoFlushQueue(reason: QueueAutoFlushReason | null | undefined): boolean {
+  return reason === "completed";
+}
+
+export function parseQueueAutoFlushReason(value: unknown): QueueAutoFlushReason | null {
+  return value === "completed" || value === "aborted" || value === "error" ? value : null;
+}
