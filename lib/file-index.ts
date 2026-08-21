@@ -2,28 +2,19 @@
  * /api/file-index 业务实现：项目文件索引/搜索。
  *
  * Route 只保留参数校验与状态码；缓存、git/readdir 枚举、匹配全部下沉到 lib。
+ * 各项上限从服务端持久化配置读取（文件管理器顶部齿轮可调）。
  */
 import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
 import path from "path";
 import { buildEntriesFromFiles, filterFileEntries, type FileIndexEntry } from "./file-fuzzy";
+import { readFileConfig } from "./file-config";
 
 const execFileAsync = promisify(execFile);
 
-// Same skip lists as /api/files — only used for the non-git readdir fallback.
-// Git-tracked repos rely on .gitignore instead (matches the TUI's fd behavior).
-// 文件索引与文件管理一致：不再隐藏 node_modules/dist/build 等目录。
-const IGNORED_NAMES = new Set<string>();
-
-const IGNORED_SUFFIXES: string[] = [];
-
-/** Cap on the plain (no-query) response used as the client-side index */
-const MAX_FILES = 5000;
-/** Hard caps on the full in-memory listing that ?q= searches against */
-const GIT_HARD_CAP = 200_000;
-const WALK_HARD_CAP = 50_000;
-const MAX_WALK_DEPTH = 8;
+/** 查询参数长度上限（非用户可调安全值） */
+const MAX_QUERY_LENGTH = 500;
 const CACHE_TTL_MS = 60_000;
 const CACHE_MAX_ENTRIES = 20;
 
@@ -61,8 +52,9 @@ async function listWithGit(cwd: string): Promise<FileListing | null> {
       { timeout: 10_000, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } },
     );
     const all = stdout.split("\0").filter(Boolean);
-    if (all.length > GIT_HARD_CAP) {
-      return { files: all.slice(0, GIT_HARD_CAP), hardTruncated: true };
+    const config = readFileConfig();
+    if (all.length > config.indexGitHardCap) {
+      return { files: all.slice(0, config.indexGitHardCap), hardTruncated: true };
     }
     return { files: all, hardTruncated: false };
   } catch {
@@ -73,6 +65,7 @@ async function listWithGit(cwd: string): Promise<FileListing | null> {
 
 function listWithWalk(cwd: string): FileListing {
   const files: string[] = [];
+  const config = readFileConfig();
   // BFS so shallow files win when the cap truncates the listing.
   const queue: Array<{ abs: string; rel: string; depth: number }> = [{ abs: cwd, rel: "", depth: 0 }];
   while (queue.length > 0) {
@@ -84,14 +77,13 @@ function listWithWalk(cwd: string): FileListing {
       continue;
     }
     for (const d of dirents) {
-      if (IGNORED_NAMES.has(d.name) || IGNORED_SUFFIXES.some((s) => d.name.endsWith(s))) continue;
       const childRel = rel ? `${rel}/${d.name}` : d.name;
       if (d.isDirectory()) {
-        if (depth + 1 <= MAX_WALK_DEPTH) {
+        if (depth + 1 <= config.indexMaxWalkDepth) {
           queue.push({ abs: path.join(abs, d.name), rel: childRel, depth: depth + 1 });
         }
       } else if (d.isFile()) {
-        if (files.length >= WALK_HARD_CAP) {
+        if (files.length >= config.indexWalkHardCap) {
           return { files, hardTruncated: true };
         }
         files.push(childRel);
@@ -119,14 +111,15 @@ export async function getFileIndex(cwd: string, query: string): Promise<FileInde
     cache.set(cwd, cached);
   }
 
+  const config = readFileConfig();
   if (query) {
     cached.entries ??= buildEntriesFromFiles(cached.listing.files);
-    return { matches: filterFileEntries(cached.entries, query) };
+    return { matches: filterFileEntries(cached.entries, query, config.atResultLimit) };
   }
 
   const { files, hardTruncated } = cached.listing;
   return {
-    files: files.slice(0, MAX_FILES),
-    truncated: hardTruncated || files.length > MAX_FILES,
+    files: files.slice(0, config.indexMaxFiles),
+    truncated: hardTruncated || files.length > config.indexMaxFiles,
   };
 }

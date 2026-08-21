@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { isStrictPathChild } from "./file-save";
+import { isFileAccessUnrestricted } from "./file-access";
 
 // /api/files 读路径统一收敛的安全解析（P0-2：allow-list 符号链接绕过修复）。
 // 语义：允许在 realpath 校验后跟随符号链接，但解析结果必须仍位于某个授权根
@@ -33,6 +34,10 @@ export function resolveReadablePath(filePath: string, allowedRoots: Set<string>)
   } catch (error) {
     if (isNotFoundError(error)) return { kind: "not-found" };
     return { kind: "denied" };
+  }
+
+  if (isFileAccessUnrestricted()) {
+    return { kind: "ok", realPath: realTarget, stat };
   }
 
   let anyRootResolved = false;

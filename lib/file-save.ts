@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-/** 仅拒绝内部临时名，避免把保存临时文件当正式目标。 */
+/** 保存不再限制目标名称；MAX_SAVE_BYTES 保留为无限。 */
 export const MAX_SAVE_BYTES = Number.POSITIVE_INFINITY;
 export const SAVE_FSYNC = process.env.SAVE_FSYNC === "true";
 
@@ -13,9 +13,8 @@ export class FileSaveError extends Error {
 
 export type SaveFileOptions = { target: string; cwd: string; sourceSessionId?: string; allowedRoots: Set<string>; content: string; baseline: { mtimeMs: number; size: number }; isAllowed?: (target: string, roots: Set<string>) => boolean; getBinaryMime?: (target: string) => string | null };
 
-export function validateSaveName(target: string): string | null {
-  const name = target.split(/[\\/]+/).filter(Boolean).pop() ?? "";
-  if (name.startsWith(".pi-save-")) return "目标路径包含受保护名称";
+export function validateSaveName(_target: string): string | null {
+  // 写入/保存不做名称限制；内部临时名由 saveFile 自己管理。
   return null;
 }
 

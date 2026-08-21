@@ -7,10 +7,10 @@ import { execFile } from "child_process";
 import fs from "fs";
 import path from "path";
 import { promisify } from "util";
+import { readFileConfig } from "./file-config";
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 5_000;
-const MAX_ENTRIES = 400;
 
 /** 目录浏览已与 PTY 同等开放：不再隐藏 node_modules/dist/build 等目录。 */
 export const BROWSE_IGNORED_NAMES = new Set<string>();
@@ -134,7 +134,7 @@ export async function browseDirectory(
 				// broken symlink：跳过
 			}
 		}
-		if (entries.length >= MAX_ENTRIES) break;
+		if (entries.length >= readFileConfig().browseMaxEntries) break;
 	}
 	entries.sort((a, b) => a.name.localeCompare(b.name));
 

@@ -62,8 +62,14 @@ export function getAllowedRootsFromSessions(sessions: Awaited<ReturnType<typeof 
   return roots;
 }
 
-export function isFilePathAllowed(target: string, allowedRoots: Set<string>): boolean {
-  for (const root of allowedRoots) {
+/** 文件可见/访问范围不再做限制（与 PTY 同等开放）。 */
+export function isFileAccessUnrestricted(): boolean {
+  return true;
+}
+
+export function isFilePathAllowed(target: string, _allowedRoots: Set<string>): boolean {
+  if (isFileAccessUnrestricted()) return true;
+  for (const root of _allowedRoots) {
     const useWindowsRules = isWindowsAbsolutePath(target) || isWindowsAbsolutePath(root);
     const resolver = useWindowsRules ? path.win32 : path;
     const sep = useWindowsRules ? "\\" : path.sep;

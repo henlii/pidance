@@ -4,12 +4,6 @@ import { spawn } from "node:child_process";
 import { Readable } from "node:stream";
 import { isFilePathAllowed } from "@/lib/file-access";
 
-const PROTECTED_NAMES = new Set([
-  ".git", ".pi", ".next", "node_modules", "dist", "build", "coverage",
-  "__pycache__", ".pytest_cache", ".mypy_cache", ".turbo", ".cache",
-  "target", "vendor",
-]);
-
 export class FileOpsError extends Error {
   readonly code: "bad-request" | "forbidden" | "not-found" | "conflict";
   constructor(code: FileOpsError["code"], message: string) {
@@ -32,12 +26,7 @@ export function validateEntryName(name: string): string | null {
   if (name.includes("/") || name.includes("\\") || path.basename(name) !== name) {
     return "Name must not contain a path";
   }
-  if (PROTECTED_NAMES.has(name) || name.startsWith(".pi-save-")) {
-    return "Protected name is not allowed";
-  }
-  if (name === ".env" || (name.startsWith(".env.") && name !== ".env.example")) {
-    return "Environment files are not allowed";
-  }
+  // 写入/上传/保存已不做名称限制：允许 node_modules/dist/.env 等任意单层名称。
   return null;
 }
 

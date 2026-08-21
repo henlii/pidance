@@ -26,7 +26,8 @@ import { FileTreePicker } from "./FileTreePicker";
 import type { GitFileStatus, GitFileStatusKind, GitStatusResponse } from "@/lib/git-types";
 import { useI18n } from "@/lib/i18n";
 import { loadSidebarPreferences, saveFileExplorerState } from "@/lib/ui-preferences";
-import { ensureServerPrefsLoaded, getServerPref, setServerPref } from "@/lib/server-preferences";
+import { ensureServerPrefsLoaded, getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
+import { DEFAULT_FILE_CONFIG, parseFileConfig, type FileConfig } from "@/lib/file-config-shared";
 
 interface FileEntry {
   name: string;
@@ -368,7 +369,7 @@ const draftActionButtonStyle: CSSProperties = {
  * 下载（文件/目录均 tar.gz 由 ?type=download 统一处理）、重命名、复制路径；
  * 目录另有新建文件/新建文件夹。触发按钮带 data-menu-open 供 CSS 保持操作区可见。
  */
-function FileRowMenu({ entryPath, name, isDir, cwd, onRename, onCreate, onMove, onCopy, t }: {
+function FileRowMenu({ entryPath, name, isDir, cwd, onRename, onCreate, onMove, onCopy, onDelete, t }: {
   entryPath: string;
   name: string;
   isDir: boolean;
@@ -377,6 +378,7 @@ function FileRowMenu({ entryPath, name, isDir, cwd, onRename, onCreate, onMove, 
   onCreate: (kind: "create-file" | "create-dir") => void;
   onMove: () => void;
   onCopy: () => void;
+  onDelete: () => void;
   t: ReturnType<typeof useI18n>["t"];
 }) {
   const [open, setOpen] = useState(false);
@@ -416,7 +418,7 @@ function FileRowMenu({ entryPath, name, isDir, cwd, onRename, onCreate, onMove, 
     if (open) { close(); return; }
     const rect = triggerRef.current?.getBoundingClientRect();
     if (rect) {
-      const estimatedMenuHeight = isDir ? 244 : 176;
+      const estimatedMenuHeight = isDir ? 280 : 212;
       const estimatedMenuWidth = 200;
       const top = rect.bottom + 4 + estimatedMenuHeight <= window.innerHeight
         ? rect.bottom + 4
@@ -540,6 +542,16 @@ function FileRowMenu({ entryPath, name, isDir, cwd, onRename, onCreate, onMove, 
             )}
             {t("files_copy")}
           </button>
+          <button type="button" role="menuitem" style={{ ...itemStyle, color: "var(--status-danger)" }} {...hover} onClick={() => { close(); onDelete(); }}>
+            {menuIcon(
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M3 6h18" />
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              </svg>
+            )}
+            {t("files_delete")}
+          </button>
         </div>,
         document.body,
       )}
@@ -562,6 +574,7 @@ function TreeNode({
   onMutated,
   onMoveEntry,
   onCopyEntry,
+  onDeleteEntry,
   t,
 }: {
   node: FileNode;
@@ -580,6 +593,7 @@ function TreeNode({
   /** 打开移动/复制目标选择弹窗。 */
   onMoveEntry: (path: string, name: string) => void;
   onCopyEntry: (path: string, name: string) => void;
+  onDeleteEntry: (path: string, name: string, isDir: boolean) => void;
   t: ReturnType<typeof useI18n>["t"];
 }) {
   const open = expandedPaths.has(node.fullPath);
@@ -803,6 +817,7 @@ function TreeNode({
             onCreate={(kind) => setDraft({ kind })}
             onMove={() => onMoveEntry(node.fullPath, node.name)}
             onCopy={() => onCopyEntry(node.fullPath, node.name)}
+            onDelete={() => onDeleteEntry(node.fullPath, node.name, node.isDir)}
             t={t}
           />
         </div>
@@ -838,6 +853,7 @@ function TreeNode({
               onMutated={onMutated}
               onMoveEntry={onMoveEntry}
               onCopyEntry={onCopyEntry}
+              onDeleteEntry={onDeleteEntry}
               t={t}
             />
           ))}
@@ -861,6 +877,12 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   onUploadBusyChange,
 }, ref) {
   const { t } = useI18n();
+  const serverPrefs = useServerPreferences();
+  const [configOpen, setConfigOpen] = useState(false);
+  const fileConfig = useMemo(() => parseFileConfig(serverPrefs.fileConfig), [serverPrefs.fileConfig]);
+  const updateFileConfig = useCallback((patch: Partial<FileConfig>) => {
+    setServerPref("fileConfig", { ...fileConfig, ...patch });
+  }, [fileConfig]);
   const [roots, setRoots] = useState<FileNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -944,6 +966,21 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const handleMutated = useCallback(() => {
     setTreeRefreshKey((key) => key + 1);
   }, []);
+
+  /** 删除文件/目录：二次确认后调用 DELETE /api/files/...。 */
+  const handleDeleteEntry = useCallback(async (entryPath: string, name: string) => {
+    if (!window.confirm(t("files_deleteConfirm", { name }))) return;
+    try {
+      const res = await fetch(`/api/files/${encodeFilePathForApi(entryPath)}`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null) as { error?: string } | null;
+        throw new Error(data?.error ?? t("files_deleteFailed"));
+      }
+      handleMutated();
+    } catch (error) {
+      window.alert(`${t("files_deleteFailed")}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [t, handleMutated]);
 
   /** 滚动位置防抖写回（200ms），避免高频滚动刷 localStorage。 */
   const handleScroll = useCallback(() => {
@@ -1180,6 +1217,52 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   return (
     <div ref={scrollRef} onScroll={handleScroll} style={{ height: "100%", overflowY: "auto", overflowX: "hidden" }}>
       <input ref={uploadInputRef} type="file" multiple hidden onChange={handleUploadInput} />
+      <div style={{ position: "sticky", top: 0, zIndex: 10, display: "flex", justifyContent: "flex-end", alignItems: "center", padding: "2px 6px", background: "var(--bg-panel)", borderBottom: "1px solid var(--border)" }}>
+        <button
+          type="button"
+          onClick={() => setConfigOpen((v) => !v)}
+          title={t("files_config")}
+          aria-label={t("files_config")}
+          style={{ height: 22, padding: "0 7px", border: "1px solid var(--border)", borderRadius: 4, background: "var(--bg-panel)", color: "var(--text-muted)", cursor: "pointer", fontSize: 10 }}
+        >
+          {t("files_config")}
+        </button>
+      </div>
+      {configOpen && (
+        <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 10px" }}>
+            {([
+              ["indexMaxFiles", t("files_configIndexMaxFiles"), 1],
+              ["indexGitHardCap", t("files_configGitHardCap"), 1],
+              ["indexWalkHardCap", t("files_configWalkHardCap"), 1],
+              ["indexMaxWalkDepth", t("files_configMaxWalkDepth"), 1],
+              ["atResultLimit", t("files_configAtResultLimit"), 1],
+              ["textPreviewMaxBytes", t("files_configTextPreview"), 1024 * 1024],
+              ["imagePreviewMaxBytes", t("files_configImagePreview"), 1024 * 1024],
+              ["docxPreviewMaxBytes", t("files_configDocxPreview"), 1024 * 1024],
+              ["browseMaxEntries", t("files_configBrowseMaxEntries"), 1],
+            ] as Array<[keyof FileConfig, string, number]>).map(([key, label, divisor]) => (
+              <label key={key} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10, color: "var(--text-dim)" }}>
+                <span>{label}</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={Math.round(fileConfig[key] / divisor)}
+                  onChange={(event) => {
+                    const raw = Number(event.target.value);
+                    if (!Number.isFinite(raw) || raw <= 0) return;
+                    updateFileConfig({ [key]: Math.round(raw * divisor) } as Partial<FileConfig>);
+                  }}
+                  style={{ width: 70, height: 20, border: "1px solid var(--border)", borderRadius: 4, background: "var(--bg)", color: "var(--text)", fontSize: 10, padding: "0 4px" }}
+                />
+              </label>
+            ))}
+          </div>
+          <div style={{ marginTop: 5, fontSize: 10, color: "var(--text-dim)" }}>
+            {t("files_configHint")}
+          </div>
+        </div>
+      )}
       {picker && (
         <FileTreePicker
           open
@@ -1342,6 +1425,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                   onMutated={handleMutated}
                   onMoveEntry={(path) => openEntryPicker("move", path)}
                   onCopyEntry={(path) => openEntryPicker("copy", path)}
+                  onDeleteEntry={(path, name) => void handleDeleteEntry(path, name)}
                   t={t}
                 />
               ))}

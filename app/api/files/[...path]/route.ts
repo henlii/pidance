@@ -8,15 +8,13 @@ import {
   normalizeSlashes,
 } from "@/lib/file-access";
 import {
-  DOCX_PREVIEW_MAX_BYTES,
-  IMAGE_PREVIEW_MAX_BYTES,
-  TEXT_PREVIEW_MAX_BYTES,
   documentPreviewKind,
   getAudioMime,
   getDocumentMime,
   getFileExt,
   getImageMime,
 } from "@/lib/file-types";
+import { readFileConfig } from "@/lib/file-config";
 import { resolveDirentIsDirectory } from "@/lib/file-dirent";
 import { isFilePathReferencedBySession } from "@/lib/session-file-references";
 import {
@@ -220,21 +218,9 @@ export async function POST(
       return NextResponse.json({ error: "Invalid conflict strategy" }, { status: 400 });
     }
 
-    // 对齐上游 0.8.1：上传大小限制（单文件 25MB、总计 100MB；content-length 预检）
-    const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
-    const MAX_TOTAL_UPLOAD_BYTES = 100 * 1024 * 1024;
-    const contentLength = Number(request.headers.get("content-length"));
-    if (Number.isFinite(contentLength) && contentLength > MAX_TOTAL_UPLOAD_BYTES + 5 * 1024 * 1024) {
-      return NextResponse.json({ error: "Uploads must total 100MB or less" }, { status: 413 });
-    }
+    // 上传大小已不做限制（写入/上传/保存无限制）。
     const formData = await request.formData();
     const files = formData.getAll("files").filter((entry): entry is File => typeof entry !== "string");
-    if (files.some((file) => file.size > MAX_UPLOAD_BYTES)) {
-      return NextResponse.json({ error: "Each upload must be 25MB or smaller" }, { status: 413 });
-    }
-    if (files.reduce((sum, file) => sum + file.size, 0) > MAX_TOTAL_UPLOAD_BYTES) {
-      return NextResponse.json({ error: "Uploads must total 100MB or less" }, { status: 413 });
-    }
     const fileNames = files.map((file) => file.name);
     const validationError = validateUploadFileNames(fileNames);
     if (validationError) {
@@ -296,6 +282,40 @@ export async function POST(
       { uploaded, skipped, errors },
       { status: errors.length > 0 ? 207 : 200 },
     );
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+  }
+}
+
+export async function DELETE(
+  _request: NextRequest,
+  { params }: { params: Promise<{ path: string[] }> }
+) {
+  try {
+    const { path: segments } = await params;
+    const filePath = filePathFromSegments(segments);
+    const root = path.parse(filePath).root;
+    if (filePath === root || filePath.replace(/[\\/]+$/, "") === root.replace(/[\\/]+$/, "")) {
+      return NextResponse.json({ error: "Cannot delete root" }, { status: 400 });
+    }
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(filePath);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        return NextResponse.json({ error: "Not found" }, { status: 404 });
+      }
+      throw error;
+    }
+
+    if (stat.isDirectory()) {
+      fs.rmSync(filePath, { recursive: true, force: false });
+    } else {
+      fs.unlinkSync(filePath);
+    }
+    return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
@@ -526,7 +546,7 @@ export async function GET(
       }
       const imageMime = getImageMime(realPath);
       if (imageMime) {
-        if (stat.size > IMAGE_PREVIEW_MAX_BYTES) {
+        if (stat.size > readFileConfig().imagePreviewMaxBytes) {
           return NextResponse.json({ error: "Image too large (>10MB)" }, { status: 413 });
         }
         return streamFile(realPath, stat, imageMime, request.headers.get("range"));
@@ -539,7 +559,7 @@ export async function GET(
       if (documentMime) {
         return streamFile(realPath, stat, documentMime, request.headers.get("range"));
       }
-      if (stat.size > TEXT_PREVIEW_MAX_BYTES) {
+      if (stat.size > readFileConfig().textPreviewMaxBytes) {
         return NextResponse.json({ error: "File too large for preview (>256KB)" }, { status: 413 });
       }
       // O_NOFOLLOW 打开 + fstat 复核后读取（TOCTOU 最终组件防护）
@@ -600,7 +620,7 @@ export async function GET(
       if (getFileExt(realPath) !== "docx") {
         return NextResponse.json({ error: "Preview not available for this file type" }, { status: 400 });
       }
-      if (stat.size > DOCX_PREVIEW_MAX_BYTES) {
+      if (stat.size > readFileConfig().docxPreviewMaxBytes) {
         return NextResponse.json({ error: "DOCX too large for preview (>10MB)" }, { status: 413 });
       }
 
