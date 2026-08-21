@@ -565,7 +565,12 @@ export class SdkSessionHost {
         // 触发点必须是 agent_settled；agent_end 只记录本轮结果。
         if (this.lastStopReason === "completed") {
           if (this.flushingFollowUp) {
-            void this.sendNextFollowUp();
+            // message_end 可能缺失：agent_settled 作为兜底确认当前条目并推进。
+            if (!this.followUpFlushConfirmed) {
+              this.confirmFollowUpFlush();
+            } else {
+              void this.sendNextFollowUp();
+            }
           } else {
             this.scheduleFollowUpFlush();
           }

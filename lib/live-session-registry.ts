@@ -2,7 +2,9 @@
  * Live session registry：globalThis 注册表、启动锁、running 广播、idle 与 id 重键。
  * 主路径固定为同进程 SdkSessionHost。
  */
-import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
+import { cacheSessionPath, invalidateSessionListCache, resolveSessionPath } from "./session-reader";
+import { openSessionView } from "./pi-session-io";
+import { readPidancePrefs } from "./pidance-prefs-file";
 import { startSdkSessionHost, type SdkSessionHost } from "./sdk-session-host";
 
 export type AgentEvent = {
@@ -230,6 +232,40 @@ export async function startRpcSession(
   navigationActions?: NavigationActions,
 ): Promise<{ session: LiveAgentSession; realSessionId: string }> {
   return startLiveSession(sessionId, sessionFile, cwd, toolNames, navigationActions);
+}
+
+/**
+ * 服务端启动/热重载后恢复待投递的 follow-up 队列：
+ * 扫描 prefs 中非空 sessionQueue.<id>，启动对应 live Host（Host 水合后会自动投递）。
+ */
+export async function recoverFollowUpQueues(): Promise<void> {
+  const prefs = readPidancePrefs();
+  const entries = Object.entries(prefs).filter(
+    ([key, value]) =>
+      key.startsWith("sessionQueue.") &&
+      Array.isArray(value) &&
+      value.some((item) => typeof item === "string" && item.trim().length > 0),
+  );
+  for (const [key] of entries) {
+    const sessionId = key.slice("sessionQueue.".length);
+    if (!sessionId) continue;
+    if (prefs[`sessionQueueHold.${sessionId}`] === true) continue;
+    const existing = getRpcSession(sessionId);
+    if (existing?.isAlive()) continue;
+    const filePath = await resolveSessionPath(sessionId);
+    if (!filePath) continue;
+    let cwd = process.cwd();
+    try {
+      cwd = openSessionView(filePath).getHeader()?.cwd || process.cwd();
+    } catch {
+      // 保留默认 cwd；启动失败由 startRpcSession 抛错记录
+    }
+    try {
+      await startRpcSession(sessionId, filePath, cwd);
+    } catch (error) {
+      console.error(`[pidance] recover follow-up queue failed for ${sessionId}:`, error);
+    }
+  }
 }
 
 export async function startLiveSession(

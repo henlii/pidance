@@ -19,4 +19,12 @@ export async function register(): Promise<void> {
   // 版本号与 SDK 基线同步（AGENTS.md 锁定 0.84.1；升级 SDK 时同步此日志）。
   // 不用 require(package.json)：webpack 产物中无法解析包外模块路径。
   console.log("[pidance] 主 Agent runtime: 同进程 Pi SDK 0.84.1");
+
+  // 恢复服务端重启前未投递的 follow-up 队列（后台消息投递）。
+  try {
+    const { recoverFollowUpQueues } = await import("@/lib/live-session-registry");
+    void recoverFollowUpQueues();
+  } catch (error) {
+    console.error("[pidance] recover follow-up queues failed:", error);
+  }
 }
