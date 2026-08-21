@@ -689,6 +689,8 @@ export const en = {
   files_configDocxPreview: 'DOCX preview max (MB)',
   files_configBrowseMaxEntries: 'Browse max entries',
   files_configHint: 'Values are saved to server preferences and take effect immediately.',
+  files_configSave: 'Save',
+  files_configCancel: 'Cancel',
   files_pickerUploadTitle: 'Upload to directory',
   files_pickerMoveTitle: 'Move to directory',
   files_pickerCopyTitle: 'Copy to directory',

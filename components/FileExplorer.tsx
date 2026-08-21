@@ -60,6 +60,8 @@ export interface FileExplorerHandle {
   startCreateFile: () => void;
   /** 在项目根 cwd 下开始新建文件夹（内联输入）。 */
   startCreateDir: () => void;
+  /** 打开/关闭文件设置面板。 */
+  toggleConfig: () => void;
 }
 
 type UploadPhase = "idle" | "checking" | "uploading";
@@ -879,10 +881,21 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const { t } = useI18n();
   const serverPrefs = useServerPreferences();
   const [configOpen, setConfigOpen] = useState(false);
+  const [draftConfig, setDraftConfig] = useState<FileConfig | null>(null);
   const fileConfig = useMemo(() => parseFileConfig(serverPrefs.fileConfig), [serverPrefs.fileConfig]);
   const updateFileConfig = useCallback((patch: Partial<FileConfig>) => {
     setServerPref("fileConfig", { ...fileConfig, ...patch });
   }, [fileConfig]);
+
+  const toggleConfig = useCallback(() => {
+    if (configOpen) {
+      setConfigOpen(false);
+      setDraftConfig(null);
+    } else {
+      setDraftConfig(fileConfig);
+      setConfigOpen(true);
+    }
+  }, [configOpen, fileConfig]);
   const [roots, setRoots] = useState<FileNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1104,7 +1117,10 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     startCreateDir() {
       setRootCreateKind("create-dir");
     },
-  }), [uploadBusy, cwd]);
+    toggleConfig() {
+      toggleConfig();
+    },
+  }), [uploadBusy, cwd, toggleConfig]);
 
   /** 目录选择器确认：上传 → 触发文件选择；移动/复制 → 执行操作。 */
   const handlePickerSelect = useCallback(async (directory: string) => {
@@ -1217,18 +1233,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   return (
     <div ref={scrollRef} onScroll={handleScroll} style={{ height: "100%", overflowY: "auto", overflowX: "hidden" }}>
       <input ref={uploadInputRef} type="file" multiple hidden onChange={handleUploadInput} />
-      <div style={{ position: "sticky", top: 0, zIndex: 10, display: "flex", justifyContent: "flex-end", alignItems: "center", padding: "2px 6px", background: "var(--bg-panel)", borderBottom: "1px solid var(--border)" }}>
-        <button
-          type="button"
-          onClick={() => setConfigOpen((v) => !v)}
-          title={t("files_config")}
-          aria-label={t("files_config")}
-          style={{ height: 22, padding: "0 7px", border: "1px solid var(--border)", borderRadius: 4, background: "var(--bg-panel)", color: "var(--text-muted)", cursor: "pointer", fontSize: 10 }}
-        >
-          {t("files_config")}
-        </button>
-      </div>
-      {configOpen && (
+      {configOpen && draftConfig && (
         <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
           <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 10px" }}>
             {([
@@ -1247,19 +1252,45 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                 <input
                   type="number"
                   min={1}
-                  value={Math.round(fileConfig[key] / divisor)}
+                  value={Math.round((draftConfig[key] ?? fileConfig[key]) / divisor)}
                   onChange={(event) => {
                     const raw = Number(event.target.value);
                     if (!Number.isFinite(raw) || raw <= 0) return;
-                    updateFileConfig({ [key]: Math.round(raw * divisor) } as Partial<FileConfig>);
+                    setDraftConfig((prev) => ({
+                      ...(prev ?? fileConfig),
+                      [key]: Math.round(raw * divisor),
+                    } as FileConfig));
                   }}
                   style={{ width: 70, height: 20, border: "1px solid var(--border)", borderRadius: 4, background: "var(--bg)", color: "var(--text)", fontSize: 10, padding: "0 4px" }}
                 />
               </label>
             ))}
           </div>
-          <div style={{ marginTop: 5, fontSize: 10, color: "var(--text-dim)" }}>
-            {t("files_configHint")}
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+            <button
+              type="button"
+              onClick={() => {
+                setServerPref("fileConfig", draftConfig);
+                setConfigOpen(false);
+                setDraftConfig(null);
+              }}
+              style={{ height: 22, padding: "0 10px", border: "1px solid var(--accent)", borderRadius: 4, background: "var(--accent)", color: "#fff", cursor: "pointer", fontSize: 10 }}
+            >
+              {t("files_configSave")}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setConfigOpen(false);
+                setDraftConfig(null);
+              }}
+              style={{ height: 22, padding: "0 10px", border: "1px solid var(--border)", borderRadius: 4, background: "var(--bg-panel)", color: "var(--text-muted)", cursor: "pointer", fontSize: 10 }}
+            >
+              {t("files_configCancel")}
+            </button>
+            <span style={{ marginLeft: 4, fontSize: 10, color: "var(--text-dim)" }}>
+              {t("files_configHint")}
+            </span>
           </div>
         </div>
       )}

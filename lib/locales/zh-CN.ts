@@ -688,6 +688,8 @@ export const zhCN: Record<TranslationKey, string> = {
   files_configDocxPreview: 'DOCX 预览上限（MB）',
   files_configBrowseMaxEntries: '目录浏览最大条目数',
   files_configHint: '数值保存到服务端偏好，立即生效。',
+  files_configSave: '保存',
+  files_configCancel: '取消',
   files_pickerUploadTitle: '上传到目录',
   files_pickerMoveTitle: '移动到目录',
   files_pickerCopyTitle: '复制到目录',
