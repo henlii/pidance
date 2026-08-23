@@ -542,6 +542,12 @@ export async function applyPidanceUpdate(options?: {
     symlinkSync(releaseDir, tmpLink);
     renameSync(tmpLink, currentLink);
 
+    try {
+      pruneOldReleases(installRoot, [target, check.currentVersion]);
+    } catch {
+      /* 旧目录删不掉不影响已切换的 current */
+    }
+
     let restarted = false;
     const shouldRestart = options?.restartService !== false && env.PIDANCE_SKIP_SERVICE_RESTART !== "1";
     if (shouldRestart) {
@@ -560,20 +566,9 @@ export async function applyPidanceUpdate(options?: {
           message: `已切换到 ${target}，但${restart.message ?? `重启 ${OFFICIAL_SERVICE_UNIT} 失败`}`,
           restarted: false,
         };
-        try {
-          pruneOldReleases(installRoot, [target, check.currentVersion]);
-        } catch {
-          /* 旧目录删不掉不影响已切换的 current */
-        }
         report("done", 100, result.message);
         return result;
       }
-    }
-
-    try {
-      pruneOldReleases(installRoot, [target, check.currentVersion]);
-    } catch {
-      /* 旧目录删不掉不影响已切换的 current */
     }
 
     const result = {
