@@ -2,7 +2,7 @@
  * Pidance UI 会话（对齐 OpenChamber ui-auth 语义，#18）：
  * - Cookie：pidance_ui_session，HttpOnly + SameSite=Strict + Secure(HTTPS)
  * - JWT HS256（node:crypto，无 jose 依赖）
- * - TTL：12h 默认 / 7d trustDevice
+ * - TTL：12h 默认 / trustDevice 长期有效（10 年，删除设备即失效）
  * - 密钥落盘：~/.pi/agent/pidance-ui-jwt-secret（或 PIDANCE_UI_JWT_SECRET / OPENCODE_JWT_SECRET）
  */
 import { createHmac, createHash, randomBytes, timingSafeEqual, scryptSync } from "node:crypto";
@@ -12,7 +12,8 @@ import { homedir } from "node:os";
 
 export const UI_SESSION_COOKIE_NAME = "pidance_ui_session";
 export const UI_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
-export const UI_TRUSTED_DEVICE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** 信任设备长期有效（10 年）：有效性由登录管理删除控制，不因时间过期。 */
+export const UI_TRUSTED_DEVICE_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1000;
 
 export const UI_LOGIN_RATE_WINDOW_MS = 5 * 60 * 1000;
 export const UI_LOGIN_RATE_MAX = 10;
@@ -286,6 +287,7 @@ export function clientIpFromHeaders(headers: {
  * 已登录设备注册表：~/.pi/agent/pidance-ui-sessions.json（与 JWT secret 同目录）。
  * 结构：{ devices: [{ id: <jti>, label, createdAt, expiresAt }] }；0600 原子写。
  * 登录签发带 jti 的会话时注册；删除设备即从注册表移除，该 cookie 随即失效（middleware 每请求校验）。
+ * 信任设备长期有效（expiresAt 为 10 年后），仅按注册表存在性校验；默认 12h 会话仍按 expiresAt 过期。
  * 过期设备惰性清理（读写时过滤）；损坏/缺失降级为空列表。
  */
 export const UI_SESSIONS_FILE_NAME = "pidance-ui-sessions.json";
@@ -294,6 +296,7 @@ export type UiSessionDevice = {
   id: string;
   label: string;
   createdAt: number;
+  /** 默认 12h 会话的过期时间；信任设备为 10 年后（长期有效，删除才失效）。 */
   expiresAt: number;
 };
 
@@ -360,6 +363,17 @@ export function readUiSessionDevices(
   }
 }
 
+/** 设备是否有效（登录校验用）。 */
+export function hasUiSessionDevice(
+  id: string,
+  filePath = uiSessionsFilePath(),
+  store: DeviceFileStore = defaultDeviceStore,
+  nowMs = Date.now(),
+): boolean {
+  if (!id) return false;
+  return readUiSessionDevices(filePath, store, nowMs).some((d) => d.id === id);
+}
+
 /** 注册设备（登录成功后）。 */
 export function saveUiSessionDevice(
   device: UiSessionDevice,
@@ -389,17 +403,6 @@ export function clearUiSessionDevices(
   store: DeviceFileStore = defaultDeviceStore,
 ): void {
   writeDevices([], filePath, store);
-}
-
-/** 设备是否有效（登录校验用）。 */
-export function hasUiSessionDevice(
-  id: string,
-  filePath = uiSessionsFilePath(),
-  store: DeviceFileStore = defaultDeviceStore,
-  nowMs = Date.now(),
-): boolean {
-  if (!id) return false;
-  return readUiSessionDevices(filePath, store, nowMs).some((d) => d.id === id);
 }
 
 /** 从 User-Agent 生成设备标签（浏览器 + 系统），不可解析时回退 "Unknown device"。 */

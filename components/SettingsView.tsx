@@ -406,6 +406,9 @@ function GeneralPage({ onClose }: { onClose?: () => void }) {
             <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-dim)", maxWidth: 420, lineHeight: 1.45 }}>
               {t("general_logoutHint")}
             </div>
+            <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)", maxWidth: 420, lineHeight: 1.45 }}>
+              {t("general_trustedDeviceHint")}
+            </div>
           </>
         )}
         <div style={{ marginTop: 14 }}>
