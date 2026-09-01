@@ -1258,6 +1258,44 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
   }, [agentRunning, reconcileAgentState]);
 
+  // 标签页从后台切回：SSE 可能停在 CLOSED（浏览器冻结/长待机后自动断开）。
+  // 切回时统一：重连 SSE + 主动 reconcile + 重拉当前会话尾页，保证消息与
+  // 运行态与磁盘权威对齐（切走期间模型可能已输出、队列已投递、分支已推进）。
+  const syncOnTabReturn = useCallback(async () => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    const source = eventStreamManagerRef.current?.getCurrentSource();
+    const stillOpen = source && (source.readyState === 1 || source.readyState === 0);
+    if (!stillOpen || !eventStreamManagerRef.current?.isCurrent(sid)) {
+      try {
+        await ensureEventsConnected(sid);
+      } catch {
+        // 重连失败的兜底走 reconcile（不打断用户输入）。
+      }
+    }
+    void reconcileAgentState(sid);
+    // 仅重拉运行中的会话尾页；空闲会话 loadSession 会带 live 状态，可能有 SSE 已
+    // 送达而 UI 未消费的残余（浏览器冻结时长），重拉是权威收口。
+    if (agentRunningRef.current) {
+      void loadSession(sid, false);
+    }
+  }, [ensureEventsConnected, reconcileAgentState, loadSession]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void syncOnTabReturn();
+    };
+    const onFocus = () => {
+      if (document.visibilityState === "visible") void syncOnTabReturn();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [syncOnTabReturn]);
+
   useEffect(() => {
     agentRunningRef.current = agentRunning;
   }, [agentRunning]);

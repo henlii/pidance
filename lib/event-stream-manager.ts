@@ -78,6 +78,8 @@ export type EventStreamManager = {
   ): Promise<void>;
   close(): void;
   getCurrentSource(): EventSourceLike | null;
+  /** 是否为当前存活连接（切换/关闭后旧 source 不再生效）。 */
+  isCurrent(sessionId: string): boolean;
 };
 
 export function createEventStreamManager(options: EventStreamManagerOptions = {}): EventStreamManager {
@@ -127,6 +129,8 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
 
     const source = createEventSource(getEventsUrl(sessionId));
     current = source;
+    lastConnectedSessionId = sessionId;
+    currentSourceRef = source;
     let pendingMessageUpdate: AgentStreamEvent | null = null;
     let frameId: TimerHandle = null;
 
@@ -225,7 +229,20 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
     getCurrentSource() {
       return current;
     },
+    isCurrent(sessionId) {
+      if (current === null || lastConnectedSessionId !== sessionId || current !== currentSourceRef) return false;
+      // CLOSED（浏览器长待机后的致命断开）视为不再有效，切回需重连。
+      return sourceOf(sessionId)?.readyState !== CLOSED;
+    },
   };
+}
+
+// 最近一次 connect 的目标 session 与 source（isCurrent 判定用）。
+// 模块级记录贴近 manager 单实例使用方式；manager 级多实例时以实例闭包为准。
+let lastConnectedSessionId: string | null = null;
+let currentSourceRef: EventSourceLike | null = null;
+function sourceOf(sessionId: string): EventSourceLike | null {
+  return lastConnectedSessionId === sessionId ? currentSourceRef : null;
 }
 
 // CONNECTING 仅为可读性保留，当前实现未直接使用该状态分支。
