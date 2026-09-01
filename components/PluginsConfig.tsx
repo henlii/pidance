@@ -1042,12 +1042,11 @@ export function PluginsConfig({
           <div
             style={{
               width: isMobile ? "100%" : 245,
-              maxHeight: isMobile ? undefined : undefined,
               borderRight: isMobile ? "none" : "1px solid var(--border)",
-              borderBottom: isMobile ? "1px solid var(--border)" : "none",
               display: isMobile && mobileDetailOpen ? "none" : "flex",
               flexDirection: "column",
-              flexShrink: 0,
+              // 移动端列表页占满剩余高度（minHeight:0 让内部 overflowY 生效）；桌面端固定宽度侧栏。
+              ...(isMobile ? { flex: 1, minHeight: 0 } : { flexShrink: 0 }),
               background: "var(--bg-panel)",
             }}
           >
@@ -1219,7 +1218,15 @@ export function PluginsConfig({
             </div>
           </div>
 
-          <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+          <div
+            style={{
+              flex: 1,
+              overflowY: "auto",
+              padding: 20,
+              // 移动端列表视图隐藏右侧占位（列表整页显示），详情/添加页全屏
+              display: isMobile && !mobileDetailOpen ? "none" : undefined,
+            }}
+          >
             {isMobile && mobileDetailOpen && (
               <button
                 type="button"

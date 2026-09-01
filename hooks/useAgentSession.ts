@@ -17,7 +17,11 @@ import { attachCustomRenderedLines, preserveCustomRenderedLines } from "@/lib/cu
 import type { SessionActivity } from "@/lib/session-activity";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { BranchActions } from "@/lib/branch-bookmarks";
-import { mergeFollowUpForSteer, joinQueueForRecall } from "@/lib/queue-merge";
+import {
+  mergeFollowUpForSteer,
+  joinQueueForRecall,
+  readFollowUpQueuePreference,
+} from "@/lib/queue-merge";
 import { pendingSessionId } from "@/lib/new-session-intent";
 import { createEventStreamManager, type EventStreamManager, type EventStreamConnectionResult } from "@/lib/event-stream-manager";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -34,7 +38,7 @@ import { parseLatestTodoSnapshot } from "@/lib/todo-parser";
 import { getSessionCapabilities } from "@/components/session-capabilities";
 import { useSessionCommands } from "@/hooks/useSessionCommands";
 import { useChatAutoFollow } from "@/hooks/useChatAutoFollow";
-import { ensureServerPrefsLoaded, getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
+import { setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { resolveDisplayModel, settleModelOverride } from "@/lib/model-selection";
 import { useI18n } from "@/lib/i18n";
 import { guidePageThinkingUpdate, thinkingLevelForEnsureBody } from "@/lib/thinking-level-policy";
@@ -42,6 +46,7 @@ import { isThinkingLevel, type AgentThinkingLevel } from "@/lib/agent-settings";
 import {
   beginAgentRunFinish,
   canFinalizeAgentRun,
+  shouldFinishFromReconcile,
 } from "@/lib/finish-agent-run";
 import {
   applyToolExecutionStart,
@@ -358,25 +363,43 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     extensionUiStateRef, commitExtensionUiState, patchExtensionUiState, dismissExtensionUiRequest,
   } = useExtensionUiState();
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
-  // 本地 follow-up 队列（Codex 风格：发送入队、引导/取回消费）。
-  // 外部 Pi 无 clear_queue RPC，队列自管才能支持“整队合并引导发送”而不双发。
+  // Pidance follow-up 队列（Codex 风格）：不复用 Pi 原生 queue，
+  // 以便支持整队合并引导、取回和跨会话 Host 自动投递。
   const [, setLocalFollowUpQueue] = useState<string[]>([]);
   const localFollowUpRef = useRef<string[]>([]);
-  const updateLocalFollowUp = useCallback((next: string[]) => {
+  const followUpSyncRef = useRef<Promise<void>>(Promise.resolve());
+  const applyLocalFollowUpQueue = useCallback((next: string[]) => {
     localFollowUpRef.current = next;
     setLocalFollowUpQueue(next);
-    // 展示层 followUp 始终以本地队列为准（Pi 队列不再使用 follow_up RPC）
     setQueuedMessages((prev) => ({ ...prev, followUp: next }));
-    // 服务端持久化（跨客户端可见）：sessionQueue.<sid>
-    const sid = sessionIdRef.current;
-    if (sid) {
-      setServerPref(`sessionQueue.${sid}`, next);
-      // 同步给 live Host：整组替换，便于 Host 在 settled 后立即投递（late-enqueue）。
-      void sendAgentCommand(sid, { type: "set_follow_up_queue", items: next }).catch((error) => {
-        console.error("[pidance] failed to sync follow-up queue to host:", error);
-      });
-    }
   }, []);
+  const applyProjectedQueues = useCallback((value?: AgentStateResponse["queuedMessages"]) => {
+    const next = normalizeQueuedMessages(value);
+    applyLocalFollowUpQueue(next.followUp);
+    setQueuedMessages({ steering: next.steering, followUp: next.followUp });
+  }, [applyLocalFollowUpQueue]);
+  const updateLocalFollowUp = useCallback(async (next: string[]) => {
+    const previous = localFollowUpRef.current;
+    const applied = [...next];
+    applyLocalFollowUpQueue(applied);
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    const sync = followUpSyncRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        // Host 同步持久化并在 settled 后投递；浏览器不再并发写同一 queue prefs。
+        await sendAgentCommand(sid, { type: "set_follow_up_queue", items: applied });
+      });
+    followUpSyncRef.current = sync.catch(() => undefined);
+    try {
+      await sync;
+    } catch (error) {
+      if (sessionIdRef.current === sid && localFollowUpRef.current === applied) {
+        applyLocalFollowUpQueue(previous);
+      }
+      throw error;
+    }
+  }, [applyLocalFollowUpQueue]);
   // 分支切换/总结进行中：树节点、发送与再次导航全部暂停，避免与 navigateTree 并发写。
   const [branchBusy, setBranchBusy] = useState(false);
 
@@ -392,6 +415,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const messagesSessionIdRef = useRef<string | null>(session?.id ?? null);
   const entryIdsRef = useRef<string[]>([]);
   const agentRunningRef = useRef(false);
+  const sendInFlightRef = useRef(false);
+  const abortRequestedRef = useRef(false);
+  const promptAbortRef = useRef<AbortController | null>(null);
   const bashRunningRef = useRef(false);
   const branchBusyRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
@@ -424,6 +450,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * 时释放，token 漂移也必须释放，否则后续 run 的收尾被永久阻塞。
    */
   const finishingPromptRunIdRef = useRef<number | null>(null);
+  const sseGenerationRef = useRef(0);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
   /** prompt 命令已提交成功（防止切走/收尾竞态把已发送消息回滚成失败） */
   const promptSubmittedRef = useRef(false);
@@ -543,6 +570,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as SessionData;
       if (sessionIdRef.current !== sid) return null;
+      if (
+        finishingPromptRunIdRef.current !== null
+        && finishingPromptRunIdRef.current !== promptRunIdRef.current
+      ) {
+        return null;
+      }
       const tailEntryIds = d.context.entryIds ?? [];
       const tailMessages = d.context.messages ?? [];
       const previousEntryIds = entryIdsRef.current;
@@ -618,10 +651,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           patchExtensionUiState({ widgets: liveState.extensionWidgets ?? [] });
         }
         if (liveState.queuedMessages !== undefined) {
-          setQueuedMessages({
-            steering: normalizeQueuedMessages(liveState.queuedMessages).steering,
-            followUp: [...localFollowUpRef.current],
-          });
+          applyProjectedQueues(liveState.queuedMessages);
         }
         if (Array.isArray(liveState.pendingExtensionRequests)) {
           const queue = (liveState.pendingExtensionRequests as AgentEvent[])
@@ -667,7 +697,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [notifyAutoFollowBranchReset, patchExtensionUiState]);
+  }, [applyProjectedQueues, notifyAutoFollowBranchReset, patchExtensionUiState]);
 
   /**
    * 向上滚动加载更旧历史（OpenChamber loadOlder 语义）。
@@ -877,20 +907,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     // 建立时捕获 runId：连接排队/重连产生的回调携带旧 token，经 finishAgentRun
     // 校验丢弃，不会结束新 run。
-    const streamRunId = promptRunIdRef.current;
+    const generation = ++sseGenerationRef.current;
     const manager = eventStreamManagerRef.current!;
     return manager.connect(sid, (event) => {
-      handleAgentEventRef.current?.(event as unknown as AgentEvent, streamRunId);
+      if (sseGenerationRef.current !== generation) return;
+      handleAgentEventRef.current?.(event as unknown as AgentEvent);
     });
   }, [capabilities.canConnectEvents]);
 
   const ensureEventsConnected = useCallback(async (sid: string) => {
     if (!capabilities.canConnectEvents) return;
     // 同上：连接建立时捕获 runId（handleSend 在连接前已递增 promptRunIdRef）。
-    const streamRunId = promptRunIdRef.current;
+    const generation = ++sseGenerationRef.current;
     try {
       // EventSource 读不到 409 正文；先 JSON 预热 live，锁冲突才能显示可读错误。
-      const wake = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state?wake=1`);
+      const wake = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state?wake=1`, {
+        signal: promptAbortRef.current?.signal,
+      });
       const wakeBody = (await wake.json().catch(() => ({}))) as { error?: string };
       if (!wake.ok) {
         const err = typeof wakeBody.error === "string" && wakeBody.error
@@ -899,7 +932,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         throw new Error(err.includes("locked by another") ? t("chat_sessionLocked") : err);
       }
       await eventStreamManagerRef.current!.ensureConnected(sid, (event) => {
-        handleAgentEventRef.current?.(event as unknown as AgentEvent, streamRunId);
+        if (sseGenerationRef.current !== generation) return;
+        handleAgentEventRef.current?.(event as unknown as AgentEvent);
       });
     } finally {
       // 同步外部可见的 eventSourceRef，保留清理与既有消费者的读取契约。
@@ -1034,12 +1068,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (state.extensionStatuses !== undefined) patchExtensionUiState({ statuses: state.extensionStatuses ?? [] });
     if (state.extensionWidgets !== undefined) patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
     if (state.queuedMessages !== undefined) {
-      setQueuedMessages({
-        steering: normalizeQueuedMessages(state.queuedMessages).steering,
-        followUp: [...localFollowUpRef.current],
-      });
+      applyProjectedQueues(state.queuedMessages);
     }
-  }, [patchExtensionUiState]);
+  }, [applyProjectedQueues, patchExtensionUiState]);
 
   /**
    * 统一 agent run 结束路径（P2）：agent_end / prompt_done / reconcile idle 三路合一。
@@ -1106,15 +1137,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const startedAt = Date.now();
 
     while (agentRunningRef.current && Date.now() - startedAt < PROMPT_SETTLE_MAX_MS) {
-      if (runId !== undefined && promptRunIdRef.current !== runId) return;
+      if (runId !== undefined && promptRunIdRef.current > runId + 1) return;
       try {
         const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
         if (res.ok) {
           const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
           const state = data.state;
-          if (!data.running || !state || (!state.isStreaming && !state.isPromptRunning)) {
-            // 统一收尾路径：runId 缺省（刷新恢复场景）时回退当前 run id。
-            await finishAgentRun(sid, runId ?? promptRunIdRef.current);
+          if (shouldFinishFromReconcile({
+            sendInFlight: sendInFlightRef.current,
+            clientRunning: agentRunningRef.current,
+            live: data.running === true,
+            isStreaming: state?.isStreaming === true,
+            isPromptRunning: state?.isPromptRunning === true,
+            isCompacting: state?.isCompacting === true,
+          })) {
+            await finishAgentRun(sid, promptRunIdRef.current);
             return;
           }
         }
@@ -1174,20 +1211,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // would otherwise leave the "Stop compaction" UI stuck. No state
       // (wrapper destroyed) means nothing is compacting.
       setIsCompacting(state?.isCompacting ?? false);
-      setQueuedMessages({
-        steering: normalizeQueuedMessages(state?.queuedMessages).steering,
-        followUp: [...localFollowUpRef.current],
-      });
-      const busy = data.running && state
-        && (state.isStreaming || state.isPromptRunning || state.isCompacting);
-      if (busy || !agentRunningRef.current) return;
-      // 服务端不 busy：走统一收尾路径（loadSession + 状态快照 + 结束副作用），
-      // 不再单独应用终止快照，避免与 agent_end/prompt_done 路径差异。
+      if (state?.queuedMessages !== undefined) {
+        applyProjectedQueues(state.queuedMessages);
+      }
+      if (!shouldFinishFromReconcile({
+        sendInFlight: sendInFlightRef.current,
+        clientRunning: agentRunningRef.current,
+        live: data.running === true,
+        isStreaming: state?.isStreaming === true,
+        isPromptRunning: state?.isPromptRunning === true,
+        isCompacting: state?.isCompacting === true,
+      })) return;
       await finishAgentRun(sid, runId);
     } catch {
       // Network still down — the next poll / visibility / online tick retries.
     }
-  }, [finishAgentRun]);
+  }, [applyProjectedQueues, finishAgentRun]);
 
   // Recovery net for missed SSE events: while the agent is running, verify
   // against the server periodically and whenever the tab returns to the
@@ -1228,7 +1267,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleAgentEvent = useCallback((event: AgentEvent, eventRunId?: number) => {
     switch (event.type) {
       case "agent_start":
-        // 新 run 开始：清空上一 run 的工具执行缓冲，避免旧快照跨 run 污染。
+        // 队列自动投递 / 扩展预热会在同一条 SSE 上开新 run。必须递增 run id，
+        // 否则上一轮 agent_end 的异步 loadSession 会按旧 token 收尾并丢掉本轮流式。
+        promptRunIdRef.current += 1;
         commitToolExecutions(clearToolExecutions(toolExecutionBufferRef.current));
         agentRunningRef.current = true;
         setAgentRunning(true);
@@ -1236,13 +1277,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatch({ type: "start" });
         break;
       case "agent_end":
-        // 统一收尾路径：eventRunId 由 SSE 建立时捕获（旧 source 排队回调携带旧 token，
-        // 经 finishAgentRun 校验丢弃，不会结束新 run）。
-        void finishAgentRun(sessionIdRef.current, eventRunId ?? promptRunIdRef.current);
+        void finishAgentRun(sessionIdRef.current, promptRunIdRef.current);
         break;
       case "prompt_done":
-        // 同 agent_end：走同一收尾路径（含 claim/token 校验，重复进入被丢弃）。
-        void finishAgentRun(sessionIdRef.current, eventRunId ?? promptRunIdRef.current);
+        void finishAgentRun(sessionIdRef.current, promptRunIdRef.current);
         break;
       case "prompt_error":
         if (sessionIdRef.current) setServerPref(`sessionQueueHold.${sessionIdRef.current}`, true);
@@ -1394,17 +1432,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "follow_up_flushed": {
-        // Host 已确认被投递 run 的 user 消息落盘/settled；按 remaining 清本地队列，
-        // 避免在 prompt preflight 阶段提前清队导致失败后队列丢失。
+        // Host 已确认被投递 run 的 user 消息落盘/settled；按 remaining 清本地投影。
+        // 持久化也由 Host 同步完成，浏览器不得用旧 prefs 反向覆盖。
         const remaining = Array.isArray(event.remaining)
           ? (event.remaining as unknown[]).filter((item): item is string => typeof item === "string")
           : [];
-        localFollowUpRef.current = remaining;
-        setLocalFollowUpQueue(remaining);
-        setQueuedMessages((prev) => ({ ...prev, followUp: remaining }));
-        if (sessionIdRef.current) {
-          setServerPref(`sessionQueue.${sessionIdRef.current}`, remaining);
-        }
+        applyLocalFollowUpQueue(remaining);
         break;
       }
       case "follow_up_flush_error":
@@ -1455,7 +1488,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
     }
-  }, [addNotice, commitToolExecutions, finishAgentRun, handleExtensionUiRequest, loadSession, t]);
+  }, [addNotice, applyLocalFollowUpQueue, commitToolExecutions, finishAgentRun, handleExtensionUiRequest, loadSession, t]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
@@ -1492,6 +1525,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setMessages((prev) => [...prev, userMsg]);
     optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
     promptRunIdRef.current = promptRunId;
+    abortRequestedRef.current = false;
+    sendInFlightRef.current = true;
+    const promptAbort = new AbortController();
+    promptAbortRef.current = promptAbort;
     agentRunningRef.current = true;
     setAgentRunning(true);
     setAgentPhase(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
@@ -1541,11 +1578,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             }
           }
           await ensureEventsConnected(sid);
+          if (abortRequestedRef.current) return false;
           await sendAgentCommand(sid, {
             type: "prompt",
             message,
             ...(piImages?.length ? { images: piImages } : {}),
-          });
+          }, { signal: promptAbort.signal });
           promptSubmittedRef.current = true;
         } else {
           // 无可用 sid（竞态：isNew 已被并发消费等）：未发送，保留 draft。
@@ -1554,6 +1592,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       } else if (session) {
         sentSessionId = session.id;
         await ensureEventsConnected(session.id);
+        if (abortRequestedRef.current) return false;
         // 下一轮生效：应用切换前记录的 pending 模型（引导消息不经过此路径）
         const pendingModelToApply = pendingModelRef.current;
         if (pendingModelToApply) {
@@ -1580,7 +1619,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           type: "prompt",
           message,
           ...(piImages?.length ? { images: piImages } : {}),
-        });
+        }, { signal: promptAbort.signal });
         promptSubmittedRef.current = true;
       }
       if (promptSubmittedRef.current && sentSessionId) {
@@ -1593,6 +1632,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // ChatInput 确认后才清空 draft。
       return true;
     } catch (e) {
+      const aborted = abortRequestedRef.current
+        || (e instanceof Error && e.name === "AbortError");
+      if (aborted) {
+        if (!promptSubmittedRef.current) {
+          agentRunningRef.current = false;
+          setAgentRunning(false);
+          setAgentPhase(null);
+          dispatch({ type: "end" });
+        }
+        return false;
+      }
       console.error("Failed to send message:", e);
       // prompt 已提交成功（切走/收尾竞态导致的后续异常）：不回滚已发送消息
       if (promptSubmittedRef.current) {
@@ -1631,6 +1681,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentPhase(null);
       dispatch({ type: "end" });
       return false;
+    } finally {
+      sendInFlightRef.current = false;
+      if (promptAbortRef.current === promptAbort) promptAbortRef.current = null;
     }
   }, [isNew, isReadOnly, newSessionModel, newSessionDefaultModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, notifyAutoFollowSend, opts.chatInputRef, t, onSessionCreated]);
 
@@ -1672,6 +1725,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (isReadOnly) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
+    abortRequestedRef.current = true;
+    promptAbortRef.current?.abort();
     setServerPref(`sessionQueueHold.${sid}`, true);
     if (bashRunningRef.current) {
       try {
@@ -1906,6 +1961,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (isReadOnly) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
+    const source = eventStreamManagerRef.current?.getCurrentSource();
+    if (!source || source.readyState === 2) {
+      await ensureEventsConnected(sid);
+    }
     // 引导/队列投递后回到 following 并钉底（消息会直接出现在会话中）。
     notifyAutoFollowSend();
     // 乐观显示：引导消息立即出现在会话中（不等当前命令执行完投递）。
@@ -1931,7 +1990,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setMessages((prev) => prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === optimisticKey)));
       console.error("Failed to steer:", e);
     }
-  }, [isReadOnly, notifyAutoFollowSend]);
+  }, [ensureEventsConnected, isReadOnly, notifyAutoFollowSend]);
 
   /**
    * SDK 错误：扩展命令（/xxx）不能被 steer/followUp 排队，但 prompt() 在
@@ -1999,40 +2058,57 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       return;
     }
-    // 运行中入队：队列块出现在输入框上方，钉底让用户看到入队结果。
+    // 运行中入队：先乐观显示，再等待 Host 同步确认；Host 是 settled 投递 owner。
     notifyAutoFollowSend();
-    updateLocalFollowUp([...localFollowUpRef.current, text]);
-  }, [isReadOnly, notifyAutoFollowSend, updateLocalFollowUp]);
+    try {
+      await updateLocalFollowUp([...localFollowUpRef.current, text]);
+    } catch (error) {
+      opts.chatInputRef?.current?.prependText(text);
+      addNotice({
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, [addNotice, isReadOnly, notifyAutoFollowSend, opts.chatInputRef, updateLocalFollowUp]);
 
   // 供 handlePromptWithStreamingBehavior（定义在前）引用最新 handleFollowUp
   handleFollowUpRef.current = handleFollowUp;
 
   const handleAbortCompaction = useCallback(async () => {
-    // 只读会话不存在进行中的 compact，拦截。
-    if (isReadOnly) return;
-    // Pi 0.83 RPC 无 abort_compaction；不发未知命令。
-    addNotice({
-      type: "warning",
-      message: "当前外部 Pi runtime 不支持中止压缩（abort_compaction）",
-    });
-  }, [isReadOnly, addNotice]);
+    if (isReadOnly || !isCompacting) return;
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    try {
+      await sendAgentCommand(sid, { type: "abort_compaction" });
+      setIsCompacting(false);
+      setCompactError(null);
+      setCompactResult(null);
+    } catch (error) {
+      setCompactError(error instanceof Error ? error.message : String(error));
+    }
+  }, [isCompacting, isReadOnly]);
 
   const handleRecallQueue = useCallback(async () => {
     // 只读会话没有队列（state 从不加载），拦截。
     if (isReadOnly) return;
     const items = localFollowUpRef.current;
     if (items.length === 0) return;
-    // 取回：队列内容回填输入框（TUI queue restore 语义），清空本地队列。
-    opts.chatInputRef?.current?.prependText(joinQueueForRecall(items));
-    updateLocalFollowUp([]);
-  }, [isReadOnly, updateLocalFollowUp, opts.chatInputRef]);
+    // 取回：Host 确认清队后再回填，避免清除失败时同一消息同时留在两处。
+    try {
+      await updateLocalFollowUp([]);
+      opts.chatInputRef?.current?.prependText(joinQueueForRecall(items));
+    } catch (error) {
+      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  }, [addNotice, isReadOnly, updateLocalFollowUp, opts.chatInputRef]);
 
   /** 引导发送：本地 follow-up 队列（+ 可选 extra）合并为一条 steer 消息，成功后清空。 */
   const handleSendQueueAsSteer = useCallback(async (extraMessage?: string) => {
     if (isReadOnly) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
-    const merged = mergeFollowUpForSteer(localFollowUpRef.current, extraMessage);
+    const originalQueue = [...localFollowUpRef.current];
+    const merged = mergeFollowUpForSteer(originalQueue, extraMessage);
     if (!merged) return;
     notifyAutoFollowSend();
     // 乐观显示：合并后的引导消息立即出现在会话中（投递时按 key 去重）。
@@ -2044,7 +2120,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
     const optimisticKey = userMessageKey(optimistic);
     setMessages((prev) => [...prev, optimistic]);
+    let queueCleared = false;
     try {
+      // 先让 Host 停止 settled 自动投递，再发送合并消息，避免当前 run 恰好结束时双发。
+      await updateLocalFollowUp([]);
+      queueCleared = true;
       if (agentRunningRef.current) {
         try {
           // 运行中：steer（打断当前思考，立即引导）
@@ -2058,14 +2138,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // 空闲：Pi 的 steer 只入进程队列不唤醒；用 prompt 立即发起新回合
         await sendAgentCommand(sid, { type: "prompt", message: merged });
       }
-      updateLocalFollowUp([]);
     } catch (e) {
+      if (queueCleared) {
+        try {
+          await updateLocalFollowUp(originalQueue);
+        } catch {
+          // 首个错误仍是用户可操作的主因；Host 同步错误已由队列投影回滚保护。
+        }
+      }
+      if (extraMessage?.trim()) opts.chatInputRef?.current?.prependText(extraMessage.trim());
       // 失败回滚乐观消息
       setMessages((prev) => prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === optimisticKey)));
       console.error("Failed to send queue as steer:", e);
       addNotice({ type: "error", message: String(e instanceof Error ? e.message : e) });
     }
-  }, [isReadOnly, notifyAutoFollowSend, updateLocalFollowUp, addNotice, isExtensionCommandQueueError]);
+  }, [isReadOnly, notifyAutoFollowSend, updateLocalFollowUp, addNotice, isExtensionCommandQueueError, opts.chatInputRef]);
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     // 只读会话：set_thinking_level 会写会话状态，拦截。
@@ -2113,41 +2200,38 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     await dispatchWorkspaceHistoryPrompt(message);
   }, [dispatchWorkspaceHistoryPrompt]);
 
-  // 服务端队列同步：挂载恢复 + focus 时从服务端拉取（多客户端可见）
+  // 队列持久层由 Host 同步写；挂载时绕过浏览器 singleton 取新快照，
+  // focus 后再消费 useServerPreferences 的刷新结果。两路都只更新 UI 投影，不反写 Host。
   const serverPrefs = useServerPreferences();
   const lastRemoteQueueRef = useRef<string[] | null>(null);
   useEffect(() => {
     const sid = sessionIdRef.current;
     if (!sid) return;
-    const key = `sessionQueue.${sid}`;
-    void ensureServerPrefsLoaded().then(() => {
-      const remote = getServerPref<string[]>(key);
-      if (Array.isArray(remote)) {
+    let cancelled = false;
+    void fetch("/api/preferences", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : null)
+      .then((body: { prefs?: unknown } | null) => {
+        if (cancelled || sessionIdRef.current !== sid) return;
+        const remote = readFollowUpQueuePreference(body?.prefs, sid);
+        if (remote === null) return;
         lastRemoteQueueRef.current = remote;
-        // 本地为空时恢复服务端队列；否则以本地为准（本地有正在输入/刚入队的）
-        if (localFollowUpRef.current.length === 0 && remote.length > 0) {
-          updateLocalFollowUp(remote);
-        }
-      }
-    });
-  }, [session?.id, updateLocalFollowUp]);
+        applyLocalFollowUpQueue(remote);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [applyLocalFollowUpQueue, session?.id]);
 
-  // focus/激活同步：服务端队列变化（其他客户端入队/清空）时更新本地
   useEffect(() => {
     const sid = sessionIdRef.current;
     if (!sid) return;
-    const remote = (serverPrefs[`sessionQueue.${sid}`] as string[] | undefined) ?? null;
-    if (!Array.isArray(remote)) return;
-    if (lastRemoteQueueRef.current === null) {
-      lastRemoteQueueRef.current = remote;
-      return;
-    }
-    if (JSON.stringify(remote) !== JSON.stringify(lastRemoteQueueRef.current)) {
-      lastRemoteQueueRef.current = remote;
-      // 服务端权威：其他客户端可能入队/消费；本地队列跟随（避免双份）
-      updateLocalFollowUp(remote);
-    }
-  }, [serverPrefs, session?.id, updateLocalFollowUp]);
+    const remote = readFollowUpQueuePreference(serverPrefs, sid);
+    if (remote === null) return;
+    if (JSON.stringify(remote) === JSON.stringify(lastRemoteQueueRef.current)) return;
+    lastRemoteQueueRef.current = remote;
+    applyLocalFollowUpQueue(remote);
+  }, [applyLocalFollowUpQueue, serverPrefs, session?.id]);
 
   // 会话切换：清空阻塞队列与可见卡片；不发送 extension_ui_response。
   useEffect(() => {
@@ -2187,12 +2271,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (agentState === true) return;
           if (agentState?.running) {
             loadTools(session.id);
+            // live host 上的队列自动投递/扩展预热可能在空闲后再次 prompt；
+            // 只要 host 还在就接 SSE，不能只在已经 stream 时才连。
+            void connectEvents(session.id);
             if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
               agentRunningRef.current = true;
               setAgentRunning(true);
               setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
               dispatch({ type: "start" });
-              void connectEvents(session.id);
               if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
                 void waitForPromptSettlement(session.id);
               }
@@ -2215,10 +2301,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             if (agentState.state.extensionStatuses !== undefined) patchExtensionUiState({ statuses: agentState.state.extensionStatuses ?? [] });
             if (agentState.state.extensionWidgets !== undefined) patchExtensionUiState({ widgets: agentState.state.extensionWidgets ?? [] });
             if (agentState.state.queuedMessages !== undefined) {
-              setQueuedMessages({
-                steering: normalizeQueuedMessages(agentState.state.queuedMessages).steering,
-                followUp: [...localFollowUpRef.current],
-              });
+              applyProjectedQueues(agentState.state.queuedMessages);
             }
             // 切回会话时恢复阻塞中的问题块（服务端权威队列）。
             if (Array.isArray(agentState.state.pendingExtensionRequests)) {

@@ -618,6 +618,8 @@ export function SkillsConfig({
   const [toggling, setToggling] = useState<Set<string>>(new Set());
   const [saveError, setSaveError] = useState<string | null>(null);
   const [addMode, setAddMode] = useState(false);
+  /** 手机端：详情/添加页打开（全屏新页面，列表隐藏） */
+  const mobileDetailOpen = addMode || selected !== null;
   const [updateStatuses, setUpdateStatuses] = useState<Record<string, SkillUpdateResult>>({});
   const [checkingUpdates, setCheckingUpdates] = useState<Set<string>>(new Set());
   const [checkingAll, setCheckingAll] = useState(false);
@@ -883,13 +885,12 @@ export function SkillsConfig({
           {/* Left: skill list */}
           <div
             style={{
-              width: isMobile ? "100%" : 210,
-              maxHeight: isMobile ? "40vh" : undefined,
+              width: isMobile ? "100%" : 245,
               borderRight: isMobile ? "none" : "1px solid var(--border)",
-              borderBottom: isMobile ? "1px solid var(--border)" : "none",
-              display: "flex",
+              display: isMobile && mobileDetailOpen ? "none" : "flex",
               flexDirection: "column",
-              flexShrink: 0,
+              // 移动端列表页占满剩余高度（minHeight:0 让内部 overflowY 生效）；桌面端固定宽度侧栏。
+              ...(isMobile ? { flex: 1, minHeight: 0 } : { flexShrink: 0 }),
               background: "var(--bg-panel)",
             }}
           >
@@ -972,7 +973,6 @@ export function SkillsConfig({
                             fontWeight: 600,
                             color: "var(--text-dim)",
                             textTransform: "uppercase",
-                            letterSpacing: "0.06em",
                           }}
                         >
                           {(() => {
@@ -988,6 +988,10 @@ export function SkillsConfig({
                           const isSelected =
                             !addMode && selected === skill.filePath;
                           const disabled = skill.disableModelInvocation;
+                          const key = updateKey(skill);
+                          const status = key ? updateStatuses[key] : undefined;
+                          const hasUpdate = status?.state === "update-available";
+                          const versionHash = shortVersion(skill.install?.versionHash);
                           return (
                             <div
                               key={skill.filePath}
@@ -1016,56 +1020,70 @@ export function SkillsConfig({
                                   e.currentTarget.style.background = "none";
                               }}
                             >
-                              <span
-                                style={{
-                                  flexShrink: 0,
-                                  width: 7,
-                                  height: 7,
-                                  borderRadius: "50%",
-                                  background: disabled
-                                    ? "var(--border)"
-                                    : "var(--accent)",
-                                  boxShadow: disabled
-                                    ? "none"
-                                    : "0 0 4px var(--accent)",
-                                  transition:
-                                    "background 0.15s, box-shadow 0.15s",
-                                }}
-                              />
-                              <span
-                                style={{
-                                  fontSize: 12,
-                                  fontWeight: isSelected ? 600 : 400,
-                                  color: disabled
-                                    ? "var(--text-dim)"
-                                    : "var(--text)",
-                                  fontFamily: "var(--font-mono)",
-                                  flex: 1,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap",
-                                }}
-                              >
-                                {skill.name}
-                              </span>
-                              {(() => {
-                                const key = updateKey(skill);
-                                const status = key ? updateStatuses[key] : undefined;
-                                if (status?.state !== "update-available") return null;
-                                return (
+                              <div style={{ minWidth: 0, flex: 1 }}>
+                                <div
+                                  style={{
+                                    fontSize: 12,
+                                    fontWeight: isSelected ? 600 : 400,
+                                    color: disabled
+                                      ? "var(--text-dim)"
+                                      : "var(--text)",
+                                    fontFamily: "var(--font-mono)",
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap",
+                                  }}
+                                >
+                                  {skill.name}
+                                </div>
+                                {hasUpdate && (
                                   <span
-                                    title={t("skills_updateAvailable")}
                                     style={{
+                                      display: "inline-block",
+                                      fontSize: 9,
+                                      marginTop: 2,
+                                      padding: "1px 6px",
+                                      borderRadius: 999,
+                                      background: "color-mix(in srgb, var(--status-warning) 18%, transparent)",
                                       color: "var(--status-warning)",
-                                      fontSize: 13,
-                                      lineHeight: 1,
-                                      flexShrink: 0,
+                                      fontWeight: 600,
+                                      fontFamily: "var(--font-mono)",
                                     }}
                                   >
-                                    ↑
+                                    {`${shortVersion(status?.currentVersion ?? skill.install?.versionHash) ?? "?"} → ${shortVersion(status?.latestVersion) ?? "?"}`}
                                   </span>
-                                );
-                              })()}
+                                )}
+                                {skill.description && (
+                                  <div
+                                    style={{
+                                      fontSize: 10,
+                                      color: "var(--text-dim)",
+                                      overflow: "hidden",
+                                      textOverflow: "ellipsis",
+                                      whiteSpace: "nowrap",
+                                      marginTop: 2,
+                                    }}
+                                    title={skill.description}
+                                  >
+                                    {skill.description}
+                                  </div>
+                                )}
+                                {versionHash && (
+                                  <div
+                                    style={{
+                                      fontSize: 10,
+                                      color: "var(--text-dim)",
+                                      overflow: "hidden",
+                                      textOverflow: "ellipsis",
+                                      whiteSpace: "nowrap",
+                                      marginTop: 2,
+                                      fontFamily: "var(--font-mono)",
+                                    }}
+                                  >
+                                    {versionHash}
+                                  </div>
+                                )}
+                              </div>
                             </div>
                           );
                         })}
@@ -1131,7 +1149,35 @@ export function SkillsConfig({
           </div>
 
           {/* Right: detail or add panel */}
-          <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+          <div
+            style={{
+              flex: 1,
+              overflowY: "auto",
+              padding: 20,
+              // 移动端列表视图隐藏右侧占位（列表整页显示），详情/添加页全屏
+              display: isMobile && !mobileDetailOpen ? "none" : undefined,
+            }}
+          >
+            {isMobile && mobileDetailOpen && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSelected(null);
+                  setAddMode(false);
+                  setSaveError(null);
+                }}
+                style={{
+                  display: "flex", alignItems: "center", gap: 5,
+                  minHeight: 32, padding: "0 10px", marginBottom: 12,
+                  borderRadius: 7, border: "1px solid var(--border)",
+                  background: "var(--bg-panel)", color: "var(--text-muted)",
+                  cursor: "pointer", fontSize: 12,
+                }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6" /></svg>
+                {t("common_back")}
+              </button>
+            )}
             {addMode ? (
               <AddSkillPanel
                 cwd={cwd}

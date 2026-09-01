@@ -39,6 +39,8 @@ export type EventStreamManagerOptions = {
   shouldAutoReconnect?: () => boolean;
   schedule?: (fn: () => void, ms: number) => TimerHandle;
   clearSchedule?: (id: TimerHandle) => void;
+  scheduleFrame?: (fn: () => void) => TimerHandle;
+  cancelFrame?: (id: TimerHandle) => void;
 };
 
 // EventSource 就绪状态常量（避免直接引用 DOM 类型以便在服务端测试中复用）。
@@ -48,6 +50,21 @@ const CLOSED = 2;
 
 function defaultCreateEventSource(url: string): EventSourceLike {
   return new EventSource(url) as unknown as EventSourceLike;
+}
+
+function defaultScheduleFrame(fn: () => void): TimerHandle {
+  if (typeof requestAnimationFrame === "function") {
+    return requestAnimationFrame(() => fn());
+  }
+  return setTimeout(fn, 16);
+}
+
+function defaultCancelFrame(id: TimerHandle): void {
+  if (typeof cancelAnimationFrame === "function") {
+    cancelAnimationFrame(id as number);
+    return;
+  }
+  clearTimeout(id);
 }
 
 export type EventStreamManager = {
@@ -72,9 +89,12 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
   const shouldAutoReconnect = options.shouldAutoReconnect ?? (() => false);
   const schedule = options.schedule ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
   const clearSchedule = options.clearSchedule ?? ((id: TimerHandle) => clearTimeout(id));
+  const scheduleFrame = options.scheduleFrame ?? defaultScheduleFrame;
+  const cancelFrame = options.cancelFrame ?? defaultCancelFrame;
 
   let current: EventSourceLike | null = null;
   let reconnectTimer: TimerHandle = null;
+  let cancelPendingDelivery: (() => void) | null = null;
 
   const clearReconnect = () => {
     if (reconnectTimer !== null) {
@@ -85,6 +105,8 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
 
   const close = () => {
     clearReconnect();
+    cancelPendingDelivery?.();
+    cancelPendingDelivery = null;
     if (current) {
       current.close();
       current = null;
@@ -96,6 +118,8 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
     onEvent: (event: AgentStreamEvent) => void,
   ): Promise<EventStreamConnectionResult> => {
     clearReconnect();
+    cancelPendingDelivery?.();
+    cancelPendingDelivery = null;
     if (current) {
       current.close();
       current = null;
@@ -103,6 +127,33 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
 
     const source = createEventSource(getEventsUrl(sessionId));
     current = source;
+    let pendingMessageUpdate: AgentStreamEvent | null = null;
+    let frameId: TimerHandle = null;
+
+    const deliverPendingMessageUpdate = () => {
+      frameId = null;
+      const pending = pendingMessageUpdate;
+      pendingMessageUpdate = null;
+      if (!pending || current !== source) return;
+      try {
+        onEvent(pending);
+      } catch {
+        // 与 EventSource 同步投递一致：单个消费错误不破坏后续事件流。
+      }
+    };
+    const flushPendingMessageUpdate = () => {
+      if (frameId !== null) {
+        cancelFrame(frameId);
+        frameId = null;
+      }
+      deliverPendingMessageUpdate();
+    };
+    const cancelPendingMessageUpdate = () => {
+      if (frameId !== null) cancelFrame(frameId);
+      frameId = null;
+      pendingMessageUpdate = null;
+    };
+    cancelPendingDelivery = cancelPendingMessageUpdate;
 
     return new Promise((resolve) => {
       let settled = false;
@@ -120,8 +171,18 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
 
       source.onmessage = (message) => {
         try {
+          if (current !== source) return;
           const event = JSON.parse(message.data) as AgentStreamEvent;
           if (event.type === "connected") settle("connected");
+          if (event.type === "message_update") {
+            // Pi 下发的是完整 message 快照；同一绘制帧只需应用最新一份。
+            // 所有视口共用此路径，低性能设备不会因逐 token 重渲染而积压。
+            pendingMessageUpdate = event;
+            if (frameId === null) frameId = scheduleFrame(deliverPendingMessageUpdate);
+            return;
+          }
+          // message_end / agent_end 等边界必须排在最后一份 update 之后。
+          flushPendingMessageUpdate();
           onEvent(event);
         } catch {
           // 忽略坏帧，保持连接。
@@ -152,7 +213,11 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
     async ensureConnected(sessionId, onEvent) {
       const result = await connect(sessionId, onEvent);
       if (result.status === "connected" || result.source.readyState === OPEN) return;
-      if (current === result.source) current = null;
+      if (current === result.source) {
+        current = null;
+        cancelPendingDelivery?.();
+        cancelPendingDelivery = null;
+      }
       result.source.close();
       throw new EventStreamConnectionError(result.status);
     },
@@ -164,4 +229,4 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
 }
 
 // CONNECTING 仅为可读性保留，当前实现未直接使用该状态分支。
-void CONNECTING;
+void CONNECTING;

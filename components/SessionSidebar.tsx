@@ -62,6 +62,7 @@ import {
   parseUnreadSessionState,
   pruneUnreadSessionState,
   saveUnreadSessionIds,
+  shouldApplyRunningReconciliation,
   unreadIdsFromState,
   type UnreadSessionState,
 } from "@/lib/unread-sessions-storage";
@@ -264,10 +265,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const initialSelectionScrollDoneRef = useRef(false);
   const prevSelectedScrollIdRef = useRef<string | null>(null);
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
-  // Once the SSE stream has delivered a frame it is the source of truth for
-  // running state; late /api/sessions responses must not overwrite it.
-  const sseAuthoritativeRef = useRef(false);
+  const previousEffectiveRunningSessionIdsRef = useRef<Set<string>>(new Set());
+  // SSE 或 /api/agent/running 一旦返回，旧 /api/sessions 快照不得再覆盖运行态。
+  const runningSnapshotAuthoritativeRef = useRef(false);
+  // 任一较新运行快照都会使在途 GET 失效；请求序号同时处理多个恢复请求乱序。
+  const runningSnapshotRevisionRef = useRef(0);
+  const runningReconciliationRequestRef = useRef(0);
   const sessionRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const commitRunningSnapshot = useCallback((ids: Iterable<string>) => {
+    runningSnapshotRevisionRef.current += 1;
+    setRunningSessionIds(new Set(ids));
+  }, []);
 
   /** 偏好更新唯一入口：内存态与 localStorage 同步写。 */
   const updatePrefs = useCallback((updater: (prev: SidebarPreferences) => SidebarPreferences) => {
@@ -365,10 +374,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         }
         return changed ? next : prev;
       });
-      // Treat the fetched running set as an initial fallback only. Once SSE is
-      // live it owns this state, so a slow fetch can't revive a stale snapshot.
-      if (!sseAuthoritativeRef.current) {
-        setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+      // 仅作首次 fallback；实时 running 端点已有快照后，慢列表响应不可复活旧状态。
+      if (!runningSnapshotAuthoritativeRef.current) {
+        commitRunningSnapshot(data.runningSessionIds ?? []);
       }
       // 服务端真实开始时间播种：刷新后运行计时不从头重算（first-seen 仅在无记录时生效）
       if (data.runningStartedAt) {
@@ -415,7 +423,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         setLoading(false);
       }
     }
-  }, []);
+  }, [commitRunningSnapshot]);
   const initialLoadDone = useRef(false);
   useEffect(() => {
     const isFirst = !initialLoadDone.current;
@@ -549,8 +557,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       try {
         const data = JSON.parse(e.data) as { type?: string; runningSessionIds?: string[] };
         if (data.type === "running") {
-          sseAuthoritativeRef.current = true;
-          setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+          runningSnapshotAuthoritativeRef.current = true;
+          commitRunningSnapshot(
+            (data.runningSessionIds ?? []).filter((id): id is string => typeof id === "string"),
+          );
         }
       } catch {
         // ignore malformed frames
@@ -559,17 +569,29 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
     // On error EventSource auto-reconnects; keep the last known state meanwhile.
     return () => source.close();
-  }, []);
+  }, [commitRunningSnapshot]);
 
   // 后台标签页会漏 SSE：聚焦时用 GET 对齐运行集（同机多浏览器可见）。
+  // 请求发出后若已收到更新快照，丢弃晚到结果，避免仍在运行的会话被误判完成。
   useEffect(() => {
     const refreshRunning = () => {
       if (document.visibilityState !== "visible") return;
+      const requestId = ++runningReconciliationRequestRef.current;
+      const requestRevision = runningSnapshotRevisionRef.current;
       void fetch("/api/agent/running", { cache: "no-store" })
         .then((r) => r.json())
         .then((d: { runningSessionIds?: unknown }) => {
           if (!Array.isArray(d.runningSessionIds)) return;
-          setRunningSessionIds(new Set(d.runningSessionIds.filter((id): id is string => typeof id === "string")));
+          if (!mountedRef.current || !shouldApplyRunningReconciliation(
+            requestRevision,
+            runningSnapshotRevisionRef.current,
+            requestId,
+            runningReconciliationRequestRef.current,
+          )) return;
+          runningSnapshotAuthoritativeRef.current = true;
+          commitRunningSnapshot(
+            d.runningSessionIds.filter((id): id is string => typeof id === "string"),
+          );
         })
         .catch(() => undefined);
     };
@@ -579,7 +601,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       window.removeEventListener("focus", refreshRunning);
       document.removeEventListener("visibilitychange", refreshRunning);
     };
-  }, []);
+  }, [commitRunningSnapshot]);
 
   // subagent 活跃运行轮询：异步子会话运行中 → 子会话 + 其主会话显示 running。
   // 数据源 /api/subagent-runs（read-only），30s 轮询 + 会话列表刷新时同步拉取。
@@ -629,14 +651,17 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     if (sessionRefreshDone) void refreshSubagentRunning();
   }, [sessionRefreshDone, refreshSubagentRunning]);
   useEffect(() => {
-    const previous = previousRunningSessionIdsRef.current;
-    const newlyRunning = [...effectiveRunningSessionIds].filter((id) => !previous.has(id));
+    const previousRunning = previousRunningSessionIdsRef.current;
+    const previousEffectiveRunning = previousEffectiveRunningSessionIdsRef.current;
+    const newlyRunning = [...effectiveRunningSessionIds].filter((id) => !previousEffectiveRunning.has(id));
 
+    // 未读只由服务器 running 快照的真实移除生成；切换聊天导致 optimistic running
+    // 消失时，服务端 host 仍可能在执行，不能把局部 UI 状态当成完成事件。
     setUnreadState((prev) =>
       applyRunningUnreadStateTransition(
         prev,
-        previous,
-        effectiveRunningSessionIds,
+        previousRunning,
+        runningSessionIds,
         selectedSessionId,
         new Date().toISOString(),
       ),
@@ -662,8 +687,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       });
     }
 
-    previousRunningSessionIdsRef.current = new Set(effectiveRunningSessionIds);
-  }, [effectiveRunningSessionIds, selectedSessionId]);
+    previousRunningSessionIdsRef.current = new Set(runningSessionIds);
+    previousEffectiveRunningSessionIdsRef.current = new Set(effectiveRunningSessionIds);
+  }, [effectiveRunningSessionIds, runningSessionIds, selectedSessionId]);
 
   // SSE 确认 running（prompt 已接受并 invalidate 列表缓存）后再拉服务端列表对齐。
   const prevSseRunningRef = useRef<Set<string>>(new Set());

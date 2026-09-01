@@ -164,6 +164,16 @@ export function pruneUnreadSessionState(state: UnreadSessionState, existingIds: 
   return changed ? { completedAt, readAt } : state;
 }
 
+/** 仅接受未被较新 running 事件或恢复请求覆盖的 GET 快照。 */
+export function shouldApplyRunningReconciliation(
+  requestRevision: number,
+  currentRevision: number,
+  requestId: number,
+  latestRequestId: number,
+): boolean {
+  return requestRevision === currentRevision && requestId === latestRequestId;
+}
+
 export function applyRunningUnreadStateTransition(
   prev: UnreadSessionState,
   previousRunning: ReadonlySet<string>,

@@ -4,8 +4,15 @@
  */
 import { cacheSessionPath, invalidateSessionListCache, resolveSessionPath } from "./session-reader";
 import { openSessionView } from "./pi-session-io";
-import { readPidancePrefs } from "./pidance-prefs-file";
+import { getPidancePref, readPidancePrefs, type PidancePrefs } from "./pidance-prefs-file";
 import { startSdkSessionHost, type SdkSessionHost } from "./sdk-session-host";
+import {
+  acquireRunningLease,
+  heartbeatRunningLease,
+  listFreshRunningLeaseSessionIds,
+  releaseRunningLease,
+  SESSION_RUNNING_LOCKED_MESSAGE,
+} from "./session-running-lease";
 
 export type AgentEvent = {
   type: string;
@@ -134,11 +141,21 @@ export function getLiveSession(sessionId: string): LiveAgentSession | undefined 
   return getRpcSession(sessionId);
 }
 
-export function getRunningRpcSessionIds(): string[] {
-  const ids = new Set<string>();
+export function getStartingSessionIds(): string[] {
+  return [...getLocks().keys()];
+}
+
+function getLocalRunningAndStartingIds(): string[] {
+  const ids = new Set<string>(getStartingSessionIds());
   for (const [sessionId, session] of getRegistry()) {
     if (session.isRunning()) ids.add(session.sessionId || sessionId);
   }
+  return [...ids];
+}
+
+export function getRunningRpcSessionIds(): string[] {
+  const ids = new Set(getLocalRunningAndStartingIds());
+  for (const id of listFreshRunningLeaseSessionIds()) ids.add(id);
   return [...ids];
 }
 
@@ -183,8 +200,38 @@ export function listPendingExtensionUi(): PendingExtensionUi[] {
 }
 
 let lastRunningSnapshot = "";
+const ownedRunningLeases = new Set<string>();
+let runningLeaseHeartbeat: ReturnType<typeof setInterval> | null = null;
+const RUNNING_LEASE_HEARTBEAT_MS = 8_000;
+
+function syncOwnedRunningLeases(): void {
+  const local = new Set(getLocalRunningAndStartingIds());
+  for (const id of local) {
+    heartbeatRunningLease(id);
+    ownedRunningLeases.add(id);
+  }
+  for (const id of [...ownedRunningLeases]) {
+    if (local.has(id)) continue;
+    releaseRunningLease(id);
+    ownedRunningLeases.delete(id);
+  }
+  if (local.size === 0) {
+    if (runningLeaseHeartbeat) {
+      clearInterval(runningLeaseHeartbeat);
+      runningLeaseHeartbeat = null;
+    }
+    return;
+  }
+  if (!runningLeaseHeartbeat) {
+    runningLeaseHeartbeat = setInterval(() => {
+      syncOwnedRunningLeases();
+    }, RUNNING_LEASE_HEARTBEAT_MS);
+    runningLeaseHeartbeat.unref?.();
+  }
+}
 
 export function notifyRunningChange(): void {
+  syncOwnedRunningLeases();
   const ids = getRunningRpcSessionIds();
   const pending = listPendingExtensionUi();
   const snapshot = JSON.stringify({
@@ -234,22 +281,40 @@ export async function startRpcSession(
   return startLiveSession(sessionId, sessionFile, cwd, toolNames, navigationActions);
 }
 
+function hasQueuedText(value: unknown): boolean {
+  return Array.isArray(value)
+    && value.some((item) => typeof item === "string" && item.trim().length > 0);
+}
+
+/** 读取当前嵌套 prefs；同时兼容早期扁平 sessionQueue.<id> 键。 */
+export function listRecoverableFollowUpSessionIds(prefs: PidancePrefs): string[] {
+  const ids = new Set<string>();
+  const nested = prefs.sessionQueue;
+  if (typeof nested === "object" && nested !== null && !Array.isArray(nested)) {
+    for (const [sessionId, queue] of Object.entries(nested as Record<string, unknown>)) {
+      if (sessionId && hasQueuedText(queue)) ids.add(sessionId);
+    }
+  }
+  for (const [key, queue] of Object.entries(prefs)) {
+    if (!key.startsWith("sessionQueue.") || !hasQueuedText(queue)) continue;
+    const sessionId = key.slice("sessionQueue.".length);
+    if (sessionId) ids.add(sessionId);
+  }
+  return [...ids]
+    .filter((sessionId) =>
+      getPidancePref(prefs, `sessionQueueHold.${sessionId}`) !== true
+      && prefs[`sessionQueueHold.${sessionId}`] !== true,
+    )
+    .sort();
+}
+
 /**
  * 服务端启动/热重载后恢复待投递的 follow-up 队列：
  * 扫描 prefs 中非空 sessionQueue.<id>，启动对应 live Host（Host 水合后会自动投递）。
  */
 export async function recoverFollowUpQueues(): Promise<void> {
   const prefs = readPidancePrefs();
-  const entries = Object.entries(prefs).filter(
-    ([key, value]) =>
-      key.startsWith("sessionQueue.") &&
-      Array.isArray(value) &&
-      value.some((item) => typeof item === "string" && item.trim().length > 0),
-  );
-  for (const [key] of entries) {
-    const sessionId = key.slice("sessionQueue.".length);
-    if (!sessionId) continue;
-    if (prefs[`sessionQueueHold.${sessionId}`] === true) continue;
+  for (const sessionId of listRecoverableFollowUpSessionIds(prefs)) {
     const existing = getRpcSession(sessionId);
     if (existing?.isAlive()) continue;
     const filePath = await resolveSessionPath(sessionId);
@@ -286,39 +351,57 @@ export async function startLiveSession(
   const inflight = locks.get(sessionId);
   if (inflight) return inflight;
 
+  if (!acquireRunningLease(sessionId)) {
+    throw new Error(SESSION_RUNNING_LOCKED_MESSAGE);
+  }
+  notifyRunningChange();
+
   const starting = (async () => {
-    const host = await startSdkSessionHost({
-      sessionId,
-      sessionFile,
-      cwd,
-      toolNames,
-      navigationActions,
-      onRunningChange: () => notifyRunningChange(),
-      onSessionListInvalidate: () => invalidateSessionListCache(),
-      cacheSessionPath: (id, file) => cacheSessionPath(id, file),
-      onSessionRekeyed: (oldId, newId, rekeyed) => {
-        rekeyLiveSession(oldId, newId, rekeyed);
-      },
-    });
-    const realSessionId = host.sessionId;
-    const realSessionFile = host.sessionFile;
-    if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile);
-    host.onDestroy(() => {
-      const current = registry.get(realSessionId);
-      if (current === host) registry.delete(realSessionId);
-      // 也清理可能的旧 temp key
-      if (sessionId !== realSessionId) {
-        const temp = registry.get(sessionId);
-        if (temp === host) registry.delete(sessionId);
-      }
-    });
-    registry.set(realSessionId, host);
-    if (sessionId !== realSessionId && registry.get(sessionId) === undefined) {
-      // temp key 不长期占用
+    try {
+      const host = await startSdkSessionHost({
+        sessionId,
+        sessionFile,
+        cwd,
+        toolNames,
+        navigationActions,
+        onRunningChange: () => notifyRunningChange(),
+        onSessionListInvalidate: () => invalidateSessionListCache(),
+        cacheSessionPath: (id, file) => cacheSessionPath(id, file),
+        onSessionRekeyed: (oldId, newId, rekeyed) => {
+          rekeyLiveSession(oldId, newId, rekeyed);
+          if (oldId !== newId) {
+            acquireRunningLease(newId);
+            releaseRunningLease(oldId);
+          }
+        },
+      });
+      const realSessionId = host.sessionId;
+      const realSessionFile = host.sessionFile;
+      if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile);
+      if (realSessionId !== sessionId) acquireRunningLease(realSessionId);
+      host.onDestroy(() => {
+        const current = registry.get(realSessionId);
+        if (current === host) registry.delete(realSessionId);
+        if (sessionId !== realSessionId) {
+          const temp = registry.get(sessionId);
+          if (temp === host) registry.delete(sessionId);
+        }
+        releaseRunningLease(realSessionId);
+        if (sessionId !== realSessionId) releaseRunningLease(sessionId);
+        notifyRunningChange();
+      });
+      registry.set(realSessionId, host);
+      host.beginExtensionBinding();
+      return { session: host, realSessionId };
+    } catch (error) {
+      releaseRunningLease(sessionId);
+      notifyRunningChange();
+      throw error;
     }
-    host.beginExtensionBinding();
-    return { session: host, realSessionId };
-  })().finally(() => locks.delete(sessionId));
+  })().finally(() => {
+    locks.delete(sessionId);
+    notifyRunningChange();
+  });
 
   locks.set(sessionId, starting);
   return starting;

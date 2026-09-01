@@ -172,5 +172,12 @@ fs.writeFileSync(`${tgzPath}.sha256`, `${hash}  ${tgzName}\n`);
 console.log("");
 console.log(`[candidate] 完成: ${tgzPath}`);
 console.log(`[candidate] SHA256: ${hash}  ${tgzName}`);
+
+// 编译产物只留最新 tgz：删构建根 .next 与旧版包；node_modules 留给下次增量 ci。
+for (const name of fs.readdirSync(buildRoot)) {
+  if (name === tgzName || name === `${tgzName}.sha256` || name === "node_modules") continue;
+  fs.rmSync(path.join(buildRoot, name), { recursive: true, force: true });
+}
+console.log("[candidate] 已清理构建根，仅保留 tgz/sha256 与 node_modules");
 console.log("");
 console.log("下一步（可选）：独立目录安装冒烟：npm install <tgz> --omit=dev");

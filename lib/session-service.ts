@@ -42,6 +42,11 @@ import { computeTurnEnd } from "./turn-end";
 import type { SessionInfo } from "./types";
 import { shouldInheritModel } from "./model-selection";
 import { updatePidancePref } from "./pidance-prefs-file";
+import {
+  isRunningLeaseHeldByOther,
+  isSessionRunningLockedError,
+  SESSION_RUNNING_LOCKED_MESSAGE,
+} from "./session-running-lease";
 import { collectSubagentTree, deleteValidatedSubagents } from "./subagent-sessions";
 import {
   archivedSessionIdsFor,
@@ -74,6 +79,7 @@ export function httpStatusForSessionError(error: unknown): number {
   const message = error instanceof Error ? error.message : String(error);
   if (error instanceof ReadOnlySubagentError || message === READ_ONLY_SUBAGENT_ERROR) return 403;
   if (message.includes("Session not found")) return 404;
+  if (isSessionRunningLockedError(error) || message === SESSION_RUNNING_LOCKED_MESSAGE) return 409;
   return 500;
 }
 
@@ -360,6 +366,9 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       await requireWritableSession(sessionId, service.isReadOnly);
       const live = service.getLive(sessionId);
       if (live) return live;
+      if (isRunningLeaseHeldByOther(sessionId)) {
+        throw new Error(SESSION_RUNNING_LOCKED_MESSAGE);
+      }
 
       const filePath = await deps.resolveSessionPath(sessionId);
       if (!filePath) {

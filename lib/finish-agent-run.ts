@@ -66,3 +66,24 @@ export function canFinalizeAgentRun(ctx: AgentRunFinishFinalizeContext): boolean
   if (ctx.eventRunId !== ctx.currentRunId) return false;
   return ctx.claimedRunId === ctx.eventRunId;
 }
+
+export interface ReconcileIdleSnapshot {
+  /** wake/prompt HTTP 仍在途：本进程 live 可能尚未建立 */
+  sendInFlight: boolean;
+  clientRunning: boolean;
+  /** 本进程是否已有 live host（GET /api/agent/[id] 的 running 字段） */
+  live: boolean;
+  isStreaming: boolean;
+  isPromptRunning: boolean;
+  isCompacting: boolean;
+}
+
+/**
+ * reconcile 不得把「未知」当成「空闲」。
+ * 无 live、发送尚未返回、或仍 busy 时都不能收尾，否则会出现：
+ * 客户端已结束 running → 无法停止/引导，而服务端随后才真正跑起来。
+ */
+export function shouldFinishFromReconcile(snapshot: ReconcileIdleSnapshot): boolean {
+  if (!snapshot.clientRunning || snapshot.sendInFlight || !snapshot.live) return false;
+  return !snapshot.isStreaming && !snapshot.isPromptRunning && !snapshot.isCompacting;
+}

@@ -85,9 +85,9 @@ npm run package:candidate                     # 默认 /tmp/pidance-release-buil
 npm run package:candidate -- --build-root /tmp/xxx
 ```
 
-脚本自动镜像工作区到中性构建根（增量复用 node_modules / .next）、跑隔离
+脚本自动镜像工作区到中性构建根（增量复用 node_modules）、跑隔离
 webpack 构建、生成前后审计、npm pack 并写 sha256；产物与后续正式发布共用
-同一套审计规则。
+同一套审计规则。打完后编译产物只留最新 tgz+sha256，见 [产物管理](./artifacts.md)。
 
 ## 3. 生成 tgz + 生成后审计 + 哈希
 

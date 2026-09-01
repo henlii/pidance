@@ -10,7 +10,7 @@
 
 Pidance is an open-source web client for the [Pi](https://github.com/badlogic/pi-mono) coding agent. It reads local Pi session files directly and preserves Pi SDK session and runtime semantics, bringing live chat, project files, Git, worktrees, subagents, and configuration into one browser workspace. Pi remains the source of truth for data and execution semantics; Pidance provides a clearer and more complete interface.
 
-> Current version: `0.2.3` · npm package: `@henlii/pidance` · CLI: `pidance`
+> Current version: `0.2.14` · npm package: `@henlii/pidance` · CLI: `pidance`
 
 ## Preview
 
@@ -36,7 +36,7 @@ Pidance is an open-source web client for the [Pi](https://github.com/badlogic/pi
 
 ## Quick start
 
-Node.js `>= 20.9.0` is required.
+Node.js `>= 22.19.0` is required.
 
 ### Run without installing
 

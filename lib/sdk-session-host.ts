@@ -18,6 +18,10 @@ import {
   updatePidancePref,
 } from "./pidance-prefs-file";
 import {
+  acquireRunningLease,
+  SESSION_RUNNING_LOCKED_MESSAGE,
+} from "./session-running-lease";
+import {
   clearRunningStartedAt,
   recordRunningStartedAt,
 } from "./running-state";
@@ -269,6 +273,18 @@ export class SdkSessionHost {
     return getPidancePref(prefs, `sessionQueueHold.${this.realSessionId}`) === true;
   }
 
+  private setFollowUpHeld(held: boolean): void {
+    try {
+      updatePidancePref(
+        `sessionQueueHold.${this.realSessionId}`,
+        held ? true : null,
+        this.agentDir,
+      );
+    } catch (error) {
+      console.error("[pidance] failed to persist follow-up hold:", error);
+    }
+  }
+
   private hydrateFollowUpQueue(): void {
     if (this.followUpQueueHydrated) return;
     this.followUpQueueHydrated = true;
@@ -459,6 +475,7 @@ export class SdkSessionHost {
         },
       },
       onError: (err) => {
+        this.setFollowUpHeld(true);
         this.emit({
           type: "extension_error",
           extensionPath: err.extensionPath,
@@ -552,6 +569,9 @@ export class SdkSessionHost {
       case "agent_end":
         this.promptRunning = false;
         this.lastStopReason = this.readStopReasonFromAgentEnd(event) ?? this.lastStopReason ?? "completed";
+        if (this.lastStopReason === "aborted" || this.lastStopReason === "error") {
+          this.setFollowUpHeld(true);
+        }
         clearRunningStartedAt(this.realSessionId);
         this.options.onSessionListInvalidate?.();
         if (this.realSessionFile) clearLeafSidecar(this.realSessionFile);
@@ -885,7 +905,7 @@ export class SdkSessionHost {
         rpcGetState: false,
         sdkSession: true,
         sessionStats: true,
-        localQueue: this.hasQueueSnapshot,
+        localQueue: true,
         localExtensionUi: true,
       },
       sessionId: this.realSessionId,
@@ -929,12 +949,10 @@ export class SdkSessionHost {
         this.extensionUi?.pendingSnapshot.values() ?? [],
       ),
     };
-    if (this.hasQueueSnapshot) {
-      projected.queuedMessages = {
-        steering: [...this.localQueue.steering],
-        followUp: [...this.localQueue.followUp],
-      };
-    }
+    projected.queuedMessages = {
+      steering: this.hasQueueSnapshot ? [...this.localQueue.steering] : [],
+      followUp: [...this.followUpQueue],
+    };
     try {
       const stats = session.getSessionStats() as {
         contextUsage?: {
@@ -988,6 +1006,9 @@ export class SdkSessionHost {
         if (this.bashRunning) {
           throw new Error("Cannot send a prompt while a shell command is running");
         }
+        if (!acquireRunningLease(this.realSessionId)) {
+          throw new Error(SESSION_RUNNING_LOCKED_MESSAGE);
+        }
         this.promptRunning = true;
         this.lastStopReason = null;
         recordRunningStartedAt(this.realSessionId, Date.now());
@@ -1021,6 +1042,9 @@ export class SdkSessionHost {
                   // 才把消息交给 agent 事件流），materialize 只会写出 header-only；
                   // 真正的落盘在 message_end(user) 处理后的 setImmediate 中完成。
                   this.syncIdentityFromSession();
+                  // 新一轮 prompt 已被 Pi 接受：同步解除旧 abort/error 留下的 hold。
+                  // 不能依赖浏览器防抖写，否则快速结束或切换会话会错过 settled flush。
+                  this.setFollowUpHeld(false);
                   this.options.onSessionListInvalidate?.();
                   resolve();
                 },
@@ -1041,6 +1065,7 @@ export class SdkSessionHost {
               })
               .catch((error) => {
                 if (this.lastStopReason !== "aborted") this.lastStopReason = "error";
+                this.setFollowUpHeld(true);
                 clearIdlePrompt();
                 if (!settled) {
                   settled = true;
@@ -1052,6 +1077,7 @@ export class SdkSessionHost {
         } catch (error) {
           this.promptRunning = false;
           this.lastStopReason = this.lastStopReason === "aborted" ? "aborted" : "error";
+          this.setFollowUpHeld(true);
           clearRunningStartedAt(this.realSessionId);
           this.notifyRunning();
           const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1063,6 +1089,7 @@ export class SdkSessionHost {
 
       case "abort": {
         this.lastStopReason = "aborted";
+        this.setFollowUpHeld(true);
         this.promptRunning = false;
         this.notifyRunning();
         await session.abort();

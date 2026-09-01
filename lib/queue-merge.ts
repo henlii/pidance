@@ -1,8 +1,8 @@
 /**
  * 本地 follow-up 队列 → 引导（steer）合并发送的纯逻辑。
  *
- * 外部 Pi 0.83 无 clear_queue RPC：follow-up 队列由 Pidance 本地自管，
- * 引导发送 = 把队列（+ 输入框 extra）合并为一条 steer 消息（公开命令）。
+ * Pidance 产品级 follow-up 队列不复用 Pi 原生队列：
+ * 引导发送 = 把队列（+ 输入框 extra）合并为一条 steer 消息。
  */
 
 /** 队列条目合并为一条引导消息；extra 为输入框内容（并入队尾）。空条目忽略。 */
@@ -19,6 +19,19 @@ export function joinQueueForRecall(items: readonly string[]): string {
     .map((s) => s.trim())
     .filter((s) => s.length > 0)
     .join("\n\n");
+}
+
+/** 从服务端偏好读取会话队列；兼容早期扁平键。缺失返回 null，空队列返回 []。 */
+export function readFollowUpQueuePreference(prefs: unknown, sessionId: string): string[] | null {
+  if (!sessionId || typeof prefs !== "object" || prefs === null || Array.isArray(prefs)) return null;
+  const record = prefs as Record<string, unknown>;
+  const nested = record.sessionQueue;
+  const nestedValue = typeof nested === "object" && nested !== null && !Array.isArray(nested)
+    ? (nested as Record<string, unknown>)[sessionId]
+    : undefined;
+  const value = nestedValue ?? record[`sessionQueue.${sessionId}`];
+  if (!Array.isArray(value)) return null;
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
 }
 
 /** 会话结束原因：只有正常完成才自动投递队列；中止/异常保留队列。 */

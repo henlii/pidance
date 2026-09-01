@@ -1,6 +1,6 @@
 {
   "name": "@henlii/pidance",
-  "version": "0.2.13",
+  "version": "0.2.14",
   "description": "Pidance：面向 Pi coding agent 的开源 Web 客户端",
   "homepage": "https://github.com/henlii/pidance#readme",
   "repository": {
@@ -58,7 +58,7 @@
     "release:check": "npm run check && npm run build && npm run release:audit"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.1",
+    "@earendil-works/pi-coding-agent": "0.84.4",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "jiti": "^2.7.0",

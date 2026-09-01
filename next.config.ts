@@ -31,6 +31,11 @@ const nextConfig: NextConfig = {
   experimental: {
     turbopackFileSystemCacheForBuild: true,
   },
+  // 父目录 /home/moss/works/open 会被 Next 推断为 workspace root，
+  // CSS `@import "tailwindcss"` 就会从仓库外解析失败。固定为本仓根。
+  turbopack: {
+    root: __dirname,
+  },
   serverExternalPackages: [
     "undici",
     // 同进程 SDK 必须走 Node require，禁止被 Turbopack/webpack 打包进 server chunk
