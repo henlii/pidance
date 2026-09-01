@@ -1798,6 +1798,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       return;
     }
+    // 显式 Stop 与目标 submission 绑定：先取消在途 POST（若有），等它结算，
+    // 再发服务端 abort；保证顺序：主模型先收到 abort，迟到的 prompt 不会复活。
+    const registry = getOrCreateBrowserSessionRuntimeRegistry();
+    const cancellation = registry.cancellationFor(sid);
+    if (cancellation) {
+      cancellation.cancel();
+      try {
+        await registry.abortSubmission(sid);
+      } catch {
+        // 结算异常不阻断 abort 命令。
+      }
+    }
     try {
       await sendAgentCommand(sid, { type: "abort" });
     } catch (e) {
