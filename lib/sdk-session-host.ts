@@ -1294,7 +1294,9 @@ export class SdkSessionHost {
       }
 
       case "extension_ui_input": {
-        // 0.83 SDK 无 progressive input；与 RPC 一致降级
+        const id = asString(command.id);
+        const data = typeof command.data === "string" ? command.data : "";
+        if (id) this.extensionUi?.inputCustom(id, data);
         return null;
       }
 

@@ -976,7 +976,7 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
             </button>
             {!collapsed && (
               <pre style={{ margin: 0, padding: "8px 9px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--font-mono)" }}>
-                {widget.lines.map((line, index, lines) => (
+                {(Array.isArray(widget.lines) ? widget.lines : []).map((line, index, lines) => (
                   <Fragment key={index}>
                     {renderAnsiLine(line, `widget-${widget.key}-line-${index}`)}
                     {index < lines.length - 1 ? "\n" : null}
