@@ -9,27 +9,15 @@
 
 import { execFile as execFileCb } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join, delimiter, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { PluginScope } from "./api-types";
+import { envWithNpmPath, resolveNpmBin } from "./npm-bin";
 import { parseNpmSpec } from "./plugin-packages";
 import { loadPackages, savePackages } from "./settings-store";
 import type { PackageSourceEntry } from "./settings-store";
 
-/** npm 命令二进制名（Windows 上 execFile 需要 .cmd 后缀） */
-const NPM_BIN = process.platform === "win32" ? "npm.cmd" : "npm";
-
-/** systemd/精简 PATH 经常没有 npm；优先用当前 Node 旁边的 npm。 */
-export function resolveNpmBin(
-  env: NodeJS.ProcessEnv = process.env,
-  execPath: string = process.execPath,
-): string {
-  const fromEnv = env.npm_execpath?.trim();
-  if (fromEnv && existsSync(fromEnv)) return fromEnv;
-  const sibling = join(dirname(execPath), NPM_BIN);
-  if (existsSync(sibling)) return sibling;
-  return NPM_BIN;
-}
+export { resolveNpmBin } from "./npm-bin";
 
 /** npm 子进程超时：120s（对齐任务约定） */
 const NPM_TIMEOUT_MS = 120_000;
@@ -184,12 +172,11 @@ async function runNpm(
   installRoot: string,
 ): Promise<void> {
   const npmBin = resolveNpmBin();
-  const pathPrefix = dirname(npmBin === NPM_BIN ? process.execPath : npmBin);
-  const env = {
-    ...process.env,
-    PATH: `${pathPrefix}${delimiter}${process.env.PATH ?? ""}`,
-  };
-  await runner.execFile(npmBin, args, { cwd: installRoot, timeout: NPM_TIMEOUT_MS, env });
+  await runner.execFile(npmBin, args, {
+    cwd: installRoot,
+    timeout: NPM_TIMEOUT_MS,
+    env: envWithNpmPath(),
+  });
 }
 
 /** 安装 npm 包并持久化到 settings */

@@ -7,6 +7,7 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { envWithNpmPath, resolveNpmBin } from "./npm-bin";
 
 const execFileAsync = promisify(execFile);
 
@@ -105,12 +106,41 @@ function execErrorStatus(error: unknown): number | null {
   return null;
 }
 
-async function probeServiceActive(
+export function systemctlPidanceArgs(
+  action: "restart" | "is-active",
+  userScope: boolean,
+): string[] {
+  return userScope
+    ? ["--user", action, OFFICIAL_SERVICE_UNIT]
+    : [action, OFFICIAL_SERVICE_UNIT];
+}
+
+/** 用户级 unit（XDG_RUNTIME_DIR）优先；PIDANCE_SYSTEMCTL_USER=0/1 可强制。 */
+export async function detectUserSystemdScope(
   exec: typeof execFileAsync,
   env: NodeJS.ProcessEnv,
 ): Promise<boolean> {
+  if (env.PIDANCE_SYSTEMCTL_USER === "0") return false;
+  if (env.PIDANCE_SYSTEMCTL_USER === "1") return true;
+  if (!env.XDG_RUNTIME_DIR && !env.DBUS_SESSION_BUS_ADDRESS) return false;
   try {
-    const r = await exec("systemctl", ["is-active", OFFICIAL_SERVICE_UNIT], {
+    const r = await exec("systemctl", systemctlPidanceArgs("is-active", true), {
+      timeout: 10_000,
+      env,
+    });
+    return isSystemdUnitActive(String(r.stdout ?? ""), 0);
+  } catch (error) {
+    return isSystemdUnitActive(execErrorStdout(error), execErrorStatus(error));
+  }
+}
+
+async function probeServiceActive(
+  exec: typeof execFileAsync,
+  env: NodeJS.ProcessEnv,
+  userScope: boolean,
+): Promise<boolean> {
+  try {
+    const r = await exec("systemctl", systemctlPidanceArgs("is-active", userScope), {
       timeout: 10_000,
       env,
     });
@@ -136,8 +166,9 @@ export async function restartOfficialPidanceService(options: {
     setTimeout(resolve, ms);
   }));
   const now = options.now ?? Date.now;
+  const userScope = await detectUserSystemdScope(exec, env);
   try {
-    await exec("systemctl", ["restart", OFFICIAL_SERVICE_UNIT], {
+    await exec("systemctl", systemctlPidanceArgs("restart", userScope), {
       timeout: SERVICE_RESTART_TIMEOUT_MS,
       env,
     });
@@ -145,12 +176,12 @@ export async function restartOfficialPidanceService(options: {
   } catch (error) {
     const restartError = error instanceof Error ? error.message : String(error);
     const startedAt = now();
-    if (await probeServiceActive(exec, env)) {
+    if (await probeServiceActive(exec, env, userScope)) {
       return interpretServiceRestart({ restartOk: false, restartError, laterActive: true });
     }
     while (now() - startedAt < SERVICE_SETTLE_MAX_MS) {
       await sleep(SERVICE_SETTLE_POLL_MS);
-      if (await probeServiceActive(exec, env)) {
+      if (await probeServiceActive(exec, env, userScope)) {
         return interpretServiceRestart({ restartOk: false, restartError, laterActive: true });
       }
     }
@@ -509,12 +540,13 @@ export async function applyPidanceUpdate(options?: {
     writeFileSync(join(releaseDir, "package.json"), `${JSON.stringify(wrapperPkg, null, 2)}\n`, "utf8");
 
     report("downloading", 20, "正在从 npm 下载包…");
+    const npmBin = resolveNpmBin(env);
     await exec(
-      "npm",
+      npmBin,
       ["install", "--omit=dev", `--registry=${registry}`, "--no-fund", "--no-audit"],
       {
         cwd: releaseDir,
-        env: { ...env, npm_config_registry: registry },
+        env: { ...envWithNpmPath(env, npmBin), npm_config_registry: registry },
         timeout: 600_000,
         maxBuffer: 8 * 1024 * 1024,
       },
