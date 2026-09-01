@@ -54,7 +54,9 @@ export async function GET(
     }
 
     return NextResponse.json({ context });
-  } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+  } catch {
+    return NextResponse.json({
+      context: { messages: [], entryIds: [], hasMoreBefore: false, totalMessageCount: 0 },
+    });
   }
 }

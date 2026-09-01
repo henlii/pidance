@@ -13,7 +13,7 @@ import {
   parseExportFormat,
   SessionExportError,
 } from "@/lib/session-export";
-import { resolveSessionPath } from "@/lib/session-reader";
+import { sessionService } from "@/lib/session-service";
 
 const execFileAsync = promisify(execFile);
 
@@ -226,7 +226,7 @@ export async function GET(
   const leafId = url.searchParams.get("leafId");
 
   try {
-    const filePath = await resolveSessionPath(id);
+    const filePath = await sessionService.resolvePath(id);
     if (!filePath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }

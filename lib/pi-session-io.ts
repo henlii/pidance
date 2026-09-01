@@ -133,3 +133,21 @@ export function openSessionView(
 ): DiskSessionReadView {
   return asDiskSessionView(openSessionManager(path, sessionDir));
 }
+
+/**
+ * Rewrite parentSession through Pi SessionManager. Header is the same object
+ * getHeader() returns; _rewriteFile is the manager's atomic JSONL writer.
+ */
+export function reparentSessionFile(
+  filePath: string,
+  parentSession: string | undefined,
+): void {
+  const manager = openSessionManager(filePath);
+  const header = manager.getHeader();
+  if (!header || header.type !== "session") return;
+  if (parentSession) header.parentSession = parentSession;
+  else delete header.parentSession;
+  const internal = manager as unknown as { _rewriteFile?: () => void; flushed?: boolean };
+  internal._rewriteFile?.();
+  if (existsSync(filePath)) internal.flushed = true;
+}

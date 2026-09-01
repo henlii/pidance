@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { searchSessionsFulltext } from "@/lib/session-fulltext-search";
 import { getAgentDir } from "@/lib/pi-paths";
 import { filterSessionIdsByArchiveScope, listArchiveRecords, realArchiveFs } from "@/lib/session-archive";
-import { listAllSessions } from "@/lib/session-reader";
+import { sessionService } from "@/lib/session-service";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -42,7 +42,7 @@ export async function GET(req: Request) {
     let sessionIds = [...result.sessionIds];
     let hits = [...result.hits];
     if (scope !== "all") {
-      const allSessions = await listAllSessions();
+      const allSessions = await sessionService.listAllSessions();
       const records = listArchiveRecords(realArchiveFs, getAgentDir());
       const kept = filterSessionIdsByArchiveScope(result.sessionIds, allSessions, records, scope);
       sessionIds = sessionIds.filter((id) => kept.has(id));
@@ -55,7 +55,12 @@ export async function GET(req: Request) {
       hits,
       sessionIds,
     });
-  } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+  } catch {
+    return NextResponse.json({
+      query: "",
+      source: "none",
+      hits: [],
+      sessionIds: [],
+    });
   }
 }

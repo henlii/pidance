@@ -1,10 +1,6 @@
 import { NextResponse } from "next/server";
-import { getSessionEntries, resolveSessionPath } from "@/lib/session-reader";
+import { sessionService } from "@/lib/session-service";
 
-/**
- * 懒加载历史 toolResult.details（首屏 deferMedia 会剥离 diff/patch 等大字段）。
- * GET /api/sessions/:id/tool-results/:toolCallId → { details }
- */
 export async function GET(
   _req: Request,
   { params }: { params: Promise<{ id: string; toolCallId: string }> },
@@ -15,21 +11,17 @@ export async function GET(
   }
 
   try {
-    const filePath = await resolveSessionPath(id);
-    if (!filePath) return NextResponse.json({ error: "Session not found" }, { status: 404 });
+    const view = await sessionService.getReadView(id);
+    if (!view) return NextResponse.json({ details: null });
 
-    const entry = getSessionEntries(filePath).find((candidate) => {
-      if (candidate.type !== "message") return false;
-      const message = candidate.message as { role?: string; toolCallId?: string };
-      return message.role === "toolResult" && message.toolCallId === toolCallId;
-    });
-    if (!entry || entry.type !== "message") {
-      return NextResponse.json({ error: "Tool result not found" }, { status: 404 });
-    }
-
-    const message = entry.message as { details?: unknown };
-    return NextResponse.json({ details: message.details ?? null });
-  } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    const entry = view.manager.getEntries().find((candidate) => {
+      const record = candidate as { type?: string; message?: { role?: string; toolCallId?: string } };
+      if (record.type !== "message") return false;
+      return record.message?.role === "toolResult" && record.message.toolCallId === toolCallId;
+    }) as { message?: { details?: unknown } } | undefined;
+    if (!entry) return NextResponse.json({ details: null });
+    return NextResponse.json({ details: entry.message?.details ?? null });
+  } catch {
+    return NextResponse.json({ details: null });
   }
 }

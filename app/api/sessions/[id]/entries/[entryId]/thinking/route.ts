@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getSessionEntries, resolveSessionPath } from "@/lib/session-reader";
+import { sessionService } from "@/lib/session-service";
 import { getThinkingText, isThinkingLikeType } from "@/lib/thinking-content";
 
 export async function GET(
@@ -14,22 +14,24 @@ export async function GET(
   }
 
   try {
-    const filePath = await resolveSessionPath(id);
-    if (!filePath) return NextResponse.json({ error: "Session not found" }, { status: 404 });
+    const view = await sessionService.getReadView(id);
+    if (!view) return NextResponse.json({ thinking: null });
 
-    // SessionManager-backed parsing preserves the SDK's malformed-line tolerance.
-    const entry = getSessionEntries(filePath).find((candidate) => candidate.id === entryId);
-    if (!entry || entry.type !== "message" || entry.message.role !== "assistant") {
-      return NextResponse.json({ error: "Assistant message not found" }, { status: 404 });
+    const entry = view.manager.getEntries().find((candidate) => {
+      const record = candidate as { id?: string; type?: string; message?: { role?: string; content?: unknown[] } };
+      return record.id === entryId;
+    }) as { type?: string; message?: { role?: string; content?: Array<{ type?: string }> } } | undefined;
+    if (!entry || entry.type !== "message" || entry.message?.role !== "assistant") {
+      return NextResponse.json({ thinking: null });
     }
 
-    const block = entry.message.content[blockIndex];
+    const block = entry.message.content?.[blockIndex];
     if (!block || !isThinkingLikeType(block.type)) {
-      return NextResponse.json({ error: "Thinking block not found" }, { status: 404 });
+      return NextResponse.json({ thinking: null });
     }
 
     return NextResponse.json({ thinking: getThinkingText(block) });
-  } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+  } catch {
+    return NextResponse.json({ thinking: null });
   }
 }

@@ -49,6 +49,7 @@ import {
   applyPassThroughExtendedThinkingInPlace,
   withPassThroughExtendedThinking,
 } from "./thinking-levels";
+import { parsePromptCommand, type PromptReceipt } from "./agent-commands";
 import {
   loadPiTheme,
   renderCustomMessageLines,
@@ -157,6 +158,8 @@ export class SdkSessionHost {
     steering: [],
     followUp: [],
   };
+  /** Live-host prompt receipts; same submissionId does not call Pi twice. */
+  private promptReceipts = new Map<string, PromptReceipt>();
   private hasQueueSnapshot = false;
   private realSessionId: string;
   private realSessionFile: string;
@@ -1003,6 +1006,9 @@ export class SdkSessionHost {
 
     switch (type) {
       case "prompt": {
+        const parsed = parsePromptCommand(command);
+        const cached = this.promptReceipts.get(parsed.submissionId);
+        if (cached) return cached;
         if (this.bashRunning) {
           throw new Error("Cannot send a prompt while a shell command is running");
         }
@@ -1031,8 +1037,8 @@ export class SdkSessionHost {
               this.emit({ type: "prompt_done" });
             };
             void session
-              .prompt(String(command.message ?? ""), {
-                images: command.images as never,
+              .prompt(parsed.message, {
+                images: (parsed.images ?? command.images) as never,
                 streamingBehavior: command.streamingBehavior as never,
                 source: "rpc",
                 preflightResult: (ok) => {
@@ -1073,7 +1079,13 @@ export class SdkSessionHost {
                 }
               });
           });
-          return null;
+          const receipt: PromptReceipt = {
+            submissionId: parsed.submissionId,
+            sessionId: this.realSessionId,
+            status: "accepted",
+          };
+          this.promptReceipts.set(parsed.submissionId, receipt);
+          return receipt;
         } catch (error) {
           this.promptRunning = false;
           this.lastStopReason = this.lastStopReason === "aborted" ? "aborted" : "error";
@@ -1083,6 +1095,12 @@ export class SdkSessionHost {
           const errorMessage = error instanceof Error ? error.message : String(error);
           this.emit({ type: "prompt_error", errorMessage });
           this.emit({ type: "prompt_done" });
+          const receipt: PromptReceipt = {
+            submissionId: parsed.submissionId,
+            sessionId: this.realSessionId,
+            status: "rejected",
+          };
+          this.promptReceipts.set(parsed.submissionId, receipt);
           throw error;
         }
       }

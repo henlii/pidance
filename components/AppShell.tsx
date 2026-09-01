@@ -31,6 +31,8 @@ import {
 } from "@/lib/file-editor-state";
 import { buildAtMentionText, buildFileAtMentionsText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
+import { createSessionNavigationStore } from "@/lib/session-navigation-store";
+import { createSessionCatalogStore } from "@/lib/session-catalog-store";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
 import type { BranchActions } from "@/lib/branch-bookmarks";
@@ -81,8 +83,10 @@ function AppShellInner() {
   );
   const [initialCwdError, setInitialCwdError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  /** 当前聊天会话的 agentRunning（含冷启动窗口）；侧栏合并进 running 集合 */
-  const [clientRunningSessionId, setClientRunningSessionId] = useState<string | null>(null);
+  /** 本地 starting 集合（发送瞬间即可显示 running，非单槽） */
+  const [clientStartingSessionIds, setClientStartingSessionIds] = useState<Set<string>>(() => new Set());
+  const navigationStoreRef = useRef(createSessionNavigationStore());
+  const catalogStoreRef = useRef(createSessionCatalogStore());
   const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   /** 受影响文件路径集合（P1-3 diff 定向刷新）：
@@ -445,6 +449,10 @@ function AppShellInner() {
   const activeCwd = identity.cwd;
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
+  const [sessionRestoreStatus, setSessionRestoreStatus] = useState<"ready" | "loading" | "not-found" | "error">(
+    () => initialSessionId ? "loading" : "ready",
+  );
+  const [sessionRestoreError, setSessionRestoreError] = useState<string | null>(null);
   // URL 恢复和首次身份建立不应清理当前聊天。
   const suppressSessionResetRef = useRef(false);
   /** 最近一次显式点选会话的 cwd 与时间：watcher 据此区分「点击引发的 identity 跟随」与真实切项目。 */
@@ -521,69 +529,33 @@ function AppShellInner() {
     const cwdChanged = previous.cwd !== current.cwd;
     const projectChanged = previous.projectRoot !== current.projectRoot;
     if (!cwdChanged && !projectChanged) return;
-    if (typeof window !== "undefined") {
-    }
-    if (suppressSessionResetRef.current) {
-      suppressSessionResetRef.current = false;
-      return;
-    }
-    if (previous.cwd === null && previous.projectRoot === null) {
-      // 首次建立 identity：若尚无选中会话，建立新会话 intent（仅客户端，不 POST）。
-      if (!selectedSession && current.cwd) {
-        newSessionIntentGenerationRef.current += 1;
-        const intent = createNewSessionIntent(current.cwd, newSessionIntentGenerationRef.current);
-        newSessionIntentRef.current = intent;
-        setNewSessionIntent(intent);
+    const nav = navigationStoreRef.current.applyIdentityChange(current, previous);
+    if (nav.target.kind === "persisted") {
+      const persisted = nav.target;
+      if (persisted.projectRoot && selectedSession && selectedSession.id === persisted.sessionId) {
+        setSelectedSession((prev) => prev && prev.id === persisted.sessionId
+          ? { ...prev, projectRoot: persisted.projectRoot }
+          : prev);
       }
       return;
     }
-    // cwd 相同 = 用户仍停留在同一工作目录：projectRoot 变化只可能是数据完善
-    // （worktree 预加载把投影回退值修正为权威主仓 root），并非切换项目。
-    // 跟随修正选中会话的 projectRoot，不得清空聊天（否则会出现「目录变了但
-    // 会话内容不显示」的假切换）。
-    if (selectedSession && selectedSession.cwd === current.cwd) {
-      if (current.projectRoot && selectedSession.projectRoot !== current.projectRoot) {
-        setSelectedSession((prev) =>
-          prev && prev.id === selectedSession.id
-            ? { ...prev, projectRoot: current.projectRoot ?? undefined }
-            : prev,
-        );
-      }
-      return;
-    }
-    if (selectedSession && (selectedSession.projectRoot ?? selectedSession.cwd) === current.projectRoot) return;
-    // 会话点击引发的 identity 跟随（迟到的 store flush / worktree 回写中间态）：
-    // 当前选中的会话就是最近点击的会话、且发生在点击后短暂窗口内时，不再往下走
-    // ——快速连点不同项目会话时，前一次点击的 setIdentity 可能迟到 flush，watcher
-    // 在中间态看到 cwd 不匹配而清空刚选中的会话（表现为切换掉进引导页）；
-    // 「新建会话后立即点会话」时 selectedSession 尚未应用（仍为 null）也可能被
-    // 误判成切项目重建引导页。窗口外（用户稳定后真实切项目/工作树）照常清空。
-    if (
-      selectedSession
-      && lastClickedSessionCwdRef.current !== null
-      && lastClickedSessionCwdRef.current === selectedSession.cwd
-      && Date.now() - lastClickedSessionAtRef.current < 800
-    ) {
-      return;
-    }
-    if (selectedSession) {
+    if (nav.target.kind === "none") {
       selectedSessionIdRef.current = null;
       setSelectedSession(null);
-    }
-    if (!selectedSession && !cwdChanged) return;
-    invalidateHydrate();
-    // 切换 project/worktree：只建客户端 intent，禁止调用 /api/agent/new。
-    // 不清空 multi-pending：其它项目下已创建的真实 id 仍保留至各自回流/删除。
-    if (current.cwd) {
-      newSessionIntentGenerationRef.current += 1;
-      const intent = createNewSessionIntent(current.cwd, newSessionIntentGenerationRef.current);
-      newSessionIntentRef.current = intent;
-      setNewSessionIntent(intent);
-    } else {
       newSessionIntentRef.current = null;
       setNewSessionIntent(null);
+      return;
     }
-    setSessionKey((key) => key + 1);
+    selectedSessionIdRef.current = null;
+    setSelectedSession(null);
+    const intent = {
+      id: nav.target.intentId,
+      cwd: nav.target.cwd,
+      generation: nav.target.generation,
+    };
+    newSessionIntentRef.current = intent;
+    setNewSessionIntent(intent);
+    invalidateHydrate();
     setBranchTree([]);
     setBranchActiveLeafId(null);
     setSystemPrompt(null);
@@ -596,11 +568,11 @@ function AppShellInner() {
     // 显式点选会话：先跳过身份 watcher（必须在本函数任何 state 变更之前）。
     // selectCwd / 迟到的 worktree 预加载回写不能把刚选中的会话清掉，否则
     // 会掉进引导页（刷新才恢复）。
-    suppressSessionResetRef.current = true;
-    // 先落 selectedSession（state 排队），再 setIdentity：setIdentity 走
-    // useSyncExternalStore 会同步 flush 整个根——若 identity 先变而
-    // selectedSession 未变，watcher 在中间态看到 cwd 不匹配会把刚选中的
-    // 会话清空（快速连点两个不同项目会话可稳定复现掉引导页）。
+    navigationStoreRef.current.selectPersisted({
+      id: session.id,
+      cwd: session.cwd,
+      projectRoot: session.projectRoot,
+    });
     lastClickedSessionCwdRef.current = session.cwd ?? null;
     lastClickedSessionAtRef.current = Date.now();
     selectedSessionIdRef.current = session.id;
@@ -623,7 +595,6 @@ function AppShellInner() {
     setNewSessionIntent(null);
     newSessionIntentRef.current = null;
     setPendingHighlightId(null);
-    setSessionKey((k) => k + 1);
     setSystemPrompt(null);
     setInitialSessionRestored(true);
     // On mobile, collapse the overlay drawer so the chat is revealed after pick.
@@ -642,17 +613,15 @@ function AppShellInner() {
     // worktree 数据权威修正），保证 lazy 新会话落到正确项目。
     const cwd = targetCwd ?? getIdentitySnapshot().cwd;
     if (!cwd) return;
-    // 本路径已建立 intent + remount；先跳过身份 watcher（setIdentity 的 store
-    // 更新会同步触发 watcher，suppress 必须已生效），避免 watcher 二次建 intent。
-    suppressSessionResetRef.current = true;
-    // 引导页默认选中本次入口的目标项目（顶部新建 = 当前选中项目；项目行 = 对应项目）
+    const nav = navigationStoreRef.current.startNew(cwd);
     setGuideDefaultCwd(cwd);
     if (getIdentitySnapshot().cwd !== cwd) {
       setIdentity({ cwd, status: "ready", error: null });
     }
     invalidateHydrate();
-    newSessionIntentGenerationRef.current += 1;
-    const intent = createNewSessionIntent(cwd, newSessionIntentGenerationRef.current);
+    const intent = nav.target.kind === "new"
+      ? { id: nav.target.intentId, cwd: nav.target.cwd, generation: nav.target.generation }
+      : createNewSessionIntent(cwd, ++newSessionIntentGenerationRef.current);
     newSessionIntentRef.current = intent;
     setNewSessionIntent(intent);
     // 不清理其它真实 id 的 pending；仅清空当前选中，进入新 intent 空 chat。
@@ -780,7 +749,11 @@ function AppShellInner() {
       return;
     }
     if (promote) {
-      // 真实 sid：选中列表 + 写 URL。不 bump sessionKey，避免重挂载冲掉正在发送的 ChatWindow。
+      navigationStoreRef.current.promote(intentId ?? "", {
+        id: session.id,
+        cwd: session.cwd,
+        projectRoot: session.projectRoot,
+      });
       setPendingHighlightId(null);
       selectedSessionIdRef.current = session.id;
       setSelectedSession(session);
@@ -806,7 +779,14 @@ function AppShellInner() {
   }, []);
 
   const handleAgentRunningChange = useCallback((running: boolean, sessionId: string | null) => {
-    setClientRunningSessionId(running && sessionId ? sessionId : null);
+    if (!sessionId) return;
+    catalogStoreRef.current[running ? "markStarting" : "clearStarting"](sessionId);
+    setClientStartingSessionIds((prev) => {
+      const next = new Set(prev);
+      if (running) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
   }, []);
 
   const handleSessionForked = useCallback((newSessionId: string, prefill?: string) => {
@@ -834,7 +814,17 @@ function AppShellInner() {
     syncUrl(`?session=${encodeURIComponent(newSessionId)}`);
   }, [hydrateSelectedSession, invalidateHydrate, activeCwd, upsertOptimisticPending, syncUrl]);
 
-  const handleInitialRestoreDone = useCallback(() => {
+  const handleInitialRestoreDone = useCallback((result?: { found?: boolean; error?: string }) => {
+    if (result?.error) {
+      navigationStoreRef.current.completeUrlRestore({ error: result.error });
+      setSessionRestoreStatus("error");
+      setSessionRestoreError(result.error);
+    } else if (result && result.found === false) {
+      navigationStoreRef.current.completeUrlRestore({ found: false });
+      setSessionRestoreStatus("not-found");
+    } else {
+      setSessionRestoreStatus("ready");
+    }
     setInitialSessionRestored(true);
   }, []);
 
@@ -1028,7 +1018,7 @@ function AppShellInner() {
         onSessionDeleted={handleSessionDeleted}
         onProjectAdded={() => setRefreshKey((k) => k + 1)}
         optimisticSessions={optimisticPendingSessions}
-        clientRunningSessionId={clientRunningSessionId}
+        clientRunningSessionIds={clientStartingSessionIds}
       />
       {/* 底部 Settings / About：同规格图标按钮（24×24），不显示永久文字标签。登录管理在 设置 → 通用。 */}
       <div style={{ padding: "6px 8px", flexShrink: 0, display: "flex", alignItems: "center", gap: 4 }}>
@@ -1298,6 +1288,22 @@ function AppShellInner() {
                 <div style={{ fontSize: 14, color: "var(--status-danger)" }}>{t("app_workspaceUnavailable")}</div>
                 <div style={{ maxWidth: "min(720px, 100%)", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: 12 }}>{initialNavigation.requestedCwd}</div>
                 <div style={{ maxWidth: 720, fontSize: 12 }}>{initialCwdError}</div>
+              </div>
+            ) : sessionRestoreStatus === "not-found" ? (
+              <div role="status" style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, color: "var(--text-muted)", textAlign: "center" }}>
+                <div style={{ fontSize: 14, color: "var(--text)" }}>{t("app_sessionNotFound")}</div>
+              </div>
+            ) : sessionRestoreStatus === "error" ? (
+              <div role="alert" style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, color: "var(--text-muted)", textAlign: "center" }}>
+                <div style={{ fontSize: 14, color: "var(--status-danger)" }}>{t("app_sessionRestoreFailed")}</div>
+                {sessionRestoreError ? <div style={{ maxWidth: 720, fontSize: 12 }}>{sessionRestoreError}</div> : null}
+                <button type="button" onClick={() => {
+                  const id = navigationStoreRef.current.retryUrlRestore();
+                  setSessionRestoreStatus("loading");
+                  setInitialSessionRestored(false);
+                  setRefreshKey((k) => k + 1);
+                  void id;
+                }}>{t("app_retry")}</button>
               </div>
             ) : showPlaceholder ? (
               activeCwd ? (

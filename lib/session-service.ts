@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, readdirSync, unlinkSync } from "fs";
 import { join, resolve } from "path";
 import { allowFileRoot } from "./file-access";
 import { getAgentDir } from "./pi-paths";
@@ -6,7 +6,9 @@ import {
   openSessionView,
   openSessionManager,
   materializeSessionFile,
+  reparentSessionFile,
 } from "./pi-session-io";
+import { parsePromptCommand, type PromptCommand, type PromptReceipt } from "./agent-commands";
 import { clearLeafSidecar, writeLeafSidecar } from "./session-leaf-sidecar";
 import {
   getRpcSession,
@@ -19,11 +21,13 @@ import {
   type PendingExtensionUi,
 } from "./rpc-manager";
 import {
+  buildSessionNavigationSnapshot,
   cacheSessionPath,
   invalidateSessionListCache,
   invalidateSessionPathCache,
   listAllSessions,
   readSessionHeader,
+  resolveSessionIdByPath,
   resolveSessionPath,
   resolveSessionManagerForRead,
   type SessionManagerReadView,
@@ -123,6 +127,8 @@ export type SessionServiceDeps = {
   invalidateSessionListCache: () => void;
   openSessionCwd: (filePath: string) => string;
   openSessionManager: (filePath: string) => SessionManagerReadView;
+  openSessionView: (filePath: string) => ReturnType<typeof openSessionView>;
+  reparentSessionFile: (filePath: string, parentSession: string | undefined) => void;
   existsSync: (path: string) => boolean;
   now: () => number;
   /** 归档 sidecar Fs（测试注入 fake fs；缺省真实 fs） */
@@ -144,6 +150,8 @@ const defaultDeps: SessionServiceDeps = {
   openSessionCwd: (filePath) => openSessionView(filePath).getHeader()?.cwd ?? process.cwd(),
   // 磁盘 open 经 resolveSessionManagerForRead / openSessionView
   openSessionManager: (filePath) => resolveSessionManagerForRead({ filePath }),
+  openSessionView,
+  reparentSessionFile,
   existsSync,
   now: () => Date.now(),
   archiveFs: realArchiveFs,
@@ -198,6 +206,30 @@ export type SessionService = {
     toolNames?: string[],
   ): Promise<{ session: LiveAgentSession; realSessionId: string }>;
   send(sessionId: string, command: SessionCommand): Promise<unknown>;
+  submitPrompt(
+    sessionId: string,
+    command: PromptCommand,
+  ): Promise<PromptReceipt>;
+  getAgentState(sessionId: string): Promise<{
+    live: boolean;
+    activeRun: boolean;
+    readOnly?: boolean;
+    state?: unknown;
+  }>;
+  renameSession(sessionId: string, name: string): Promise<void>;
+  getNavigationSnapshot(
+    sessionId: string,
+    options?: { deferThinking?: boolean; deferToolResultImages?: boolean },
+  ): Promise<{
+    filePath: string;
+    leafId: string | null;
+    tree: unknown;
+    context: unknown;
+    header: { id?: string; cwd?: string; timestamp?: string; parentSession?: string } | null | undefined;
+    sessionName: string | undefined;
+    parentSessionId?: string;
+    info: SessionInfo | null;
+  } | null>;
   /**
    * 类型安全的持久活动写入。
    * 单写者：仅当 live 暴露 in-process SessionManager（inner.sessionManager）时走 live.appendActivity；
@@ -255,6 +287,16 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
   /** 当前 sidecar 目录下的全部合法记录（带短 TTL 缓存）。 */
   const currentArchiveRecords = () =>
     listArchiveRecords(deps.archiveFs ?? realArchiveFs, deps.archiveAgentDir?.() ?? getAgentDir());
+
+  const awaitWriterReleased = async (sessionId: string): Promise<void> => {
+    const session = deps.getRpcSession(sessionId);
+    if (!session?.isAlive()) return;
+    if (typeof (session as { destroyAsync?: unknown }).destroyAsync === "function") {
+      await (session as { destroyAsync: () => Promise<void> }).destroyAsync();
+    } else {
+      session.destroy();
+    }
+  };
 
   const service: SessionService = {
     async listSessions() {
@@ -419,20 +461,17 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       // 2. 等待 abort 完成后 await destroy。
       await service.destroyAsync(sessionId);
 
-      // 3. 子会话重挂到本会话的 parent（cascade re-parent）。
+      // 3. 子会话重挂到本会话的 parent（cascade re-parent via SessionManager）。
       const dir = filePath.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
       try {
         const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl") && join(dir, f) !== filePath);
         for (const file of files) {
           const childPath = join(dir, file);
           try {
-            const content = readFileSync(childPath, "utf8");
-            const lines = content.split("\n");
-            const header = JSON.parse(lines[0]) as { type?: string; parentSession?: string };
-            if (header.type === "session" && header.parentSession === filePath) {
-              header.parentSession = parentSessionPath;
-              lines[0] = JSON.stringify(header);
-              writeFileSync(childPath, lines.join("\n"));
+            const header = readSessionHeader(childPath);
+            if (header?.type === "session" && header.parentSession === filePath) {
+              if (header.id) await awaitWriterReleased(header.id);
+              deps.reparentSessionFile(childPath, parentSessionPath);
             }
           } catch {
             /* skip malformed */
@@ -476,6 +515,93 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       return session.send(command);
     },
 
+    async submitPrompt(sessionId, command) {
+      await requireWritableSession(sessionId, service.isReadOnly);
+      const parsed = parsePromptCommand(command);
+      try {
+        const data = await service.send(sessionId, parsed);
+        if (data && typeof data === "object" && (data as PromptReceipt).status) {
+          return data as PromptReceipt;
+        }
+        return { submissionId: parsed.submissionId, sessionId, status: "accepted" };
+      } catch (error) {
+        if (isSessionRunningLockedError(error)) throw error;
+        return { submissionId: parsed.submissionId, sessionId, status: "rejected" };
+      }
+    },
+
+    async getAgentState(sessionId) {
+      if (await service.isReadOnly(sessionId)) {
+        return { live: false, activeRun: false, readOnly: true };
+      }
+      const session = service.getLive(sessionId);
+      if (!session) return { live: false, activeRun: false };
+      const state = await session.send({ type: "get_state" });
+      const activeRun = typeof (session as { isRunning?: () => boolean }).isRunning === "function"
+        ? Boolean((session as { isRunning: () => boolean }).isRunning())
+        : Boolean(
+          (state as { isStreaming?: boolean; isPromptRunning?: boolean; isCompacting?: boolean; isBashRunning?: boolean } | null)
+            && (
+              (state as { isStreaming?: boolean }).isStreaming
+              || (state as { isPromptRunning?: boolean }).isPromptRunning
+              || (state as { isCompacting?: boolean }).isCompacting
+              || (state as { isBashRunning?: boolean }).isBashRunning
+            ),
+        );
+      return { live: true, activeRun, state };
+    },
+
+    async renameSession(sessionId, name) {
+      await requireWritableSession(sessionId, service.isReadOnly);
+      const trimmed = name.trim();
+      if (!trimmed) throw new Error("name is required");
+      const live = service.getLive(sessionId);
+      if (live?.isAlive()) {
+        await live.send({ type: "set_session_name", name: trimmed });
+        deps.invalidateSessionListCache();
+        return;
+      }
+      const filePath = await deps.resolveSessionPath(sessionId);
+      if (!filePath) throw new Error("Session not found");
+      await awaitWriterReleased(sessionId);
+      deps.openSessionView(filePath).appendSessionInfo(trimmed);
+      deps.invalidateSessionListCache();
+    },
+
+    async getNavigationSnapshot(sessionId, options = {}) {
+      const view = await service.getReadView(sessionId);
+      if (!view) return null;
+      const { filePath, manager: sm } = view;
+      const { leafId, tree, context, header, sessionName } = buildSessionNavigationSnapshot(sm, options);
+      const parentSessionId = header?.parentSession
+        ? await resolveSessionIdByPath(header.parentSession)
+        : undefined;
+      const relation = (await deps.listAllSessions()).find((session) => session.id === sessionId);
+      const info = header ? {
+        path: filePath,
+        id: header.id,
+        cwd: header.cwd ?? "",
+        name: sessionName,
+        created: header.timestamp,
+        modified: header.timestamp,
+        messageCount: (context as { totalMessageCount?: number; messages: unknown[] }).totalMessageCount
+          ?? (context as { messages: unknown[] }).messages.length,
+        firstMessage: relation?.firstMessage ?? "(no messages)",
+        parentSessionId,
+        ...(relation?.subagent ? { subagent: relation.subagent, readOnly: true as const } : {}),
+      } : null;
+      return {
+        filePath,
+        leafId,
+        tree,
+        context,
+        header,
+        sessionName,
+        parentSessionId,
+        info,
+      };
+    },
+
     async appendActivity(sessionId, input) {
       // readOnly（subagent 持久化）拒绝写，且不启动任何会话
       await requireWritableSession(sessionId, service.isReadOnly);
@@ -498,12 +624,12 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         return await appendOnWrapper.call(live, input);
       }
       if (live?.isAlive()) {
-        service.destroy(sessionId);
+        await awaitWriterReleased(sessionId);
       }
       const filePath = await deps.resolveSessionPath(sessionId);
       if (!filePath) throw new Error("Session not found");
       const activity = normalizeActivityInput(input);
-      const manager = openSessionView(filePath);
+      const manager = deps.openSessionView(filePath);
       const entryId = manager.appendCustomEntry(PIDANCE_ACTIVITY_CUSTOM_TYPE, activity);
       deps.invalidateSessionListCache();
       return { entryId, activity };
@@ -514,13 +640,13 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       await requireWritableSession(sessionId, service.isReadOnly);
       const live = service.getLive(sessionId);
       if (live?.isAlive()) {
-        service.destroy(sessionId);
+        await awaitWriterReleased(sessionId);
       }
       const filePath = await deps.resolveSessionPath(sessionId);
       if (!filePath) throw new Error("Session not found");
       const data = normalizeCommandEntryData(input);
       if (!data.command) throw new Error("command is required");
-      const manager = openSessionView(filePath);
+      const manager = deps.openSessionView(filePath);
       const entryId = manager.appendCustomEntry(PIDANCE_COMMAND_CUSTOM_TYPE, data);
       deps.invalidateSessionListCache();
       return { entryId, data };
@@ -597,12 +723,12 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         if (liveBefore.inner?.isBashRunning) {
           throw new Error("Cannot switch branch while a shell command is running");
         }
-        service.destroy(sessionId);
+        await awaitWriterReleased(sessionId);
       }
 
       const filePath = await deps.resolveSessionPath(sessionId);
       if (!filePath) throw new Error("Session not found");
-      const sessionManager = openSessionView(filePath);
+      const sessionManager = deps.openSessionView(filePath);
       const oldLeafId = sessionManager.getLeafId();
       // 目标 = 当前 leaf：无导航语义，不写 sidecar（避免固化无变化值）
       if (trimmedId === oldLeafId) return { cancelled: false };
@@ -638,12 +764,12 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         if (liveBefore.inner?.isBashRunning) {
           throw new Error("Cannot branch while a shell command is running");
         }
-        service.destroy(sessionId);
+        await awaitWriterReleased(sessionId);
       }
 
       const filePath = await deps.resolveSessionPath(sessionId);
       if (!filePath) throw new Error("Session not found");
-      const sessionManager = openSessionView(filePath);
+      const sessionManager = deps.openSessionView(filePath);
       const leafId = sessionManager.getLeafId();
       if (!leafId) throw new Error("Session has no leaf");
       const path = sessionManager.getBranch(leafId);
@@ -694,7 +820,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       // 统一磁盘 Pi SessionManager
       // 读/分叉源文件前先停 live，避免外部 pi 仍在 append 时读到半写状态
       if (deps.getRpcSession(sessionId)?.isAlive()) {
-        service.destroy(sessionId);
+        await awaitWriterReleased(sessionId);
       }
       const filePath =
         (inner?.sessionFile || wrapper?.sessionFile) ??
@@ -734,7 +860,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       )) {
         newManager.appendModelChange(sourceModel.provider, sourceModel.id);
       }
-      deps.getRpcSession(sessionId)?.destroy();
+      await awaitWriterReleased(sessionId);
       return { cancelled: false, newSessionId };
     },
   };

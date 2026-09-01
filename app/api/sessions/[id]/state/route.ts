@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { resolveSessionPath } from "@/lib/session-reader";
 import {
   sessionService,
   httpStatusForSessionError,
@@ -8,7 +7,7 @@ import {
 /**
  * GET /api/sessions/[id]/state
  * - 默认：仅当已有 live host 时返回 get_state（不启动）
- * - ?wake=1：可写会话 ensureLive 后返回完整 state（含 systemPrompt / contextUsage）
+ * - ?wake=1：可写会话 ensureLive 后返回完整 state
  */
 export async function GET(
   req: Request,
@@ -16,27 +15,21 @@ export async function GET(
 ) {
   const { id } = await params;
   try {
-    if (!(await resolveSessionPath(id))) {
+    if (!(await sessionService.resolvePath(id))) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    if (await sessionService.isReadOnly(id)) {
-      return NextResponse.json({ running: false, readOnly: true });
+    const result = await sessionService.getAgentState(id);
+    if (result.readOnly) {
+      return NextResponse.json(result);
     }
 
     const wake = new URL(req.url).searchParams.get("wake") === "1";
-    const live = wake
-      ? await sessionService.ensureLive(id)
-      : sessionService.getLive(id);
-
-    if (!live) {
-      return NextResponse.json({
-        running: false,
-      });
+    if (wake && !result.live) {
+      await sessionService.ensureLive(id);
+      return NextResponse.json(await sessionService.getAgentState(id));
     }
-
-    const state = await live.send({ type: "get_state" });
-    return NextResponse.json({ running: true, state });
+    return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ error: message }, { status: httpStatusForSessionError(error) });

@@ -134,7 +134,7 @@ interface Props {
   onNewSession?: (cwd?: string) => void;
   initialSessionId?: string | null;
   skipInitialProjectSelection?: boolean;
-  onInitialRestoreDone?: () => void;
+  onInitialRestoreDone?: (result?: { found?: boolean; error?: string }) => void;
   refreshKey?: number;
   onSessionDeleted?: (sessionId: string) => void;
   /** 添加项目成功：通知上层进入引导页并选中新项目 */
@@ -144,14 +144,14 @@ interface Props {
    * 内部按 id upsert 进 pending map，与 server 列表 merge。
    */
   optimisticSessions?: readonly SessionInfo[];
-  /** 当前聊天会话 agentRunning（含冷启动窗口，比 SSE 更早） */
-  clientRunningSessionId?: string | null;
+  /** 本地 starting 会话集合（发送瞬间即可显示 running） */
+  clientRunningSessionIds?: ReadonlySet<string>;
 }
 
 
 // ── 主组件 ─────────────────────────────────────────────────────────────────
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, onProjectAdded, optimisticSessions, clientRunningSessionId }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, onProjectAdded, optimisticSessions, clientRunningSessionIds }: Props) {
   const { t } = useI18n();
   const [serverSessions, setServerSessions] = useState<SessionInfo[]>([]);
   /** 服务器权威列表是否已应用（区分 localStorage 缓存首帧与服务器完整列表）。 */
@@ -176,12 +176,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   // SSE running ∪ 当前聊天冷启动 agentRunning（发送瞬间即可显示运行中/时长）
   const effectiveRunningSessionIds = useMemo(() => {
-    if (!clientRunningSessionId) return runningSessionIds;
-    if (runningSessionIds.has(clientRunningSessionId)) return runningSessionIds;
+    if (!clientRunningSessionIds || clientRunningSessionIds.size === 0) return runningSessionIds;
     const next = new Set(runningSessionIds);
-    next.add(clientRunningSessionId);
+    for (const id of clientRunningSessionIds) next.add(id);
     return next;
-  }, [runningSessionIds, clientRunningSessionId]);
+  }, [runningSessionIds, clientRunningSessionIds]);
   // ── 归档（P0-2）：服务端返回的归档列表/计数 + Archive 视图开关 + 动作状态 ──
   const [archivedSessions, setArchivedSessions] = useState<SessionInfo[]>([]);
   const [archivedCount, setArchivedCount] = useState(0);
@@ -361,7 +360,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       saveCachedSessionList(data.sessions);
       setArchivedSessions(data.archivedSessions ?? []);
       setArchivedCount(data.archivedCount ?? 0);
-      setPendingIds((prev) => reconcilePendingSessionIds(prev, data.sessions));
+      const archivedIds = new Set((data.archivedSessions ?? []).map((session) => session.id));
+      setPendingIds((prev) => {
+        const next = reconcilePendingSessionIds(prev, data.sessions);
+        for (const id of [...next]) {
+          if (archivedIds.has(id)) next.delete(id);
+        }
+        return next;
+      });
       setPendingById((prev) => {
         if (prev.size === 0) return prev;
         const next = new Map(prev);
@@ -369,6 +375,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         for (const s of data.sessions) {
           if (next.has(s.id)) {
             next.delete(s.id);
+            changed = true;
+          }
+        }
+        for (const id of archivedIds) {
+          if (next.has(id)) {
+            next.delete(id);
             changed = true;
           }
         }
@@ -760,23 +772,21 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     // URL 恢复必须优先于 cwd 自动选择；requestedCwd 已先建立身份时，
     // selectedCwd 不再为空，但仍不能跳过目标会话恢复。
     if (initialSessionId && !restoredRef.current) {
-      const target = allSessions.find((s) => s.id === initialSessionId);
-      if (typeof window !== "undefined") {
-      }
-      if (target) {
+      if (error && serverListLoaded) {
         restoredRef.current = true;
-        // URL 恢复同样走 handleSelectSession 统一路径：suppress → setIdentity
-        // → setSelectedSession 原子完成，watcher 不会清空恢复中的会话。
-        onSelectSession(target, true);
+        onInitialRestoreDone?.({ error });
         return;
       }
-      // 首帧 localStorage 缓存只保留最近 50 条，旧会话缺失是常态：必须等
-      // 服务器完整列表到达后再判定目标会话不存在，否则刷新旧会话/分享链接
-      // 会直接掉进空聊天/引导页（此前 restoredRef 一旦置位永不重试）。
+      const target = allSessions.find((s) => s.id === initialSessionId);
+      if (target) {
+        restoredRef.current = true;
+        onSelectSession(target, true);
+        onInitialRestoreDone?.({ found: true });
+        return;
+      }
       if (!serverListLoaded) return;
-      // Session not found — notify parent so it can show the placeholder
       restoredRef.current = true;
-      onInitialRestoreDone?.();
+      onInitialRestoreDone?.({ found: false });
     }
     if (selectedCwd === null) {
       // 已关闭项目不参与自动选择：全部关闭时保持空工作区，而不是复活已关闭项目。
@@ -784,7 +794,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       const next = projects.find((root) => !closedRoots.has(root));
       if (next) selectCwd(next);
     }
-  }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, selectCwd, closedRoots, serverListLoaded]);
+  }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, selectCwd, closedRoots, serverListLoaded, error]);
 
   const closeCustomPathPanel = useCallback(() => {
     setCustomPathOpen(false);

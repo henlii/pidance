@@ -15,7 +15,9 @@ import { normalizeToolCalls } from "@/lib/normalize";
 import { recoverFailedSend } from "@/lib/send-failure";
 import { attachCustomRenderedLines, preserveCustomRenderedLines } from "@/lib/custom-rendered-lines";
 import type { SessionActivity } from "@/lib/session-activity";
-import { sendAgentCommand } from "@/lib/agent-client";
+import { readAgentLiveFlag, sendAgentCommand } from "@/lib/agent-client";
+import { generateSubmissionId } from "@/lib/agent-commands";
+import { getOrCreateBrowserSessionRuntimeRegistry } from "@/lib/browser-session-runtime-registry";
 import type { BranchActions } from "@/lib/branch-bookmarks";
 import {
   mergeFollowUpForSteer,
@@ -673,20 +675,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const hotRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
         if (hotRes.ok) {
           const hot = await hotRes.json() as {
-            running: boolean;
+            live?: boolean;
+            running?: boolean;
+            activeRun?: boolean;
             state?: AgentStateResponse;
           };
           if (sessionIdRef.current !== sid) return null;
-          if (hot.running && hot.state) {
+          const live = readAgentLiveFlag(hot);
+          if (live && hot.state) {
             applyLiveState(hot.state);
-            return hot;
+            return { running: live, live, activeRun: hot.activeRun === true, state: hot.state };
           }
-          if (!hot.running) {
+          if (!live) {
             setQueuedMessages({ steering: [], followUp: [...localFollowUpRef.current] });
           }
         }
 
-        return { running: false };
+        return { running: false, live: false, activeRun: false };
       } catch (e) {
         console.error("Failed to load agent state:", e);
         return null;
@@ -1141,12 +1146,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       try {
         const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
         if (res.ok) {
-          const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
+          const data = await res.json() as { live?: boolean; running?: boolean; activeRun?: boolean; state?: AgentStateResponse };
           const state = data.state;
           if (shouldFinishFromReconcile({
             sendInFlight: sendInFlightRef.current,
             clientRunning: agentRunningRef.current,
-            live: data.running === true,
+            live: readAgentLiveFlag(data),
             isStreaming: state?.isStreaming === true,
             isPromptRunning: state?.isPromptRunning === true,
             isCompacting: state?.isCompacting === true,
@@ -1201,7 +1206,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
       if (!res.ok) return;
-      const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
+      const data = await res.json() as { live?: boolean; running?: boolean; state?: AgentStateResponse };
       // A slow response can straddle a run boundary (previous run finished
       // and the user already started the next one while this request was in
       // flight) — everything in it is stale, drop it.
@@ -1217,7 +1222,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!shouldFinishFromReconcile({
         sendInFlight: sendInFlightRef.current,
         clientRunning: agentRunningRef.current,
-        live: data.running === true,
+        live: readAgentLiveFlag(data),
         isStreaming: state?.isStreaming === true,
         isPromptRunning: state?.isPromptRunning === true,
         isCompacting: state?.isCompacting === true,
@@ -1553,45 +1558,49 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }, intentId);
     }
 
-    const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+    const runtime = getOrCreateBrowserSessionRuntimeRegistry();
+    const submissionId = generateSubmissionId();
+    const draftKey = session?.id
+      ?? (newSessionCwdRef.current ? `new:${newSessionCwdRef.current}` : "new");
 
     try {
       let sentSessionId: string | null = null;
       if (isNew && newSessionCwdRef.current) {
         const selectedModel = newSessionModel ?? newSessionDefaultModel;
         const existingSid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
-        const sid = existingSid ?? await ensureNewSession();
-        // 发送期间捕获 intent：切走后仍把消息发到已创建会话，不 promote 到新 intent
         const intentAtSend = newSessionIntentIdRef.current;
-
-        if (sid) {
-          sentSessionId = sid;
-          // ensure 成功即 promote：即使后续 SSE/prompt 失败也保留 sid，禁止二次创建。
-          // 发送中切走：跳过 promote（UI 已离开该 intent），发送仍完成
-          if (newSessionIntentIdRef.current === intentAtSend) {
-            promoteNewSession(1, message);
+        const receipt = await runtime.submitPrompt({
+          target: existingSid
+            ? { kind: "persisted", sessionId: existingSid }
+            : { kind: "new", intentId: intentAtSend ?? "", cwd: newSessionCwdRef.current },
+          submissionId,
+          message,
+          images,
+          draftKey,
+          model: selectedModel ?? undefined,
+        });
+        sentSessionId = receipt.sessionId;
+        sessionIdRef.current = receipt.sessionId;
+        if (newSessionIntentIdRef.current === intentAtSend) {
+          promoteNewSession(1, message);
+        }
+        if (receipt.status !== "accepted") {
+          if (receipt.status === "rejected") {
+            const optimisticKey = optimisticUserMessageKeyRef.current;
+            setMessages((prev) => recoverFailedSend({
+              messages: prev,
+              optimisticKey,
+              isOptimisticMatch: (msg) => userMessageKey(msg) === optimisticKey,
+            }).messages);
+            optimisticUserMessageKeyRef.current = null;
           }
-          if (selectedModel) {
-            setPendingModel(selectedModel);
-            if (existingSid) {
-              await sendAgentCommand(sid, { type: "set_model", provider: selectedModel.provider, modelId: selectedModel.modelId });
-            }
-          }
-          await ensureEventsConnected(sid);
-          if (abortRequestedRef.current) return false;
-          await sendAgentCommand(sid, {
-            type: "prompt",
-            message,
-            ...(piImages?.length ? { images: piImages } : {}),
-          }, { signal: promptAbort.signal });
-          promptSubmittedRef.current = true;
-        } else {
-          // 无可用 sid（竞态：isNew 已被并发消费等）：未发送，保留 draft。
           return false;
         }
+        promptSubmittedRef.current = true;
+        void ensureEventsConnected(receipt.sessionId);
       } else if (session) {
         sentSessionId = session.id;
-        await ensureEventsConnected(session.id);
+        void ensureEventsConnected(session.id);
         if (abortRequestedRef.current) return false;
         // 下一轮生效：应用切换前记录的 pending 模型（引导消息不经过此路径）
         const pendingModelToApply = pendingModelRef.current;
@@ -1615,11 +1624,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             });
           }
         }
-        await sendAgentCommand(session.id, {
-          type: "prompt",
+        const receipt = await runtime.submitPrompt({
+          target: { kind: "persisted", sessionId: session.id },
+          submissionId,
           message,
-          ...(piImages?.length ? { images: piImages } : {}),
-        }, { signal: promptAbort.signal });
+          images,
+          draftKey,
+        });
+        if (receipt.status !== "accepted") {
+          if (receipt.status === "rejected") {
+            const optimisticKey = optimisticUserMessageKeyRef.current;
+            setMessages((prev) => recoverFailedSend({
+              messages: prev,
+              optimisticKey,
+              isOptimisticMatch: (msg) => userMessageKey(msg) === optimisticKey,
+            }).messages);
+            optimisticUserMessageKeyRef.current = null;
+          }
+          return false;
+        }
         promptSubmittedRef.current = true;
       }
       if (promptSubmittedRef.current && sentSessionId) {
@@ -1685,7 +1708,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       sendInFlightRef.current = false;
       if (promptAbortRef.current === promptAbort) promptAbortRef.current = null;
     }
-  }, [isNew, isReadOnly, newSessionModel, newSessionDefaultModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, notifyAutoFollowSend, opts.chatInputRef, t, onSessionCreated]);
+  }, [isNew, isReadOnly, newSessionModel, newSessionDefaultModel, session, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, notifyAutoFollowSend, opts.chatInputRef, t, onSessionCreated]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean): Promise<boolean> => {
     // 只读会话：bash 命令同样会写 session 文件，拦截。
@@ -2269,10 +2292,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         loadSession(session.id, true, true).then((agentState) => {
           // includeState=true 的运行时不会返回 true；该分支仅收窄 loadSession 的联合返回类型。
           if (agentState === true) return;
-          if (agentState?.running) {
+          if (agentState?.running || agentState?.live) {
             loadTools(session.id);
             // live host 上的队列自动投递/扩展预热可能在空闲后再次 prompt；
             // 只要 host 还在就接 SSE，不能只在已经 stream 时才连。
+            getOrCreateBrowserSessionRuntimeRegistry().attach(session.id, (event) => {
+              handleAgentEventRef.current?.(event as AgentEvent);
+            });
             void connectEvents(session.id);
             if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
               agentRunningRef.current = true;
@@ -2323,8 +2349,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     return () => {
       bashRecoveryIdRef.current += 1;
-      eventStreamManagerRef.current?.close();
-      eventSourceRef.current = null;
+      const sid = sessionIdRef.current ?? session?.id;
+      if (sid) getOrCreateBrowserSessionRuntimeRegistry().detach(sid);
+      // ChatWindow 卸载只退订；registry 继续持有 ESM 与 in-flight POST。
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

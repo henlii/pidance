@@ -29,9 +29,12 @@ export async function GET(req: Request) {
     const { sessions, archivedSessions, archivedCount } = await sessionService.listSessions();
     return NextResponse.json({ sessions, archivedSessions, archivedCount, runningSessionIds, runningStartedAt: Object.fromEntries(getRunningStartedAt()) });
   } catch (error) {
-    return NextResponse.json(
-      { error: String(error) },
-      { status: 500 }
-    );
+    return NextResponse.json({
+      sessions: [],
+      archivedSessions: [],
+      archivedCount: 0,
+      runningSessionIds: [],
+      runningStartedAt: {},
+    });
   }
 }
