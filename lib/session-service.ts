@@ -9,6 +9,7 @@ import {
   reparentSessionFile,
 } from "./pi-session-io";
 import { parsePromptCommand, type PromptCommand, type PromptReceipt } from "./agent-commands";
+import { parseContextLimitParam, sliceContextBefore, sliceContextTail, DEFAULT_SESSION_HISTORY_PAGE, DEFAULT_SESSION_TAIL_LIMIT } from "./session-context-window";
 import { clearLeafSidecar, writeLeafSidecar } from "./session-leaf-sidecar";
 import {
   getRpcSession,
@@ -21,6 +22,7 @@ import {
   type PendingExtensionUi,
 } from "./rpc-manager";
 import {
+  buildSessionContext,
   buildSessionNavigationSnapshot,
   cacheSessionPath,
   invalidateSessionListCache,
@@ -230,6 +232,16 @@ export type SessionService = {
     parentSessionId?: string;
     info: SessionInfo | null;
   } | null>;
+  getContextPage(
+    sessionId: string,
+    options: {
+      leafId?: string;
+      before?: string;
+      limit: number | null;
+      deferThinking?: boolean;
+      deferToolResultImages?: boolean;
+    },
+  ): Promise<unknown>;
   /**
    * 类型安全的持久活动写入。
    * 单写者：仅当 live 暴露 in-process SessionManager（inner.sessionManager）时走 live.appendActivity；
@@ -600,6 +612,31 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         parentSessionId,
         info,
       };
+    },
+
+    async getContextPage(sessionId, options) {
+      const view = await service.getReadView(sessionId);
+      if (!view) return { context: null };
+      const sm = view.manager as { getEntries?: () => Parameters<typeof buildSessionContext>[0] };
+      const entries = (sm.getEntries?.() ?? []) as Parameters<typeof buildSessionContext>[0];
+      const full = buildSessionContext(entries, options.leafId, {
+        deferThinking: options.deferThinking,
+        deferToolResultImages: options.deferToolResultImages,
+      });
+      const limit = options.limit;
+      let context;
+      if (options.before) {
+        context = sliceContextBefore(full, options.before, limit ?? DEFAULT_SESSION_HISTORY_PAGE);
+      } else if (limit !== null) {
+        context = sliceContextTail(full, limit);
+      } else {
+        context = {
+          ...full,
+          hasMoreBefore: false,
+          totalMessageCount: full.messages.length,
+        };
+      }
+      return { context };
     },
 
     async appendActivity(sessionId, input) {

@@ -37,7 +37,7 @@ export async function submitAgentPrompt(
   input: { message: string; images?: AttachedImage[]; submissionId: string },
   options?: { signal?: AbortSignal },
 ): Promise<PromptReceipt> {
-  const data = await sendAgentCommand<PromptReceipt>(sessionId, {
+  const data = await sendAgentCommand<unknown>(sessionId, {
     type: "prompt",
     message: input.message,
     submissionId: input.submissionId,
@@ -45,14 +45,24 @@ export async function submitAgentPrompt(
       images: input.images.map((img) => ({ type: "image", data: img.data, mimeType: img.mimeType })),
     } : {}),
   }, options);
-  if (data && typeof data === "object" && typeof data.submissionId === "string") {
-    return {
-      submissionId: data.submissionId,
-      sessionId: typeof data.sessionId === "string" ? data.sessionId : sessionId,
-      status: data.status === "rejected" ? "rejected" : "accepted",
-    };
+  if (!data || typeof data !== "object") {
+    throw new Error("Invalid prompt receipt: expected an object");
   }
-  return { submissionId: input.submissionId, sessionId, status: "accepted" };
+  const receipt = data as { submissionId?: unknown; sessionId?: unknown; status?: unknown };
+  if (
+    typeof receipt.submissionId !== "string"
+    || !receipt.submissionId
+    || typeof receipt.sessionId !== "string"
+    || !receipt.sessionId
+    || (receipt.status !== "accepted" && receipt.status !== "rejected")
+  ) {
+    throw new Error("Invalid prompt receipt");
+  }
+  return {
+    submissionId: receipt.submissionId,
+    sessionId: receipt.sessionId,
+    status: receipt.status,
+  };
 }
 
 export function readAgentLiveFlag(data: { live?: unknown; running?: unknown }): boolean {

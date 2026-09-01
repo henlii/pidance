@@ -21,7 +21,10 @@ export type PromptSubmission = {
   sessionId: string;
   draftKey: string;
   message: string;
+  images?: AttachedImage[];
   status: SubmissionStatus;
+  /** persisted 时对应 Pi JSONL user entry id；未确认前为 null */
+  entryId?: string | null;
   error?: string;
 };
 
@@ -68,6 +71,7 @@ export type BrowserSessionRuntimeRegistryDeps = {
       message: string;
       images?: AttachedImage[];
       submissionId: string;
+      signal?: AbortSignal;
     },
   ) => Promise<PromptReceipt>;
   ensureNewSession?: (
@@ -76,55 +80,57 @@ export type BrowserSessionRuntimeRegistryDeps = {
   ) => Promise<string>;
   wake?: (sessionId: string, signal?: AbortSignal) => Promise<void>;
   createEventStream?: (sessionId: string, onEvent: (event: AgentStreamEvent) => void) => EventStreamManager;
-  restoreDraft?: (draftKey: string, message: string) => void;
+  restoreDraft?: (draftKey: string, draft: { value: string; images: AttachedImage[] }) => void;
   now?: () => number;
   makeSubmissionId?: () => string;
+};
+
+export type RegistrySubscription = {
+  sessionId: string;
+  dispose: () => void;
+};
+
+export type SubmitPromptCancellation = {
+  submissionId: string;
+  cancel: () => void;
+  signal: AbortSignal;
 };
 
 type RuntimeSlot = {
   sessionId: string;
   snapshot: SessionRuntimeSnapshot;
   submissions: Map<string, PromptSubmission>;
+  /** in-flight POST per submissionId（单飞）；结算后从 map 移除 */
+  inFlight: Map<string, Promise<SubmitPromptResult>>;
+  /** submissionId → AbortController（Stop 用） */
+  promptAborts: Map<string, AbortController>;
   eventStream: EventStreamManager | null;
   viewHandlers: Set<(event: AgentStreamEvent) => void>;
   snapshotListeners: Set<() => void>;
   attachCount: number;
-  promptAbort: AbortController | null;
+};
+
+export type BrowserSessionRuntimeRegistry = {
+  getSnapshot(sessionId: string): SessionRuntimeSnapshot | null;
+  subscribe(sessionId: string, listener: () => void): () => void;
+  attach(sessionId: string, onEvent?: (event: AgentStreamEvent) => void): RegistrySubscription;
+  detach(sessionId: string, subscription: RegistrySubscription): void;
+  submitPrompt(input: SubmitPromptInput): Promise<SubmitPromptResult>;
+  /** 绑定当前 submissions 的取消槽位；cancel 只取消一个 submission */
+  cancellationFor(sessionId: string): SubmitPromptCancellation | null;
+  /** 显式 Stop：取消唯一在途 submission 的 POST 并等待结算 */
+  abortSubmission(sessionId: string, submissionId?: string): Promise<SubmitPromptResult | null>;
+  abort(sessionId: string): void;
+  hydrate(sessionId: string, messages: AgentMessage[], entryIds?: string[]): void;
+  applyEvent(sessionId: string, event: AgentStreamEvent): void;
+  getSubmission(sessionId: string, submissionId: string): PromptSubmission | undefined;
+  /** 测试用：重置单例 */
+  resetForTests(): void;
 };
 
 function emptyStream(): StreamSnapshot {
   return { isStreaming: false, streamingMessage: null };
 }
-
-function userMessageFromSubmit(message: string, images: AttachedImage[] | undefined, now: number): AgentMessage {
-  const imageBlocks = images?.map((img) => ({
-    type: "image" as const,
-    source: { type: "base64" as const, media_type: img.mimeType, data: img.data },
-  }));
-  return {
-    role: "user",
-    content: imageBlocks?.length
-      ? [...(message.trim() ? [{ type: "text" as const, text: message }] : []), ...imageBlocks]
-      : message,
-    timestamp: now,
-  };
-}
-
-function defaultRestoreDraft(draftKey: string, message: string): void {
-  setDraft(draftKey, { value: message, images: [] });
-}
-
-export type BrowserSessionRuntimeRegistry = {
-  getSnapshot(sessionId: string): SessionRuntimeSnapshot | null;
-  subscribe(sessionId: string, listener: () => void): () => void;
-  attach(sessionId: string, onEvent?: (event: AgentStreamEvent) => void): SessionRuntimeSnapshot;
-  detach(sessionId: string, onEvent?: (event: AgentStreamEvent) => void): void;
-  submitPrompt(input: SubmitPromptInput): Promise<SubmitPromptResult>;
-  abort(sessionId: string): void;
-  hydrate(sessionId: string, messages: AgentMessage[], entryIds?: string[]): void;
-  applyEvent(sessionId: string, event: AgentStreamEvent): void;
-  getSubmission(sessionId: string, submissionId: string): PromptSubmission | undefined;
-};
 
 function createSlot(sessionId: string): RuntimeSlot {
   return {
@@ -141,12 +147,61 @@ function createSlot(sessionId: string): RuntimeSlot {
       attachCount: 0,
     },
     submissions: new Map(),
+    inFlight: new Map(),
+    promptAborts: new Map(),
     eventStream: null,
     viewHandlers: new Set(),
     snapshotListeners: new Set(),
     attachCount: 0,
-    promptAbort: null,
   };
+}
+
+function userMessageFromSubmit(message: string, images: AttachedImage[] | undefined, now: number): AgentMessage {
+  const imageBlocks = images?.map((img) => ({
+    type: "image" as const,
+    source: { type: "base64" as const, media_type: img.mimeType, data: img.data },
+  }));
+  return {
+    role: "user",
+    content: imageBlocks?.length
+      ? [...(message.trim() ? [{ type: "text" as const, text: message }] : []), ...imageBlocks]
+      : message,
+    timestamp: now,
+  };
+}
+
+export function hashMessageIdentity(message: string, images: AttachedImage[] | undefined): string {
+  const imageSig = (images ?? [])
+    .map((img) => `${img.mimeType}:${img.data}`)
+    .join("|");
+  return `${message}\x1f${imageSig}`;
+}
+
+function extractImagesFromMessage(message: AgentMessage): AttachedImage[] | undefined {
+  const content = (message as { content?: unknown }).content;
+  if (!Array.isArray(content)) return undefined;
+  const images: AttachedImage[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    const record = block as {
+      type?: string;
+      source?: { type?: string; media_type?: string; data?: string };
+      data?: string;
+      mimeType?: string;
+    };
+    if (record.type !== "image") continue;
+    const source = record.source;
+    const data = source?.data ?? record.data;
+    const mimeType = source?.media_type ?? record.mimeType;
+    if (typeof data === "string" && typeof mimeType === "string") {
+      images.push({ data, mimeType, previewUrl: `data:${mimeType};base64,${data}` });
+    }
+  }
+  return images.length ? images : undefined;
+}
+
+function defaultRestoreDraft(draftKey: string, draft: { value: string; images: AttachedImage[] }): void {
+  setDraft(draftKey, { value: draft.value, images: draft.images });
 }
 
 export function createBrowserSessionRuntimeRegistry(
@@ -176,6 +231,30 @@ export function createBrowserSessionRuntimeRegistry(
     for (const listener of slot.snapshotListeners) listener();
   };
 
+  const settleSubmission = (
+    slot: RuntimeSlot,
+    submissionId: string,
+    status: SubmissionStatus,
+    error?: string,
+  ) => {
+    const submission = slot.submissions.get(submissionId);
+    if (submission) {
+      submission.status = status;
+      submission.error = error;
+    }
+    slot.snapshot.sendInFlight = slot.inFlight.size > 0;
+    if (slot.inFlight.size === 0 && !slot.snapshot.agentRunning) {
+      slot.snapshot.agentRunning = false;
+    }
+  };
+
+  const restoreDraftFor = (submission: PromptSubmission) => {
+    restoreDraft(submission.draftKey, {
+      value: submission.message,
+      images: submission.images ?? [],
+    });
+  };
+
   const applyEventToSlot = (slot: RuntimeSlot, event: AgentStreamEvent) => {
     const type = event.type;
     if (type === "agent_start") {
@@ -194,18 +273,35 @@ export function createBrowserSessionRuntimeRegistry(
       }
     } else if (type === "message_end") {
       const completed = event.message as AgentMessage | undefined;
+      const entryId = typeof event.entryId === "string" && event.entryId ? event.entryId : null;
       if (completed?.role === "user") {
         const last = slot.snapshot.messages[slot.snapshot.messages.length - 1];
         const lastContent = last && "content" in last ? (last as { content?: unknown }).content : undefined;
         const nextContent = completed && "content" in completed ? (completed as { content?: unknown }).content : undefined;
         const lastText = typeof lastContent === "string" ? lastContent : "";
         const nextText = typeof nextContent === "string" ? nextContent : "";
-        if (!last || last.role !== "user" || lastText !== nextText) {
-          slot.snapshot.messages = [...slot.snapshot.messages, completed];
+        const isNextEntryPresent = entryId !== null
+          ? slot.snapshot.messages.some((msg) => (msg as { entryId?: unknown }).entryId === entryId)
+          : false;
+        if (!isNextEntryPresent && (!last || last.role !== "user" || lastText !== nextText)) {
+          // AgentMessage 不含 entryId；用扩展字段承载服务端 entry id，避免正文匹配。
+          const withEntry = {
+            ...(completed as unknown as Record<string, unknown>),
+            entryId: entryId ?? (completed as unknown as Record<string, unknown>).entryId,
+          };
+          slot.snapshot.messages = [...slot.snapshot.messages, withEntry as unknown as AgentMessage];
         }
-        for (const submission of slot.submissions.values()) {
-          if (submission.status === "accepted" && submission.message === nextText) {
-            submission.status = "persisted";
+        // 稳定身份：只有文本+图片签名完全一致且服务端给出 entryId 的 accepted
+        // submission 才标记 persisted；禁止按正文模糊匹配两个同文消息。
+        if (entryId !== null) {
+          const candidates = [...slot.submissions.values()]
+            .filter((sub) => sub.status === "accepted" || sub.status === "submitting");
+          const match = candidates.find((sub) =>
+            hashMessageIdentity(sub.message, sub.images) === hashMessageIdentity(nextText, extractImagesFromMessage(completed)),
+          );
+          if (match) {
+            match.status = "persisted";
+            match.entryId = entryId;
           }
         }
       } else if (completed && slot.snapshot.agentRunning) {
@@ -265,14 +361,19 @@ export function createBrowserSessionRuntimeRegistry(
         void deps.wake(sessionId).catch(() => undefined);
       }
       publish(slot);
-      return slot.snapshot;
+      return {
+        sessionId,
+        dispose: () => {
+          const current = slots.get(sessionId);
+          if (!current) return;
+          if (onEvent) current.viewHandlers.delete(onEvent);
+          current.attachCount = Math.max(0, current.attachCount - 1);
+          publish(current);
+        },
+      };
     },
-    detach(sessionId, onEvent) {
-      const slot = slots.get(sessionId);
-      if (!slot) return;
-      if (onEvent) slot.viewHandlers.delete(onEvent);
-      slot.attachCount = Math.max(0, slot.attachCount - 1);
-      publish(slot);
+    detach(sessionId, subscription) {
+      subscription.dispose();
     },
     async submitPrompt(input) {
       const submissionId = input.submissionId?.trim() || makeSubmissionId();
@@ -280,9 +381,23 @@ export function createBrowserSessionRuntimeRegistry(
         ? input.target.sessionId
         : pendingSessionId(input.target.intentId);
 
+      // 新会话创建失败的 rejected/unknown 结算与 draft 恢复都要有归档。
+      // ensure 失败由调用方捕获，不吞 throw。
       if (input.target.kind === "new") {
         if (!deps.ensureNewSession) {
-          restoreDraft(input.draftKey, input.message);
+          const slot0 = getSlot(sessionId, true)!;
+          const submission0: PromptSubmission = {
+            submissionId,
+            sessionId,
+            draftKey: input.draftKey,
+            message: input.message,
+            images: input.images,
+            status: "rejected",
+            error: "no ensure implementation",
+          };
+          slot0.submissions.set(submissionId, submission0);
+          restoreDraftFor(submission0);
+          publish(slot0);
           return { submissionId, sessionId, status: "rejected" };
         }
         const created = await deps.ensureNewSession(input.target.cwd, input.model);
@@ -297,18 +412,24 @@ export function createBrowserSessionRuntimeRegistry(
         return {
           submissionId,
           sessionId,
-          status: existing.status === "submitting" ? "accepted" : existing.status === "persisted" ? "accepted" : existing.status,
+          status: existing.status === "submitting" ? "accepted" : "accepted",
         };
       }
+      const inFlight = slot.inFlight.get(submissionId);
+      if (inFlight) return inFlight;
 
       const submission: PromptSubmission = {
         submissionId,
         sessionId,
         draftKey: input.draftKey,
         message: input.message,
+        images: input.images,
         status: "submitting",
+        entryId: null,
       };
+      const controller = new AbortController();
       slot.submissions.set(submissionId, submission);
+      slot.promptAborts.set(submissionId, controller);
       slot.snapshot.sendInFlight = true;
       slot.snapshot.agentRunning = true;
       slot.snapshot.promptRunId += 1;
@@ -319,49 +440,74 @@ export function createBrowserSessionRuntimeRegistry(
       publish(slot);
       connectEvents(slot);
       if (deps.wake) {
-        void deps.wake(sessionId, slot.promptAbort?.signal).catch(() => undefined);
+        void deps.wake(sessionId, controller.signal).catch(() => undefined);
       }
 
-      try {
-        const receipt = await deps.postPrompt(sessionId, {
-          message: input.message,
-          images: input.images,
-          submissionId,
-        });
-        if (receipt.status === "rejected") {
-          submission.status = "rejected";
-          submission.error = "rejected";
-          slot.snapshot.sendInFlight = false;
-          slot.snapshot.agentRunning = false;
-          restoreDraft(input.draftKey, input.message);
+      const promise = (async (): Promise<SubmitPromptResult> => {
+        try {
+          const receipt = await deps.postPrompt(sessionId, {
+            message: input.message,
+            images: input.images,
+            submissionId,
+            signal: controller.signal,
+          });
+          if (receipt.status === "rejected") {
+            settleSubmission(slot, submissionId, "rejected", "rejected");
+            restoreDraftFor(submission);
+            publish(slot);
+            return { submissionId, sessionId, status: "rejected" };
+          }
+          settleSubmission(slot, submissionId, "accepted");
           publish(slot);
-          return { submissionId, sessionId, status: "rejected" };
-        }
-        submission.status = "accepted";
-        slot.snapshot.sendInFlight = false;
-        publish(slot);
-        return { submissionId, sessionId, status: "accepted" };
-      } catch (error) {
-        const aborted = error instanceof Error && error.name === "AbortError";
-        if (aborted) {
-          slot.snapshot.sendInFlight = false;
+          return { submissionId, sessionId, status: "accepted" };
+        } catch (error) {
+          const aborted = error instanceof Error && (error.name === "AbortError" || controller.signal.aborted);
+          if (aborted) {
+            settleSubmission(slot, submissionId, "unknown", "aborted");
+            publish(slot);
+            return { submissionId, sessionId, status: "unknown" };
+          }
+          settleSubmission(slot, submissionId, "unknown", error instanceof Error ? error.message : String(error));
+          restoreDraftFor(submission);
           publish(slot);
           return { submissionId, sessionId, status: "unknown" };
+        } finally {
+          slot.inFlight.delete(submissionId);
+          slot.promptAborts.delete(submissionId);
+          slot.snapshot.sendInFlight = slot.inFlight.size > 0;
+          publish(slot);
         }
-        submission.status = "unknown";
-        slot.snapshot.sendInFlight = false;
-        slot.snapshot.agentRunning = false;
-        restoreDraft(input.draftKey, input.message);
-        publish(slot);
-        return { submissionId, sessionId, status: "unknown" };
-      }
+      })();
+      slot.inFlight.set(submissionId, promise);
+      return promise;
+    },
+    cancellationFor(sessionId) {
+      const slot = slots.get(sessionId);
+      if (!slot) return null;
+      const first = [...slot.promptAborts.entries()][0];
+      if (!first) return null;
+      const [submissionId, controller] = first;
+      return { submissionId, cancel: () => controller.abort(), signal: controller.signal };
+    },
+    abortSubmission(sessionId, submissionId) {
+      const slot = slots.get(sessionId);
+      if (!slot) return Promise.resolve(null);
+      const controller = submissionId
+        ? slot.promptAborts.get(submissionId)
+        : [...slot.promptAborts.values()][0];
+      const inflight = submissionId
+        ? slot.inFlight.get(submissionId)
+        : [...slot.inFlight.values()][0];
+      controller?.abort();
+      if (inflight) return inflight;
+      return Promise.resolve(null);
     },
     abort(sessionId) {
       const slot = slots.get(sessionId);
       if (!slot) return;
-      slot.promptAbort?.abort();
+      for (const controller of slot.promptAborts.values()) controller.abort();
       slot.snapshot.agentRunning = false;
-      slot.snapshot.sendInFlight = false;
+      slot.snapshot.sendInFlight = slot.inFlight.size > 0;
       publish(slot);
     },
     hydrate(sessionId, messages, entryIds = []) {
@@ -376,6 +522,9 @@ export function createBrowserSessionRuntimeRegistry(
     },
     getSubmission(sessionId, submissionId) {
       return slots.get(sessionId)?.submissions.get(submissionId);
+    },
+    resetForTests() {
+      resetSingleton();
     },
   };
 
@@ -396,8 +545,12 @@ export function getBrowserSessionRuntimeRegistry(
   return singleton;
 }
 
-export function resetBrowserSessionRuntimeRegistryForTests(): void {
+function resetSingleton(): void {
   singleton = null;
+}
+
+export function resetBrowserSessionRuntimeRegistryForTests(): void {
+  resetSingleton();
 }
 
 function createBrowserFetchDeps(): BrowserSessionRuntimeRegistryDeps {

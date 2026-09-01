@@ -453,11 +453,6 @@ function AppShellInner() {
     () => initialSessionId ? "loading" : "ready",
   );
   const [sessionRestoreError, setSessionRestoreError] = useState<string | null>(null);
-  // URL 恢复和首次身份建立不应清理当前聊天。
-  const suppressSessionResetRef = useRef(false);
-  /** 最近一次显式点选会话的 cwd 与时间：watcher 据此区分「点击引发的 identity 跟随」与真实切项目。 */
-  const lastClickedSessionCwdRef = useRef<string | null>(null);
-  const lastClickedSessionAtRef = useRef(0);
 
   // selectedSessionIdRef / newSessionIntentRef 在事件路径即时写入；
   // effect 仅作 state 回流后的兜底同步（同 tick 读必须走事件路径）。
@@ -506,9 +501,8 @@ function AppShellInner() {
           throw new Error(data.error ?? `HTTP ${response.status}`);
         }
 
-        // The sidebar will notify us when it adopts this cwd. Avoid remounting
-        // the just-created empty chat during that initial synchronization.
-        suppressSessionResetRef.current = true;
+        // The sidebar will notify us when it adopts this cwd; identity watcher
+        // is a pure projection of navigation store, no suppress ref needed.
         setIdentity({ cwd: data.cwd, projectRoot: data.cwd, status: "ready", error: null });
         setInitialCwdStatus("ready");
       })
@@ -573,8 +567,6 @@ function AppShellInner() {
       cwd: session.cwd,
       projectRoot: session.projectRoot,
     });
-    lastClickedSessionCwdRef.current = session.cwd ?? null;
-    lastClickedSessionAtRef.current = Date.now();
     selectedSessionIdRef.current = session.id;
     setSelectedSession(session);
     // 统一在此同步 identity：会话 cwd 与 projectRoot 成为当前项目上下文。
@@ -592,11 +584,10 @@ function AppShellInner() {
     invalidateHydrate();
     // 选中已有会话：使新建 intent 失效，迟到 ensure 不得覆盖当前 chat。
     // 不清理 optimistic pending map：其它真实 id 须保留至 server 回流/显式删除。
-    setNewSessionIntent(null);
-    newSessionIntentRef.current = null;
     setPendingHighlightId(null);
     setSystemPrompt(null);
     setInitialSessionRestored(true);
+    if (sessionRestoreStatus !== "ready") setSessionRestoreStatus("ready");
     // On mobile, collapse the overlay drawer so the chat is revealed after pick.
     if (isMobile && !isRestore) setSidebarOpen(false);
     // 生产模式 router.replace 会触发 Suspense remount loop（见 syncUrl），
@@ -604,7 +595,7 @@ function AppShellInner() {
     if (!isRestore) {
       syncUrl(`?session=${encodeURIComponent(session.id)}`);
     }
-  }, [isMobile, invalidateHydrate, syncUrl]);
+  }, [isMobile, invalidateHydrate, syncUrl, sessionRestoreStatus]);
 
   const handleNewSession = useCallback((targetCwd?: string) => {
     // 侧栏行内入口（项目行/非主 worktree 行）显式给出目标 cwd；其点击路径已先把
@@ -628,7 +619,6 @@ function AppShellInner() {
     selectedSessionIdRef.current = null;
     setPendingHighlightId(null);
     setSelectedSession(null);
-    setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
     setSystemPrompt(null);
@@ -638,7 +628,6 @@ function AppShellInner() {
 
   /** 引导页改项目/工作树：写入全局 identity，不重建 intent、不重挂载 ChatWindow。 */
   const handleGuideTargetChange = useCallback((cwd: string, projectRoot?: string | null) => {
-    suppressSessionResetRef.current = true;
     setIdentity({
       cwd,
       projectRoot: projectRoot ?? cwd,
@@ -672,6 +661,15 @@ function AppShellInner() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [settingsOpen, aboutOpen]);
+
+  // hydrate 成功时写回 store（applyHydrate）
+  const applyHydratedToNavigation = useCallback((sessionId: string, info: SessionInfo) => {
+    navigationStoreRef.current.applyHydrate({
+      id: sessionId,
+      cwd: info.cwd ?? "",
+      projectRoot: info.projectRoot,
+    });
+  }, []);
 
   /**
    * 按真实 session id 精确补水（有界重试），不再全量 GET /api/sessions 后 find。
@@ -719,6 +717,7 @@ function AppShellInner() {
         // 补全 projectRoot 等服务端字段；已有完整字段时仍可刷新 path/name。
         return { ...prev, ...result.value };
       });
+      applyHydratedToNavigation(sessionId, result.value);
       // 服务端完整字段也可替换侧栏 pending map 中的同 id 条目。
       setOptimisticPendingById((prev) => {
         if (!prev.has(sessionId)) return prev;
@@ -727,7 +726,7 @@ function AppShellInner() {
         return next;
       });
     }).catch(() => {});
-  }, [invalidateHydrate]);
+  }, [invalidateHydrate, applyHydratedToNavigation]);
 
   // ChatWindow：Pi 返回真实 id 后 promote；仅当前 intent 可写当前 chat。
   // 迟到旧 intent 的 session 仍 upsert 进 pending map，不销毁、不选中。
@@ -798,7 +797,6 @@ function AppShellInner() {
     setNewSessionIntent(null);
     newSessionIntentRef.current = null;
     setRefreshKey((k) => k + 1);
-    setSessionKey((k) => k + 1);
     // 用函数式 prev 保留 fork 前会话字段；同时 upsert pending map。
     setSelectedSession((prev) => {
       const forked: SessionInfo = {
@@ -809,6 +807,11 @@ function AppShellInner() {
       return forked;
     });
     selectedSessionIdRef.current = newSessionId;
+    navigationStoreRef.current.forkTo({
+      id: newSessionId,
+      cwd: activeCwd ?? "",
+      projectRoot: undefined,
+    });
     // fork 复用 targeted hydration，不套 new-intent 门禁。
     hydrateSelectedSession(newSessionId, { forFork: true });
     syncUrl(`?session=${encodeURIComponent(newSessionId)}`);
@@ -828,6 +831,13 @@ function AppShellInner() {
     setInitialSessionRestored(true);
   }, []);
 
+  // navigation store 订阅：初始 URL restore 开始
+  useEffect(() => {
+    if (initialSessionId) {
+      navigationStoreRef.current.beginUrlRestore(initialSessionId);
+    }
+  }, [initialSessionId]);
+
   const handleSessionDeleted = useCallback((sessionId: string) => {
     setRefreshKey((k) => k + 1);
     removeOptimisticPending(sessionId);
@@ -836,8 +846,8 @@ function AppShellInner() {
       setNewSessionIntent(null);
       newSessionIntentRef.current = null;
       selectedSessionIdRef.current = null;
+      navigationStoreRef.current.deleteSession(sessionId);
       setSelectedSession(null);
-      setSessionKey((k) => k + 1);
       setBranchTree([]);
       setBranchActiveLeafId(null);
       setSystemPrompt(null);

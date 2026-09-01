@@ -17,7 +17,7 @@ import { attachCustomRenderedLines, preserveCustomRenderedLines } from "@/lib/cu
 import type { SessionActivity } from "@/lib/session-activity";
 import { readAgentLiveFlag, sendAgentCommand } from "@/lib/agent-client";
 import { generateSubmissionId } from "@/lib/agent-commands";
-import { getOrCreateBrowserSessionRuntimeRegistry } from "@/lib/browser-session-runtime-registry";
+import { getOrCreateBrowserSessionRuntimeRegistry, type RegistrySubscription } from "@/lib/browser-session-runtime-registry";
 import type { BranchActions } from "@/lib/branch-bookmarks";
 import {
   mergeFollowUpForSteer,
@@ -406,6 +406,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [branchBusy, setBranchBusy] = useState(false);
 
   const eventSourceRef = useRef<EventSource | null>(null);
+  const runtimeSubscriptionRef = useRef<RegistrySubscription | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   /** 切换会话时取消进行中的后台 wake，避免串台写 systemPrompt */
   const wakeAbortRef = useRef<AbortController | null>(null);
@@ -2296,7 +2297,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             loadTools(session.id);
             // live host 上的队列自动投递/扩展预热可能在空闲后再次 prompt；
             // 只要 host 还在就接 SSE，不能只在已经 stream 时才连。
-            getOrCreateBrowserSessionRuntimeRegistry().attach(session.id, (event) => {
+            runtimeSubscriptionRef.current = getOrCreateBrowserSessionRuntimeRegistry().attach(session.id, (event) => {
               handleAgentEventRef.current?.(event as AgentEvent);
             });
             void connectEvents(session.id);
@@ -2350,7 +2351,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => {
       bashRecoveryIdRef.current += 1;
       const sid = sessionIdRef.current ?? session?.id;
-      if (sid) getOrCreateBrowserSessionRuntimeRegistry().detach(sid);
+      if (sid && runtimeSubscriptionRef.current) {
+        getOrCreateBrowserSessionRuntimeRegistry().detach(sid, runtimeSubscriptionRef.current);
+        runtimeSubscriptionRef.current = null;
+      }
       // ChatWindow 卸载只退订；registry 继续持有 ESM 与 in-flight POST。
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

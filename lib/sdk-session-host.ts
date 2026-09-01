@@ -160,6 +160,10 @@ export class SdkSessionHost {
   };
   /** Live-host prompt receipts; same submissionId does not call Pi twice. */
   private promptReceipts = new Map<string, PromptReceipt>();
+  /** submissionId → in-flight prompt promise（单飞；结算后删除） */
+  private promptInFlight = new Map<string, Promise<PromptReceipt>>();
+  /** 共享 destroy 完成信号：destroyAsync 并发重入时 await 同一 dispose */
+  private destroyPromise: Promise<void> | null = null;
   private hasQueueSnapshot = false;
   private realSessionId: string;
   private realSessionFile: string;
@@ -1009,6 +1013,9 @@ export class SdkSessionHost {
         const parsed = parsePromptCommand(command);
         const cached = this.promptReceipts.get(parsed.submissionId);
         if (cached) return cached;
+        const key = parsed.submissionId;
+        const inFlight = this.promptInFlight.get(key);
+        if (inFlight) return inFlight;
         if (this.bashRunning) {
           throw new Error("Cannot send a prompt while a shell command is running");
         }
@@ -1019,7 +1026,8 @@ export class SdkSessionHost {
         this.lastStopReason = null;
         recordRunningStartedAt(this.realSessionId, Date.now());
         this.notifyRunning();
-        try {
+        const flight = (async (): Promise<PromptReceipt> => {
+          try {
           await new Promise<void>((resolve, reject) => {
             let settled = false;
             const clearIdlePrompt = () => {
@@ -1084,9 +1092,9 @@ export class SdkSessionHost {
             sessionId: this.realSessionId,
             status: "accepted",
           };
-          this.promptReceipts.set(parsed.submissionId, receipt);
+          this.promptReceipts.set(key, receipt);
           return receipt;
-        } catch (error) {
+          } catch (error) {
           this.promptRunning = false;
           this.lastStopReason = this.lastStopReason === "aborted" ? "aborted" : "error";
           this.setFollowUpHeld(true);
@@ -1100,9 +1108,14 @@ export class SdkSessionHost {
             sessionId: this.realSessionId,
             status: "rejected",
           };
-          this.promptReceipts.set(parsed.submissionId, receipt);
+          this.promptReceipts.set(key, receipt);
           throw error;
-        }
+          } finally {
+            this.promptInFlight.delete(key);
+          }
+        })();
+        this.promptInFlight.set(key, flight);
+        return flight;
       }
 
       case "abort": {
@@ -1427,35 +1440,40 @@ export class SdkSessionHost {
   }
 
   async destroyAsync(): Promise<void> {
+    // 单飞：并发重入（Service 多条离线写路径 / idle 定时器）共享同一 dispose。
+    if (this.destroyPromise) return this.destroyPromise;
     if (!this._alive && !this.runtime) return;
     this._alive = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
-    this.unsubscribe?.();
-    this.unsubscribe = null;
-    this.extensionUi?.dispose();
-    this.extensionUi = null;
-    const runtime = this.runtime;
-    this.runtime = null;
-    if (runtime) {
-      try {
-        await runtime.dispose();
-      } catch (err) {
-        console.error("[pidance] sdk runtime dispose error:", err);
+    this.destroyPromise = (async () => {
+      this.unsubscribe?.();
+      this.unsubscribe = null;
+      this.extensionUi?.dispose();
+      this.extensionUi = null;
+      const runtime = this.runtime;
+      this.runtime = null;
+      if (runtime) {
+        try {
+          await runtime.dispose();
+        } catch (err) {
+          console.error("[pidance] sdk runtime dispose error:", err);
+        }
       }
-    }
-    this.promptRunning = false;
-    this.bashRunning = false;
-    this.bashCommand = null;
-    this.flushingFollowUp = false;
-    this.followUpFlushBatch = [];
-    this.followUpFlushCursor = 0;
-    this.followUpFlushConfirmed = false;
-    this.followUpFlushAsOne = false;
-    this.followUpFlushOriginal = [];
-    clearRunningStartedAt(this.realSessionId);
-    this.onDestroyCallback?.();
-    this.notifyRunning();
+      this.promptRunning = false;
+      this.bashRunning = false;
+      this.bashCommand = null;
+      this.flushingFollowUp = false;
+      this.followUpFlushBatch = [];
+      this.followUpFlushCursor = 0;
+      this.followUpFlushConfirmed = false;
+      this.followUpFlushAsOne = false;
+      this.followUpFlushOriginal = [];
+      clearRunningStartedAt(this.realSessionId);
+      this.onDestroyCallback?.();
+      this.notifyRunning();
+    })();
+    return this.destroyPromise;
   }
 }
 
