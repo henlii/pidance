@@ -50,11 +50,7 @@ import { resolveDisplayModel, settleModelOverride } from "@/lib/model-selection"
 import { useI18n } from "@/lib/i18n";
 import { guidePageThinkingUpdate, thinkingLevelForEnsureBody } from "@/lib/thinking-level-policy";
 import { isThinkingLevel, type AgentThinkingLevel } from "@/lib/agent-settings";
-import {
-  beginAgentRunFinish,
-  canFinalizeAgentRun,
-  shouldFinishFromReconcile,
-} from "@/lib/finish-agent-run";
+
 import {
   applyToolExecutionStart,
   applyToolExecutionUpdate,
@@ -427,12 +423,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [agentRunning, session?.id, onAgentRunningChange]);
   const messagesSessionIdRef = useRef<string | null>(session?.id ?? null);
   const entryIdsRef = useRef<string[]>([]);
-  /** 会话内 hydrate 请求单调号：会话切换时清零；后发请求才可覆盖旧响应 */
-  const hydrateReqSeqRef = useRef(0);
   const agentRunningRef = useRef(false);
-  const sendInFlightRef = useRef(false);
   const abortRequestedRef = useRef(false);
-  const promptAbortRef = useRef<AbortController | null>(null);
   const bashRunningRef = useRef(false);
   const branchBusyRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
@@ -458,13 +450,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   });
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
   const newSessionPromotedRef = useRef(false);
-  const promptRunIdRef = useRef(0);
-  /**
-   * 当前 run 的 completion claim（finishAgentRun 写入）：阻止 agent_end /
-   * prompt_done / reconcile 为同一 run 重复进入异步收尾；新 run 开始或收尾结束
-   * 时释放，token 漂移也必须释放，否则后续 run 的收尾被永久阻塞。
-   */
-  const finishingPromptRunIdRef = useRef<number | null>(null);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
   /** prompt 命令已提交成功（防止切走/收尾竞态把已发送消息回滚成失败） */
   const promptSubmittedRef = useRef(false);
@@ -544,14 +529,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     let messagesLoaded = false;
     try {
       if (showLoading) setLoading(true);
-      const hydrateSinceSeq = getOrCreateBrowserSessionRuntimeRegistry().getSnapshot(sid)?.timelineSeq ?? 0;
+      const registry = getOrCreateBrowserSessionRuntimeRegistry();
+      const hydrateSinceSeq = registry.getSnapshot(sid)?.timelineSeq ?? 0;
       // 切换会话：先清上一会话的 live 投影，避免 systemPrompt/用量串台
       if (includeState) {
         setSystemPrompt(null);
         setContextUsage(null);
       }
       // tail-first：首屏只拉最新 N 条，尽快结束 loading；更旧历史按需 prepend。
-      const hydrateRequestSeq = ++hydrateReqSeqRef.current;
+      const hydrateRequestSeq = registry.beginHydrate(sid);
       const params = new URLSearchParams({
         deferThinking: "1",
         deferMedia: "1",
@@ -575,9 +561,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as SessionData;
       if (sessionIdRef.current !== sid) return null;
+      const runState = registry.getRunState(sid);
       if (
-        finishingPromptRunIdRef.current !== null
-        && finishingPromptRunIdRef.current !== promptRunIdRef.current
+        runState?.finishingRunId !== null
+        && runState?.finishingRunId !== runState?.promptRunId
       ) {
         return null;
       }
@@ -734,6 +721,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!before) return false;
     historyLoadingRef.current = true;
     setHistoryLoading(true);
+    const registry = getOrCreateBrowserSessionRuntimeRegistry();
+    const hydrateRequestSeq = registry.beginHydrate(sid);
     try {
       const params = new URLSearchParams({
         deferThinking: "1",
@@ -779,7 +768,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
       entryIdsRef.current = nextEntryIds;
       setEntryIds(nextEntryIds);
-      getOrCreateBrowserSessionRuntimeRegistry().hydrate(sid, nextMessages, nextEntryIds);
+      registry.hydrate(sid, nextMessages, nextEntryIds, { hydrateRequestSeq });
       const more = d.context.hasMoreBefore === true
         || (typeof d.context.totalMessageCount === "number"
           && d.context.totalMessageCount > nextEntryIds.length);
@@ -805,8 +794,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
       if (leafId) params.set("leafId", leafId);
       const url = `/api/sessions/${encodeURIComponent(sid)}/context?${params}`;
-      const hydrateRequestSeq = ++hydrateReqSeqRef.current;
-      const hydrateSinceSeq = getOrCreateBrowserSessionRuntimeRegistry().getSnapshot(sid)?.timelineSeq ?? 0;
+      const registry = getOrCreateBrowserSessionRuntimeRegistry();
+      const hydrateRequestSeq = registry.beginHydrate(sid);
+      const hydrateSinceSeq = registry.getSnapshot(sid)?.timelineSeq ?? 0;
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as {
@@ -1095,42 +1085,35 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * 按同一 token 安全结束状态。loadSession 失败也必须在 finally 结束，不得永久 running。
    */
   const finishAgentRun = useCallback(async (sid: string | null, runId: number) => {
-    // 显式收窄：beginAgentRunFinish 的 sid 非空校验是 seam 层的防御性冗余。
     if (!sid) return;
-    if (!beginAgentRunFinish({
-      sessionId: sid,
-      currentSessionId: sessionIdRef.current,
-      eventRunId: runId,
-      currentRunId: promptRunIdRef.current,
-      running: agentRunningRef.current,
-      claimedRunId: finishingPromptRunIdRef.current,
-    })) return;
-    // claim 必须在第一个 await 前占住：并发进入的 agent_end/prompt_done/reconcile 全部让路。
-    finishingPromptRunIdRef.current = runId;
+    const registry = getOrCreateBrowserSessionRuntimeRegistry();
+    const before = registry.getRunState(sid);
+    if (
+      sessionIdRef.current !== sid
+      || !before
+      || before.promptRunId !== runId
+      || (before.agentRunning && before.sendInFlight)
+    ) return;
+    // claim 必须在第一个 await 前占住：agent_end/prompt_done/reconcile 共用 slot claim。
+    if (!registry.beginRunFinish(sid, runId)) return;
     try {
       const agentState = await loadSession(sid, false, true, false, false, () => {
-        // 消息真正替换（onMessagesReplaced）：校验 token 后延长 settle 窗口并标记
-        // end-pin。pendingEndPin 无条件下发，following/released 门禁已在 messages
-        // effect 处理，released 阅读不会被拉回。
-        if (runId !== promptRunIdRef.current) return;
+        if (registry.getRunState(sid)?.promptRunId !== runId) return;
         notifyAutoFollowEnd();
       });
-      // includeState 已刷新大部分附属字段；applyAgentStateSnapshot 统一补齐
-      // loadSession 未覆盖的 isCompacting（其余字段幂等重跑无害）。
       if (agentState && typeof agentState === "object" && "running" in agentState) {
         applyAgentStateSnapshot(agentState.state);
       }
     } finally {
-      const valid = canFinalizeAgentRun({
-        sessionId: sid,
-        currentSessionId: sessionIdRef.current,
-        eventRunId: runId,
-        currentRunId: promptRunIdRef.current,
-        claimedRunId: finishingPromptRunIdRef.current,
-      });
-      // 无条件释放 claim：token 漂移（切换会话/开启新 run）也必须让路，否则
-      // 新 run 的收尾路径会被旧 claim 永久阻塞。
-      finishingPromptRunIdRef.current = null;
+      const current = registry.getRunState(sid);
+      const valid = Boolean(
+        current
+        && sessionIdRef.current === sid
+        && current.promptRunId === runId
+        && current.finishingRunId === runId,
+      );
+      registry.completeRun(sid, runId);
+      registry.releaseRunFinish(sid, runId);
       if (!valid) return;
       optimisticUserMessageKeyRef.current = null;
       agentRunningRef.current = false;
@@ -1148,34 +1131,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [loadSession, onAgentEnd, applyAgentStateSnapshot, dispatch, setAgentRunning, setAgentPhase, setRetryInfo, notifyAutoFollowEnd]);
 
   const waitForPromptSettlement = useCallback(async (sid: string, runId?: number) => {
+    const registry = getOrCreateBrowserSessionRuntimeRegistry();
     await delay(PROMPT_SETTLE_INITIAL_DELAY_MS);
     const startedAt = Date.now();
 
-    while (agentRunningRef.current && Date.now() - startedAt < PROMPT_SETTLE_MAX_MS) {
-      if (runId !== undefined && promptRunIdRef.current > runId + 1) return;
+    while (Date.now() - startedAt < PROMPT_SETTLE_MAX_MS) {
+      const current = registry.getRunState(sid);
+      if (!current?.agentRunning) return;
+      if (runId !== undefined && current.promptRunId > runId + 1) return;
       try {
-        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
-        if (res.ok) {
-          const data = await res.json() as { live?: boolean; running?: boolean; activeRun?: boolean; state?: AgentStateResponse };
-          const state = data.state;
-          if (shouldFinishFromReconcile({
-            sendInFlight: sendInFlightRef.current,
-            clientRunning: agentRunningRef.current,
-            live: readAgentLiveFlag(data),
-            isStreaming: state?.isStreaming === true,
-            isPromptRunning: state?.isPromptRunning === true,
-            isCompacting: state?.isCompacting === true,
-          })) {
-            await finishAgentRun(sid, promptRunIdRef.current);
-            return;
-          }
+        const result = await registry.reconcile(sid);
+        if (!result || result.stale) return;
+        applyAgentStateSnapshot(result.state as AgentStateResponse | undefined);
+        if (result.shouldFinish) {
+          await finishAgentRun(sid, result.runId);
+          return;
         }
       } catch {
         // SSE remains the primary completion path.
       }
       await delay(PROMPT_SETTLE_POLL_MS);
     }
-  }, [finishAgentRun]);
+  }, [applyAgentStateSnapshot, finishAgentRun]);
 
   const waitForBashSettlement = useCallback(async (sid: string) => {
     const recoveryId = bashRecoveryIdRef.current + 1;
@@ -1211,33 +1188,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // If the server reports idle while we still think it's running, finish
   // through the same path as agent_end / prompt_done.
   const reconcileAgentState = useCallback(async (sid: string) => {
-    if (!agentRunningRef.current) return;
-    const runId = promptRunIdRef.current;
+    const registry = getOrCreateBrowserSessionRuntimeRegistry();
+    const current = registry.getRunState(sid);
+    if (!current?.agentRunning) return;
     try {
-      const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
-      if (!res.ok) return;
-      const data = await res.json() as { live?: boolean; running?: boolean; state?: AgentStateResponse };
-      // A slow response can straddle a run boundary (previous run finished
-      // and the user already started the next one while this request was in
-      // flight) — everything in it is stale, drop it.
-      if (promptRunIdRef.current !== runId) return;
-      const state = data.state;
+      const result = await registry.reconcile(sid);
+      if (!result || result.stale) return;
+      const state = result.state as AgentStateResponse | undefined;
       // Mirror compaction state unconditionally: a missed compaction_end
-      // would otherwise leave the "Stop compaction" UI stuck. No state
-      // (wrapper destroyed) means nothing is compacting.
+      // would otherwise leave the Stop UI stuck.
       setIsCompacting(state?.isCompacting ?? false);
       if (state?.queuedMessages !== undefined) {
         applyProjectedQueues(state.queuedMessages);
       }
-      if (!shouldFinishFromReconcile({
-        sendInFlight: sendInFlightRef.current,
-        clientRunning: agentRunningRef.current,
-        live: readAgentLiveFlag(data),
-        isStreaming: state?.isStreaming === true,
-        isPromptRunning: state?.isPromptRunning === true,
-        isCompacting: state?.isCompacting === true,
-      })) return;
-      await finishAgentRun(sid, runId);
+      if (result.shouldFinish) {
+        await finishAgentRun(sid, result.runId);
+      }
     } catch {
       // Network still down — the next poll / visibility / online tick retries.
     }
@@ -1317,9 +1283,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleAgentEvent = useCallback((event: AgentEvent, eventRunId?: number) => {
     switch (event.type) {
       case "agent_start":
-        // 队列自动投递 / 扩展预热会在同一条 SSE 上开新 run。必须递增 run id，
-        // 否则上一轮 agent_end 的异步 loadSession 会按旧 token 收尾并丢掉本轮流式。
-        promptRunIdRef.current += 1;
+        // registry 在应用事件前递增当前 session 的 run id；hook 只处理视图副作用。
         commitToolExecutions(clearToolExecutions(toolExecutionBufferRef.current));
         agentRunningRef.current = true;
         setAgentRunning(true);
@@ -1327,11 +1291,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatch({ type: "start" });
         break;
       case "agent_end":
-        void finishAgentRun(sessionIdRef.current, promptRunIdRef.current);
+      case "prompt_done": {
+        const sid = sessionIdRef.current;
+        const runId = sid
+          ? getOrCreateBrowserSessionRuntimeRegistry().getRunState(sid)?.promptRunId
+          : undefined;
+        if (sid && runId !== undefined) void finishAgentRun(sid, runId);
         break;
-      case "prompt_done":
-        void finishAgentRun(sessionIdRef.current, promptRunIdRef.current);
-        break;
+      }
       case "prompt_error":
         if (sessionIdRef.current) setServerPref(`sessionQueueHold.${sessionIdRef.current}`, true);
         // P0-1：prompt 异步失败且乐观 bubble 未被 message_end 消费（消息未确认
@@ -1508,8 +1475,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return await executeBashRef.current?.(bashCmd, isExcluded) ?? false;
     }
 
-    const promptRunId = promptRunIdRef.current + 1;
-
     const imageBlocks = images?.map((img) => ({ type: "image" as const, source: { type: "base64" as const, media_type: img.mimeType, data: img.data } }));
     const userMsg: AgentMessage = {
       role: "user",
@@ -1520,12 +1485,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
     setMessages((prev) => [...prev, userMsg]);
     optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
-    promptRunIdRef.current = promptRunId;
     promptSubmittedRef.current = false;
     abortRequestedRef.current = false;
-    sendInFlightRef.current = true;
-    const promptAbort = new AbortController();
-    promptAbortRef.current = promptAbort;
     agentRunningRef.current = true;
     setAgentRunning(true);
     setAgentPhase(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
@@ -1652,7 +1613,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setServerPref(`sessionQueueHold.${sentSessionId}`, null);
       }
       if (sendStillCurrent() && isSlashCommandPrompt && sentSessionId) {
-        void waitForPromptSettlement(sentSessionId, promptRunId);
+        const runId = runtime.getRunState(sentSessionId)?.promptRunId;
+        void waitForPromptSettlement(sentSessionId, runId);
       }
       // P0-1：发送已确认（prompt 预检通过 / 消息已提交），返回 true 供
       // ChatInput 确认后才清空 draft。
@@ -1709,9 +1671,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatch({ type: "end" });
       }
       return false;
-    } finally {
-      if (sendStillCurrent()) sendInFlightRef.current = false;
-      if (promptAbortRef.current === promptAbort) promptAbortRef.current = null;
     }
   }, [isNew, isReadOnly, newSessionModel, newSessionDefaultModel, session, promoteNewSession, waitForPromptSettlement, addNotice, notifyAutoFollowSend, opts.chatInputRef, t, onSessionCreated]);
 
@@ -1758,7 +1717,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = liveId ?? pendingId;
     if (!sid) return;
     abortRequestedRef.current = true;
-    promptAbortRef.current?.abort();
     if (liveId) setServerPref(`sessionQueueHold.${liveId}`, true);
     if (bashRunningRef.current) {
       if (!liveId) return;
@@ -2322,7 +2280,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       promptSubmitted: promptSubmittedRef,
       ensuringNewSession: ensuringNewSessionRef,
     }, session?.id ?? null);
-    hydrateReqSeqRef.current = 0;
     setMessages([]);
     entryIdsRef.current = [];
     setEntryIds([]);
@@ -2361,7 +2318,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         entryIdsRef.current = snap.entryIds;
         setAgentRunning(snap.agentRunning);
         agentRunningRef.current = snap.agentRunning;
-        sendInFlightRef.current = snap.sendInFlight;
         if (snap.streamState.isStreaming) {
           dispatch({
             type: "update",

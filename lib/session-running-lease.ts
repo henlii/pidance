@@ -72,7 +72,7 @@ export function isFresh(lease: RunningLease, now: number): boolean {
 }
 
 export function listFreshRunningLeaseSessions(
-  agentDir: string = getAgentDir(),
+  agentDir: string | undefined = getAgentDir(),
   now = Date.now(),
 ): { sessionId: string; startedAt: number }[] {
   const dir = leaseDir(agentDir);

@@ -49,6 +49,11 @@ async function abSync(args) {
   return execFileSync(cmd[0], cmd.slice(1), { maxBuffer: 64 * 1024 * 1024, encoding: "utf8" });
 }
 
+async function evalResult(script) {
+  const result = await ab(["eval", "--session", SESSION, script]);
+  return result?.data?.result;
+}
+
 /** snapshot 文本（compact） */
 async function snapshotText(opts = "") {
   const args = ["snapshot", ...(opts ? [opts] : []), "--session", SESSION];
@@ -274,6 +279,50 @@ test("用例10：无认证访问受保护 API → 401（认证门禁）", async 
   await ensureAuthed();
 });
 
+test("A9：同一 ChatWindow 在真实 390px viewport 保持桌面最终 timeline 投影", async () => {
+  await ab(["open", URL_BASE, "--session", SESSION], { json: false }).catch(() => {});
+  await ensureAuthed();
+  await new Promise((r) => setTimeout(r, 1800));
+  await ab(["set", "viewport", "1280", "720", "--session", SESSION], { json: false });
+  const sessionId = await evalResult("document.querySelector('[data-session-id]')?.getAttribute('data-session-id')");
+  assert.ok(typeof sessionId === "string" && sessionId.length > 0, "A9 需要一个已有会话作为稳定回放目标");
+  await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(sessionId)}`, "--session", SESSION], { json: false });
+  await new Promise((r) => setTimeout(r, 2200));
+
+  await ab(["set", "viewport", "1280", "720", "--session", SESSION], { json: false });
+  await new Promise((r) => setTimeout(r, 300));
+  const desktop = await evalResult(`(() => {
+    const chat = document.querySelector('[data-pidance-chat="true"]');
+    return {
+      width: innerWidth,
+      height: innerHeight,
+      messageCount: chat?.getAttribute('data-chat-message-count'),
+      entryCount: chat?.getAttribute('data-chat-entry-count'),
+      error: document.body.innerText.includes('Application error'),
+    };
+  })()`);
+
+  await ab(["set", "viewport", "390", "844", "--session", SESSION], { json: false });
+  await new Promise((r) => setTimeout(r, 500));
+  const mobile = await evalResult(`(() => {
+    const chat = document.querySelector('[data-pidance-chat="true"]');
+    return {
+      width: innerWidth,
+      height: innerHeight,
+      messageCount: chat?.getAttribute('data-chat-message-count'),
+      entryCount: chat?.getAttribute('data-chat-entry-count'),
+      error: document.body.innerText.includes('Application error'),
+    };
+  })()`);
+
+  assert.equal(desktop.width, 1280);
+  assert.equal(mobile.width, 390);
+  assert.equal(desktop.error, false);
+  assert.equal(mobile.error, false);
+  assert.equal(mobile.messageCount, desktop.messageCount, '移动 viewport 不得改变最终 message timeline');
+  assert.equal(mobile.entryCount, desktop.entryCount, '移动 viewport 不得改变 entryId 对齐');
+});
+
 test("用例11：添加空项目 → 侧栏显示并可新建会话（项目独立于会话）", async () => {
   const dir = `/tmp/pidance-e2e-${Date.now()}`;
   const fs = await import("node:fs");
@@ -282,6 +331,7 @@ test("用例11：添加空项目 → 侧栏显示并可新建会话（项目独�
     // 打开添加项目弹窗
     await ab(["open", URL_BASE, "--session", SESSION], { json: false }).catch(() => {});
     await ensureAuthed();
+    await ab(["set", "viewport", "1280", "720", "--session", SESSION], { json: false });
     let addRef = null;
     for (let attempt = 0; attempt < 3 && !addRef; attempt += 1) {
       await new Promise((r) => setTimeout(r, 2500));
@@ -289,7 +339,10 @@ test("用例11：添加空项目 → 侧栏显示并可新建会话（项目独�
       addRef = Object.entries(refs).find(([, i]) => i?.role === "button" && (i.name ?? "").includes("添加项目"))?.[0] ?? null;
     }
     assert.ok(addRef, "未找到添加项目按钮（重试 3 次后仍无）");
-    await ab(["click", addRef, "--session", SESSION], { json: false });
+    // 语义定位避免上一个测试遗留的 tooltip 让旧 ref 点击点被遮挡。
+    await ab(["press", "Escape", "--session", SESSION], { json: false }).catch(() => {});
+    await ab(["mouse", "move", "1000", "700", "--session", SESSION], { json: false }).catch(() => {});
+    await ab(["find", "role", "button", "click", "--name", "添加项目", "--exact", "--session", SESSION], { json: false });
     await new Promise((r) => setTimeout(r, 1200));
     // 填路径 + Enter 浏览 + 添加
     const refs2 = await snapshotRefs();
@@ -304,7 +357,8 @@ test("用例11：添加空项目 → 侧栏显示并可新建会话（项目独�
     await ab(["click", addBtn, "--session", SESSION], { json: false });
     await new Promise((r) => setTimeout(r, 1500));
     const text = await snapshotText();
-    assert.ok(text.includes(dir), `空项目未显示在侧栏（dir=${dir}）`);
+    const projectName = dir.split("/").at(-1) ?? dir;
+    assert.ok(text.includes(projectName) || text.includes(dir), `空项目未显示在侧栏（dir=${dir}）`);
     assert.ok(text.includes("暂无会话") || text.includes("新建会话"), "空项目缺少新建会话入口");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

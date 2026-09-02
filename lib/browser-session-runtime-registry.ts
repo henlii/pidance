@@ -15,6 +15,7 @@ import type { PromptReceipt } from "./agent-commands";
 import { generateSubmissionId } from "./agent-commands";
 import { attachCustomRenderedLines } from "./custom-rendered-lines";
 import { normalizeToolCalls } from "./normalize";
+import { shouldFinishFromReconcile } from "./finish-agent-run";
 import type { AgentMessage, AttachedImage } from "./types";
 
 export type SubmissionStatus = "submitting" | "accepted" | "persisted" | "rejected" | "unknown";
@@ -45,10 +46,34 @@ export type SessionRuntimeSnapshot = {
   sendInFlight: boolean;
   submissions: PromptSubmission[];
   promptRunId: number;
+  /** 当前 run 的异步 finish claim；由 registry 而非视图 hook 持有。 */
+  finishingRunId: number | null;
+  /** 最近一个已收到 agent_end/prompt_done 的 run。 */
+  completedRunId: number | null;
   attachCount: number;
   /** 消息 timeline 版本：仅当 messages/streaming 内容变化时递增；
-   *  connected/agent_start 等运行态事件不递增，避免阻塞初始磁盘 hydrate。 */
+   * connected/agent_start 等运行态事件不递增，避免阻塞初始磁盘 hydrate。 */
   timelineSeq: number;
+};
+
+export type RuntimeAgentState = {
+  live?: boolean;
+  running?: boolean;
+  activeRun?: boolean;
+  state?: {
+    isStreaming?: boolean;
+    isPromptRunning?: boolean;
+    isCompacting?: boolean;
+    [key: string]: unknown;
+  };
+};
+
+export type RuntimeReconcileResult = {
+  runId: number;
+  stale: boolean;
+  live: boolean;
+  shouldFinish: boolean;
+  state?: RuntimeAgentState["state"];
 };
 
 export type SubmitPromptTarget =
@@ -86,6 +111,7 @@ export type BrowserSessionRuntimeRegistryDeps = {
   ) => Promise<string>;
   wake?: (sessionId: string, signal?: AbortSignal) => Promise<void>;
   createEventStream?: (sessionId: string, onEvent: (event: AgentStreamEvent) => void) => EventStreamManager;
+  getAgentState?: (sessionId: string) => Promise<RuntimeAgentState>;
   restoreDraft?: (draftKey: string, draft: { value: string; images: AttachedImage[] }) => void;
   now?: () => number;
   makeSubmissionId?: () => string;
@@ -115,7 +141,9 @@ type RuntimeSlot = {
   snapshotListeners: Set<(snapshot: SessionRuntimeSnapshot) => void>;
   attachCount: number;
   consumedEntryIds: Set<string>;
-  /** 同 session hydrate 请求（按发起序）的单调号；后发请求不被早到的旧响应覆盖 */
+  /** submitPrompt 乐观消息的稳定位置；message_end 回来时按 submission 绑定 entryId */
+  submissionMessageIndexes: Map<string, number>;
+  /** slot-owned hydrate 请求（按发起序）的单调号 */
   hydrateSeq: number;
   /** 最近一次已应用 hydrate 的请求号 */
   hydrateAppliedSeq: number;
@@ -132,6 +160,14 @@ export type BrowserSessionRuntimeRegistry = {
   /** 显式 Stop：取消唯一在途 submission 的 POST 并等待结算 */
   abortSubmission(sessionId: string, submissionId?: string): Promise<SubmitPromptResult | null>;
   abort(sessionId: string): void;
+  /** 当前 per-session run 状态；视图只读此 snapshot，不维护 sendInFlight 单槽。 */
+  getRunState(sessionId: string): Pick<SessionRuntimeSnapshot, "promptRunId" | "agentRunning" | "sendInFlight" | "finishingRunId" | "completedRunId"> | null;
+  beginRunFinish(sessionId: string, runId: number): boolean;
+  releaseRunFinish(sessionId: string, runId: number): void;
+  completeRun(sessionId: string, runId: number): boolean;
+  reconcile(sessionId: string): Promise<RuntimeReconcileResult | null>;
+  /** 在 HTTP context 发起前取得 slot-owned 请求代数。 */
+  beginHydrate(sessionId: string): number;
   hydrate(
     sessionId: string,
     messages: AgentMessage[],
@@ -163,6 +199,8 @@ function createSlot(sessionId: string): RuntimeSlot {
       sendInFlight: false,
       submissions: [],
       promptRunId: 0,
+      finishingRunId: null,
+      completedRunId: null,
       attachCount: 0,
       timelineSeq: 0,
     },
@@ -174,6 +212,7 @@ function createSlot(sessionId: string): RuntimeSlot {
     snapshotListeners: new Set(),
     attachCount: 0,
     consumedEntryIds: new Set(),
+    submissionMessageIndexes: new Map(),
     hydrateSeq: 0,
     hydrateAppliedSeq: 0,
   };
@@ -244,10 +283,14 @@ export function createBrowserSessionRuntimeRegistry(
       ...(message as unknown as Record<string, unknown>),
       entryId: entryId ?? (message as unknown as Record<string, unknown>).entryId ?? "",
     };
+    const alignedEntryIds = alignEntryIds(slot.snapshot.messages, slot.snapshot.entryIds);
     slot.snapshot.messages = [...slot.snapshot.messages, withEntry as unknown as AgentMessage];
-    slot.snapshot.entryIds = [...slot.snapshot.entryIds, entryId ?? ""];
+    slot.snapshot.entryIds = [...alignedEntryIds, entryId ?? ""];
     bumpTimeline(slot);
   };
+
+  const alignEntryIds = (messages: readonly AgentMessage[], entryIds: readonly string[]): string[] =>
+    messages.map((_message, index) => entryIds[index] ?? "");
 
   const settleSubmission = (
     slot: RuntimeSlot,
@@ -278,9 +321,14 @@ export function createBrowserSessionRuntimeRegistry(
     if (type === "agent_start") {
       slot.snapshot.promptRunId += 1;
       slot.snapshot.agentRunning = true;
+      slot.snapshot.completedRunId = null;
+      // 新 run 到来时，旧 run 的 finish 异步操作失去所有权；其 finally
+      // 只能按 runId 条件释放，不能阻塞当前 run。
+      slot.snapshot.finishingRunId = null;
       slot.snapshot.streamState = { isStreaming: true, streamingMessage: null };
     } else if (type === "agent_end" || type === "prompt_done") {
       slot.snapshot.agentRunning = false;
+      slot.snapshot.completedRunId = slot.snapshot.promptRunId;
       slot.snapshot.streamState = emptyStream();
     } else if (type === "message_start" || type === "message_update") {
       const message = event.message as Partial<AgentMessage> | undefined;
@@ -305,27 +353,66 @@ export function createBrowserSessionRuntimeRegistry(
           return;
         }
         if (entryId) slot.consumedEntryIds.add(entryId);
-        const last = slot.snapshot.messages[slot.snapshot.messages.length - 1];
-        const lastContent = last && "content" in last ? (last as { content?: unknown }).content : undefined;
-        const nextContent = completed && "content" in completed ? (completed as { content?: unknown }).content : undefined;
-        const lastText = typeof lastContent === "string" ? lastContent : "";
-        const nextText = typeof nextContent === "string" ? nextContent : "";
-        const isNextEntryPresent = entryId !== null
-          ? slot.snapshot.messages.some((msg) => (msg as { entryId?: unknown }).entryId === entryId)
-          : false;
-        if (!isNextEntryPresent && (!last || last.role !== "user" || lastText !== nextText)) {
-          appendMessageWithEntry(slot, completed, entryId);
+        const match = entryId === null
+          ? undefined
+          : [...slot.submissions.values()].find((sub) =>
+              (sub.status === "accepted" || sub.status === "submitting") && !sub.entryId,
+            );
+        const messageIndex = match
+          ? slot.submissionMessageIndexes.get(match.submissionId)
+          : undefined;
+        const currentMessage = messageIndex === undefined
+          ? undefined
+          : slot.snapshot.messages[messageIndex];
+        const currentEntryIds = alignEntryIds(slot.snapshot.messages, slot.snapshot.entryIds);
+        const currentEntryId = messageIndex === undefined ? undefined : currentEntryIds[messageIndex];
+        if (
+          messageIndex !== undefined
+          && currentMessage?.role === "user"
+          && !currentEntryId
+        ) {
+          const withEntry = {
+            ...(completed as unknown as Record<string, unknown>),
+            entryId: entryId ?? "",
+          } as unknown as AgentMessage;
+          const messages = [...slot.snapshot.messages];
+          messages[messageIndex] = withEntry;
+          currentEntryIds[messageIndex] = entryId ?? "";
+          slot.snapshot.messages = messages;
+          slot.snapshot.entryIds = currentEntryIds;
+          bumpTimeline(slot);
+        } else {
+          const last = slot.snapshot.messages[slot.snapshot.messages.length - 1];
+          const lastContent = last && "content" in last ? (last as { content?: unknown }).content : undefined;
+          const nextContent = completed && "content" in completed ? (completed as { content?: unknown }).content : undefined;
+          const lastText = typeof lastContent === "string" ? lastContent : "";
+          const nextText = typeof nextContent === "string" ? nextContent : "";
+          const isNextEntryPresent = entryId !== null
+            ? slot.snapshot.messages.some((msg) => (msg as { entryId?: unknown }).entryId === entryId)
+            : false;
+          if (!isNextEntryPresent && (!last || last.role !== "user" || lastText !== nextText)) {
+            appendMessageWithEntry(slot, completed, entryId);
+          } else if (!isNextEntryPresent && entryId !== null && last?.role === "user") {
+            const lastIndex = slot.snapshot.messages.length - 1;
+            const aligned = alignEntryIds(slot.snapshot.messages, slot.snapshot.entryIds);
+            if (!aligned[lastIndex]) {
+              const messages = [...slot.snapshot.messages];
+              messages[lastIndex] = {
+                ...(last as unknown as Record<string, unknown>),
+                entryId,
+              } as unknown as AgentMessage;
+              aligned[lastIndex] = entryId;
+              slot.snapshot.messages = messages;
+              slot.snapshot.entryIds = aligned;
+              bumpTimeline(slot);
+            }
+          }
         }
         // FIFO：下一个未绑定 entry 的 accepted/submitting submission。
         // 同一 entryId 不可二次消费，避免 SSE 重放把两条 submission 绑到同一 entry。
-        if (entryId !== null) {
-          const match = [...slot.submissions.values()].find((sub) =>
-            (sub.status === "accepted" || sub.status === "submitting") && !sub.entryId,
-          );
-          if (match) {
-            match.status = "persisted";
-            match.entryId = entryId;
-          }
+        if (match && entryId !== null) {
+          match.status = "persisted";
+          match.entryId = entryId;
         }
       } else if (completed && slot.snapshot.agentRunning) {
         const rendered = attachCustomRenderedLines(completed, event.renderedLines);
@@ -437,10 +524,15 @@ export function createBrowserSessionRuntimeRegistry(
       slot.snapshot.sendInFlight = true;
       slot.snapshot.agentRunning = true;
       slot.snapshot.promptRunId += 1;
+      slot.snapshot.completedRunId = null;
+      slot.snapshot.finishingRunId = null;
+      const optimisticMessageIndex = slot.snapshot.messages.length;
       slot.snapshot.messages = [
         ...slot.snapshot.messages,
         userMessageFromSubmit(input.message, input.images, now()),
       ];
+      slot.snapshot.entryIds = [...slot.snapshot.entryIds, ""];
+      slot.submissionMessageIndexes.set(submissionId, optimisticMessageIndex);
       bumpTimeline(slot);
       publish(slot);
 
@@ -531,28 +623,97 @@ export function createBrowserSessionRuntimeRegistry(
       slot.snapshot.sendInFlight = slot.inFlight.size > 0;
       publish(slot);
     },
+    getRunState(sessionId) {
+      const snapshot = slots.get(sessionId)?.snapshot;
+      if (!snapshot) return null;
+      return {
+        promptRunId: snapshot.promptRunId,
+        agentRunning: snapshot.agentRunning,
+        sendInFlight: snapshot.sendInFlight,
+        finishingRunId: snapshot.finishingRunId,
+        completedRunId: snapshot.completedRunId,
+      };
+    },
+    beginRunFinish(sessionId, runId) {
+      const slot = slots.get(sessionId);
+      if (!slot) return false;
+      const snapshot = slot.snapshot;
+      if (snapshot.promptRunId !== runId) return false;
+      if (snapshot.finishingRunId !== null) return false;
+      if (!snapshot.agentRunning && snapshot.completedRunId !== runId) return false;
+      snapshot.finishingRunId = runId;
+      publish(slot);
+      return true;
+    },
+    releaseRunFinish(sessionId, runId) {
+      const slot = slots.get(sessionId);
+      if (!slot || slot.snapshot.finishingRunId !== runId) return;
+      slot.snapshot.finishingRunId = null;
+      publish(slot);
+    },
+    completeRun(sessionId, runId) {
+      const slot = slots.get(sessionId);
+      if (!slot || slot.snapshot.promptRunId !== runId) return false;
+      slot.snapshot.agentRunning = false;
+      slot.snapshot.completedRunId = runId;
+      slot.snapshot.streamState = emptyStream();
+      publish(slot);
+      return true;
+    },
+    async reconcile(sessionId) {
+      const slot = slots.get(sessionId);
+      if (!slot || !deps.getAgentState) return null;
+      const runId = slot.snapshot.promptRunId;
+      const data = await deps.getAgentState(sessionId);
+      const current = slots.get(sessionId);
+      if (current !== slot || current.snapshot.promptRunId !== runId) {
+        return { runId, stale: true, live: false, shouldFinish: false };
+      }
+      const live = data.live === true || (data.live === undefined && data.running === true);
+      const state = data.state;
+      return {
+        runId,
+        stale: false,
+        live,
+        shouldFinish: shouldFinishFromReconcile({
+          sendInFlight: current.snapshot.sendInFlight,
+          clientRunning: current.snapshot.agentRunning,
+          live,
+          isStreaming: state?.isStreaming === true,
+          isPromptRunning: state?.isPromptRunning === true,
+          isCompacting: state?.isCompacting === true,
+        }),
+        state,
+      };
+    },
+    beginHydrate(sessionId) {
+      const slot = getSlot(sessionId, true)!;
+      slot.hydrateSeq += 1;
+      return slot.hydrateSeq;
+    },
     hydrate(sessionId, messages, entryIds = [], options) {
       const slot = getSlot(sessionId, true)!;
       if (options?.sinceSeq !== undefined && slot.snapshot.timelineSeq > options.sinceSeq) {
         return false;
       }
-      if (
-        options?.hydrateRequestSeq !== undefined
-        && options.hydrateRequestSeq <= slot.hydrateAppliedSeq
-      ) {
-        return false;
-      }
-      if (options?.hydrateRequestSeq !== undefined) {
-        slot.hydrateAppliedSeq = options.hydrateRequestSeq;
-      }
+      const requestSeq = options?.hydrateRequestSeq ?? ++slot.hydrateSeq;
+      if (requestSeq <= slot.hydrateAppliedSeq) return false;
+      slot.hydrateSeq = Math.max(slot.hydrateSeq, requestSeq);
+      slot.hydrateAppliedSeq = requestSeq;
+      const alignedEntryIds = alignEntryIds(messages, entryIds);
       slot.snapshot.messages = [...messages];
-      slot.snapshot.entryIds = [...entryIds];
+      slot.snapshot.entryIds = alignedEntryIds;
+      for (const id of alignedEntryIds) {
+        if (id) slot.consumedEntryIds.add(id);
+      }
       publish(slot);
       return true;
     },
     appendLocal(sessionId, message) {
       const slot = getSlot(sessionId, true)!;
+      const alignedEntryIds = alignEntryIds(slot.snapshot.messages, slot.snapshot.entryIds);
       slot.snapshot.messages = [...slot.snapshot.messages, message];
+      slot.snapshot.entryIds = [...alignedEntryIds, ""];
       bumpTimeline(slot);
       publish(slot);
     },
@@ -633,6 +794,12 @@ function createBrowserFetchDeps(): BrowserSessionRuntimeRegistryDeps {
         const wakeBody = await wake.json().catch(() => ({})) as { error?: string };
         throw new Error(typeof wakeBody.error === "string" ? wakeBody.error : `HTTP ${wake.status}`);
       }
+    },
+    async getAgentState(sessionId) {
+      const response = await fetch(`/api/agent/${encodeURIComponent(sessionId)}`, { cache: "no-store" });
+      const data = await response.json().catch(() => ({})) as RuntimeAgentState & { error?: string };
+      if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
+      return data;
     },
   };
 }

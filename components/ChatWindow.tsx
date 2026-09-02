@@ -518,6 +518,9 @@ const chatPlan = composeChatPlan({
 
   return (
     <div
+      data-pidance-chat="true"
+      data-chat-message-count={messages.length}
+      data-chat-entry-count={entryIds.length}
       className="relative flex h-full min-h-0 flex-col overflow-hidden"
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}

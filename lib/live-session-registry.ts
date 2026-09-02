@@ -6,6 +6,7 @@ import { cacheSessionPath, invalidateSessionListCache, resolveSessionPath } from
 import { openSessionView } from "./pi-session-io";
 import { getPidancePref, readPidancePrefs, type PidancePrefs } from "./pidance-prefs-file";
 import { startSdkSessionHost, type SdkSessionHost } from "./sdk-session-host";
+import { getRunningStartedAt as getLocalRunningStartedAt } from "./running-state";
 import {
   acquireRunningLease,
   heartbeatRunningLease,
@@ -160,14 +161,28 @@ export function getRunningRpcSessionIds(): string[] {
   return [...ids];
 }
 
-/** 运行 id → startedAt（本进程 running-state 与跨进程租约合并；缺省按 now 兜底）。 */
-export function getRunningStartedAtTable(): Record<string, number> {
+const localStartingStartedAt = new Map<string, number>();
+
+/** 运行 id → startedAt（本进程 running-state 与跨进程租约合并）。 */
+export function getRunningStartedAtTable(
+  agentDir?: string,
+  now = Date.now(),
+): Record<string, number> {
   const table: Record<string, number> = {};
-  const now = Date.now();
-  for (const sessionId of getLocalRunningAndStartingIds()) {
-    table[sessionId] = now;
+  const localStartedAt = getLocalRunningStartedAt();
+  const localIds = getLocalRunningAndStartingIds();
+  const localSet = new Set(localIds);
+  for (const sessionId of localIds) {
+    const startedAt = localStartedAt.get(sessionId)
+      ?? localStartingStartedAt.get(sessionId)
+      ?? now;
+    localStartingStartedAt.set(sessionId, startedAt);
+    table[sessionId] = startedAt;
   }
-  for (const { sessionId, startedAt } of listFreshRunningLeaseSessions()) {
+  for (const sessionId of [...localStartingStartedAt.keys()]) {
+    if (!localSet.has(sessionId)) localStartingStartedAt.delete(sessionId);
+  }
+  for (const { sessionId, startedAt } of listFreshRunningLeaseSessions(agentDir, now)) {
     table[sessionId] = startedAt;
   }
   return table;
