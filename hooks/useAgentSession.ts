@@ -2405,10 +2405,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         getOrCreateBrowserSessionRuntimeRegistry().detach(sid, runtimeSubscriptionRef.current);
         runtimeSubscriptionRef.current = null;
       }
-      // ChatWindow 卸载只退订；registry 继续持有 ESM 与 in-flight POST。
+      // ChatWindow 切换会话（不再重挂载）：退订旧 runtime，新会话由本 effect 重入加载。
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [session?.id, session?.readOnly]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);
