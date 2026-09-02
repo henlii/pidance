@@ -423,7 +423,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [agentRunning, session?.id, onAgentRunningChange]);
   const messagesSessionIdRef = useRef<string | null>(session?.id ?? null);
   const entryIdsRef = useRef<string[]>([]);
-  const agentRunningRef = useRef(false);
+  const getRuntimeAgentRunning = useCallback((sessionId?: string | null): boolean => {
+    const sid = sessionId
+      ?? sessionIdRef.current
+      ?? (newSessionIntentIdRef.current ? pendingSessionId(newSessionIntentIdRef.current) : null);
+    return sid ? getOrCreateBrowserSessionRuntimeRegistry().getRunState(sid)?.agentRunning === true : false;
+  }, []);
   const abortRequestedRef = useRef(false);
   const bashRunningRef = useRef(false);
   const branchBusyRef = useRef(false);
@@ -969,7 +974,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // OpenChamber 语义：取消问题块 = 终止当前执行（agent 阻塞在扩展请求上）。
       // 防护：若取消响应期间 agent 已自行停止（或用户已先停止），不再补发 abort，
       // 避免误中止之后新启动的 run。
-      if ("cancelled" in response && response.cancelled === true && agentRunningRef.current) {
+      if ("cancelled" in response && response.cancelled === true && getRuntimeAgentRunning()) {
         try {
           await sendAgentCommand(sid, { type: "abort" });
         } catch {
@@ -1016,7 +1021,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sessionIdRef,
     isReadOnly,
     canWrite: capabilities.canSendSessionCommands,
-    agentRunningRef,
+    getAgentRunning: () => getRuntimeAgentRunning(),
     bashRunningRef,
     branchBusyRef,
     branchBusy,
@@ -1092,7 +1097,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       sessionIdRef.current !== sid
       || !before
       || before.promptRunId !== runId
-      || (before.agentRunning && before.sendInFlight)
+      || before.sendInFlight
     ) return;
     // claim 必须在第一个 await 前占住：agent_end/prompt_done/reconcile 共用 slot claim。
     if (!registry.beginRunFinish(sid, runId)) return;
@@ -1116,7 +1121,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       registry.releaseRunFinish(sid, runId);
       if (!valid) return;
       optimisticUserMessageKeyRef.current = null;
-      agentRunningRef.current = false;
       setAgentRunning(false);
       setAgentPhase(null);
       setRetryInfo(null);
@@ -1248,7 +1252,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     void reconcileAgentState(sid);
     // 仅重拉运行中的会话尾页；空闲会话 loadSession 会带 live 状态，可能有 SSE 已
     // 送达而 UI 未消费的残余（浏览器冻结时长），重拉是权威收口。
-    if (agentRunningRef.current) {
+    if (getRuntimeAgentRunning()) {
       void loadSession(sid, false);
     }
   }, [ensureEventsConnected, reconcileAgentState, loadSession]);
@@ -1268,10 +1272,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
   }, [syncOnTabReturn]);
 
-  useEffect(() => {
-    agentRunningRef.current = agentRunning;
-  }, [agentRunning]);
-
   // P4a 工具执行缓冲：ref 持有不可变 Map 状态（事件处理零拷贝读取），setState 只同步
   // 数组投影给 React。apply* 为纯函数，非法/迟到事件内部安全忽略并返回原引用。
   const toolExecutionBufferRef = useRef<ToolExecutionBufferState>(new Map());
@@ -1285,7 +1285,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "agent_start":
         // registry 在应用事件前递增当前 session 的 run id；hook 只处理视图副作用。
         commitToolExecutions(clearToolExecutions(toolExecutionBufferRef.current));
-        agentRunningRef.current = true;
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
         dispatch({ type: "start" });
@@ -1333,7 +1332,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "message_start":
       case "message_update": {
         // timeline/stream 由 registry snapshot 驱动；这里只更新 agentPhase。
-        if (!agentRunningRef.current) break;
+        if (!getRuntimeAgentRunning()) break;
         const msg = event.message as Partial<AgentMessage> | undefined;
         if (msg?.role === "user") break;
         setAgentPhase(null);
@@ -1459,7 +1458,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (isReadOnly) return false;
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length) return false;
-    if (agentRunningRef.current || bashRunningRef.current) return false;
+    if (getRuntimeAgentRunning() || bashRunningRef.current) return false;
     // 分支切换/摘要进行中：prompt 会与 navigateTree 并发写会话文件，先拦住。
     if (branchBusyRef.current) {
       addNotice({ type: "info", message: "Branch switch in progress — please wait" });
@@ -1487,7 +1486,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
     promptSubmittedRef.current = false;
     abortRequestedRef.current = false;
-    agentRunningRef.current = true;
     setAgentRunning(true);
     setAgentPhase(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
     dispatch({ type: "start" });
@@ -1624,7 +1622,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         || (e instanceof Error && e.name === "AbortError");
       if (aborted) {
         if (sendStillCurrent() && !promptSubmittedRef.current) {
-          agentRunningRef.current = false;
           setAgentRunning(false);
           setAgentPhase(null);
           dispatch({ type: "end" });
@@ -1665,7 +1662,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
       }
       if (sendStillCurrent()) {
-        agentRunningRef.current = false;
         setAgentRunning(false);
         setAgentPhase(null);
         dispatch({ type: "end" });
@@ -1677,7 +1673,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean): Promise<boolean> => {
     // 只读会话：bash 命令同样会写 session 文件，拦截。
     if (isReadOnly) return false;
-    if (agentRunningRef.current || bashRunningRef.current || branchBusyRef.current) return false;
+    if (getRuntimeAgentRunning() || bashRunningRef.current || branchBusyRef.current) return false;
     const inputText = `${excludeFromContext ? "!!" : "!"}${command}`;
     bashRunningRef.current = true;
     setPendingBash({ command, excludeFromContext, startedAt: Date.now() });
@@ -2052,7 +2048,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     const text = message.trim();
     if (!text) return;
-    if (images?.length || !agentRunningRef.current) {
+    if (images?.length || !getRuntimeAgentRunning()) {
       // 有图或空闲：直接 prompt（空闲时无“结束后投递”语义）
       notifyAutoFollowSend();
       const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
@@ -2134,7 +2130,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 先让 Host 停止 settled 自动投递，再发送合并消息，避免当前 run 恰好结束时双发。
       await updateLocalFollowUp([]);
       queueCleared = true;
-      if (agentRunningRef.current) {
+      if (getRuntimeAgentRunning()) {
         try {
           // 运行中：steer（打断当前思考，立即引导）
           await sendAgentCommand(sid, { type: "steer", message: merged });
@@ -2187,7 +2183,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    */
   const dispatchWorkspaceHistoryPrompt = useCallback(async (message: string) => {
     if (isReadOnly) return;
-    if (agentRunningRef.current || bashRunningRef.current || branchBusyRef.current) return;
+    if (getRuntimeAgentRunning() || bashRunningRef.current || branchBusyRef.current) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
     try {
@@ -2289,7 +2285,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setHasMoreBefore(false);
     dispatch({ type: "reset" });
     setAgentRunning(false);
-    agentRunningRef.current = false;
     setBashRunning(false);
     bashRunningRef.current = false;
     setPendingBash(null);
@@ -2317,7 +2312,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setEntryIds(snap.entryIds);
         entryIdsRef.current = snap.entryIds;
         setAgentRunning(snap.agentRunning);
-        agentRunningRef.current = snap.agentRunning;
         if (snap.streamState.isStreaming) {
           dispatch({
             type: "update",
@@ -2339,7 +2333,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (agentState?.running || agentState?.live) {
             loadTools(session.id);
             if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
-              agentRunningRef.current = true;
               setAgentRunning(true);
               setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
               dispatch({ type: "start" });
