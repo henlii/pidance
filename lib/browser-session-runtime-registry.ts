@@ -304,8 +304,16 @@ export function createBrowserSessionRuntimeRegistry(
       submission.error = error;
     }
     slot.snapshot.sendInFlight = slot.inFlight.size > 0;
-    if (slot.inFlight.size === 0 && !slot.snapshot.agentRunning) {
+    // 当前 promise 在 settle 时仍位于 inFlight；size<=1 表示没有其它提交。
+    // rejected/unknown 不是正在执行的 Agent run，必须结束本次乐观 running，
+    // 否则失败恢复 draft 后会把会话永久留在 Stop/禁止再次发送状态。
+    if (
+      slot.inFlight.size <= 1
+      && (status === "rejected" || status === "unknown")
+    ) {
       slot.snapshot.agentRunning = false;
+      slot.snapshot.completedRunId = slot.snapshot.promptRunId;
+      slot.snapshot.streamState = emptyStream();
     }
   };
 
