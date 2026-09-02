@@ -2,16 +2,17 @@
 
 import { useCallback, useEffect, useReducer, useState } from "react";
 import { noticeReducer, type NoticeType } from "@/lib/notice-reducer";
+import { getNoticeQueueStore } from "@/lib/notice-queue-store";
 import type { SessionActivity } from "@/lib/session-activity";
 
 /**
- * notice/activity 展示状态所有权（从 hooks/useAgentSession.ts 抽出，#17 D5c）。
+ * notice/activity 展示状态所有权（#17 D5c + #23 每会话队列）。
  *
- * - notices：noticeReducer 的 visible 投影；transient 自动退出 / 退出动画由本 hook 的
- *   effect 驱动，重要消息常驻直到 dismiss。
- * - liveNoticeActivities：notify 持久活动的页内增量覆盖层，避免为了刷新一条 activity
- *   全量 loadSession，与运行中的 message_end / 流式 SSE 竞争并用磁盘旧快照覆盖较新消息。
- *   写入统一经 addLiveActivity（requestId 去重）与 clearLiveActivities（会话切换清空）。
+ * - notices：改由「每会话通知队列」驱动——通知归属指定会话（sessionId），
+ *   独立内存队列、不跟随会话生命周期；当前加载哪个会话就展示哪个会话的
+ *   可见投影（同时最多 3 条普通 + 3 条高级，普通自动过期、高级常驻）。
+ * - mainReducer 投影仍保留（历史活动合并/退出动画），双轨以 store 为主。
+ * - liveNoticeActivities：notify 持久活动的页内增量覆盖层（与之前一致）。
  */
 
 export type LiveNoticeActivity = {
@@ -20,7 +21,6 @@ export type LiveNoticeActivity = {
 };
 
 const NOTICE_VISIBLE_MS = 5000;
-const NOTICE_EXIT_ANIMATION_MS = 180;
 
 function createNoticeId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -29,29 +29,36 @@ function createNoticeId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-export function useNoticeState() {
-  const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
-  // notify 持久活动的页内增量覆盖层：避免为了刷新一条 activity 全量 loadSession，
-  // 与运行中的 message_end / 流式 SSE 竞争并用磁盘旧快照覆盖较新消息。
+export function useNoticeState(sessionId?: string | null) {
+  const store = getNoticeQueueStore();
+  const activeSessionId = sessionId ?? null;
+  const [, forceUpdate] = useReducer((x: number) => x + 1, 0);
+  // legacy reducer 保留：visible 投影由 store 提供后，此 reducer 只承载退出动画
+  // 与活动历史的「历史合并」；实际消费的 notices 来自 store 的 getVisible()。
+  const [, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
   const [liveNoticeActivities, setLiveNoticeActivities] = useState<LiveNoticeActivity[]>([]);
+
+  // 订阅 store：任何入队/激活/关闭都触发本 hook 重渲。
+  useEffect(() => {
+    return store.subscribe(() => forceUpdate());
+  }, [store]);
+
+  // 活跃会话变化：激活对应队列（其可见投影立即切换）。
+  useEffect(() => {
+    store.activate(activeSessionId);
+  }, [store, activeSessionId]);
 
   const addNotice = useCallback((notice: { id?: string; message: string; type?: NoticeType; activityRecord?: boolean }) => {
     const message = notice.message.trim();
     if (!message) return;
-    const type = notice.type ?? "info";
-    const important = type === "warning" || type === "error";
-    dispatchNotice({
-      type: "add",
-      notice: {
-        id: notice.id ?? createNoticeId(),
-        message,
-        type,
-        tier: important ? "important" : "transient",
-        pinned: false,
-        activityRecord: notice.activityRecord === true,
-      },
+    store.enqueue({
+      sessionId: activeSessionId,
+      id: notice.id ?? createNoticeId(),
+      message,
+      type: notice.type ?? "info",
+      activityRecord: notice.activityRecord === true,
     });
-  }, []);
+  }, [store, activeSessionId]);
 
   /** 并入页内活动投影：requestId 去重（与磁盘快照带回后自动去重语义一致）。 */
   const addLiveActivity = useCallback((activity: SessionActivity) => {
@@ -68,34 +75,26 @@ export function useNoticeState() {
   }, []);
 
   const dismissNotice = useCallback((id: string) => {
-    dispatchNotice({ type: "dismiss", id });
-  }, []);
+    store.dismiss(id);
+  }, [store]);
 
   const toggleNoticePin = useCallback((id: string) => {
-    dispatchNotice({ type: "toggle_pin", id });
-  }, []);
+    store.togglePin(id);
+  }, [store]);
 
-  // transient 自动退出与退出动画：优先处理 exiting 项（动画结束后 remove，腾出空位
-  // 让 pending 回填）；否则最旧未 exiting 的 transient 达到可见时长后标记 exiting。
+  // 普通消息自动过期：可见 transient 满 5s 后从队列移除（FIFO 补位）。
   useEffect(() => {
-    if (noticeState.visible.length === 0) return;
-    const exiting = noticeState.visible.find((notice) => notice.exiting);
-    if (exiting) {
-      const t = setTimeout(() => {
-        dispatchNotice({ type: "remove", id: exiting.id });
-      }, NOTICE_EXIT_ANIMATION_MS);
-      return () => clearTimeout(t);
-    }
-    const oldest = noticeState.visible.find((notice) => notice.tier === "transient" && !notice.exiting);
-    if (!oldest) return;
+    const visible = store.getVisible();
+    const oldestTransient = visible.find((notice) => notice.tier === "transient");
+    if (!oldestTransient) return;
     const t = setTimeout(() => {
-      dispatchNotice({ type: "mark_oldest_transient_exiting" });
+      store.expireTransient(oldestTransient.id);
     }, NOTICE_VISIBLE_MS);
     return () => clearTimeout(t);
-  }, [noticeState.visible]);
+  }, [store, activeSessionId, store.getVisible().length]);
 
   return {
-    notices: noticeState.visible,
+    notices: store.getVisible(),
     liveNoticeActivities,
     addNotice,
     addLiveActivity,

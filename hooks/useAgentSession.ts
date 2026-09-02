@@ -355,9 +355,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [toolExecutionSnapshots, setToolExecutionSnapshots] = useState<ToolExecutionSnapshot[]>([]);
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
   const [slashCommandsLoading, setSlashCommandsLoading] = useState(false);
-  // notice/activity 展示状态所有权（#17 D5c）：reducer、addNotice、退出动画与
-  // liveNoticeActivities 写入已抽至 useNoticeState，此处仅解构消费。
-  const { notices, liveNoticeActivities, addNotice, addLiveActivity, clearLiveActivities, dismissNotice, toggleNoticePin } = useNoticeState();
+  // notice/activity 展示状态所有权（#17 D5c + #23 每会话队列）：
+  // 通知按 sessionId 入队，当前加载的会话展示其 FIFO 投影（3 普通 + 3 高级）。
+  const { notices, liveNoticeActivities, addNotice, addLiveActivity, clearLiveActivities, dismissNotice, toggleNoticePin } = useNoticeState(session?.id ?? null);
   const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
   // extension UI 展示状态（#17 D5c）：5 state + ref + 3 更新回调已抽至 useExtensionUiState。
   const {
