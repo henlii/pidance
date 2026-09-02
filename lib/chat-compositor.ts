@@ -99,10 +99,12 @@ function messageItem(messages: AgentMessage[], idx: number, isStreaming: boolean
 
 export function composeChatPlan(input: ChatCompositorInput): ChatRenderPlanItem[] {
   const { messages, isStreaming, agentOrBashRunning, liveSlot } = input;
-  const lastUserIdx = messages.findLastIndex((message) => message.role === "user");
+  const liveActive = Boolean(liveSlot?.isActive && liveSlot.message);
+  const liveUserStart = trailingLiveUserStart(messages, liveActive);
+  const lastUserIdx = messages.slice(0, liveUserStart).findLastIndex((message) => message.role === "user");
   const plan: ChatRenderPlanItem[] = [];
 
-  for (let idx = 0; idx < messages.length;) {
+  for (let idx = 0; idx < liveUserStart;) {
     if (messages[idx].role !== "user") {
       plan.push(messageItem(messages, idx, isStreaming));
       idx++;
@@ -157,8 +159,7 @@ export function composeChatPlan(input: ChatCompositorInput): ChatRenderPlanItem[
     for (let renderIdx = finalAssistantIdx + 1; renderIdx < endIdx; renderIdx++) plan.push(messageItem(messages, renderIdx, isStreaming));
     idx = endIdx;
   }
-  // live streaming slot：作为计划末尾的独立 message item——不进入 process group /
-  // final answer split（与现有独立渲染等价，live assistant 就是整条消息）；
+  // live streaming slot：本轮思考/工具先于末尾的引导 user 气泡出现。
   // timestamp 语义与当前 live tail 一致（不重复推导，显式隐藏）。
   if (liveSlot?.isActive && liveSlot.message) {
     plan.push({
@@ -171,15 +172,45 @@ export function composeChatPlan(input: ChatCompositorInput): ChatRenderPlanItem[
       showTimestamp: false,
     });
   }
+  // trailing user（引导乐观气泡）：按原 index 单独渲染，不进入 process group。
+  for (let idx = liveUserStart; idx < messages.length; idx++) {
+    plan.push(messageItem(messages, idx, isStreaming));
+  }
   return plan;
 }
 
 /**
- * 从渲染计划中提取 live 消息投影（composeChatPlan 保证至多一个且位于计划末尾）。
+ * live 激活时末尾可后置到 live 之后的连续 user 气泡起点。
+ * 从末尾剥连续 role==="user"：仅当该条是引导乐观（_steerOptimistic）
+ * 或前一条也是 user（连续引导）；前一条是 assistant 的新 prompt 不剥——
+ * 那是新回合用户消息，应在 live 之前。live 未激活返回 messages.length。
+ */
+export function trailingLiveUserStart(
+  messages: readonly AgentMessage[],
+  liveActive: boolean,
+): number {
+  if (!liveActive) return messages.length;
+  let split = messages.length;
+  while (split > 0) {
+    const message = messages[split - 1];
+    if (message?.role !== "user") break;
+    const isSteerOptimistic = (message as { _steerOptimistic?: boolean })._steerOptimistic === true;
+    const prevIsUser = split - 2 >= 0 && messages[split - 2]?.role === "user";
+    if (!isSteerOptimistic && !prevIsUser) break;
+    split--;
+  }
+  return split;
+}
+
+/**
+ * 从渲染计划中提取 live 消息投影。live 通常在计划末尾，但 trailing user（引导
+ * 乐观气泡）会被后置到 live 之后——因此按计划位置查找，不假定一定是最后一项。
  * ChatMinimap 等消费同一计划时用此函数获取 live 消息，消除第二套 live 拼接。
  */
 export function getChatPlanLiveMessage(plan: ChatRenderPlanItem[]): Partial<AgentMessage> | null {
-  const tail = plan[plan.length - 1];
-  if (tail?.kind === "message" && tail.source === "live") return tail.messageOverride ?? null;
+  for (let idx = plan.length - 1; idx >= 0; idx--) {
+    const item = plan[idx];
+    if (item?.kind === "message" && item.source === "live") return item.messageOverride ?? null;
+  }
   return null;
 }

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback, useMemo, RefObject } from "react";
 import type { AgentMessage, AssistantMessage, TextContent } from "@/lib/types";
-import { getChatPlanLiveMessage, type ChatRenderPlanItem } from "@/lib/chat-compositor";
+import { getChatPlanLiveMessage, trailingLiveUserStart, type ChatRenderPlanItem } from "@/lib/chat-compositor";
 
 interface Props {
   messages: AgentMessage[];
@@ -76,11 +76,18 @@ export function ChatMinimap({ messages, plan, scrollContainer, messageRefs }: Pr
   const draggingRef = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // P3b：live 来自统一渲染计划（ChatWindow 传入），与磁盘消息同序拼接在末尾；
-  // 不再自行拼接 streamState.streamingMessage（第二套 live 逻辑已消除）。
+  // P3b：live 来自统一渲染计划（ChatWindow 传入），与磁盘消息同序；
+  // trailing user（引导乐观气泡）按 compositor 计划后置到 live 之后，
+  // 不得在此自行 messages.concat(live) 造成第二套顺序。
   const allMessages = useMemo(() => {
     const live = getChatPlanLiveMessage(plan);
-    return (live ? [...messages, live] : messages) as (AgentMessage | Partial<AgentMessage>)[];
+    const split = trailingLiveUserStart(messages, live != null);
+    const next = [
+      ...messages.slice(0, split),
+      ...(live ? [live] : []),
+      ...messages.slice(split),
+    ];
+    return next as (AgentMessage | Partial<AgentMessage>)[];
   }, [plan, messages]);
   const allMessagesRef = useRef(allMessages);
   allMessagesRef.current = allMessages;

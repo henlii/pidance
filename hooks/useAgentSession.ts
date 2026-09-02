@@ -1482,7 +1482,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         : message,
       timestamp: Date.now(),
     };
-    setMessages((prev) => [...prev, userMsg]);
+    // 乐观气泡只来自 registry.submitPrompt 的 slot append + subscribe；
+    // 本 hook 不再复制一份 user 消息（否则 UI 双条、磁盘一条）。
+    // userMsg 仅用于 rejected 回滚的乐观 key 匹配。
     optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
     promptSubmittedRef.current = false;
     abortRequestedRef.current = false;
@@ -1968,7 +1970,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     // 引导/队列投递后回到 following 并钉底（消息会直接出现在会话中）。
     notifyAutoFollowSend();
-    // 乐观显示：引导消息立即出现在会话中（不等当前命令执行完投递）。
+    // 乐观显示：引导消息立即写入 timeline（不等当前命令执行完投递）；
+    // 视觉顺序由 compositor 投影——先本轮思考/工具，再引导气泡。
     // 仅前端显示，agent 运行逻辑不变（steer RPC 照常入 Pi 队列）；
     // Pi 实际投递时按 key 删除本地乐观，避免双条。
     const optimistic: SteerOptimisticMessage = {
@@ -1987,10 +1990,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ...(piImages?.length ? { images: piImages } : {}),
       });
     } catch (e) {
-      // 失败回滚乐观消息
+      // 失败回滚乐观消息；hydrate 带 slot 序号，避免旧列表盖掉较新 live。
       setMessages((prev) => {
         const next = prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === optimisticKey));
-        getOrCreateBrowserSessionRuntimeRegistry().hydrate(sid, next, entryIdsRef.current);
+        const registry = getOrCreateBrowserSessionRuntimeRegistry();
+        registry.hydrate(sid, next, entryIdsRef.current, {
+          sinceSeq: registry.getSnapshot(sid)?.timelineSeq ?? 0,
+          hydrateRequestSeq: registry.beginHydrate(sid),
+        });
         return next;
       });
       console.error("Failed to steer:", e);
@@ -2116,7 +2123,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const merged = mergeFollowUpForSteer(originalQueue, extraMessage);
     if (!merged) return;
     notifyAutoFollowSend();
-    // 乐观显示：合并后的引导消息立即出现在会话中（投递时按 key 去重）。
+    // 乐观显示：合并后的引导消息立即写入 timeline；视觉顺序由 compositor
+    // 投影（本轮思考/工具之后）。投递时按 key 去重。
     const optimistic: SteerOptimisticMessage = {
       role: "user",
       content: merged,
@@ -2152,10 +2160,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       }
       if (extraMessage?.trim()) opts.chatInputRef?.current?.prependText(extraMessage.trim());
-      // 失败回滚乐观消息
+      // 失败回滚乐观消息；hydrate 带 slot 序号，避免旧列表盖掉较新 live。
       setMessages((prev) => {
         const next = prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === optimisticKey));
-        getOrCreateBrowserSessionRuntimeRegistry().hydrate(sid, next, entryIdsRef.current);
+        const registry = getOrCreateBrowserSessionRuntimeRegistry();
+        registry.hydrate(sid, next, entryIdsRef.current, {
+          sinceSeq: registry.getSnapshot(sid)?.timelineSeq ?? 0,
+          hydrateRequestSeq: registry.beginHydrate(sid),
+        });
         return next;
       });
       console.error("Failed to send queue as steer:", e);
