@@ -78,6 +78,8 @@ export type EventStreamManager = {
   ): Promise<void>;
   close(): void;
   getCurrentSource(): EventSourceLike | null;
+  /** 是否为当前存活连接（切换/关闭后旧 source 不再生效）。 */
+  isCurrent(sessionId: string): boolean;
 };
 
 export function createEventStreamManager(options: EventStreamManagerOptions = {}): EventStreamManager {
@@ -93,6 +95,7 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
   const cancelFrame = options.cancelFrame ?? defaultCancelFrame;
 
   let current: EventSourceLike | null = null;
+  let connectedSessionId: string | null = null;
   let reconnectTimer: TimerHandle = null;
   let cancelPendingDelivery: (() => void) | null = null;
 
@@ -111,6 +114,7 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
       current.close();
       current = null;
     }
+    connectedSessionId = null;
   };
 
   const connect = (
@@ -127,6 +131,7 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
 
     const source = createEventSource(getEventsUrl(sessionId));
     current = source;
+    connectedSessionId = sessionId;
     let pendingMessageUpdate: AgentStreamEvent | null = null;
     let frameId: TimerHandle = null;
 
@@ -224,6 +229,11 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
     close,
     getCurrentSource() {
       return current;
+    },
+    isCurrent(sessionId) {
+      if (current === null || connectedSessionId !== sessionId) return false;
+      // CLOSED（浏览器长待机后的致命断开）视为不再有效，切回需重连。
+      return current.readyState !== CLOSED;
     },
   };
 }

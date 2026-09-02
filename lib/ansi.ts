@@ -85,11 +85,13 @@ function trimEndVisibleSpaces(text: string): string {
   }
 }
 
-export function normalizeCustomPanelLines(lines: string[]): string[] {
+export function normalizeCustomPanelLines(lines: unknown): string[] {
+  if (!Array.isArray(lines)) return [];
+  const stringLines = lines.filter((line): line is string => typeof line === "string");
   const horizontalFrameLine = /^[┌├└╭╰][─┬┴┼]+[┐┤┘╮╯]$/;
   const normalized: string[] = [];
 
-  for (const rawLine of lines) {
+  for (const rawLine of stringLines) {
     const lineWithoutCursor = rawLine.replace(TUI_CURSOR_MARKER_RE, "");
     const plain = stripAnsi(lineWithoutCursor).trimEnd();
     if (horizontalFrameLine.test(plain)) continue;
@@ -112,7 +114,7 @@ export function normalizeCustomPanelLines(lines: string[]): string[] {
 
   while (normalized.length > 0 && stripAnsi(normalized[0]).trim() === "") normalized.shift();
   while (normalized.length > 0 && stripAnsi(normalized[normalized.length - 1]).trim() === "") normalized.pop();
-  return normalized.length ? normalized : lines;
+  return normalized.length ? normalized : stringLines;
 }
 
 export function ansi256Color(index: number): string | undefined {

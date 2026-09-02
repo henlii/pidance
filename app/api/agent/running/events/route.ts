@@ -19,6 +19,7 @@ export async function GET(req: Request) {
         encode({
           type: "running",
           runningSessionIds: ids,
+          runningStartedAt: sessionService.getRunningStartedAt(),
           pendingExtensionUi: sessionService.listPendingExtensionUi(),
         });
       };

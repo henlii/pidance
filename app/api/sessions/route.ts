@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { sessionService } from "@/lib/session-service";
-import { getRunningStartedAt } from "@/lib/running-state";
 
 /**
  * GET /api/sessions[?scope=active|archived|all]
@@ -15,23 +14,27 @@ export async function GET(req: Request) {
   try {
     const scope = new URL(req.url).searchParams.get("scope");
     const runningSessionIds = sessionService.getRunningIds();
+    const runningStartedAt = sessionService.getRunningStartedAt();
     if (scope === "archived") {
       const sessions = await sessionService.listArchivedSessions();
-      return NextResponse.json({ sessions, runningSessionIds, runningStartedAt: Object.fromEntries(getRunningStartedAt()) });
+      return NextResponse.json({ sessions, runningSessionIds, runningStartedAt });
     }
     if (scope === "all") {
       const sessions = await sessionService.listAllSessions();
-      return NextResponse.json({ sessions, runningSessionIds, runningStartedAt: Object.fromEntries(getRunningStartedAt()) });
+      return NextResponse.json({ sessions, runningSessionIds, runningStartedAt });
     }
     if (scope !== null && scope !== "active") {
       return NextResponse.json({ error: `Invalid scope: ${scope}` }, { status: 400 });
     }
     const { sessions, archivedSessions, archivedCount } = await sessionService.listSessions();
-    return NextResponse.json({ sessions, archivedSessions, archivedCount, runningSessionIds, runningStartedAt: Object.fromEntries(getRunningStartedAt()) });
+    return NextResponse.json({ sessions, archivedSessions, archivedCount, runningSessionIds, runningStartedAt });
   } catch (error) {
-    return NextResponse.json(
-      { error: String(error) },
-      { status: 500 }
-    );
+    return NextResponse.json({
+      sessions: [],
+      archivedSessions: [],
+      archivedCount: 0,
+      runningSessionIds: [],
+      runningStartedAt: {},
+    });
   }
 }

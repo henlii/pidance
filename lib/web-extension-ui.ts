@@ -21,6 +21,11 @@ export type PendingExtensionRequest = {
   reject: (error: Error) => void;
 };
 
+type CustomUiSession = {
+  handleInput: (data: string) => void;
+  done: (result?: unknown) => void;
+};
+
 export type WebExtensionUIAdapter = {
   uiContext: ExtensionUIContext;
   pending: Map<string, PendingExtensionRequest>;
@@ -29,6 +34,7 @@ export type WebExtensionUIAdapter = {
   widgets: Map<string, unknown>;
   pendingSnapshot: Map<string, Record<string, unknown>>;
   respond: (id: string, response: Record<string, unknown>) => boolean;
+  inputCustom: (id: string, data: string) => boolean;
   dispose: () => void;
 };
 
@@ -105,6 +111,7 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
   const pendingSnapshot = new Map<string, Record<string, unknown>>();
   const statuses = new Map<string, string>();
   const widgets = new Map<string, unknown>();
+  const customSessions = new Map<string, CustomUiSession>();
 
   const uiContext: ExtensionUIContext = {
     select: (title, options, opts) =>
@@ -218,35 +225,72 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       });
     },
     async custom(factory) {
-      // headless custom：提供最小 TUI 壳；多数扩展会因无真实终端降级
+      // headless custom：调用 Component.render(width) 得到 ANSI 行，再投影到 Web 面板。
+      // /btw 等 overlay 扩展依赖 theme.fg/bg 与 requestRender；缺 lines 会让 React 崩页面。
       const id = randomUUID();
+      const columns = DEFAULT_CUSTOM_UI_COLUMNS;
+      const rows = DEFAULT_CUSTOM_UI_ROWS;
       return new Promise((resolve) => {
         let doneCalled = false;
+        let component: { render?: (width: number) => unknown; handleInput?: (data: string) => void } | undefined;
         const done = (result: unknown) => {
           if (doneCalled) return;
           doneCalled = true;
+          customSessions.delete(id);
           emit({
             type: "extension_ui_request",
             id,
-            method: "custom_close",
+            method: "custom",
+            closed: true,
+            lines: [],
           });
           resolve(result as never);
         };
-        const tui = createHeadlessCustomUiTui(() => {
+        const emitLines = () => {
+          if (doneCalled) return;
+          let lines: string[] = [];
+          try {
+            const rendered = component?.render?.(columns);
+            if (Array.isArray(rendered)) {
+              lines = rendered.filter((line): line is string => typeof line === "string");
+            }
+          } catch (error) {
+            console.error("[pidance] custom UI render failed:", error);
+          }
           emit({
             type: "extension_ui_request",
             id,
-            method: "custom_render",
+            method: "custom",
+            lines,
           });
-        }, DEFAULT_CUSTOM_UI_COLUMNS, DEFAULT_CUSTOM_UI_ROWS);
-        void Promise.resolve(factory(tui as never, {} as never, {} as never, done)).catch(() => {
-          done(undefined);
-        });
-        emit({
-          type: "extension_ui_request",
-          id,
-          method: "custom",
-        });
+        };
+        const handleInput = (data: string) => {
+          if (data === "\x03") {
+            done(undefined);
+            return;
+          }
+          try {
+            component?.handleInput?.(data);
+          } catch (error) {
+            console.error("[pidance] custom UI input failed:", error);
+          }
+        };
+        customSessions.set(id, { handleInput, done });
+        const tui = createHeadlessCustomUiTui(() => {
+          emitLines();
+        }, columns, rows);
+        const theme = loadPiTheme() ?? uiContext.theme;
+        void Promise.resolve()
+          .then(() => factory(tui as never, theme as never, {} as never, done))
+          .then((created) => {
+            if (doneCalled) return;
+            component = created as typeof component;
+            emitLines();
+          })
+          .catch((error) => {
+            console.error("[pidance] custom UI factory failed:", error);
+            done(undefined);
+          });
       });
     },
     pasteToEditor(text) {
@@ -328,12 +372,22 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       entry.resolve(response);
       return true;
     },
+    inputCustom(id, data) {
+      const session = customSessions.get(id);
+      if (!session) return false;
+      session.handleInput(data);
+      return true;
+    },
     dispose() {
       for (const [id, entry] of pending) {
         pending.delete(id);
         pendingSnapshot.delete(id);
         entry.reject(new Error("Extension UI disposed"));
       }
+      for (const session of customSessions.values()) {
+        session.done(undefined);
+      }
+      customSessions.clear();
       statuses.clear();
       widgets.clear();
     },

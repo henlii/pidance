@@ -1,4 +1,4 @@
-import { closeSync, openSync, readSync, statSync } from "fs";
+import { closeSync, existsSync, openSync, readSync, statSync } from "fs";
 import { normalize as normalizePath } from "path";
 import type { AgentMessage, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
 import { PIDANCE_COMMAND_CUSTOM_TYPE, parseCommandEntryData } from "./session-command-entry";
@@ -327,11 +327,19 @@ function getPathToIdCache(): Map<string, string> {
 
 export async function resolveSessionPath(sessionId: string): Promise<string | null> {
   const cached = getPathCache().get(sessionId);
-  if (cached) return cached;
+  if (cached) {
+    if (existsSync(cached)) return cached;
+    invalidateSessionPathCache(sessionId);
+  }
 
-  // Cache miss: scan all sessions to populate cache, then retry
+  // Cache miss or stale path: scan all sessions to populate cache, then retry
   await listAllSessions();
-  return getPathCache().get(sessionId) ?? null;
+  const resolved = getPathCache().get(sessionId) ?? null;
+  if (resolved && !existsSync(resolved)) {
+    invalidateSessionPathCache(sessionId);
+    return null;
+  }
+  return resolved;
 }
 
 export async function resolveSessionIdByPath(filePath: string): Promise<string | undefined> {

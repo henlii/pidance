@@ -49,6 +49,7 @@ import {
   applyPassThroughExtendedThinkingInPlace,
   withPassThroughExtendedThinking,
 } from "./thinking-levels";
+import { parsePromptCommand, type PromptReceipt } from "./agent-commands";
 import {
   loadPiTheme,
   renderCustomMessageLines,
@@ -157,6 +158,12 @@ export class SdkSessionHost {
     steering: [],
     followUp: [],
   };
+  /** Live-host prompt receipts; same submissionId does not call Pi twice. */
+  private promptReceipts = new Map<string, PromptReceipt>();
+  /** submissionId → in-flight prompt promise（单飞；结算后删除） */
+  private promptInFlight = new Map<string, Promise<PromptReceipt>>();
+  /** 共享 destroy 完成信号：destroyAsync 并发重入时 await 同一 dispose */
+  private destroyPromise: Promise<void> | null = null;
   private hasQueueSnapshot = false;
   private realSessionId: string;
   private realSessionFile: string;
@@ -1003,6 +1010,12 @@ export class SdkSessionHost {
 
     switch (type) {
       case "prompt": {
+        const parsed = parsePromptCommand(command);
+        const cached = this.promptReceipts.get(parsed.submissionId);
+        if (cached) return cached;
+        const key = parsed.submissionId;
+        const inFlight = this.promptInFlight.get(key);
+        if (inFlight) return inFlight;
         if (this.bashRunning) {
           throw new Error("Cannot send a prompt while a shell command is running");
         }
@@ -1013,7 +1026,8 @@ export class SdkSessionHost {
         this.lastStopReason = null;
         recordRunningStartedAt(this.realSessionId, Date.now());
         this.notifyRunning();
-        try {
+        const flight = (async (): Promise<PromptReceipt> => {
+          try {
           await new Promise<void>((resolve, reject) => {
             let settled = false;
             const clearIdlePrompt = () => {
@@ -1031,8 +1045,8 @@ export class SdkSessionHost {
               this.emit({ type: "prompt_done" });
             };
             void session
-              .prompt(String(command.message ?? ""), {
-                images: command.images as never,
+              .prompt(parsed.message, {
+                images: (parsed.images ?? command.images) as never,
                 streamingBehavior: command.streamingBehavior as never,
                 source: "rpc",
                 preflightResult: (ok) => {
@@ -1073,8 +1087,14 @@ export class SdkSessionHost {
                 }
               });
           });
-          return null;
-        } catch (error) {
+          const receipt: PromptReceipt = {
+            submissionId: parsed.submissionId,
+            sessionId: this.realSessionId,
+            status: "accepted",
+          };
+          this.promptReceipts.set(key, receipt);
+          return receipt;
+          } catch (error) {
           this.promptRunning = false;
           this.lastStopReason = this.lastStopReason === "aborted" ? "aborted" : "error";
           this.setFollowUpHeld(true);
@@ -1083,8 +1103,19 @@ export class SdkSessionHost {
           const errorMessage = error instanceof Error ? error.message : String(error);
           this.emit({ type: "prompt_error", errorMessage });
           this.emit({ type: "prompt_done" });
+          const receipt: PromptReceipt = {
+            submissionId: parsed.submissionId,
+            sessionId: this.realSessionId,
+            status: "rejected",
+          };
+          this.promptReceipts.set(key, receipt);
           throw error;
-        }
+          } finally {
+            this.promptInFlight.delete(key);
+          }
+        })();
+        this.promptInFlight.set(key, flight);
+        return flight;
       }
 
       case "abort": {
@@ -1276,7 +1307,9 @@ export class SdkSessionHost {
       }
 
       case "extension_ui_input": {
-        // 0.83 SDK 无 progressive input；与 RPC 一致降级
+        const id = asString(command.id);
+        const data = typeof command.data === "string" ? command.data : "";
+        if (id) this.extensionUi?.inputCustom(id, data);
         return null;
       }
 
@@ -1407,35 +1440,40 @@ export class SdkSessionHost {
   }
 
   async destroyAsync(): Promise<void> {
+    // 单飞：并发重入（Service 多条离线写路径 / idle 定时器）共享同一 dispose。
+    if (this.destroyPromise) return this.destroyPromise;
     if (!this._alive && !this.runtime) return;
     this._alive = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
-    this.unsubscribe?.();
-    this.unsubscribe = null;
-    this.extensionUi?.dispose();
-    this.extensionUi = null;
-    const runtime = this.runtime;
-    this.runtime = null;
-    if (runtime) {
-      try {
-        await runtime.dispose();
-      } catch (err) {
-        console.error("[pidance] sdk runtime dispose error:", err);
+    this.destroyPromise = (async () => {
+      this.unsubscribe?.();
+      this.unsubscribe = null;
+      this.extensionUi?.dispose();
+      this.extensionUi = null;
+      const runtime = this.runtime;
+      this.runtime = null;
+      if (runtime) {
+        try {
+          await runtime.dispose();
+        } catch (err) {
+          console.error("[pidance] sdk runtime dispose error:", err);
+        }
       }
-    }
-    this.promptRunning = false;
-    this.bashRunning = false;
-    this.bashCommand = null;
-    this.flushingFollowUp = false;
-    this.followUpFlushBatch = [];
-    this.followUpFlushCursor = 0;
-    this.followUpFlushConfirmed = false;
-    this.followUpFlushAsOne = false;
-    this.followUpFlushOriginal = [];
-    clearRunningStartedAt(this.realSessionId);
-    this.onDestroyCallback?.();
-    this.notifyRunning();
+      this.promptRunning = false;
+      this.bashRunning = false;
+      this.bashCommand = null;
+      this.flushingFollowUp = false;
+      this.followUpFlushBatch = [];
+      this.followUpFlushCursor = 0;
+      this.followUpFlushConfirmed = false;
+      this.followUpFlushAsOne = false;
+      this.followUpFlushOriginal = [];
+      clearRunningStartedAt(this.realSessionId);
+      this.onDestroyCallback?.();
+      this.notifyRunning();
+    })();
+    return this.destroyPromise;
   }
 }
 

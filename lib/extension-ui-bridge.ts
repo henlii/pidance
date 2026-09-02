@@ -157,6 +157,13 @@ export function applyExtensionUiRequest(
           ? { state: { ...state, customUi: null }, effects: [] }
           : { state, effects: [] };
       }
-      return { state: { ...state, customUi: request }, effects: [] };
+      {
+        const lines = Array.isArray(request.lines)
+          ? request.lines.filter((line): line is string => typeof line === "string")
+          : [];
+        return { state: { ...state, customUi: { ...request, lines } }, effects: [] };
+      }
+    default:
+      return { state, effects: [] };
   }
 }

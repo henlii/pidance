@@ -732,6 +732,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     // 失败路径由 useAgentSession 经 insertIfEmpty 恢复（此处覆盖同步 false 返回）。
     // 有附件时不乐观清空：发送失败恢复图片成本高，保持确认后清空。
     const hasAttachment = attachedImages.length > 0 || hasReadyUploads;
+    const capturedDraftKey = draftKeyRef.current;
     if (!hasAttachment) clearInput();
     if (!attachedImages.length && !hasReadyUploads && base.startsWith("/") && onBuiltinCommand) {
       const result = await onBuiltinCommand(base);
@@ -743,8 +744,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const msg = composeMessageWithUploads(base);
     const submitted = await onSend(msg, attachedImages.length ? attachedImages : undefined);
     if (submitted === false) {
-      // 发送被拒（branchBusy / 新会话失败等）：恢复草稿（仅纯文本可恢复）
-      if (!hasAttachment) insertIfEmptyLocal(base);
+      // 按发送时 draftKey 恢复，避免切到会话 B 后写进 B 的输入框。
+      if (!hasAttachment && capturedDraftKey) {
+        setDraft(capturedDraftKey, { value: base, images: [] });
+        if (draftKeyRef.current === capturedDraftKey) insertIfEmptyLocal(base);
+      } else if (!hasAttachment) {
+        insertIfEmptyLocal(base);
+      }
       return;
     }
     if (hasAttachment) clearInput();

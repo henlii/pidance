@@ -91,7 +91,8 @@ export interface UseSessionCommandsOptions {
   isReadOnly: boolean;
   /** 分支写入口是否可用（capabilities.canSendSessionCommands）。 */
   canWrite: boolean;
-  agentRunningRef: RefObject<boolean>;
+  /** 从 per-session BrowserSessionRuntimeRegistry 读取运行态。 */
+  getAgentRunning: () => boolean;
   bashRunningRef: RefObject<boolean>;
   /** 分支切换进行中门禁：ref 与 state 必须同源，二者同时写（见调用方）。 */
   branchBusyRef: RefObject<boolean>;
@@ -127,7 +128,7 @@ export function useSessionCommands(options: UseSessionCommandsOptions) {
     sessionIdRef,
     isReadOnly,
     canWrite,
-    agentRunningRef,
+    getAgentRunning,
     bashRunningRef,
     branchBusyRef,
     branchBusy,
@@ -201,7 +202,7 @@ export function useSessionCommands(options: UseSessionCommandsOptions) {
   const handleBranchHere = useCallback(async (entryId: string, text?: string) => {
     const gate = gateBranchAction({
       readOnly: isReadOnly,
-      busy: agentRunningRef.current || bashRunningRef.current || branchBusyRef.current,
+      busy: getAgentRunning() || bashRunningRef.current || branchBusyRef.current,
     });
     if (!gate.allowed) return;
     const sid = sessionIdRef.current;
@@ -233,7 +234,7 @@ export function useSessionCommands(options: UseSessionCommandsOptions) {
       branchBusyRef.current = false;
       setBranchBusy(false);
     }
-  }, [addNotice, isReadOnly, agentRunningRef, bashRunningRef, branchBusyRef, sessionIdRef, setBranchBusy, sendAgentCommand, chatInputRef, loadSession]);
+  }, [addNotice, isReadOnly, getAgentRunning, bashRunningRef, branchBusyRef, sessionIdRef, setBranchBusy, sendAgentCommand, chatInputRef, loadSession]);
 
   /**
    * Assistant「基于此回答分支」（选项 B）：服务端计算 turnEnd（至下一条 user 前最后 entry），
@@ -243,7 +244,7 @@ export function useSessionCommands(options: UseSessionCommandsOptions) {
   const handleBranchFromAssistant = useCallback(async (entryId: string) => {
     const gate = gateBranchAction({
       readOnly: isReadOnly,
-      busy: agentRunningRef.current || bashRunningRef.current || branchBusyRef.current,
+      busy: getAgentRunning() || bashRunningRef.current || branchBusyRef.current,
     });
     if (!gate.allowed) return;
     const sid = sessionIdRef.current;
@@ -264,7 +265,7 @@ export function useSessionCommands(options: UseSessionCommandsOptions) {
       branchBusyRef.current = false;
       setBranchBusy(false);
     }
-  }, [addNotice, isReadOnly, agentRunningRef, bashRunningRef, branchBusyRef, sessionIdRef, setBranchBusy, sendAgentCommand, loadSession]);
+  }, [addNotice, isReadOnly, getAgentRunning, bashRunningRef, branchBusyRef, sessionIdRef, setBranchBusy, sendAgentCommand, loadSession]);
 
   /**
    * 用户「从此处开始新会话」：fork（SDK before-entry：createBranchedSession(user.parentId)）
@@ -273,7 +274,7 @@ export function useSessionCommands(options: UseSessionCommandsOptions) {
   const handleNewSessionFromHere = useCallback(async (entryId: string, text: string) => {
     const gate = gateBranchAction({
       readOnly: isReadOnly,
-      busy: agentRunningRef.current || bashRunningRef.current || branchBusyRef.current,
+      busy: getAgentRunning() || bashRunningRef.current || branchBusyRef.current,
     });
     if (!gate.allowed) return;
     const sid = sessionIdRef.current;
@@ -296,7 +297,7 @@ export function useSessionCommands(options: UseSessionCommandsOptions) {
       branchBusyRef.current = false;
       setBranchBusy(false);
     }
-  }, [addNotice, isReadOnly, agentRunningRef, bashRunningRef, branchBusyRef, sessionIdRef, setBranchBusy, sendAgentCommand, onSessionForked]);
+  }, [addNotice, isReadOnly, getAgentRunning, bashRunningRef, branchBusyRef, sessionIdRef, setBranchBusy, sendAgentCommand, onSessionForked]);
 
   /**
    * Assistant「基于此回答开始新会话」：create_session_from_leaf（SDK through-entry：
@@ -305,7 +306,7 @@ export function useSessionCommands(options: UseSessionCommandsOptions) {
   const handleNewSessionFromAnswer = useCallback(async (entryId: string) => {
     const gate = gateBranchAction({
       readOnly: isReadOnly,
-      busy: agentRunningRef.current || bashRunningRef.current || branchBusyRef.current,
+      busy: getAgentRunning() || bashRunningRef.current || branchBusyRef.current,
     });
     if (!gate.allowed) return;
     const sid = sessionIdRef.current;
@@ -329,7 +330,7 @@ export function useSessionCommands(options: UseSessionCommandsOptions) {
       branchBusyRef.current = false;
       setBranchBusy(false);
     }
-  }, [addNotice, isReadOnly, agentRunningRef, bashRunningRef, branchBusyRef, sessionIdRef, setBranchBusy, sendAgentCommand, onSessionForked]);
+  }, [addNotice, isReadOnly, getAgentRunning, bashRunningRef, branchBusyRef, sessionIdRef, setBranchBusy, sendAgentCommand, onSessionForked]);
 
   /**
    * 带选项的分支切换（D3）：直接 / 默认摘要 / 自定义焦点。
@@ -340,7 +341,7 @@ export function useSessionCommands(options: UseSessionCommandsOptions) {
   const navigateBranch = useCallback(async (targetId: string, choice: BranchSwitchChoice): Promise<BranchActionResult> => {
     const gate = gateBranchAction({
       readOnly: isReadOnly,
-      busy: agentRunningRef.current || bashRunningRef.current || branchBusyRef.current,
+      busy: getAgentRunning() || bashRunningRef.current || branchBusyRef.current,
     });
     if (!gate.allowed) return { kind: gate.reason === "busy" ? "busy" : "error" };
     const command = buildBranchSwitchCommand(targetId, choice);
@@ -372,7 +373,7 @@ export function useSessionCommands(options: UseSessionCommandsOptions) {
       branchBusyRef.current = false;
       setBranchBusy(false);
     }
-  }, [addNotice, isReadOnly, agentRunningRef, bashRunningRef, branchBusyRef, sessionIdRef, setBranchBusy, sendAgentCommand, chatInputRef, loadSession]);
+  }, [addNotice, isReadOnly, getAgentRunning, bashRunningRef, branchBusyRef, sessionIdRef, setBranchBusy, sendAgentCommand, chatInputRef, loadSession]);
 
   /**
    * 设置/清除分支书签（D3）：只经 set_branch_label 命令，不直接写会话文件；
@@ -381,7 +382,7 @@ export function useSessionCommands(options: UseSessionCommandsOptions) {
   const setBranchLabel = useCallback(async (targetId: string, rawLabel: string): Promise<BranchActionResult> => {
     const gate = gateBranchAction({
       readOnly: isReadOnly,
-      busy: agentRunningRef.current || bashRunningRef.current || branchBusyRef.current,
+      busy: getAgentRunning() || bashRunningRef.current || branchBusyRef.current,
     });
     if (!gate.allowed) return { kind: gate.reason === "busy" ? "busy" : "error" };
     const command = buildSetBranchLabelCommand(targetId, rawLabel);
@@ -407,7 +408,7 @@ export function useSessionCommands(options: UseSessionCommandsOptions) {
       branchBusyRef.current = false;
       setBranchBusy(false);
     }
-  }, [addNotice, isReadOnly, agentRunningRef, bashRunningRef, branchBusyRef, sessionIdRef, setBranchBusy, sendAgentCommand, loadSession]);
+  }, [addNotice, isReadOnly, getAgentRunning, bashRunningRef, branchBusyRef, sessionIdRef, setBranchBusy, sendAgentCommand, loadSession]);
 
   const branchActions = useMemo<BranchActions>(() => ({
     canWrite,

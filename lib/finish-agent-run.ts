@@ -1,14 +1,14 @@
 /**
  * P2 统一 agent run 结束路径的纯逻辑 seam。
  *
- * 三条结束路径（agent_end / prompt_done / reconcile idle）共用同一 finalizer：
- * - beginAgentRunFinish：进入异步收尾前的 token 校验并抢占 completion claim；
- * - canFinalizeAgentRun：loadSession 完成/失败后的二次校验。
+ * `shouldFinishFromReconcile` 是浏览器 runtime 的纯策略 seam；生产状态与 finish
+ * claim 由 BrowserSessionRuntimeRegistry 的 per-session slot 持有。
+ * `beginAgentRunFinish` / `canFinalizeAgentRun` 保留为独立策略测试 seam，避免把
+ * token 校验逻辑复制回调用方。
  *
- * 旧 SSE source 排队回调在连接建立时捕获 runId（而非处理时读取），旧 reconcile
- * 响应在请求发出时捕获 runId——二者都携带旧 token，经 token 校验被丢弃，不会
- * 结束新 run。hook 只负责把 refs/state 映射成快照传入本 seam，副作用
- * （loadSession / setState / dispatch / onAgentEnd）由调用方执行。
+ * 旧 SSE source 排队回调和旧 reconcile 响应都携带 run token，经调用方/registry
+ * 校验后丢弃，不会结束新 run；副作用（loadSession / setState / dispatch）仍由
+ * 视图适配器执行。
  */
 
 export interface AgentRunFinishContext {
