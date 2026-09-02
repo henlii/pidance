@@ -2333,6 +2333,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
 
   useEffect(() => {
+    // 会话/新 intent 变化：先清空上一会话的本地聊天状态，避免切到新 intent 时
+    // 仍显示旧消息（sessionKey remount 移除后的 state 残留竞态）。
+    setMessages([]);
+    entryIdsRef.current = [];
+    setEntryIds([]);
+    setData(null);
+    setActiveLeafId(null);
+    hasMoreBeforeRef.current = false;
+    setHasMoreBefore(false);
+    dispatch({ type: "reset" });
+    setAgentRunning(false);
+    agentRunningRef.current = false;
+    setBashRunning(false);
+    bashRunningRef.current = false;
+    setPendingBash(null);
+    setRetryInfo(null);
+    setIsCompacting(false);
+    setSystemPrompt(null);
+    setContextUsage(null);
+    setCurrentModelOverride(null);
+    setPendingModel(null);
+    pendingModelRef.current = null;
+    optimisticUserMessageKeyRef.current = null;
     if (session) {
       sessionIdRef.current = session.id;
       if (session.readOnly === true) {
