@@ -220,6 +220,7 @@ export function createSessionCatalogStore(options?: {
       state.loading = false;
       state.error = message;
       state.listStatus = "error";
+      state.serverListLoaded = true;
       emit();
     },
     beginListLoad() {

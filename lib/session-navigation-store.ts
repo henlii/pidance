@@ -21,6 +21,8 @@ export type SessionNavigationState = {
   target: SessionTarget;
   urlRestore: UrlRestoreState;
   intentGeneration: number;
+  /** 用户 target 变迁代数；迟到 identity 必须携带捕获时的值 */
+  transitionSeq: number;
 };
 
 export type PersistedSessionRef = {
@@ -80,7 +82,11 @@ export type SessionNavigationStore = {
   startNew(cwd: string): SessionNavigationState;
   promote(intentId: string, session: PersistedSessionRef): boolean;
   applyHydrate(session: PersistedSessionRef): boolean;
-  applyIdentityChange(identity: IdentityRef, previous: IdentityRef): SessionNavigationState;
+  applyIdentityChange(
+    identity: IdentityRef,
+    previous: IdentityRef,
+    expectedTransitionSeq?: number,
+  ): SessionNavigationState;
   deleteSession(sessionId: string, nextCwd?: string | null): SessionNavigationState;
   forkTo(session: PersistedSessionRef): SessionNavigationState;
   beginUrlRestore(sessionId: string): SessionNavigationState;
@@ -98,6 +104,7 @@ export function createSessionNavigationStore(options?: {
     target: { kind: "none" },
     urlRestore: { kind: "idle" },
     intentGeneration: 0,
+    transitionSeq: 0,
   };
   const listeners = new Set<() => void>();
 
@@ -106,6 +113,7 @@ export function createSessionNavigationStore(options?: {
       sameTarget(state.target, next.target)
       && sameRestore(state.urlRestore, next.urlRestore)
       && state.intentGeneration === next.intentGeneration
+      && state.transitionSeq === next.transitionSeq
     ) {
       return state;
     }
@@ -116,6 +124,7 @@ export function createSessionNavigationStore(options?: {
 
   const startNew = (cwd: string): SessionNavigationState => {
     state.intentGeneration += 1;
+    state.transitionSeq += 1;
     const intent = createNewSessionIntent(cwd, state.intentGeneration, makeIntentId);
     return emit({
       target: {
@@ -126,6 +135,7 @@ export function createSessionNavigationStore(options?: {
       },
       urlRestore: { kind: "ready" },
       intentGeneration: state.intentGeneration,
+      transitionSeq: state.transitionSeq,
     });
   };
 
@@ -140,6 +150,7 @@ export function createSessionNavigationStore(options?: {
       };
     },
     selectPersisted(session) {
+      state.transitionSeq += 1;
       return emit({
         target: {
           kind: "persisted",
@@ -149,12 +160,14 @@ export function createSessionNavigationStore(options?: {
         },
         urlRestore: { kind: "ready" },
         intentGeneration: state.intentGeneration,
+        transitionSeq: state.transitionSeq,
       });
     },
     startNew,
     promote(intentId, session) {
       const current = state.target;
       if (current.kind !== "new" || current.intentId !== intentId) return false;
+      state.transitionSeq += 1;
       emit({
         target: {
           kind: "persisted",
@@ -164,6 +177,7 @@ export function createSessionNavigationStore(options?: {
         },
         urlRestore: { kind: "ready" },
         intentGeneration: state.intentGeneration,
+        transitionSeq: state.transitionSeq,
       });
       return true;
     },
@@ -181,7 +195,10 @@ export function createSessionNavigationStore(options?: {
       });
       return true;
     },
-    applyIdentityChange(identity, previous) {
+    applyIdentityChange(identity, previous, expectedTransitionSeq) {
+      if (expectedTransitionSeq !== undefined && expectedTransitionSeq !== state.transitionSeq) {
+        return state;
+      }
       const cwdChanged = previous.cwd !== identity.cwd;
       const projectChanged = previous.projectRoot !== identity.projectRoot;
       if (!cwdChanged && !projectChanged) return state;
@@ -206,16 +223,19 @@ export function createSessionNavigationStore(options?: {
         target: { kind: "none" },
         urlRestore: { kind: "ready" },
         intentGeneration: state.intentGeneration,
+        transitionSeq: state.transitionSeq,
       });
     },
     deleteSession(sessionId, nextCwd) {
       const current = state.target;
       if (current.kind !== "persisted" || current.sessionId !== sessionId) return state;
       if (nextCwd) return startNew(nextCwd);
+      state.transitionSeq += 1;
       return emit({
         target: { kind: "none" },
         urlRestore: { kind: "ready" },
         intentGeneration: state.intentGeneration,
+        transitionSeq: state.transitionSeq,
       });
     },
     forkTo(session) {
@@ -248,6 +268,7 @@ export function createSessionNavigationStore(options?: {
           : state.target,
         urlRestore: { kind: "not-found", sessionId },
         intentGeneration: state.intentGeneration,
+        transitionSeq: state.transitionSeq,
       });
     },
     retryUrlRestore() {

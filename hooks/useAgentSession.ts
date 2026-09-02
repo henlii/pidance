@@ -17,7 +17,12 @@ import type { SessionActivity } from "@/lib/session-activity";
 import { readAgentLiveFlag, sendAgentCommand } from "@/lib/agent-client";
 import { generateSubmissionId } from "@/lib/agent-commands";
 import { getOrCreateBrowserSessionRuntimeRegistry, type RegistrySubscription } from "@/lib/browser-session-runtime-registry";
-import { resolveSubmitTarget, resetChatTargetRefs } from "@/lib/chat-submit-target";
+import {
+  captureChatTargetToken,
+  chatTargetTokenMatches,
+  resolveSubmitTarget,
+  resetChatTargetRefs,
+} from "@/lib/chat-submit-target";
 import type { BranchActions } from "@/lib/branch-bookmarks";
 import {
   mergeFollowUpForSteer,
@@ -529,6 +534,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     let messagesLoaded = false;
     try {
       if (showLoading) setLoading(true);
+      const hydrateSinceSeq = getOrCreateBrowserSessionRuntimeRegistry().getSnapshot(sid)?.timelineSeq ?? 0;
       // 切换会话：先清上一会话的 live 投影，避免 systemPrompt/用量串台
       if (includeState) {
         setSystemPrompt(null);
@@ -606,7 +612,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       entryIdsRef.current = resolvedEntryIds;
       messagesSessionIdRef.current = sid;
       setEntryIds(resolvedEntryIds);
-      getOrCreateBrowserSessionRuntimeRegistry().hydrate(sid, hydratedMessages, resolvedEntryIds);
+      const appliedHydrate = getOrCreateBrowserSessionRuntimeRegistry().hydrate(
+        sid,
+        hydratedMessages,
+        resolvedEntryIds,
+        { sinceSeq: hydrateSinceSeq },
+      );
+      if (!appliedHydrate) {
+        const live = getOrCreateBrowserSessionRuntimeRegistry().getSnapshot(sid);
+        if (live) {
+          setMessages(live.messages);
+          setEntryIds(live.entryIds);
+          entryIdsRef.current = live.entryIds;
+        }
+      }
       const more = d.context.hasMoreBefore === true
         || (typeof d.context.totalMessageCount === "number"
           && d.context.totalMessageCount > resolvedEntryIds.length);
@@ -775,6 +794,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
       if (leafId) params.set("leafId", leafId);
       const url = `/api/sessions/${encodeURIComponent(sid)}/context?${params}`;
+      const hydrateSinceSeq = getOrCreateBrowserSessionRuntimeRegistry().getSnapshot(sid)?.timelineSeq ?? 0;
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as {
@@ -785,6 +805,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           totalMessageCount?: number;
         };
       };
+      if (sessionIdRef.current !== sid) return;
       const nextEntryIds = d.context.entryIds ?? [];
       const previousEntryIds = entryIdsRef.current;
       const shouldPreserveRenderedLines = messagesSessionIdRef.current === sid;
@@ -800,7 +821,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       entryIdsRef.current = nextEntryIds;
       messagesSessionIdRef.current = sid;
       setEntryIds(nextEntryIds);
-      getOrCreateBrowserSessionRuntimeRegistry().hydrate(sid, hydrated, nextEntryIds);
+      const appliedHydrate = getOrCreateBrowserSessionRuntimeRegistry().hydrate(
+        sid,
+        hydrated,
+        nextEntryIds,
+        { sinceSeq: hydrateSinceSeq },
+      );
+      if (!appliedHydrate) {
+        const live = getOrCreateBrowserSessionRuntimeRegistry().getSnapshot(sid);
+        if (live) {
+          setMessages(live.messages);
+          setEntryIds(live.entryIds);
+          entryIdsRef.current = live.entryIds;
+        }
+      }
       const more = d.context.hasMoreBefore === true
         || (typeof d.context.totalMessageCount === "number"
           && d.context.totalMessageCount > nextEntryIds.length);
@@ -839,19 +873,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!isNew || !cwd) return sessionIdRef.current;
     if (ensuringNewSessionRef.current) return ensuringNewSessionRef.current;
 
-    // 捕获本次 ensure 的 cwd：并发/切项目不得改写已发出的 body。
     const ensureCwd = cwd;
+    const intentAtEnsure = newSessionIntentIdRef.current;
     const promise = (async () => {
       const selectedModel = newSessionModel ?? newSessionDefaultModel;
-      // P0c：不再用预设收窄工具集——新会话不传 toolNames，SDK/扩展加载全集。
       const res = await fetch("/api/agent/new", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           cwd: ensureCwd,
-          // 必须带 type:"ensure_session"：createNew 据此只创建 runtime 不发送首条
-          // prompt；缺失时 promptCommand 为空对象 → session.send({}) → Unsupported
-          // command: undefined（08705ad 曾误删此字段，导致新会话创建 500）。
           type: "ensure_session",
           ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
           ...(() => {
@@ -863,8 +893,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const result = await res.json() as { sessionId: string };
       const realId = result.sessionId;
-      // 真实 sid 一旦返回即写入 ref：后续 prompt/SSE 失败也必须复用，禁止二次创建。
-      sessionIdRef.current = realId;
+      if (newSessionIntentIdRef.current === intentAtEnsure) {
+        sessionIdRef.current = realId;
+      }
       return realId;
     })();
 
@@ -872,7 +903,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       return await promise;
     } finally {
-      ensuringNewSessionRef.current = null;
+      if (ensuringNewSessionRef.current === promise) {
+        ensuringNewSessionRef.current = null;
+      }
     }
   }, [isNew, newSessionModel, newSessionDefaultModel, resolvedThinking]);
 
@@ -1509,6 +1542,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const submissionId = generateSubmissionId();
     const draftKey = session?.id
       ?? (newSessionCwdRef.current ? `new:${newSessionCwdRef.current}` : "new");
+    const sendToken = captureChatTargetToken({
+      isNew,
+      intentId: newSessionIntentIdRef.current,
+      persistedSessionId: session?.id ?? null,
+    });
+    const sendStillCurrent = () => sendToken !== null && chatTargetTokenMatches(sendToken, {
+      intentId: newSessionIntentIdRef.current,
+      persistedSessionId: isNew ? null : (sessionIdRef.current ?? session?.id ?? null),
+    });
 
     try {
       let sentSessionId: string | null = null;
@@ -1532,12 +1574,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           model: selectedModel ?? undefined,
         });
         sentSessionId = receipt.sessionId;
-        sessionIdRef.current = receipt.sessionId;
-        if (newSessionIntentIdRef.current === intentAtSend) {
-          promoteNewSession(1, message);
+        if (sendStillCurrent()) {
+          sessionIdRef.current = receipt.sessionId;
+          if (newSessionIntentIdRef.current === intentAtSend) {
+            promoteNewSession(1, message);
+          }
         }
         if (receipt.status !== "accepted") {
-          if (receipt.status === "rejected") {
+          if (receipt.status === "rejected" && sendStillCurrent()) {
             const optimisticKey = optimisticUserMessageKeyRef.current;
             setMessages((prev) => recoverFailedSend({
               messages: prev,
@@ -1548,7 +1592,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
           return false;
         }
-        promptSubmittedRef.current = true;
+        if (sendStillCurrent()) promptSubmittedRef.current = true;
       } else if (target.kind === "persisted") {
         sentSessionId = target.sessionId;
         if (abortRequestedRef.current) return false;
@@ -1582,7 +1626,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           draftKey,
         });
         if (receipt.status !== "accepted") {
-          if (receipt.status === "rejected") {
+          if (receipt.status === "rejected" && sendStillCurrent()) {
             const optimisticKey = optimisticUserMessageKeyRef.current;
             setMessages((prev) => recoverFailedSend({
               messages: prev,
@@ -1593,12 +1637,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
           return false;
         }
-        promptSubmittedRef.current = true;
+        if (sendStillCurrent()) promptSubmittedRef.current = true;
       }
-      if (promptSubmittedRef.current && sentSessionId) {
+      if (sendStillCurrent() && promptSubmittedRef.current && sentSessionId) {
         setServerPref(`sessionQueueHold.${sentSessionId}`, null);
       }
-      if (isSlashCommandPrompt && sentSessionId) {
+      if (sendStillCurrent() && isSlashCommandPrompt && sentSessionId) {
         void waitForPromptSettlement(sentSessionId, promptRunId);
       }
       // P0-1：发送已确认（prompt 预检通过 / 消息已提交），返回 true 供
@@ -1608,7 +1652,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const aborted = abortRequestedRef.current
         || (e instanceof Error && e.name === "AbortError");
       if (aborted) {
-        if (!promptSubmittedRef.current) {
+        if (sendStillCurrent() && !promptSubmittedRef.current) {
           agentRunningRef.current = false;
           setAgentRunning(false);
           setAgentPhase(null);
@@ -1617,12 +1661,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return false;
       }
       console.error("Failed to send message:", e);
-      // prompt 已提交成功（切走/收尾竞态导致的后续异常）：不回滚已发送消息
       if (promptSubmittedRef.current) {
-        promptSubmittedRef.current = false;
+        if (sendStillCurrent()) promptSubmittedRef.current = false;
         addNotice({ type: "warning", message: t("chat_sendSubmittedSwitched") });
         return true;
       }
+      if (!sendStillCurrent()) return false;
       // P0-1：失败 = 消息未确认进入权威视图 → 移除假 bubble + 保留 draft。
       // 发送失败时乐观 user 消息若仍在列表末尾（未被 message_end 消费），
       // 它是未落地的「假 bubble」；draft 由 insertIfEmpty 恢复（输入框空才写入，
@@ -1649,13 +1693,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           message: message.includes("locked by another") ? t("chat_sessionLocked") : message,
         });
       }
-      agentRunningRef.current = false;
-      setAgentRunning(false);
-      setAgentPhase(null);
-      dispatch({ type: "end" });
+      if (sendStillCurrent()) {
+        agentRunningRef.current = false;
+        setAgentRunning(false);
+        setAgentPhase(null);
+        dispatch({ type: "end" });
+      }
       return false;
     } finally {
-      sendInFlightRef.current = false;
+      if (sendStillCurrent()) sendInFlightRef.current = false;
       if (promptAbortRef.current === promptAbort) promptAbortRef.current = null;
     }
   }, [isNew, isReadOnly, newSessionModel, newSessionDefaultModel, session, promoteNewSession, waitForPromptSettlement, addNotice, notifyAutoFollowSend, opts.chatInputRef, t, onSessionCreated]);

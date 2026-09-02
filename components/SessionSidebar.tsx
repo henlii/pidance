@@ -281,10 +281,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const runningReconciliationRequestRef = useRef(0);
   const sessionRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const commitRunningSnapshot = useCallback((ids: Iterable<string>) => {
+  const commitRunningSnapshot = useCallback((ids: Iterable<string>, runningStartedAt?: Record<string, number>) => {
     runningSnapshotRevisionRef.current += 1;
     catalogStore.applyRunningSnapshot({
       runningIds: [...ids],
+      runningStartedAt,
       selectedSessionId: catalogSelectedRef.current,
       now: Date.now(),
     });
@@ -466,11 +467,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
     source.onmessage = (e) => {
       try {
-        const data = JSON.parse(e.data) as { type?: string; runningSessionIds?: string[] };
+        const data = JSON.parse(e.data) as {
+          type?: string;
+          runningSessionIds?: string[];
+          runningStartedAt?: Record<string, number>;
+        };
         if (data.type === "running") {
           runningSnapshotAuthoritativeRef.current = true;
           commitRunningSnapshot(
             (data.runningSessionIds ?? []).filter((id): id is string => typeof id === "string"),
+            data.runningStartedAt && typeof data.runningStartedAt === "object"
+              ? data.runningStartedAt
+              : undefined,
           );
         }
       } catch {
@@ -491,7 +499,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       const requestRevision = runningSnapshotRevisionRef.current;
       void fetch("/api/agent/running", { cache: "no-store" })
         .then((r) => r.json())
-        .then((d: { runningSessionIds?: unknown }) => {
+        .then((d: { runningSessionIds?: unknown; runningStartedAt?: Record<string, number> }) => {
           if (!Array.isArray(d.runningSessionIds)) return;
           if (!mountedRef.current || !shouldApplyRunningReconciliation(
             requestRevision,
@@ -502,6 +510,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           runningSnapshotAuthoritativeRef.current = true;
           commitRunningSnapshot(
             d.runningSessionIds.filter((id): id is string => typeof id === "string"),
+            d.runningStartedAt && typeof d.runningStartedAt === "object"
+              ? d.runningStartedAt
+              : undefined,
           );
         })
         .catch(() => undefined);

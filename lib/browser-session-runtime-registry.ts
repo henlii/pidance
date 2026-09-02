@@ -46,6 +46,8 @@ export type SessionRuntimeSnapshot = {
   submissions: PromptSubmission[];
   promptRunId: number;
   attachCount: number;
+  /** live 事件单调序号；hydrate 用 sinceSeq 避免陈旧磁盘覆盖较新 timeline */
+  timelineSeq: number;
 };
 
 export type SubmitPromptTarget =
@@ -125,7 +127,12 @@ export type BrowserSessionRuntimeRegistry = {
   /** 显式 Stop：取消唯一在途 submission 的 POST 并等待结算 */
   abortSubmission(sessionId: string, submissionId?: string): Promise<SubmitPromptResult | null>;
   abort(sessionId: string): void;
-  hydrate(sessionId: string, messages: AgentMessage[], entryIds?: string[]): void;
+  hydrate(
+    sessionId: string,
+    messages: AgentMessage[],
+    entryIds?: string[],
+    options?: { sinceSeq?: number },
+  ): boolean;
   appendLocal(sessionId: string, message: AgentMessage): void;
   applyEvent(sessionId: string, event: AgentStreamEvent): void;
   ensureEventsConnected(sessionId: string): void;
@@ -152,6 +159,7 @@ function createSlot(sessionId: string): RuntimeSlot {
       submissions: [],
       promptRunId: 0,
       attachCount: 0,
+      timelineSeq: 0,
     },
     submissions: new Map(),
     inFlight: new Map(),
@@ -216,6 +224,10 @@ export function createBrowserSessionRuntimeRegistry(
     for (const listener of slot.snapshotListeners) listener(slot.snapshot);
   };
 
+  const bumpTimeline = (slot: RuntimeSlot) => {
+    slot.snapshot.timelineSeq += 1;
+  };
+
   const settleSubmission = (
     slot: RuntimeSlot,
     submissionId: string,
@@ -241,6 +253,7 @@ export function createBrowserSessionRuntimeRegistry(
   };
 
   const applyEventToSlot = (slot: RuntimeSlot, event: AgentStreamEvent) => {
+    bumpTimeline(slot);
     const type = event.type;
     if (type === "agent_start") {
       slot.snapshot.promptRunId += 1;
@@ -348,6 +361,7 @@ export function createBrowserSessionRuntimeRegistry(
     subscribe(sessionId, listener) {
       const slot = getSlot(sessionId, true)!;
       slot.snapshotListeners.add(listener);
+      listener(slot.snapshot);
       return () => {
         slot.snapshotListeners.delete(listener);
       };
@@ -411,6 +425,7 @@ export function createBrowserSessionRuntimeRegistry(
         ...slot.snapshot.messages,
         userMessageFromSubmit(input.message, input.images, now()),
       ];
+      bumpTimeline(slot);
       publish(slot);
 
       const promise = (async (): Promise<SubmitPromptResult> => {
@@ -500,15 +515,20 @@ export function createBrowserSessionRuntimeRegistry(
       slot.snapshot.sendInFlight = slot.inFlight.size > 0;
       publish(slot);
     },
-    hydrate(sessionId, messages, entryIds = []) {
+    hydrate(sessionId, messages, entryIds = [], options) {
       const slot = getSlot(sessionId, true)!;
+      if (options?.sinceSeq !== undefined && slot.snapshot.timelineSeq > options.sinceSeq) {
+        return false;
+      }
       slot.snapshot.messages = [...messages];
       slot.snapshot.entryIds = [...entryIds];
       publish(slot);
+      return true;
     },
     appendLocal(sessionId, message) {
       const slot = getSlot(sessionId, true)!;
       slot.snapshot.messages = [...slot.snapshot.messages, message];
+      bumpTimeline(slot);
       publish(slot);
     },
     applyEvent(sessionId, event) {

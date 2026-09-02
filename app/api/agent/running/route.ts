@@ -10,6 +10,7 @@ export async function GET() {
 	return NextResponse.json(
 		{
 			runningSessionIds: sessionService.getRunningIds(),
+			runningStartedAt: sessionService.getRunningStartedAt(),
 			pendingExtensionUi: sessionService.listPendingExtensionUi(),
 		},
 		{ headers: { "Cache-Control": "no-store" } },

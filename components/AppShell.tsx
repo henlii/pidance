@@ -104,6 +104,8 @@ function AppShellInner() {
   const [guideDefaultCwd, setGuideDefaultCwd] = useState<string | null>(null);
   const selectedSessionIdRef = useRef<string | null>(null);
   const hydrateAbortRef = useRef<AbortController | null>(null);
+  const cwdValidateAbortRef = useRef<AbortController | null>(null);
+  const identityEpochRef = useRef(0);
   /**
    * 侧栏乐观 pending（按真实 id）：快速 A/B 创建时多条并存，
    * 迟到 intent 不选中但必须保留到 server 回流/显式删除。
@@ -467,6 +469,8 @@ function AppShellInner() {
     if (!requestedCwd) return;
 
     const controller = new AbortController();
+    cwdValidateAbortRef.current = controller;
+    const epochAtStart = identityEpochRef.current;
     setInitialCwdStatus("validating");
     setInitialCwdError(null);
 
@@ -481,19 +485,21 @@ function AppShellInner() {
         if (!response.ok || !data.cwd) {
           throw new Error(data.error ?? `HTTP ${response.status}`);
         }
-
-        // The sidebar will notify us when it adopts this cwd; identity watcher
-        // is a pure projection of navigation store, no suppress ref needed.
+        if (identityEpochRef.current !== epochAtStart) return;
         setIdentity({ cwd: data.cwd, projectRoot: data.cwd, status: "ready", error: null });
         setInitialCwdStatus("ready");
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
+        if (identityEpochRef.current !== epochAtStart) return;
         setInitialCwdError(error instanceof Error ? error.message : String(error));
         setInitialCwdStatus("error");
       });
 
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      if (cwdValidateAbortRef.current === controller) cwdValidateAbortRef.current = null;
+    };
   }, [initialNavigation, setIdentity]);
 
   const previousProjectIdentityRef = useRef({ cwd: identity.cwd, projectRoot: identity.projectRoot });
@@ -543,6 +549,8 @@ function AppShellInner() {
     // 显式点选会话：先跳过身份 watcher（必须在本函数任何 state 变更之前）。
     // selectCwd / 迟到的 worktree 预加载回写不能把刚选中的会话清掉，否则
     // 会掉进引导页（刷新才恢复）。
+    identityEpochRef.current += 1;
+    cwdValidateAbortRef.current?.abort();
     navigationStoreRef.current.selectPersisted({
       id: session.id,
       cwd: session.cwd,
@@ -585,6 +593,8 @@ function AppShellInner() {
     // worktree 数据权威修正），保证 lazy 新会话落到正确项目。
     const cwd = targetCwd ?? getIdentitySnapshot().cwd;
     if (!cwd) return;
+    identityEpochRef.current += 1;
+    cwdValidateAbortRef.current?.abort();
     const nav = navigationStoreRef.current.startNew(cwd);
     setGuideDefaultCwd(cwd);
     if (getIdentitySnapshot().cwd !== cwd) {

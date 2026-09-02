@@ -53,3 +53,28 @@ export function resetChatTargetRefs(
   refs.promptSubmitted.current = false;
   refs.ensuringNewSession.current = null;
 }
+
+export type ChatTargetToken =
+  | { kind: "new"; intentId: string }
+  | { kind: "persisted"; sessionId: string };
+
+export function captureChatTargetToken(identity: {
+  isNew: boolean;
+  intentId: string | null;
+  persistedSessionId: string | null;
+}): ChatTargetToken | null {
+  if (identity.isNew) {
+    if (!identity.intentId) return null;
+    return { kind: "new", intentId: identity.intentId };
+  }
+  if (!identity.persistedSessionId) return null;
+  return { kind: "persisted", sessionId: identity.persistedSessionId };
+}
+
+export function chatTargetTokenMatches(
+  token: ChatTargetToken,
+  current: { intentId: string | null; persistedSessionId: string | null },
+): boolean {
+  if (token.kind === "new") return current.intentId === token.intentId;
+  return current.persistedSessionId === token.sessionId;
+}
