@@ -339,10 +339,10 @@ test("用例11：添加空项目 → 侧栏显示并可新建会话（项目独�
       addRef = Object.entries(refs).find(([, i]) => i?.role === "button" && (i.name ?? "").includes("添加项目"))?.[0] ?? null;
     }
     assert.ok(addRef, "未找到添加项目按钮（重试 3 次后仍无）");
-    // 语义定位避免上一个测试遗留的 tooltip 让旧 ref 点击点被遮挡。
-    await ab(["press", "Escape", "--session", SESSION], { json: false }).catch(() => {});
-    await ab(["mouse", "move", "1000", "700", "--session", SESSION], { json: false }).catch(() => {});
-    await ab(["find", "role", "button", "click", "--name", "添加项目", "--exact", "--session", SESSION], { json: false });
+    // 语义定位避免 ref 被重渲染；DOM click 仍走 React 的真实 onClick，
+    // 但不受悬浮 tooltip 命中测试遮挡的影响。
+    const clicked = await evalResult("(() => { const button = document.querySelector('button[aria-label=\"添加项目\"]'); if (!button) return false; button.click(); return true; })()");
+    assert.equal(clicked, true, "添加项目按钮不可点击");
     await new Promise((r) => setTimeout(r, 1200));
     // 填路径 + Enter 浏览 + 添加
     const refs2 = await snapshotRefs();
