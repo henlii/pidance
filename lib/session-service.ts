@@ -9,6 +9,12 @@ import {
   reparentSessionFile,
 } from "./pi-session-io";
 import { parsePromptCommand, type PromptCommand, type PromptReceipt } from "./agent-commands";
+import {
+  generateSessionTitleFromMessages,
+  resolveTitleModelConfig,
+} from "./session-title";
+import { type ExportFormat } from "./session-export";
+import { buildSessionExport, type SessionExportPayload } from "./session-html-export";
 import { parseContextLimitParam, sliceContextBefore, sliceContextTail, DEFAULT_SESSION_HISTORY_PAGE, DEFAULT_SESSION_TAIL_LIMIT } from "./session-context-window";
 import { clearLeafSidecar, writeLeafSidecar } from "./session-leaf-sidecar";
 import {
@@ -89,6 +95,7 @@ export function httpStatusForSessionError(error: unknown): number {
   if (error instanceof ReadOnlySubagentError || message === READ_ONLY_SUBAGENT_ERROR) return 403;
   if (message.includes("Session not found")) return 404;
   if (isSessionRunningLockedError(error) || message === SESSION_RUNNING_LOCKED_MESSAGE) return 409;
+  if (message.includes("closed while its title")) return 409;
   return 500;
 }
 
@@ -222,6 +229,11 @@ export type SessionService = {
     state?: unknown;
   }>;
   renameSession(sessionId: string, name: string): Promise<void>;
+  autoNameSession(sessionId: string): Promise<{ title: string; usage: unknown }>;
+  exportSession(
+    sessionId: string,
+    options: { format: ExportFormat; leafId?: string },
+  ): Promise<SessionExportPayload>;
   getNavigationSnapshot(
     sessionId: string,
     options?: { deferThinking?: boolean; deferToolResultImages?: boolean },
@@ -586,6 +598,41 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       await awaitWriterReleased(sessionId);
       deps.openSessionView(filePath).appendSessionInfo(trimmed);
       deps.invalidateSessionListCache();
+    },
+
+    async autoNameSession(sessionId) {
+      await requireWritableSession(sessionId, service.isReadOnly);
+      const session = await service.ensureLive(sessionId);
+      await (session as { waitUntilReady?: () => Promise<void> }).waitUntilReady?.();
+      const snapshot = await service.getNavigationSnapshot(sessionId);
+      if (!snapshot) throw new Error("Session not found");
+      const messages = (snapshot.context as { messages?: Array<{ role: string; content: unknown }> }).messages ?? [];
+      const config = resolveTitleModelConfig();
+      const result = await generateSessionTitleFromMessages({
+        messages,
+        provider: config.provider,
+        modelId: config.modelId,
+        baseUrl: config.baseUrl,
+        api: config.api,
+        apiKey: config.apiKey,
+        headers: config.headers,
+      });
+      if (!session.isAlive()) {
+        throw new Error("The session was closed while its title was being generated. Please try again.");
+      }
+      try {
+        await session.send({ type: "set_session_name", name: result.title });
+      } catch {
+        await service.destroyAsync(sessionId);
+        await service.renameSession(sessionId, result.title);
+      }
+      return { title: result.title, usage: result.usage ?? null };
+    },
+
+    async exportSession(sessionId, options) {
+      const filePath = await deps.resolveSessionPath(sessionId);
+      if (!filePath) throw new Error("Session not found");
+      return buildSessionExport(filePath, options);
     },
 
     async getNavigationSnapshot(sessionId, options = {}) {
