@@ -58,6 +58,9 @@ export async function submitAgentPrompt(
   ) {
     throw new Error("Invalid prompt receipt");
   }
+  if (receipt.submissionId !== input.submissionId || receipt.sessionId !== sessionId) {
+    throw new Error("Invalid prompt receipt");
+  }
   return {
     submissionId: receipt.submissionId,
     sessionId: receipt.sessionId,

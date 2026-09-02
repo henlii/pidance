@@ -45,8 +45,6 @@ import {
   RECENT_SESSIONS_LOAD_MORE,
   getGroupVisibleCount,
   getVisibleTopLevelNodes,
-  mergeOptimisticSessions,
-  reconcilePendingSessionIds,
   resetGroupVisibleCount,
   shouldApplySessionListResponse,
 } from "./session-sidebar-state";
@@ -55,7 +53,6 @@ import { useProjectActions, useProjectIdentity } from "./ProjectProvider";
 
 import { useI18n } from "@/lib/i18n";
 import {
-  applyRunningUnreadStateTransition,
   loadUnreadSessionIds,
   markSessionRead,
   mergeUnreadSessionState,
@@ -136,27 +133,23 @@ interface Props {
   initialSessionId?: string | null;
   skipInitialProjectSelection?: boolean;
   onInitialRestoreDone?: (result?: { found?: boolean; error?: string }) => void;
+  restoreNonce?: number;
   refreshKey?: number;
   onSessionDeleted?: (sessionId: string) => void;
   /** 添加项目成功：通知上层进入引导页并选中新项目 */
   onProjectAdded?: (cwd: string) => void;
-  /**
-   * 真实 id 已返回、列表尚未回流的乐观会话列表（多 id）。
-   * 内部按 id upsert 进 pending map，与 server 列表 merge。
-   */
-  optimisticSessions?: readonly SessionInfo[];
-  /** 本地 starting 会话集合（发送瞬间即可显示 running） */
-  clientRunningSessionIds?: ReadonlySet<string>;
+  /** AppShell 传入的唯一 catalog store；缺省时本组件自建（测试）。 */
+  catalogStore?: SessionCatalogStore;
 }
 
 
 // ── 主组件 ─────────────────────────────────────────────────────────────────
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, onProjectAdded, optimisticSessions, clientRunningSessionIds }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, restoreNonce = 0, refreshKey, onSessionDeleted, onProjectAdded, catalogStore: catalogStoreProp }: Props) {
   const { t } = useI18n();
-  // 会话目录唯一 owner：SessionCatalogStore；本组件只订阅 snapshot 并发动作。
-  const catalogStoreRef = useRef<SessionCatalogStore | null>(null);
-  if (!catalogStoreRef.current) catalogStoreRef.current = createSessionCatalogStore();
+  const catalogStoreRef = useRef<SessionCatalogStore | null>(catalogStoreProp ?? null);
+  if (!catalogStoreRef.current) catalogStoreRef.current = catalogStoreProp ?? createSessionCatalogStore();
+  if (catalogStoreProp) catalogStoreRef.current = catalogStoreProp;
   const catalogStore = catalogStoreRef.current;
   const [catalogTick, setCatalogTick] = useState(0);
   const catalogSelectedRef = useRef(selectedSessionId);
@@ -173,9 +166,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const archivedSessions = catalogSnapshot.archivedSessions;
   const archivedCount = catalogSnapshot.archivedCount;
   const runningSessionIds = catalogSnapshot.runningIds;
-  const pendingById = new Map<string, SessionInfo>();
-  const pendingIds = new Set<string>();
-  const deletedIds = new Set<string>();
   const serverSessionsRef = useRef<SessionInfo[]>(serverSessions);
   serverSessionsRef.current = serverSessions;
   const sessionListFetchGenRef = useRef(0);
@@ -190,12 +180,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const wtNewInputRef = useRef<HTMLInputElement>(null);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   // SSE running ∪ 当前聊天冷启动 agentRunning（发送瞬间即可显示运行中/时长）
-  const effectiveRunningSessionIds = useMemo(() => {
-    if (!clientRunningSessionIds || clientRunningSessionIds.size === 0) return runningSessionIds;
-    const next = new Set(runningSessionIds);
-    for (const id of clientRunningSessionIds) next.add(id);
-    return next;
-  }, [runningSessionIds, clientRunningSessionIds]);
+  const effectiveRunningSessionIds = catalogSnapshot.effectiveRunningIds;
   // ── 归档（P0-2）：服务端返回的归档列表/计数 + Archive 视图开关 + 动作状态 ──
   const [archiveViewOpen, setArchiveViewOpen] = useState(false);
   const [archiveBusyId, setArchiveBusyId] = useState<string | null>(null);
@@ -222,16 +207,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // catalog 内 unread 快照与 SSE 权威 running 快照在 store 中维护；这里的
   // serverRunningStartedAt 只承担计时播种（与 store 的 startedAt 同源）。
   const [serverRunningStartedAt, setServerRunningStartedAt] = useState<ReadonlyMap<string, number>>(() => new Map());
-  const [unreadState, setUnreadState] = useState<UnreadSessionState>(() => {
-    const ids = loadUnreadSessionIds();
-    return parseUnreadSessionState([...ids]);
-  });
   const unreadHydratedRef = useRef(false);
-  const unreadSessionIds = useMemo(() => {
-    const ids = unreadIdsFromState(unreadState);
-    for (const id of effectiveRunningSessionIds) ids.delete(id);
-    return ids;
-  }, [unreadState, effectiveRunningSessionIds]);
+  const unreadSessionIds = catalogSnapshot.unreadIds;
 
   // 服务端 startedAt 播种（不重算 first-seen 窗口）
   useEffect(() => {
@@ -363,9 +340,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // 已关闭项目集合：仅影响侧栏可见性与自动选择，绝不触碰会话/目录/Git 数据
   const closedRoots = useMemo(() => new Set(prefs.closedProjectRoots), [prefs.closedProjectRoots]);
 
-  const pendingIdsRef = useRef(pendingIds);
-  pendingIdsRef.current = pendingIds;
-
   // Catalog 订阅：store 内任何变更同步触发本组件重渲（依赖 tick 触发 memo）。
   useEffect(() => {
     return catalogStore.subscribe(() => setCatalogTick((tick) => tick + 1));
@@ -441,31 +415,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     };
   }, [loadSessions]);
 
-  // 真实 id 乐观 upsert（多条）：写入 catalog store，不等全量列表。
-  // pending:<intent> 占位被父层撤掉后，这里同步删掉，避免与真实 sid 双行。
-  useEffect(() => {
-    const liveOptimistic = new Set((optimisticSessions ?? []).map((s) => s.id).filter(Boolean));
-    for (const s of optimisticSessions ?? []) {
-      if (!s?.id) continue;
-      catalogStore.upsertPending(s);
-    }
-    const batchIds = new Set((optimisticSessions ?? []).map((s) => s.id).filter(Boolean));
-    if (batchIds.size === 0) return;
-    const state = catalogStore.getState();
-    for (const id of [...state.pendingIds]) {
-      if (id.startsWith("pending:") && !batchIds.has(id)) catalogStore.removePending(id);
-    }
-  }, [optimisticSessions, catalogStore]);
-
-  const allSessions = useMemo(
-    () => mergeOptimisticSessions({
-      serverSessions,
-      pendingSessions: [...pendingById.values()],
-      pendingIds,
-      deletedIds,
-    }),
-    [serverSessions, pendingById, pendingIds, deletedIds],
-  );
+  const allSessions = serverSessions;
 
   const {
     worktreeSnapshots,
@@ -482,7 +432,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     mountedRef,
   });
 
-  // 未读：时钟结构跨端按较新时间戳合并，避免后写者把已读覆盖成未读。
+  useEffect(() => {
+    const local = parseUnreadSessionState([...loadUnreadSessionIds()]);
+    catalogStore.replaceUnread(local);
+  }, [catalogStore]);
+
   useEffect(() => {
     const remoteState = getServerPref<unknown>("unreadSessionState");
     const remoteLegacy = getServerPref<unknown>("unreadSessionIds");
@@ -492,17 +446,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       parseUnreadSessionState(remoteState),
       parseUnreadSessionState(remoteLegacy),
     );
-    setUnreadState((prev) => mergeUnreadSessionState(prev, remote));
-  }, [serverPrefs]);
+    catalogStore.replaceUnread(mergeUnreadSessionState(catalogStore.getState().unread, remote));
+  }, [serverPrefs, catalogStore]);
 
   useEffect(() => {
-    const ids = unreadIdsFromState(unreadState);
+    const unread = catalogStore.getState().unread;
+    const ids = unreadIdsFromState(unread);
     saveUnreadSessionIds(ids);
     if (!unreadHydratedRef.current) return;
-    setServerPref("unreadSessionState", unreadState);
+    setServerPref("unreadSessionState", unread);
     setServerPref("unreadSessionIds", [...ids]);
     flushServerPrefs();
-  }, [unreadState]);
+  }, [catalogTick, catalogStore]);
 
   useEffect(() => {
     // Live running status via SSE — no polling. The server pushes the current
@@ -635,6 +590,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, []);
 
   const restoredRef = useRef(false);
+  useEffect(() => {
+    restoredRef.current = false;
+  }, [restoreNonce]);
 
   useEffect(() => () => {
     mountedRef.current = false;
@@ -678,16 +636,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   // Auto-select cwd and restore session from URL on first load
   useEffect(() => {
-    if (allSessions.length === 0 || skipInitialProjectSelection) return;
+    if (skipInitialProjectSelection && !initialSessionId) return;
 
-    // URL 恢复必须优先于 cwd 自动选择；requestedCwd 已先建立身份时，
-    // selectedCwd 不再为空，但仍不能跳过目标会话恢复。
+    // URL 恢复必须优先于 cwd 自动选择；空列表在 serverListLoaded 后视为 not-found。
     if (initialSessionId && !restoredRef.current) {
       if (error && serverListLoaded) {
         restoredRef.current = true;
         onInitialRestoreDone?.({ error });
         return;
       }
+      if (!serverListLoaded) return;
       const target = allSessions.find((s) => s.id === initialSessionId);
       if (target) {
         restoredRef.current = true;
@@ -695,10 +653,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         onInitialRestoreDone?.({ found: true });
         return;
       }
-      if (!serverListLoaded) return;
       restoredRef.current = true;
       onInitialRestoreDone?.({ found: false });
+      return;
     }
+    if (allSessions.length === 0) return;
     if (selectedCwd === null) {
       // 已关闭项目不参与自动选择：全部关闭时保持空工作区，而不是复活已关闭项目。
       const projects = getRecentProjects(allSessions);

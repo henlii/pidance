@@ -95,6 +95,7 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
   const cancelFrame = options.cancelFrame ?? defaultCancelFrame;
 
   let current: EventSourceLike | null = null;
+  let connectedSessionId: string | null = null;
   let reconnectTimer: TimerHandle = null;
   let cancelPendingDelivery: (() => void) | null = null;
 
@@ -113,6 +114,7 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
       current.close();
       current = null;
     }
+    connectedSessionId = null;
   };
 
   const connect = (
@@ -129,8 +131,7 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
 
     const source = createEventSource(getEventsUrl(sessionId));
     current = source;
-    lastConnectedSessionId = sessionId;
-    currentSourceRef = source;
+    connectedSessionId = sessionId;
     let pendingMessageUpdate: AgentStreamEvent | null = null;
     let frameId: TimerHandle = null;
 
@@ -230,19 +231,11 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
       return current;
     },
     isCurrent(sessionId) {
-      if (current === null || lastConnectedSessionId !== sessionId || current !== currentSourceRef) return false;
+      if (current === null || connectedSessionId !== sessionId) return false;
       // CLOSED（浏览器长待机后的致命断开）视为不再有效，切回需重连。
-      return sourceOf(sessionId)?.readyState !== CLOSED;
+      return current.readyState !== CLOSED;
     },
   };
-}
-
-// 最近一次 connect 的目标 session 与 source（isCurrent 判定用）。
-// 模块级记录贴近 manager 单实例使用方式；manager 级多实例时以实例闭包为准。
-let lastConnectedSessionId: string | null = null;
-let currentSourceRef: EventSourceLike | null = null;
-function sourceOf(sessionId: string): EventSourceLike | null {
-  return lastConnectedSessionId === sessionId ? currentSourceRef : null;
 }
 
 // CONNECTING 仅为可读性保留，当前实现未直接使用该状态分支。

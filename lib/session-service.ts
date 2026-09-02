@@ -57,6 +57,7 @@ import { collectSubagentTree, deleteValidatedSubagents } from "./subagent-sessio
 import {
   archivedSessionIdsFor,
   createArchiveActions,
+  filterSessionIdsByArchiveScope,
   listArchiveRecords,
   partitionSessionsByArchiveState,
   removeArchiveRecordAfterPermanentDelete,
@@ -64,6 +65,8 @@ import {
   type SessionArchiveFs,
   realArchiveFs,
 } from "./session-archive";
+import { getRunningStartedAt as readRunningStartedAt } from "./running-state";
+import { searchSessionsFulltext, type SessionSearchResult } from "./session-fulltext-search";
 
 export type SessionCommand = Record<string, unknown> & { type: string };
 
@@ -263,6 +266,11 @@ export type SessionService = {
   ): Promise<{ entryId: string; data: { command: string; ok: boolean; result?: string; version?: number } }>;
   createNew(options: CreateNewSessionOptions): Promise<CreateNewSessionResult>;
   getRunningIds(): string[];
+  getRunningStartedAt(): Record<string, number>;
+  searchFulltext(
+    query: string,
+    options?: { maxHits?: number; scope?: "active" | "archived" | "all" },
+  ): Promise<SessionSearchResult>;
   listPendingExtensionUi(): PendingExtensionUi[];
   subscribeRunning(listener: (ids: string[]) => void): () => void;
   isReadOnly(sessionId: string): Promise<boolean>;
@@ -302,12 +310,12 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
 
   const awaitWriterReleased = async (sessionId: string): Promise<void> => {
     const session = deps.getRpcSession(sessionId);
-    if (!session?.isAlive()) return;
+    if (!session) return;
     if (typeof (session as { destroyAsync?: unknown }).destroyAsync === "function") {
       await (session as { destroyAsync: () => Promise<void> }).destroyAsync();
-    } else {
-      session.destroy();
+      return;
     }
+    if (session.isAlive()) session.destroy();
   };
 
   const service: SessionService = {
@@ -660,9 +668,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       if (live?.isAlive() && hasInProcessManager && typeof appendOnWrapper === "function") {
         return await appendOnWrapper.call(live, input);
       }
-      if (live?.isAlive()) {
-        await awaitWriterReleased(sessionId);
-      }
+      await awaitWriterReleased(sessionId);
       const filePath = await deps.resolveSessionPath(sessionId);
       if (!filePath) throw new Error("Session not found");
       const activity = normalizeActivityInput(input);
@@ -675,10 +681,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
     async appendCommandEntry(sessionId, input) {
       // 与 appendActivity 同一单写者模式：readOnly 拒绝、外部 RPC live 先停进程再写盘。
       await requireWritableSession(sessionId, service.isReadOnly);
-      const live = service.getLive(sessionId);
-      if (live?.isAlive()) {
-        await awaitWriterReleased(sessionId);
-      }
+      await awaitWriterReleased(sessionId);
       const filePath = await deps.resolveSessionPath(sessionId);
       if (!filePath) throw new Error("Session not found");
       const data = normalizeCommandEntryData(input);
@@ -737,6 +740,29 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       return deps.getRunningRpcSessionIds();
     },
 
+    getRunningStartedAt() {
+      return Object.fromEntries(readRunningStartedAt());
+    },
+
+    async searchFulltext(query, options = {}) {
+      const result = await searchSessionsFulltext(query, {
+        limits: options.maxHits !== undefined ? { maxHits: options.maxHits } : undefined,
+      });
+      const scope = options.scope ?? "active";
+      if (scope === "all") return result;
+      const allSessions = await deps.listAllSessions();
+      const records = listArchiveRecords(
+        deps.archiveFs ?? realArchiveFs,
+        deps.archiveAgentDir?.() ?? getAgentDir(),
+      );
+      const kept = filterSessionIdsByArchiveScope(result.sessionIds, allSessions, records, scope);
+      return {
+        ...result,
+        sessionIds: result.sessionIds.filter((id) => kept.has(id)),
+        hits: result.hits.filter((hit) => kept.has(hit.sessionId)),
+      };
+    },
+
     listPendingExtensionUi() {
       return deps.listPendingExtensionUi();
     },
@@ -756,12 +782,10 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       const liveBefore = deps.getRpcSession(sessionId) as
         | { isAlive?: () => boolean; inner?: { isBashRunning?: boolean } }
         | undefined;
-      if (liveBefore?.isAlive?.()) {
-        if (liveBefore.inner?.isBashRunning) {
-          throw new Error("Cannot switch branch while a shell command is running");
-        }
-        await awaitWriterReleased(sessionId);
+      if (liveBefore?.isAlive?.() && liveBefore.inner?.isBashRunning) {
+        throw new Error("Cannot switch branch while a shell command is running");
       }
+      await awaitWriterReleased(sessionId);
 
       const filePath = await deps.resolveSessionPath(sessionId);
       if (!filePath) throw new Error("Session not found");
@@ -797,12 +821,10 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       const liveBefore = deps.getRpcSession(sessionId) as
         | { isAlive?: () => boolean; inner?: { isBashRunning?: boolean } }
         | undefined;
-      if (liveBefore?.isAlive?.()) {
-        if (liveBefore.inner?.isBashRunning) {
-          throw new Error("Cannot branch while a shell command is running");
-        }
-        await awaitWriterReleased(sessionId);
+      if (liveBefore?.isAlive?.() && liveBefore.inner?.isBashRunning) {
+        throw new Error("Cannot branch while a shell command is running");
       }
+      await awaitWriterReleased(sessionId);
 
       const filePath = await deps.resolveSessionPath(sessionId);
       if (!filePath) throw new Error("Session not found");
@@ -856,9 +878,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
 
       // 统一磁盘 Pi SessionManager
       // 读/分叉源文件前先停 live，避免外部 pi 仍在 append 时读到半写状态
-      if (deps.getRpcSession(sessionId)?.isAlive()) {
-        await awaitWriterReleased(sessionId);
-      }
+      await awaitWriterReleased(sessionId);
       const filePath =
         (inner?.sessionFile || wrapper?.sessionFile) ??
         (await deps.resolveSessionPath(sessionId));

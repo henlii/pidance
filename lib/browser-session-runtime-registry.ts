@@ -7,11 +7,14 @@ import { setDraft } from "./draft-store";
 import {
   createEventStreamManager,
   type AgentStreamEvent,
+  type EventSourceLike,
   type EventStreamManager,
 } from "./event-stream-manager";
 import { pendingSessionId } from "./new-session-intent";
 import type { PromptReceipt } from "./agent-commands";
 import { generateSubmissionId } from "./agent-commands";
+import { attachCustomRenderedLines } from "./custom-rendered-lines";
+import { normalizeToolCalls } from "./normalize";
 import type { AgentMessage, AttachedImage } from "./types";
 
 export type SubmissionStatus = "submitting" | "accepted" | "persisted" | "rejected" | "unknown";
@@ -106,13 +109,14 @@ type RuntimeSlot = {
   promptAborts: Map<string, AbortController>;
   eventStream: EventStreamManager | null;
   viewHandlers: Set<(event: AgentStreamEvent) => void>;
-  snapshotListeners: Set<() => void>;
+  snapshotListeners: Set<(snapshot: SessionRuntimeSnapshot) => void>;
   attachCount: number;
+  consumedEntryIds: Set<string>;
 };
 
 export type BrowserSessionRuntimeRegistry = {
   getSnapshot(sessionId: string): SessionRuntimeSnapshot | null;
-  subscribe(sessionId: string, listener: () => void): () => void;
+  subscribe(sessionId: string, listener: (snapshot: SessionRuntimeSnapshot) => void): () => void;
   attach(sessionId: string, onEvent?: (event: AgentStreamEvent) => void): RegistrySubscription;
   detach(sessionId: string, subscription: RegistrySubscription): void;
   submitPrompt(input: SubmitPromptInput): Promise<SubmitPromptResult>;
@@ -122,7 +126,10 @@ export type BrowserSessionRuntimeRegistry = {
   abortSubmission(sessionId: string, submissionId?: string): Promise<SubmitPromptResult | null>;
   abort(sessionId: string): void;
   hydrate(sessionId: string, messages: AgentMessage[], entryIds?: string[]): void;
+  appendLocal(sessionId: string, message: AgentMessage): void;
   applyEvent(sessionId: string, event: AgentStreamEvent): void;
+  ensureEventsConnected(sessionId: string): void;
+  getEventSource(sessionId: string): EventSourceLike | null;
   getSubmission(sessionId: string, submissionId: string): PromptSubmission | undefined;
   /** 测试用：重置单例 */
   resetForTests(): void;
@@ -153,6 +160,7 @@ function createSlot(sessionId: string): RuntimeSlot {
     viewHandlers: new Set(),
     snapshotListeners: new Set(),
     attachCount: 0,
+    consumedEntryIds: new Set(),
   };
 }
 
@@ -175,29 +183,6 @@ export function hashMessageIdentity(message: string, images: AttachedImage[] | u
     .map((img) => `${img.mimeType}:${img.data}`)
     .join("|");
   return `${message}\x1f${imageSig}`;
-}
-
-function extractImagesFromMessage(message: AgentMessage): AttachedImage[] | undefined {
-  const content = (message as { content?: unknown }).content;
-  if (!Array.isArray(content)) return undefined;
-  const images: AttachedImage[] = [];
-  for (const block of content) {
-    if (!block || typeof block !== "object") continue;
-    const record = block as {
-      type?: string;
-      source?: { type?: string; media_type?: string; data?: string };
-      data?: string;
-      mimeType?: string;
-    };
-    if (record.type !== "image") continue;
-    const source = record.source;
-    const data = source?.data ?? record.data;
-    const mimeType = source?.media_type ?? record.mimeType;
-    if (typeof data === "string" && typeof mimeType === "string") {
-      images.push({ data, mimeType, previewUrl: `data:${mimeType};base64,${data}` });
-    }
-  }
-  return images.length ? images : undefined;
 }
 
 function defaultRestoreDraft(draftKey: string, draft: { value: string; images: AttachedImage[] }): void {
@@ -228,7 +213,7 @@ export function createBrowserSessionRuntimeRegistry(
       submissions: [...slot.submissions.values()],
       attachCount: slot.attachCount,
     };
-    for (const listener of slot.snapshotListeners) listener();
+    for (const listener of slot.snapshotListeners) listener(slot.snapshot);
   };
 
   const settleSubmission = (
@@ -269,12 +254,24 @@ export function createBrowserSessionRuntimeRegistry(
       if (!slot.snapshot.agentRunning) return;
       if (message?.role === "user") return;
       if (message) {
-        slot.snapshot.streamState = { isStreaming: true, streamingMessage: message };
+        const rendered = attachCustomRenderedLines(
+          message as AgentMessage,
+          event.renderedLines,
+        );
+        slot.snapshot.streamState = {
+          isStreaming: true,
+          streamingMessage: normalizeToolCalls(rendered),
+        };
       }
     } else if (type === "message_end") {
       const completed = event.message as AgentMessage | undefined;
       const entryId = typeof event.entryId === "string" && event.entryId ? event.entryId : null;
       if (completed?.role === "user") {
+        if (entryId && slot.consumedEntryIds.has(entryId)) {
+          publish(slot);
+          return;
+        }
+        if (entryId) slot.consumedEntryIds.add(entryId);
         const last = slot.snapshot.messages[slot.snapshot.messages.length - 1];
         const lastContent = last && "content" in last ? (last as { content?: unknown }).content : undefined;
         const nextContent = completed && "content" in completed ? (completed as { content?: unknown }).content : undefined;
@@ -284,20 +281,17 @@ export function createBrowserSessionRuntimeRegistry(
           ? slot.snapshot.messages.some((msg) => (msg as { entryId?: unknown }).entryId === entryId)
           : false;
         if (!isNextEntryPresent && (!last || last.role !== "user" || lastText !== nextText)) {
-          // AgentMessage 不含 entryId；用扩展字段承载服务端 entry id，避免正文匹配。
           const withEntry = {
             ...(completed as unknown as Record<string, unknown>),
             entryId: entryId ?? (completed as unknown as Record<string, unknown>).entryId,
           };
           slot.snapshot.messages = [...slot.snapshot.messages, withEntry as unknown as AgentMessage];
         }
-        // 稳定身份：只有文本+图片签名完全一致且服务端给出 entryId 的 accepted
-        // submission 才标记 persisted；禁止按正文模糊匹配两个同文消息。
+        // FIFO：下一个未绑定 entry 的 accepted/submitting submission。
+        // 同一 entryId 不可二次消费，避免 SSE 重放把两条 submission 绑到同一 entry。
         if (entryId !== null) {
-          const candidates = [...slot.submissions.values()]
-            .filter((sub) => sub.status === "accepted" || sub.status === "submitting");
-          const match = candidates.find((sub) =>
-            hashMessageIdentity(sub.message, sub.images) === hashMessageIdentity(nextText, extractImagesFromMessage(completed)),
+          const match = [...slot.submissions.values()].find((sub) =>
+            (sub.status === "accepted" || sub.status === "submitting") && !sub.entryId,
           );
           if (match) {
             match.status = "persisted";
@@ -305,7 +299,8 @@ export function createBrowserSessionRuntimeRegistry(
           }
         }
       } else if (completed && slot.snapshot.agentRunning) {
-        slot.snapshot.messages = [...slot.snapshot.messages, completed];
+        const rendered = attachCustomRenderedLines(completed, event.renderedLines);
+        slot.snapshot.messages = [...slot.snapshot.messages, normalizeToolCalls(rendered)];
       }
       slot.snapshot.streamState = emptyStream();
     }
@@ -320,23 +315,28 @@ export function createBrowserSessionRuntimeRegistry(
   };
 
   const connectEvents = (slot: RuntimeSlot) => {
-    if (slot.eventStream) return;
+    const source = slot.eventStream?.getCurrentSource();
+    if (slot.eventStream && source && source.readyState !== 2 && slot.eventStream.isCurrent(slot.sessionId)) {
+      return;
+    }
+    slot.eventStream = null;
     const onEvent = (event: AgentStreamEvent) => applyEventToSlot(slot, event);
     const manager = deps.createEventStream
       ? deps.createEventStream(slot.sessionId, onEvent)
       : createEventStreamManager();
     slot.eventStream = manager;
     void manager.ensureConnected(slot.sessionId, onEvent).catch(() => {
-      /* SSE is observation only; POST does not depend on it */
+      if (slot.eventStream === manager) slot.eventStream = null;
     });
   };
 
   const rekey = (fromId: string, toId: string): RuntimeSlot => {
     const slot = getSlot(fromId, true)!;
-    slots.delete(fromId);
     slot.sessionId = toId;
     slot.snapshot.sessionId = toId;
     slots.set(toId, slot);
+    // pending id 继续指向同一 slot，ensure 完成后 Stop 仍能按原 intent 命中。
+    slots.set(fromId, slot);
     return slot;
   };
 
@@ -377,42 +377,16 @@ export function createBrowserSessionRuntimeRegistry(
     },
     async submitPrompt(input) {
       const submissionId = input.submissionId?.trim() || makeSubmissionId();
-      let sessionId = input.target.kind === "persisted"
+      const initialSessionId = input.target.kind === "persisted"
         ? input.target.sessionId
         : pendingSessionId(input.target.intentId);
-
-      // 新会话创建失败的 rejected/unknown 结算与 draft 恢复都要有归档。
-      // ensure 失败由调用方捕获，不吞 throw。
-      if (input.target.kind === "new") {
-        if (!deps.ensureNewSession) {
-          const slot0 = getSlot(sessionId, true)!;
-          const submission0: PromptSubmission = {
-            submissionId,
-            sessionId,
-            draftKey: input.draftKey,
-            message: input.message,
-            images: input.images,
-            status: "rejected",
-            error: "no ensure implementation",
-          };
-          slot0.submissions.set(submissionId, submission0);
-          restoreDraftFor(submission0);
-          publish(slot0);
-          return { submissionId, sessionId, status: "rejected" };
-        }
-        const created = await deps.ensureNewSession(input.target.cwd, input.model);
-        const pending = getSlot(sessionId, true)!;
-        sessionId = created;
-        rekey(pending.sessionId, created);
-      }
-
-      const slot = getSlot(sessionId, true)!;
+      const slot = getSlot(initialSessionId, true)!;
       const existing = slot.submissions.get(submissionId);
       if (existing && (existing.status === "accepted" || existing.status === "persisted" || existing.status === "submitting")) {
         return {
           submissionId,
-          sessionId,
-          status: existing.status === "submitting" ? "accepted" : "accepted",
+          sessionId: slot.sessionId,
+          status: "accepted",
         };
       }
       const inFlight = slot.inFlight.get(submissionId);
@@ -420,7 +394,7 @@ export function createBrowserSessionRuntimeRegistry(
 
       const submission: PromptSubmission = {
         submissionId,
-        sessionId,
+        sessionId: initialSessionId,
         draftKey: input.draftKey,
         message: input.message,
         images: input.images,
@@ -438,13 +412,29 @@ export function createBrowserSessionRuntimeRegistry(
         userMessageFromSubmit(input.message, input.images, now()),
       ];
       publish(slot);
-      connectEvents(slot);
-      if (deps.wake) {
-        void deps.wake(sessionId, controller.signal).catch(() => undefined);
-      }
 
       const promise = (async (): Promise<SubmitPromptResult> => {
+        let sessionId = initialSessionId;
         try {
+          if (input.target.kind === "new") {
+            if (!deps.ensureNewSession) {
+              settleSubmission(slot, submissionId, "rejected", "no ensure implementation");
+              restoreDraftFor(submission);
+              publish(slot);
+              return { submissionId, sessionId, status: "rejected" };
+            }
+            const created = await deps.ensureNewSession(input.target.cwd, input.model);
+            if (controller.signal.aborted) {
+              throw new DOMException("aborted", "AbortError");
+            }
+            sessionId = created;
+            submission.sessionId = created;
+            rekey(initialSessionId, created);
+          }
+          connectEvents(slot);
+          if (deps.wake) {
+            void deps.wake(sessionId, controller.signal).catch(() => undefined);
+          }
           const receipt = await deps.postPrompt(sessionId, {
             message: input.message,
             images: input.images,
@@ -516,9 +506,24 @@ export function createBrowserSessionRuntimeRegistry(
       slot.snapshot.entryIds = [...entryIds];
       publish(slot);
     },
+    appendLocal(sessionId, message) {
+      const slot = getSlot(sessionId, true)!;
+      slot.snapshot.messages = [...slot.snapshot.messages, message];
+      publish(slot);
+    },
     applyEvent(sessionId, event) {
       const slot = getSlot(sessionId, true)!;
       applyEventToSlot(slot, event);
+    },
+    ensureEventsConnected(sessionId) {
+      const slot = getSlot(sessionId, true)!;
+      connectEvents(slot);
+      if (deps.wake) {
+        void deps.wake(sessionId).catch(() => undefined);
+      }
+    },
+    getEventSource(sessionId) {
+      return slots.get(sessionId)?.eventStream?.getCurrentSource() ?? null;
     },
     getSubmission(sessionId, submissionId) {
       return slots.get(sessionId)?.submissions.get(submissionId);
@@ -557,7 +562,7 @@ function createBrowserFetchDeps(): BrowserSessionRuntimeRegistryDeps {
   return {
     async postPrompt(sessionId, input) {
       const { submitAgentPrompt } = await import("./agent-client");
-      return submitAgentPrompt(sessionId, input);
+      return submitAgentPrompt(sessionId, input, { signal: input.signal });
     },
     async ensureNewSession(cwd, extras) {
       const res = await fetch("/api/agent/new", {

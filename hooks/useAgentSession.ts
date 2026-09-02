@@ -11,13 +11,13 @@ import type {
   AttachedImage,
   ChatInputHandle,
 } from "@/lib/types";
-import { normalizeToolCalls } from "@/lib/normalize";
 import { recoverFailedSend } from "@/lib/send-failure";
-import { attachCustomRenderedLines, preserveCustomRenderedLines } from "@/lib/custom-rendered-lines";
+import { preserveCustomRenderedLines } from "@/lib/custom-rendered-lines";
 import type { SessionActivity } from "@/lib/session-activity";
 import { readAgentLiveFlag, sendAgentCommand } from "@/lib/agent-client";
 import { generateSubmissionId } from "@/lib/agent-commands";
 import { getOrCreateBrowserSessionRuntimeRegistry, type RegistrySubscription } from "@/lib/browser-session-runtime-registry";
+import { resolveSubmitTarget, resetChatTargetRefs } from "@/lib/chat-submit-target";
 import type { BranchActions } from "@/lib/branch-bookmarks";
 import {
   mergeFollowUpForSteer,
@@ -25,7 +25,6 @@ import {
   readFollowUpQueuePreference,
 } from "@/lib/queue-merge";
 import { pendingSessionId } from "@/lib/new-session-intent";
-import { createEventStreamManager, type EventStreamManager, type EventStreamConnectionResult } from "@/lib/event-stream-manager";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import {
   applyExtensionUiRequest,
@@ -212,8 +211,6 @@ const PROMPT_SETTLE_POLL_MS = 600;
 const PROMPT_SETTLE_MAX_MS = 20_000;
 const AGENT_STATE_RECONCILE_MS = 15_000;
 const BASH_STATE_RECONCILE_MS = 1_000;
-// 外部 pi 冷启动（fork 会话首次启动进程）可超 5s；15s 覆盖启动窗口。
-const EVENT_STREAM_CONNECT_TIMEOUT_MS = 15_000;
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -453,7 +450,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * 时释放，token 漂移也必须释放，否则后续 run 的收尾被永久阻塞。
    */
   const finishingPromptRunIdRef = useRef<number | null>(null);
-  const sseGenerationRef = useRef(0);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
   /** prompt 命令已提交成功（防止切走/收尾竞态把已发送消息回滚成失败） */
   const promptSubmittedRef = useRef(false);
@@ -474,18 +470,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return cached && cached.sessionId === sid ? cached.todos : [];
   }, [messages, streamState.streamingMessage, session?.id]);
 
-  // SSE 连接管理交由可注入、可独立测试的 EventStreamManager（见
-  // lib/event-stream-manager.ts）。这里只保留 lazy 初始化的 ref 通过引用
-  // 复用同一实例，并把 agentRunningRef 作为重连门控注入。外部可见的
-  // eventSourceRef 与之同步以便消费方契约不变。
-  const eventStreamManagerRef = useRef<EventStreamManager | null>(null);
-  if (eventStreamManagerRef.current === null) {
-    eventStreamManagerRef.current = createEventStreamManager({
-      connectTimeoutMs: EVENT_STREAM_CONNECT_TIMEOUT_MS,
-      reconnectDelayMs: 1_000,
-      shouldAutoReconnect: () => agentRunningRef.current,
-    });
-  }
+  // SSE 由 BrowserSessionRuntimeRegistry 唯一持有；本 hook 只 attach/订阅 snapshot。
 
   // P1-2：显示模型按固定优先级解析——用户手动选择（override）最高，其次
   // 新会话发送中携带的选择（pending），再其次磁盘持久化 model_change
@@ -590,6 +575,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setData(d);
       setActiveLeafId(d.leafId);
       let resolvedEntryIds = tailEntryIds;
+      let hydratedMessages = tailMessages;
       setMessages((previous) => {
         const base = sameSession && previousEntryIds.length > 0
           ? mergeTailReload({
@@ -600,9 +586,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             })
           : { messages: tailMessages, entryIds: tailEntryIds };
         resolvedEntryIds = base.entryIds;
-        return sameSession
+        hydratedMessages = sameSession
           ? preserveCustomRenderedLines(previous, previousEntryIds, base.messages, base.entryIds)
           : base.messages;
+        return hydratedMessages;
       });
       // 整体替换完成：调用方（agent_end 收尾）可在此延长 settle 窗口 / 标记 end-pin，
       // 覆盖异步返回晚于 settle 窗口时的高度突变（流式占位消失 → 钳位跳变）。
@@ -619,6 +606,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       entryIdsRef.current = resolvedEntryIds;
       messagesSessionIdRef.current = sid;
       setEntryIds(resolvedEntryIds);
+      getOrCreateBrowserSessionRuntimeRegistry().hydrate(sid, hydratedMessages, resolvedEntryIds);
       const more = d.context.hasMoreBefore === true
         || (typeof d.context.totalMessageCount === "number"
           && d.context.totalMessageCount > resolvedEntryIds.length);
@@ -743,20 +731,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return false;
       }
       const prevIds = entryIdsRef.current;
+      let nextMessages: AgentMessage[] = [];
       const nextEntryIds = prependOlderPage({
         previousMessages: olderMsgs,
         previousEntryIds: prevIds,
         olderMessages: olderMsgs,
         olderEntryIds: olderIds,
       }).entryIds;
-      setMessages((previous) => prependOlderPage({
-        previousMessages: previous,
-        previousEntryIds: prevIds,
-        olderMessages: olderMsgs,
-        olderEntryIds: olderIds,
-      }).messages);
+      setMessages((previous) => {
+        nextMessages = prependOlderPage({
+          previousMessages: previous,
+          previousEntryIds: prevIds,
+          olderMessages: olderMsgs,
+          olderEntryIds: olderIds,
+        }).messages;
+        return nextMessages;
+      });
       entryIdsRef.current = nextEntryIds;
       setEntryIds(nextEntryIds);
+      getOrCreateBrowserSessionRuntimeRegistry().hydrate(sid, nextMessages, nextEntryIds);
       const more = d.context.hasMoreBefore === true
         || (typeof d.context.totalMessageCount === "number"
           && d.context.totalMessageCount > nextEntryIds.length);
@@ -797,12 +790,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const shouldPreserveRenderedLines = messagesSessionIdRef.current === sid;
       // 仅在成功拿到新 context、即将写入 state 时重置跟随；fetch 失败不遗留 pending。
       notifyAutoFollowBranchReset();
-      setMessages((previous) => shouldPreserveRenderedLines
-        ? preserveCustomRenderedLines(previous, previousEntryIds, d.context.messages, nextEntryIds)
-        : d.context.messages);
+      let hydrated = d.context.messages;
+      setMessages((previous) => {
+        hydrated = shouldPreserveRenderedLines
+          ? preserveCustomRenderedLines(previous, previousEntryIds, d.context.messages, nextEntryIds)
+          : d.context.messages;
+        return hydrated;
+      });
       entryIdsRef.current = nextEntryIds;
       messagesSessionIdRef.current = sid;
       setEntryIds(nextEntryIds);
+      getOrCreateBrowserSessionRuntimeRegistry().hydrate(sid, hydrated, nextEntryIds);
       const more = d.context.hasMoreBefore === true
         || (typeof d.context.totalMessageCount === "number"
           && d.context.totalMessageCount > nextEntryIds.length);
@@ -906,46 +904,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isReadOnly, session?.id]);
 
-  const connectEvents = useCallback((sid: string): Promise<EventStreamConnectionResult> => {
-    // 当前调用点均已按能力门禁；保留显式错误，防止未来误把只读会话接入 SSE。
-    if (!capabilities.canConnectEvents) {
-      return Promise.reject(new Error("Read-only sessions do not connect to agent events"));
-    }
-    // 建立时捕获 runId：连接排队/重连产生的回调携带旧 token，经 finishAgentRun
-    // 校验丢弃，不会结束新 run。
-    const generation = ++sseGenerationRef.current;
-    const manager = eventStreamManagerRef.current!;
-    return manager.connect(sid, (event) => {
-      if (sseGenerationRef.current !== generation) return;
-      handleAgentEventRef.current?.(event as unknown as AgentEvent);
-    });
-  }, [capabilities.canConnectEvents]);
-
-  const ensureEventsConnected = useCallback(async (sid: string) => {
+  const ensureEventsConnected = useCallback((sid: string) => {
     if (!capabilities.canConnectEvents) return;
-    // 同上：连接建立时捕获 runId（handleSend 在连接前已递增 promptRunIdRef）。
-    const generation = ++sseGenerationRef.current;
-    try {
-      // EventSource 读不到 409 正文；先 JSON 预热 live，锁冲突才能显示可读错误。
-      const wake = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state?wake=1`, {
-        signal: promptAbortRef.current?.signal,
-      });
-      const wakeBody = (await wake.json().catch(() => ({}))) as { error?: string };
-      if (!wake.ok) {
-        const err = typeof wakeBody.error === "string" && wakeBody.error
-          ? wakeBody.error
-          : `HTTP ${wake.status}`;
-        throw new Error(err.includes("locked by another") ? t("chat_sessionLocked") : err);
-      }
-      await eventStreamManagerRef.current!.ensureConnected(sid, (event) => {
-        if (sseGenerationRef.current !== generation) return;
-        handleAgentEventRef.current?.(event as unknown as AgentEvent);
-      });
-    } finally {
-      // 同步外部可见的 eventSourceRef，保留清理与既有消费者的读取契约。
-      eventSourceRef.current = eventStreamManagerRef.current?.getCurrentSource() as unknown as EventSource | null;
-    }
-  }, [capabilities.canConnectEvents, t]);
+    const registry = getOrCreateBrowserSessionRuntimeRegistry();
+    registry.ensureEventsConnected(sid);
+    eventSourceRef.current = registry.getEventSource(sid) as unknown as EventSource | null;
+  }, [capabilities.canConnectEvents]);
 
   const respondToExtensionUi = useCallback(async (
     request: ExtensionUiDialogRequest,
@@ -1264,14 +1228,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const syncOnTabReturn = useCallback(async () => {
     const sid = sessionIdRef.current;
     if (!sid) return;
-    const source = eventStreamManagerRef.current?.getCurrentSource();
+    const registry = getOrCreateBrowserSessionRuntimeRegistry();
+    const source = registry.getEventSource(sid);
     const stillOpen = source && (source.readyState === 1 || source.readyState === 0);
-    if (!stillOpen || !eventStreamManagerRef.current?.isCurrent(sid)) {
-      try {
-        await ensureEventsConnected(sid);
-      } catch {
-        // 重连失败的兜底走 reconcile（不打断用户输入）。
-      }
+    if (!stillOpen) {
+      ensureEventsConnected(sid);
     }
     void reconcileAgentState(sid);
     // 仅重拉运行中的会话尾页；空闲会话 loadSession 会带 live 状态，可能有 SSE 已
@@ -1359,71 +1320,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       case "message_start":
       case "message_update": {
-        // Ignore streaming events arriving after this run already finished
-        // (e.g. SSE data buffered while the tab was frozen, flushed after
-        // reconcile) — they would resurrect a ghost streaming bubble.
+        // timeline/stream 由 registry snapshot 驱动；这里只更新 agentPhase。
         if (!agentRunningRef.current) break;
         const msg = event.message as Partial<AgentMessage> | undefined;
-        if (msg?.role === "user") {
-          break;
-        }
-        if (msg) {
-          messagesSessionIdRef.current = sessionIdRef.current;
-          const renderedMessage = attachCustomRenderedLines(
-            msg as AgentMessage,
-            (event as AgentEvent & { renderedLines?: unknown }).renderedLines,
-          );
-          dispatch({ type: "update", message: normalizeToolCalls(renderedMessage) });
-        }
+        if (msg?.role === "user") break;
         setAgentPhase(null);
         break;
       }
       case "message_end": {
-        const completed = event.message as AgentMessage | undefined;
-        if (completed && completed.role === "user") {
-          // Delivered steering/follow-up messages surface here as user
-          // messages. The run's initial prompt also emits one, but handleSend
-          // already appended it optimistically. Consume only the still-adjacent
-          // optimistic bubble; later same-text queue deliveries must render.
-          const delivered = normalizeToolCalls(completed);
-          const deliveredKey = userMessageKey(delivered);
-          // 先删除本地乐观（同 key）——不受 running guard 限制：空闲 flush（prompt）
-          // 投递时前端 agentRunningRef 尚未置位，若被 guard 拦截则乐观残留、
-          // 重拉又追加 → 双条。
-          const optimisticKey = optimisticUserMessageKeyRef.current;
+        if (event.message && (event.message as AgentMessage).role === "user") {
           optimisticUserMessageKeyRef.current = null;
-          setMessages((prev) => {
-            const withoutSteer = prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === deliveredKey));
-            // 列表已有同 key 的非乐观 user（磁盘已加载/迟到重放）→ 不追加，避免双条
-            const already = withoutSteer.some(
-              (m) => m.role === "user" && !(m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === deliveredKey,
-            );
-            if (already) return withoutSteer;
-            const last = withoutSteer[withoutSteer.length - 1];
-            if (optimisticKey && last?.role === "user" && userMessageKey(last) === optimisticKey) {
-              return optimisticKey === deliveredKey
-                ? withoutSteer
-                : [...withoutSteer.slice(0, -1), delivered];
-            }
-            return [...withoutSteer, delivered];
-          });
-        } else if (completed) {
-          // Same late-event guard: after reconcile finished this run,
-          // loadSession already loaded this message from the session file —
-          // appending it again would duplicate it.
-          if (!agentRunningRef.current) break;
-          // Same late-event guard: after reconcile finished this run,
-          // loadSession already loaded this message from the session file —
-          // appending it again would duplicate it.
-          if (!agentRunningRef.current) break;
-          messagesSessionIdRef.current = sessionIdRef.current;
-          const renderedMessage = attachCustomRenderedLines(
-            completed,
-            (event as AgentEvent & { renderedLines?: unknown }).renderedLines,
-          );
-          setMessages((prev) => [...prev, normalizeToolCalls(renderedMessage)]);
         }
-        dispatch({ type: "reset" });
         setAgentPhase({ kind: "waiting_model" });
         break;
       }
@@ -1569,6 +1476,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setMessages((prev) => [...prev, userMsg]);
     optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
     promptRunIdRef.current = promptRunId;
+    promptSubmittedRef.current = false;
     abortRequestedRef.current = false;
     sendInFlightRef.current = true;
     const promptAbort = new AbortController();
@@ -1604,14 +1512,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     try {
       let sentSessionId: string | null = null;
-      if (isNew && newSessionCwdRef.current) {
+      const intentAtSend = newSessionIntentIdRef.current;
+      const target = resolveSubmitTarget({
+        isNew,
+        intentId: intentAtSend,
+        cwd: newSessionCwdRef.current,
+        persistedSessionId: session?.id ?? null,
+        ensuredSessionId: isNew ? sessionIdRef.current : null,
+      });
+      if (!target) return false;
+      if (target.kind === "new") {
         const selectedModel = newSessionModel ?? newSessionDefaultModel;
-        const existingSid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
-        const intentAtSend = newSessionIntentIdRef.current;
         const receipt = await runtime.submitPrompt({
-          target: existingSid
-            ? { kind: "persisted", sessionId: existingSid }
-            : { kind: "new", intentId: intentAtSend ?? "", cwd: newSessionCwdRef.current },
+          target,
           submissionId,
           message,
           images,
@@ -1636,10 +1549,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           return false;
         }
         promptSubmittedRef.current = true;
-        void ensureEventsConnected(receipt.sessionId);
-      } else if (session) {
-        sentSessionId = session.id;
-        void ensureEventsConnected(session.id);
+      } else if (target.kind === "persisted") {
+        sentSessionId = target.sessionId;
         if (abortRequestedRef.current) return false;
         // 下一轮生效：应用切换前记录的 pending 模型（引导消息不经过此路径）
         const pendingModelToApply = pendingModelRef.current;
@@ -1647,7 +1558,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           pendingModelRef.current = null;
           setPendingModel(null);
           try {
-            await sendAgentCommand(session.id, {
+            await sendAgentCommand(target.sessionId, {
               type: "set_model",
               provider: pendingModelToApply.provider,
               modelId: pendingModelToApply.modelId,
@@ -1664,7 +1575,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
         }
         const receipt = await runtime.submitPrompt({
-          target: { kind: "persisted", sessionId: session.id },
+          target,
           submissionId,
           message,
           images,
@@ -1747,7 +1658,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       sendInFlightRef.current = false;
       if (promptAbortRef.current === promptAbort) promptAbortRef.current = null;
     }
-  }, [isNew, isReadOnly, newSessionModel, newSessionDefaultModel, session, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, notifyAutoFollowSend, opts.chatInputRef, t, onSessionCreated]);
+  }, [isNew, isReadOnly, newSessionModel, newSessionDefaultModel, session, promoteNewSession, waitForPromptSettlement, addNotice, notifyAutoFollowSend, opts.chatInputRef, t, onSessionCreated]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean): Promise<boolean> => {
     // 只读会话：bash 命令同样会写 session 文件，拦截。
@@ -1785,14 +1696,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleAbort = useCallback(async () => {
     // 只读会话没有任何运行中的 agent，abort 无意义且不发送。
     if (isReadOnly) return;
-    const sid = sessionIdRef.current;
+    const pendingId = isNew && newSessionIntentIdRef.current
+      ? pendingSessionId(newSessionIntentIdRef.current)
+      : null;
+    const liveId = sessionIdRef.current;
+    const sid = liveId ?? pendingId;
     if (!sid) return;
     abortRequestedRef.current = true;
     promptAbortRef.current?.abort();
-    setServerPref(`sessionQueueHold.${sid}`, true);
+    if (liveId) setServerPref(`sessionQueueHold.${liveId}`, true);
     if (bashRunningRef.current) {
+      if (!liveId) return;
       try {
-        await sendAgentCommand(sid, { type: "abort_bash" });
+        await sendAgentCommand(liveId, { type: "abort_bash" });
       } catch (e) {
         console.error("Failed to abort bash:", e);
       }
@@ -1810,12 +1726,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // 结算异常不阻断 abort 命令。
       }
     }
-    try {
-      await sendAgentCommand(sid, { type: "abort" });
-    } catch (e) {
-      console.error("Failed to abort:", e);
+    if (liveId && !liveId.startsWith("pending:")) {
+      try {
+        await sendAgentCommand(liveId, { type: "abort" });
+      } catch (e) {
+        console.error("Failed to abort:", e);
+      }
     }
-  }, [isReadOnly]);
+  }, [isNew, isReadOnly]);
 
   const handleModelChange = useCallback(async (provider: string, modelId: string, thinkingLevel?: string | null) => {
     // 只读会话：set_model 会写会话状态，拦截。
@@ -2035,9 +1953,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (isReadOnly) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
-    const source = eventStreamManagerRef.current?.getCurrentSource();
+    const source = getOrCreateBrowserSessionRuntimeRegistry().getEventSource(sid);
     if (!source || source.readyState === 2) {
-      await ensureEventsConnected(sid);
+      ensureEventsConnected(sid);
     }
     // 引导/队列投递后回到 following 并钉底（消息会直接出现在会话中）。
     notifyAutoFollowSend();
@@ -2051,7 +1969,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       _steerOptimistic: true,
     };
     const optimisticKey = userMessageKey(optimistic);
-    setMessages((prev) => [...prev, optimistic]);
+    getOrCreateBrowserSessionRuntimeRegistry().appendLocal(sid, optimistic);
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     try {
       await sendAgentCommand(sid, {
@@ -2061,7 +1979,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
     } catch (e) {
       // 失败回滚乐观消息
-      setMessages((prev) => prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === optimisticKey)));
+      setMessages((prev) => {
+        const next = prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === optimisticKey));
+        getOrCreateBrowserSessionRuntimeRegistry().hydrate(sid, next, entryIdsRef.current);
+        return next;
+      });
       console.error("Failed to steer:", e);
     }
   }, [ensureEventsConnected, isReadOnly, notifyAutoFollowSend]);
@@ -2193,7 +2115,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       _steerOptimistic: true,
     };
     const optimisticKey = userMessageKey(optimistic);
-    setMessages((prev) => [...prev, optimistic]);
+    getOrCreateBrowserSessionRuntimeRegistry().appendLocal(sid, optimistic);
     let queueCleared = false;
     try {
       // 先让 Host 停止 settled 自动投递，再发送合并消息，避免当前 run 恰好结束时双发。
@@ -2222,7 +2144,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       if (extraMessage?.trim()) opts.chatInputRef?.current?.prependText(extraMessage.trim());
       // 失败回滚乐观消息
-      setMessages((prev) => prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === optimisticKey)));
+      setMessages((prev) => {
+        const next = prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === optimisticKey));
+        getOrCreateBrowserSessionRuntimeRegistry().hydrate(sid, next, entryIdsRef.current);
+        return next;
+      });
       console.error("Failed to send queue as steer:", e);
       addNotice({ type: "error", message: String(e instanceof Error ? e.message : e) });
     }
@@ -2335,6 +2261,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => {
     // 会话/新 intent 变化：先清空上一会话的本地聊天状态，避免切到新 intent 时
     // 仍显示旧消息（sessionKey remount 移除后的 state 残留竞态）。
+    resetChatTargetRefs({
+      sessionId: sessionIdRef,
+      newSessionPromoted: newSessionPromotedRef,
+      promptSubmitted: promptSubmittedRef,
+      ensuringNewSession: ensuringNewSessionRef,
+    }, session?.id ?? null);
     setMessages([]);
     entryIdsRef.current = [];
     setEntryIds([]);
@@ -2356,24 +2288,44 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setPendingModel(null);
     pendingModelRef.current = null;
     optimisticUserMessageKeyRef.current = null;
+
+    const registry = getOrCreateBrowserSessionRuntimeRegistry();
+    const runtimeId = session?.id ?? (isNew && newSessionIntentId ? pendingSessionId(newSessionIntentId) : null);
+    let unsubSnapshot: (() => void) | null = null;
+    if (runtimeId && session?.readOnly !== true) {
+      runtimeSubscriptionRef.current = registry.attach(runtimeId, (event) => {
+        handleAgentEventRef.current?.(event as AgentEvent);
+      });
+      unsubSnapshot = registry.subscribe(runtimeId, (snap) => {
+        if (sessionIdRef.current && snap.sessionId !== sessionIdRef.current && snap.sessionId !== runtimeId) {
+          return;
+        }
+        setMessages(snap.messages);
+        setEntryIds(snap.entryIds);
+        entryIdsRef.current = snap.entryIds;
+        setAgentRunning(snap.agentRunning);
+        agentRunningRef.current = snap.agentRunning;
+        sendInFlightRef.current = snap.sendInFlight;
+        if (snap.streamState.isStreaming) {
+          dispatch({
+            type: "update",
+            message: snap.streamState.streamingMessage ?? {},
+          });
+        } else {
+          dispatch({ type: "end" });
+        }
+        eventSourceRef.current = registry.getEventSource(snap.sessionId) as unknown as EventSource | null;
+      });
+    }
+
     if (session) {
-      sessionIdRef.current = session.id;
       if (session.readOnly === true) {
-        // 只读会话：只走 GET 详情读取路径。不拉 /state、不连 per-session SSE、
-        // 不触发任何会启动 AgentSession 的调用；历史消息与分支树照常展示。
         void loadSession(session.id, true, false);
       } else {
         loadSession(session.id, true, true).then((agentState) => {
-          // includeState=true 的运行时不会返回 true；该分支仅收窄 loadSession 的联合返回类型。
           if (agentState === true) return;
           if (agentState?.running || agentState?.live) {
             loadTools(session.id);
-            // live host 上的队列自动投递/扩展预热可能在空闲后再次 prompt；
-            // 只要 host 还在就接 SSE，不能只在已经 stream 时才连。
-            runtimeSubscriptionRef.current = getOrCreateBrowserSessionRuntimeRegistry().attach(session.id, (event) => {
-              handleAgentEventRef.current?.(event as AgentEvent);
-            });
-            void connectEvents(session.id);
             if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
               agentRunningRef.current = true;
               setAgentRunning(true);
@@ -2386,7 +2338,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             if (agentState.state?.isBashRunning) {
               bashRunningRef.current = true;
               setBashRunning(true);
-              // 恢复执行中的 bash 命令气泡（pendingBash 不持久化，刷新后由服务端快照恢复）
               if (agentState.state.pendingBash) {
                 setPendingBash(agentState.state.pendingBash);
               }
@@ -2403,7 +2354,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             if (agentState.state.queuedMessages !== undefined) {
               applyProjectedQueues(agentState.state.queuedMessages);
             }
-            // 切回会话时恢复阻塞中的问题块（服务端权威队列）。
             if (Array.isArray(agentState.state.pendingExtensionRequests)) {
               const queue = (agentState.state.pendingExtensionRequests as AgentEvent[])
                 .filter((e): e is ExtensionUiBlockingRequest => {
@@ -2423,14 +2373,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     return () => {
       bashRecoveryIdRef.current += 1;
-      const sid = sessionIdRef.current ?? session?.id;
+      unsubSnapshot?.();
+      const sid = runtimeId ?? sessionIdRef.current ?? session?.id;
       if (sid && runtimeSubscriptionRef.current) {
         getOrCreateBrowserSessionRuntimeRegistry().detach(sid, runtimeSubscriptionRef.current);
         runtimeSubscriptionRef.current = null;
       }
-      // ChatWindow 切换会话（不再重挂载）：退订旧 runtime，新会话由本 effect 重入加载。
     };
-  }, [session?.id, session?.readOnly]);
+  }, [session?.id, session?.readOnly, newSessionIntentId, isNew]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);

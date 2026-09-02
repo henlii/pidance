@@ -83,10 +83,13 @@ function AppShellInner() {
   );
   const [initialCwdError, setInitialCwdError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  /** 本地 starting 集合（发送瞬间即可显示 running，非单槽） */
-  const [clientStartingSessionIds, setClientStartingSessionIds] = useState<Set<string>>(() => new Set());
+  const [restoreNonce, setRestoreNonce] = useState(0);
   const navigationStoreRef = useRef(createSessionNavigationStore());
   const catalogStoreRef = useRef(createSessionCatalogStore());
+  const [navEpoch, setNavEpoch] = useState(0);
+  useEffect(() => navigationStoreRef.current.subscribe(() => setNavEpoch((n) => n + 1)), []);
+  const navState = navigationStoreRef.current.getState();
+  const navTarget = navState.target;
   const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   /** 受影响文件路径集合（P1-3 diff 定向刷新）：
@@ -105,30 +108,8 @@ function AppShellInner() {
    * 侧栏乐观 pending（按真实 id）：快速 A/B 创建时多条并存，
    * 迟到 intent 不选中但必须保留到 server 回流/显式删除。
    */
-  const [optimisticPendingById, setOptimisticPendingById] = useState<Map<string, SessionInfo>>(
-    () => new Map(),
-  );
   /** 新会话占位行高亮（真实 sid 尚未写入 selectedSession / URL） */
   const [pendingHighlightId, setPendingHighlightId] = useState<string | null>(null);
-  const optimisticPendingSessions = useMemo(
-    () => [...optimisticPendingById.values()],
-    [optimisticPendingById],
-  );
-  const upsertOptimisticPending = useCallback((session: SessionInfo) => {
-    setOptimisticPendingById((prev) => {
-      const next = new Map(prev);
-      next.set(session.id, session);
-      return next;
-    });
-  }, []);
-  const removeOptimisticPending = useCallback((sessionId: string) => {
-    setOptimisticPendingById((prev) => {
-      if (!prev.has(sessionId)) return prev;
-      const next = new Map(prev);
-      next.delete(sessionId);
-      return next;
-    });
-  }, []);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPageId | null>(null);
   /** Ctrl/Cmd+K 命令面板 */
@@ -718,13 +699,7 @@ function AppShellInner() {
         return { ...prev, ...result.value };
       });
       applyHydratedToNavigation(sessionId, result.value);
-      // 服务端完整字段也可替换侧栏 pending map 中的同 id 条目。
-      setOptimisticPendingById((prev) => {
-        if (!prev.has(sessionId)) return prev;
-        const next = new Map(prev);
-        next.set(sessionId, result.value);
-        return next;
-      });
+      catalogStoreRef.current.upsertPending(result.value);
     }).catch(() => {});
   }, [invalidateHydrate, applyHydratedToNavigation]);
 
@@ -740,9 +715,9 @@ function AppShellInner() {
 
     // 发送瞬间用 pending:<intent> 占位；真实 sid 到达后换掉占位，避免列表双行。
     if (intentId && session.id !== pendingSessionId(intentId)) {
-      removeOptimisticPending(pendingSessionId(intentId));
+      catalogStoreRef.current.removePending(pendingSessionId(intentId));
     }
-    upsertOptimisticPending(session);
+    catalogStoreRef.current.upsertPending(session);
     if (isPendingSessionId(session.id)) {
       if (promote) setPendingHighlightId(session.id);
       return;
@@ -766,7 +741,7 @@ function AppShellInner() {
       saveCachedSessionList(merged);
     }
     setRefreshKey((k) => k + 1);
-  }, [upsertOptimisticPending, removeOptimisticPending, syncUrl]);
+  }, [syncUrl]);
 
   const handleAgentEnd = useCallback(() => {
     setRefreshKey((k) => k + 1);
@@ -780,12 +755,6 @@ function AppShellInner() {
   const handleAgentRunningChange = useCallback((running: boolean, sessionId: string | null) => {
     if (!sessionId) return;
     catalogStoreRef.current[running ? "markStarting" : "clearStarting"](sessionId);
-    setClientStartingSessionIds((prev) => {
-      const next = new Set(prev);
-      if (running) next.add(sessionId);
-      else next.delete(sessionId);
-      return next;
-    });
   }, []);
 
   const handleSessionForked = useCallback((newSessionId: string, prefill?: string) => {
@@ -803,7 +772,7 @@ function AppShellInner() {
         ...(prev ?? { path: "", cwd: activeCwd ?? "", created: "", modified: "", messageCount: 0, firstMessage: "" }),
         id: newSessionId,
       };
-      upsertOptimisticPending(forked);
+      catalogStoreRef.current.upsertPending(forked);
       return forked;
     });
     selectedSessionIdRef.current = newSessionId;
@@ -815,7 +784,7 @@ function AppShellInner() {
     // fork 复用 targeted hydration，不套 new-intent 门禁。
     hydrateSelectedSession(newSessionId, { forFork: true });
     syncUrl(`?session=${encodeURIComponent(newSessionId)}`);
-  }, [hydrateSelectedSession, invalidateHydrate, activeCwd, upsertOptimisticPending, syncUrl]);
+  }, [hydrateSelectedSession, invalidateHydrate, activeCwd, syncUrl]);
 
   const handleInitialRestoreDone = useCallback((result?: { found?: boolean; error?: string }) => {
     if (result?.error) {
@@ -840,7 +809,7 @@ function AppShellInner() {
 
   const handleSessionDeleted = useCallback((sessionId: string) => {
     setRefreshKey((k) => k + 1);
-    removeOptimisticPending(sessionId);
+    catalogStoreRef.current.markDeleted(sessionId);
     if (selectedSession?.id === sessionId) {
       invalidateHydrate();
       setNewSessionIntent(null);
@@ -853,7 +822,7 @@ function AppShellInner() {
       setSystemPrompt(null);
       syncUrl("/");
     }
-  }, [selectedSession, invalidateHydrate, removeOptimisticPending, syncUrl]);
+  }, [selectedSession, invalidateHydrate, syncUrl]);
 
   const handleOpenFile = useCallback((filePath: string, fileName: string, sourceSessionId?: string | null, writable = false, mode: "content" | "diff" = "content") => {
     const bufferKey = makeFileBufferKey(filePath, sourceSessionId);
@@ -991,11 +960,27 @@ function AppShellInner() {
     setActiveRightTabId("info");
   }, [applyRightPanelOpen, isMobile]);
 
-  // 新会话 cwd 来自 intent 捕获值，不从随后可能变化的 activeCwd 裸推导。
-  const effectiveNewSessionCwd =
-    selectedSession === null ? (newSessionIntent?.cwd ?? null) : null;
-  const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
-  // While restoring initial session from URL, don't show the placeholder
+  // NavigationStore 是 target 唯一 owner；React state 只缓存 SessionInfo。
+  void navEpoch;
+  const chatSession = navTarget.kind === "persisted"
+    ? (selectedSession?.id === navTarget.sessionId
+      ? selectedSession
+      : {
+          id: navTarget.sessionId,
+          path: "",
+          cwd: navTarget.cwd,
+          projectRoot: navTarget.projectRoot,
+          created: selectedSession?.created ?? "",
+          modified: selectedSession?.modified ?? "",
+          messageCount: selectedSession?.messageCount ?? 0,
+          firstMessage: selectedSession?.firstMessage ?? "",
+        })
+    : null;
+  const chatIntent = navTarget.kind === "new"
+    ? { id: navTarget.intentId, cwd: navTarget.cwd, generation: navTarget.generation }
+    : null;
+  const effectiveNewSessionCwd = chatSession === null ? (newSessionIntent?.cwd ?? chatIntent?.cwd ?? null) : null;
+  const showChat = chatSession !== null || effectiveNewSessionCwd !== null;
   const showPlaceholder = initialSessionRestored && !showChat;
 
   const activeFileTab = activeFileTabId
@@ -1018,17 +1003,17 @@ function AppShellInner() {
   const sidebarContent = (
     <>
       <SessionSidebar
-        selectedSessionId={selectedSession?.id ?? pendingHighlightId}
+        catalogStore={catalogStoreRef.current}
+        selectedSessionId={chatSession?.id ?? pendingHighlightId}
         onSelectSession={handleSelectSession}
         onNewSession={handleNewSession}
         initialSessionId={initialSessionId}
         skipInitialProjectSelection={initialNavigation.requestedCwd !== null}
         onInitialRestoreDone={handleInitialRestoreDone}
+        restoreNonce={restoreNonce}
         refreshKey={refreshKey}
         onSessionDeleted={handleSessionDeleted}
         onProjectAdded={() => setRefreshKey((k) => k + 1)}
-        optimisticSessions={optimisticPendingSessions}
-        clientRunningSessionIds={clientStartingSessionIds}
       />
       {/* 底部 Settings / About：同规格图标按钮（24×24），不显示永久文字标签。登录管理在 设置 → 通用。 */}
       <div style={{ padding: "6px 8px", flexShrink: 0, display: "flex", alignItems: "center", gap: 4 }}>
@@ -1270,9 +1255,9 @@ function AppShellInner() {
             {showChat ? (
               <ChatWindow
                 key={sessionKey}
-                session={selectedSession}
+                session={chatSession}
                 newSessionCwd={effectiveNewSessionCwd}
-                newSessionIntentId={newSessionIntent?.id ?? null}
+                newSessionIntentId={chatIntent?.id ?? newSessionIntent?.id ?? null}
                 guideDefaultCwd={guideDefaultCwd}
                 onGuideTargetChange={handleGuideTargetChange}
                 onAgentEnd={handleAgentEnd}
@@ -1308,11 +1293,11 @@ function AppShellInner() {
                 <div style={{ fontSize: 14, color: "var(--status-danger)" }}>{t("app_sessionRestoreFailed")}</div>
                 {sessionRestoreError ? <div style={{ maxWidth: 720, fontSize: 12 }}>{sessionRestoreError}</div> : null}
                 <button type="button" onClick={() => {
-                  const id = navigationStoreRef.current.retryUrlRestore();
+                  navigationStoreRef.current.retryUrlRestore();
                   setSessionRestoreStatus("loading");
                   setInitialSessionRestored(false);
+                  setRestoreNonce((n) => n + 1);
                   setRefreshKey((k) => k + 1);
-                  void id;
                 }}>{t("app_retry")}</button>
               </div>
             ) : showPlaceholder ? (
