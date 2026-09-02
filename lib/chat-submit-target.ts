@@ -78,3 +78,15 @@ export function chatTargetTokenMatches(
   if (token.kind === "new") return current.intentId === token.intentId;
   return current.persistedSessionId === token.sessionId;
 }
+
+/** 两个完整 target token 是否同为当前导航 target（比较 kind + 具体 id）。 */
+export function sameChatTargetToken(a: ChatTargetToken | null, b: ChatTargetToken | null): boolean {
+  if (!a || !b) {
+    if (!a && !b) return true;
+    return false;
+  }
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "new" && b.kind === "new") return a.intentId === b.intentId;
+  if (a.kind === "persisted" && b.kind === "persisted") return a.sessionId === b.sessionId;
+  return false;
+}

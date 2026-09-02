@@ -46,7 +46,8 @@ export type SessionRuntimeSnapshot = {
   submissions: PromptSubmission[];
   promptRunId: number;
   attachCount: number;
-  /** live 事件单调序号；hydrate 用 sinceSeq 避免陈旧磁盘覆盖较新 timeline */
+  /** 消息 timeline 版本：仅当 messages/streaming 内容变化时递增；
+   *  connected/agent_start 等运行态事件不递增，避免阻塞初始磁盘 hydrate。 */
   timelineSeq: number;
 };
 
@@ -114,6 +115,10 @@ type RuntimeSlot = {
   snapshotListeners: Set<(snapshot: SessionRuntimeSnapshot) => void>;
   attachCount: number;
   consumedEntryIds: Set<string>;
+  /** 同 session hydrate 请求（按发起序）的单调号；后发请求不被早到的旧响应覆盖 */
+  hydrateSeq: number;
+  /** 最近一次已应用 hydrate 的请求号 */
+  hydrateAppliedSeq: number;
 };
 
 export type BrowserSessionRuntimeRegistry = {
@@ -131,7 +136,7 @@ export type BrowserSessionRuntimeRegistry = {
     sessionId: string,
     messages: AgentMessage[],
     entryIds?: string[],
-    options?: { sinceSeq?: number },
+    options?: { sinceSeq?: number; hydrateRequestSeq?: number },
   ): boolean;
   appendLocal(sessionId: string, message: AgentMessage): void;
   applyEvent(sessionId: string, event: AgentStreamEvent): void;
@@ -169,6 +174,8 @@ function createSlot(sessionId: string): RuntimeSlot {
     snapshotListeners: new Set(),
     attachCount: 0,
     consumedEntryIds: new Set(),
+    hydrateSeq: 0,
+    hydrateAppliedSeq: 0,
   };
 }
 
@@ -228,6 +235,20 @@ export function createBrowserSessionRuntimeRegistry(
     slot.snapshot.timelineSeq += 1;
   };
 
+  const appendMessageWithEntry = (
+    slot: RuntimeSlot,
+    message: AgentMessage,
+    entryId: string | null,
+  ): void => {
+    const withEntry = {
+      ...(message as unknown as Record<string, unknown>),
+      entryId: entryId ?? (message as unknown as Record<string, unknown>).entryId ?? "",
+    };
+    slot.snapshot.messages = [...slot.snapshot.messages, withEntry as unknown as AgentMessage];
+    slot.snapshot.entryIds = [...slot.snapshot.entryIds, entryId ?? ""];
+    bumpTimeline(slot);
+  };
+
   const settleSubmission = (
     slot: RuntimeSlot,
     submissionId: string,
@@ -253,7 +274,6 @@ export function createBrowserSessionRuntimeRegistry(
   };
 
   const applyEventToSlot = (slot: RuntimeSlot, event: AgentStreamEvent) => {
-    bumpTimeline(slot);
     const type = event.type;
     if (type === "agent_start") {
       slot.snapshot.promptRunId += 1;
@@ -294,11 +314,7 @@ export function createBrowserSessionRuntimeRegistry(
           ? slot.snapshot.messages.some((msg) => (msg as { entryId?: unknown }).entryId === entryId)
           : false;
         if (!isNextEntryPresent && (!last || last.role !== "user" || lastText !== nextText)) {
-          const withEntry = {
-            ...(completed as unknown as Record<string, unknown>),
-            entryId: entryId ?? (completed as unknown as Record<string, unknown>).entryId,
-          };
-          slot.snapshot.messages = [...slot.snapshot.messages, withEntry as unknown as AgentMessage];
+          appendMessageWithEntry(slot, completed, entryId);
         }
         // FIFO：下一个未绑定 entry 的 accepted/submitting submission。
         // 同一 entryId 不可二次消费，避免 SSE 重放把两条 submission 绑到同一 entry。
@@ -313,7 +329,7 @@ export function createBrowserSessionRuntimeRegistry(
         }
       } else if (completed && slot.snapshot.agentRunning) {
         const rendered = attachCustomRenderedLines(completed, event.renderedLines);
-        slot.snapshot.messages = [...slot.snapshot.messages, normalizeToolCalls(rendered)];
+        appendMessageWithEntry(slot, normalizeToolCalls(rendered), entryId);
       }
       slot.snapshot.streamState = emptyStream();
     }
@@ -519,6 +535,15 @@ export function createBrowserSessionRuntimeRegistry(
       const slot = getSlot(sessionId, true)!;
       if (options?.sinceSeq !== undefined && slot.snapshot.timelineSeq > options.sinceSeq) {
         return false;
+      }
+      if (
+        options?.hydrateRequestSeq !== undefined
+        && options.hydrateRequestSeq <= slot.hydrateAppliedSeq
+      ) {
+        return false;
+      }
+      if (options?.hydrateRequestSeq !== undefined) {
+        slot.hydrateAppliedSeq = options.hydrateRequestSeq;
       }
       slot.snapshot.messages = [...messages];
       slot.snapshot.entryIds = [...entryIds];

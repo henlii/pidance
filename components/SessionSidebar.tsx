@@ -675,7 +675,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       const next = projects.find((root) => !closedRoots.has(root));
       if (next) selectCwd(next);
     }
-  }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, selectCwd, closedRoots, serverListLoaded, error]);
+  }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, selectCwd, closedRoots, serverListLoaded, error, restoreNonce]);
 
   const closeCustomPathPanel = useCallback(() => {
     setCustomPathOpen(false);

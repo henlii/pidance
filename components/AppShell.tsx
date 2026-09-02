@@ -571,8 +571,10 @@ function AppShellInner() {
       });
     }
     invalidateHydrate();
-    // 选中已有会话：使新建 intent 失效，迟到 ensure 不得覆盖当前 chat。
+    // 选中已有会话：清掉新建 intent（含 ref 与 state），使迟到 ensure/promote 失效。
     // 不清理 optimistic pending map：其它真实 id 须保留至 server 回流/显式删除。
+    newSessionIntentRef.current = null;
+    setNewSessionIntent(null);
     setPendingHighlightId(null);
     setSystemPrompt(null);
     setInitialSessionRestored(true);

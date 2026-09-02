@@ -19,9 +19,10 @@ import { generateSubmissionId } from "@/lib/agent-commands";
 import { getOrCreateBrowserSessionRuntimeRegistry, type RegistrySubscription } from "@/lib/browser-session-runtime-registry";
 import {
   captureChatTargetToken,
-  chatTargetTokenMatches,
+  sameChatTargetToken,
   resolveSubmitTarget,
   resetChatTargetRefs,
+  type ChatTargetToken,
 } from "@/lib/chat-submit-target";
 import type { BranchActions } from "@/lib/branch-bookmarks";
 import {
@@ -410,6 +411,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const eventSourceRef = useRef<EventSource | null>(null);
   const runtimeSubscriptionRef = useRef<RegistrySubscription | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
+  /** 每次 render 用当前 props/refs 构造的导航 target token；旧闭包只读它做 CAS。 */
+  const currentTargetTokenRef = useRef<ChatTargetToken | null>(null);
+  currentTargetTokenRef.current = captureChatTargetToken({
+    isNew,
+    intentId: newSessionIntentId ?? newSessionIntentIdRef.current,
+    persistedSessionId: isNew ? null : (session?.id ?? null),
+  });
   /** 切换会话时取消进行中的后台 wake，避免串台写 systemPrompt */
   const wakeAbortRef = useRef<AbortController | null>(null);
   // 侧栏运行中指示：agentRunning 在 ensureEventsConnected 前已置位（冷启动窗口），
@@ -419,6 +427,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [agentRunning, session?.id, onAgentRunningChange]);
   const messagesSessionIdRef = useRef<string | null>(session?.id ?? null);
   const entryIdsRef = useRef<string[]>([]);
+  /** 会话内 hydrate 请求单调号：会话切换时清零；后发请求才可覆盖旧响应 */
+  const hydrateReqSeqRef = useRef(0);
   const agentRunningRef = useRef(false);
   const sendInFlightRef = useRef(false);
   const abortRequestedRef = useRef(false);
@@ -541,6 +551,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setContextUsage(null);
       }
       // tail-first：首屏只拉最新 N 条，尽快结束 loading；更旧历史按需 prepend。
+      const hydrateRequestSeq = ++hydrateReqSeqRef.current;
       const params = new URLSearchParams({
         deferThinking: "1",
         deferMedia: "1",
@@ -616,7 +627,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         sid,
         hydratedMessages,
         resolvedEntryIds,
-        { sinceSeq: hydrateSinceSeq },
+        { sinceSeq: hydrateSinceSeq, hydrateRequestSeq },
       );
       if (!appliedHydrate) {
         const live = getOrCreateBrowserSessionRuntimeRegistry().getSnapshot(sid);
@@ -794,6 +805,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
       if (leafId) params.set("leafId", leafId);
       const url = `/api/sessions/${encodeURIComponent(sid)}/context?${params}`;
+      const hydrateRequestSeq = ++hydrateReqSeqRef.current;
       const hydrateSinceSeq = getOrCreateBrowserSessionRuntimeRegistry().getSnapshot(sid)?.timelineSeq ?? 0;
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -825,7 +837,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         sid,
         hydrated,
         nextEntryIds,
-        { sinceSeq: hydrateSinceSeq },
+        { sinceSeq: hydrateSinceSeq, hydrateRequestSeq },
       );
       if (!appliedHydrate) {
         const live = getOrCreateBrowserSessionRuntimeRegistry().getSnapshot(sid);
@@ -1540,21 +1552,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     const runtime = getOrCreateBrowserSessionRuntimeRegistry();
     const submissionId = generateSubmissionId();
+    const intentAtSend = newSessionIntentIdRef.current;
     const draftKey = session?.id
-      ?? (newSessionCwdRef.current ? `new:${newSessionCwdRef.current}` : "new");
+      ?? (isNew && intentAtSend ? `new:${intentAtSend}` : (newSessionCwdRef.current ? `new:${newSessionCwdRef.current}` : "new"));
     const sendToken = captureChatTargetToken({
       isNew,
-      intentId: newSessionIntentIdRef.current,
-      persistedSessionId: session?.id ?? null,
+      intentId: intentAtSend,
+      persistedSessionId: isNew ? null : (session?.id ?? null),
     });
-    const sendStillCurrent = () => sendToken !== null && chatTargetTokenMatches(sendToken, {
-      intentId: newSessionIntentIdRef.current,
-      persistedSessionId: isNew ? null : (sessionIdRef.current ?? session?.id ?? null),
-    });
+    const sendStillCurrent = () => sendToken !== null && sameChatTargetToken(sendToken, currentTargetTokenRef.current);
 
     try {
       let sentSessionId: string | null = null;
-      const intentAtSend = newSessionIntentIdRef.current;
       const target = resolveSubmitTarget({
         isNew,
         intentId: intentAtSend,
@@ -2313,6 +2322,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       promptSubmitted: promptSubmittedRef,
       ensuringNewSession: ensuringNewSessionRef,
     }, session?.id ?? null);
+    hydrateReqSeqRef.current = 0;
     setMessages([]);
     entryIdsRef.current = [];
     setEntryIds([]);

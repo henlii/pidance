@@ -16,6 +16,7 @@ import {
 import { type ExportFormat } from "./session-export";
 import { buildSessionExport, type SessionExportPayload } from "./session-html-export";
 import { parseContextLimitParam, sliceContextBefore, sliceContextTail, DEFAULT_SESSION_HISTORY_PAGE, DEFAULT_SESSION_TAIL_LIMIT } from "./session-context-window";
+import { getThinkingText, isThinkingLikeType } from "./thinking-content";
 import { clearLeafSidecar, writeLeafSidecar } from "./session-leaf-sidecar";
 import {
   getRpcSession,
@@ -72,6 +73,7 @@ import {
   realArchiveFs,
 } from "./session-archive";
 import { getRunningStartedAt as readRunningStartedAt } from "./running-state";
+import { getRunningStartedAtTable } from "./live-session-registry";
 import { searchSessionsFulltext, type SessionSearchResult } from "./session-fulltext-search";
 
 export type SessionCommand = Record<string, unknown> & { type: string };
@@ -257,6 +259,14 @@ export type SessionService = {
       deferToolResultImages?: boolean;
     },
   ): Promise<unknown>;
+  /** 只读：assistant entry 的 thinking 块文本；非 assistant/无该块返回 null。 */
+  getEntryThinking(
+    sessionId: string,
+    entryId: string,
+    blockIndex: number,
+  ): Promise<{ thinking: string } | null>;
+  /** 只读：toolResult entry 的 details；未命中返回 null。 */
+  getToolResultDetails(sessionId: string, toolCallId: string): Promise<{ details: unknown } | null>;
   /**
    * 类型安全的持久活动写入。
    * 单写者：仅当 live 暴露 in-process SessionManager（inner.sessionManager）时走 live.appendActivity；
@@ -694,6 +704,34 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       return { context };
     },
 
+    async getEntryThinking(sessionId, entryId, blockIndex) {
+      const view = await service.getReadView(sessionId);
+      if (!view) return null;
+      const entry = (view.manager.getEntries() as Array<{ id?: string; type?: string; message?: { role?: string; content?: unknown[] } }>)
+        .find((candidate) => candidate.id === entryId);
+      if (!entry || entry.type !== "message" || entry.message?.role !== "assistant") {
+        return null;
+      }
+      const block = entry.message.content?.[blockIndex] as { type?: string } | undefined;
+      if (!block || !isThinkingLikeType(block.type)) {
+        return null;
+      }
+      return { thinking: getThinkingText(block) };
+    },
+
+    async getToolResultDetails(sessionId, toolCallId) {
+      const view = await service.getReadView(sessionId);
+      if (!view) return null;
+      const entry = (view.manager.getEntries() as Array<{ type?: string; message?: { role?: string; toolCallId?: string; details?: unknown } }>)
+        .find((candidate) =>
+          candidate.type === "message"
+          && candidate.message?.role === "toolResult"
+          && candidate.message.toolCallId === toolCallId,
+        );
+      if (!entry) return null;
+      return { details: entry.message?.details ?? null };
+    },
+
     async appendActivity(sessionId, input) {
       // readOnly（subagent 持久化）拒绝写，且不启动任何会话
       await requireWritableSession(sessionId, service.isReadOnly);
@@ -788,7 +826,12 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
     },
 
     getRunningStartedAt() {
-      return Object.fromEntries(readRunningStartedAt());
+      // 本进程 running-state 为权威，跨进程租约 startedAt 补齐缺失 id。
+      const merged = Object.fromEntries(readRunningStartedAt());
+      for (const [id, startedAt] of Object.entries(getRunningStartedAtTable())) {
+        if (!(id in merged)) merged[id] = startedAt;
+      }
+      return merged;
     },
 
     async searchFulltext(query, options = {}) {

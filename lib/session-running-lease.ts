@@ -24,6 +24,8 @@ export type RunningLease = {
   pid: number;
   sessionId: string;
   heartbeatAt: number;
+  /** 稳定 run 起始（首次 acquire 落盘）；跨进程 epoch 用，滚动 heartbeat 不改写 */
+  startedAt: number;
 };
 
 function leaseDir(agentDir: string): string {
@@ -50,18 +52,39 @@ function readLeaseFile(path: string): RunningLease | null {
     const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<RunningLease>;
     if (typeof raw.pid !== "number" || typeof raw.sessionId !== "string") return null;
     if (typeof raw.heartbeatAt !== "number") return null;
-    return { pid: raw.pid, sessionId: raw.sessionId, heartbeatAt: raw.heartbeatAt };
+    return {
+      pid: raw.pid,
+      sessionId: raw.sessionId,
+      heartbeatAt: raw.heartbeatAt,
+      startedAt: typeof raw.startedAt === "number" ? raw.startedAt : raw.heartbeatAt,
+    };
   } catch {
     return null;
   }
 }
 
-function isFresh(lease: RunningLease, now: number): boolean {
+function writeLease(path: string, lease: RunningLease): void {
+  writeFileSync(path, `${JSON.stringify(lease)}\n`, { mode: 0o600 });
+}
+
+export function isFresh(lease: RunningLease, now: number): boolean {
   return now - lease.heartbeatAt <= RUNNING_LEASE_TTL_MS && isPidAlive(lease.pid);
 }
 
-function writeLease(path: string, lease: RunningLease): void {
-  writeFileSync(path, `${JSON.stringify(lease)}\n`, { mode: 0o600 });
+export function listFreshRunningLeaseSessions(
+  agentDir: string = getAgentDir(),
+  now = Date.now(),
+): { sessionId: string; startedAt: number }[] {
+  const dir = leaseDir(agentDir);
+  if (!existsSync(dir)) return [];
+  const sessions: { sessionId: string; startedAt: number }[] = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".json")) continue;
+    const lease = readLeaseFile(join(dir, name));
+    if (!lease || !isFresh(lease, now)) continue;
+    sessions.push({ sessionId: lease.sessionId, startedAt: lease.startedAt });
+  }
+  return sessions;
 }
 
 export function isSessionRunningLockedError(error: unknown): boolean {
@@ -82,7 +105,13 @@ export function acquireRunningLease(
   if (current && isFresh(current, now) && current.pid !== process.pid) {
     return false;
   }
-  writeLease(path, { pid: process.pid, sessionId, heartbeatAt: now });
+  // 首次 acquire 记录稳定 startedAt；同进程重 acquire/心跳沿用，跨进程可见同一 epoch。
+  writeLease(path, {
+    pid: process.pid,
+    sessionId,
+    heartbeatAt: now,
+    startedAt: current && current.pid === process.pid ? current.startedAt : now,
+  });
   return true;
 }
 
@@ -96,7 +125,12 @@ export function heartbeatRunningLease(
   const current = existsSync(path) ? readLeaseFile(path) : null;
   if (current && current.pid !== process.pid && isFresh(current, now)) return;
   if (!existsSync(leaseDir(agentDir))) mkdirSync(leaseDir(agentDir), { recursive: true, mode: 0o700 });
-  writeLease(path, { pid: process.pid, sessionId, heartbeatAt: now });
+  writeLease(path, {
+    pid: process.pid,
+    sessionId,
+    heartbeatAt: now,
+    startedAt: current && current.pid === process.pid ? current.startedAt : now,
+  });
 }
 
 export function releaseRunningLease(

@@ -10,6 +10,7 @@ import {
   acquireRunningLease,
   heartbeatRunningLease,
   listFreshRunningLeaseSessionIds,
+  listFreshRunningLeaseSessions,
   releaseRunningLease,
   SESSION_RUNNING_LOCKED_MESSAGE,
 } from "./session-running-lease";
@@ -157,6 +158,19 @@ export function getRunningRpcSessionIds(): string[] {
   const ids = new Set(getLocalRunningAndStartingIds());
   for (const id of listFreshRunningLeaseSessionIds()) ids.add(id);
   return [...ids];
+}
+
+/** 运行 id → startedAt（本进程 running-state 与跨进程租约合并；缺省按 now 兜底）。 */
+export function getRunningStartedAtTable(): Record<string, number> {
+  const table: Record<string, number> = {};
+  const now = Date.now();
+  for (const sessionId of getLocalRunningAndStartingIds()) {
+    table[sessionId] = now;
+  }
+  for (const { sessionId, startedAt } of listFreshRunningLeaseSessions()) {
+    table[sessionId] = startedAt;
+  }
+  return table;
 }
 
 export function getRunningSessionIds(): string[] {
