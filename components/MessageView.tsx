@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useState, useRef, useEffect, useMemo, type ReactNode } from "react";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { AlertTriangle, Check, CheckCircle2, ChevronDown, ChevronUp, Copy, FilePlus, FileText, GitBranch, Globe, ListTodo, Pencil, Search, ShieldCheck, Terminal, Webhook, XCircle } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
 import { copyText } from "@/lib/clipboard";
@@ -810,8 +811,12 @@ function TextBlock({ block, isStreaming, cwd, onOpenFile }: { block: TextContent
 }
 
 /** 思考 / 工具明细默认最大高度：超出在块内滚动，避免会话视口被无限撑高。
- * 手机小视口按 45vh 收缩，避免块内滚动区占满屏幕。 */
-const STREAM_BLOCK_MAX_HEIGHT = "min(320px, 45vh)";
+ * 桌面 320px；手机小视口按 32vh 收得更紧，避免块内滚动区占满屏幕。 */
+const STREAM_BLOCK_MAX_HEIGHT_DESKTOP = "min(320px, 45vh)";
+const STREAM_BLOCK_MAX_HEIGHT_MOBILE = "min(240px, 32vh)";
+function useStreamBlockMaxHeight(): string {
+  return useIsMobile() ? STREAM_BLOCK_MAX_HEIGHT_MOBILE : STREAM_BLOCK_MAX_HEIGHT_DESKTOP;
+}
 /** 距块底多少 px 内视为仍跟随；用户上滚超出后停止自动向下。 */
 const STREAM_BLOCK_FOLLOW_TOLERANCE_PX = 24;
 
@@ -843,6 +848,7 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
   blockIndex: number;
 }) {
   const { t } = useI18n();
+  const streamBlockMaxHeight = useStreamBlockMaxHeight();
   const [expanded, setExpanded] = useState(isStreaming ?? false);
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -944,7 +950,7 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
             whiteSpace: "pre-wrap",
             background: "var(--bg-panel)",
             borderTop: "1px solid var(--border)",
-            maxHeight: STREAM_BLOCK_MAX_HEIGHT,
+            maxHeight: streamBlockMaxHeight,
             overflow: "auto",
             overscrollBehavior: "contain",
           }}
@@ -969,6 +975,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
   startedAt?: number;
 }) {
   const { t } = useI18n();
+  const streamBlockMaxHeight = useStreamBlockMaxHeight();
   const [expandedOverride, setExpandedOverride] = useState<boolean | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [resolvedDetails, setResolvedDetails] = useState<unknown>(undefined);
@@ -1099,7 +1106,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
       {expanded && command && (
         <div style={{ padding: "8px 10px", borderTop: `1px solid color-mix(in srgb, ${statusColor} 22%, var(--border))`, background: "var(--bg-subtle)" }}>
           <div style={{ marginBottom: 4, color: "var(--text-dim)", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em" }}>{t("message_toolCommand")}</div>
-          <code style={{ display: "block", maxHeight: STREAM_BLOCK_MAX_HEIGHT, overflow: "auto", overscrollBehavior: "contain", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{command}</code>
+          <code style={{ display: "block", maxHeight: streamBlockMaxHeight, overflow: "auto", overscrollBehavior: "contain", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{command}</code>
         </div>
       )}
 
@@ -1115,7 +1122,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
             color: "var(--text-muted)",
             fontSize: 12,
             lineHeight: 1.5,
-maxHeight: STREAM_BLOCK_MAX_HEIGHT,
+maxHeight: streamBlockMaxHeight,
             overflow: "auto",
             overscrollBehavior: "contain",
             background: "var(--bg-subtle)",
@@ -1147,7 +1154,7 @@ maxHeight: STREAM_BLOCK_MAX_HEIGHT,
               if (pinningOutputRef.current) return;
               followOutputRef.current = isNearStreamBlockBottom(event.currentTarget);
             }}
-            style={{ margin: 0, padding: "4px 10px 10px", maxHeight: STREAM_BLOCK_MAX_HEIGHT, overflow: "auto", overscrollBehavior: "contain", color: renderedLiveLines || snapshot.output ? "var(--text-muted)" : "var(--text-dim)", background: "var(--tool-bg)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
+            style={{ margin: 0, padding: "4px 10px 10px", maxHeight: streamBlockMaxHeight, overflow: "auto", overscrollBehavior: "contain", color: renderedLiveLines || snapshot.output ? "var(--text-muted)" : "var(--text-dim)", background: "var(--tool-bg)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
           >{renderedLiveLines ? renderAnsiLines(renderedLiveLines, "tool-live") : snapshot.output || t("message_toolWaitingOutput")}</pre>
         </div>
       )}
@@ -1200,10 +1207,11 @@ function renderAnsiLines(lines: string[], keyPrefix: string): ReactNode[] {
 
 /** 插件 TUI 行沿用工具卡片的边框、底色和等宽排版，不引入新视觉语义。 */
 function AnsiToolLines({ lines, statusColor }: { lines: string[]; statusColor: string }) {
+  const maxHeight = useStreamBlockMaxHeight();
   return (
     <pre
       tabIndex={0}
-      style={{ margin: 0, padding: "8px 10px", maxHeight: STREAM_BLOCK_MAX_HEIGHT, overflow: "auto", overscrollBehavior: "contain", borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--bg-subtle)", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
+      style={{ margin: 0, padding: "8px 10px", maxHeight, overflow: "auto", overscrollBehavior: "contain", borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--bg-subtle)", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
     >
       {renderAnsiLines(lines, "tool-rendered")}
     </pre>
@@ -1795,6 +1803,7 @@ function activityMetadataPreview(metadata: SessionActivity["metadata"]): [string
  */
 function PidanceActivityView({ message, activity }: { message: CustomMessage; activity: SessionActivity }) {
   const { t } = useI18n();
+  const streamBlockMaxHeight = useStreamBlockMaxHeight();
   const [copied, setCopied] = useState(false);
   const time = formatTime(message.timestamp);
   const { color, border, background, Icon } = ACTIVITY_KIND_STYLES[activity.kind];
@@ -1859,7 +1868,7 @@ function PidanceActivityView({ message, activity }: { message: CustomMessage; ac
             style={{
               margin: 0,
               padding: "8px 12px",
-              maxHeight: STREAM_BLOCK_MAX_HEIGHT,
+              maxHeight: streamBlockMaxHeight,
               overflow: "auto",
               color: "var(--text)",
               fontSize: 12,

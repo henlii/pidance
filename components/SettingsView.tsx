@@ -422,7 +422,7 @@ function GeneralPage({ onClose }: { onClose?: () => void }) {
           ) : devices.length === 0 ? (
             <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{t("general_noDevices")}</div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, maxWidth: 480 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, maxWidth: 480, maxHeight: 320, overflowY: "auto", overscrollBehavior: "contain" }}>
               {devices.map((device) => (
                 <div
                   key={device.id}

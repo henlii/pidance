@@ -1746,12 +1746,14 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
       delete providers[name];
       return { ...prev, providers };
     });
+    // 手机端删除后回到列表页（同插件页）；桌面端保持自动选中第一个 provider。
     setConfig((prev) => {
       const remaining = Object.keys(prev.providers ?? {});
+      if (isMobile) { setSelection(null); return prev; }
       setSelection(remaining.length > 0 ? { type: "provider", name: remaining[0] } : null);
       return prev;
     });
-  }, []);
+  }, [isMobile]);
 
   const addModel = useCallback((providerName: string) => {
     setConfig((prev) => {
@@ -1925,13 +1927,17 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
         {/* Body */}
         <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
 
-          {/* Left: tree */}
+          {/* Left: tree。移动端同插件页：列表整页，点选后切换到全屏详情页 */}
           <div style={{
             width: isMobile ? "100%" : 210,
-            maxHeight: isMobile ? "40vh" : undefined,
             borderRight: isMobile ? "none" : "1px solid var(--border)",
             borderBottom: isMobile ? "1px solid var(--border)" : "none",
-            display: "flex", flexDirection: "column", flexShrink: 0, background: "var(--bg-panel)",
+            flexDirection: "column", background: "var(--bg-panel)",
+            // 移动端列表页占满剩余高度（minHeight:0 让内部 overflowY 生效）；
+            // 点选后列表隐藏，切换到全屏详情页。桌面端固定宽度侧栏。
+            ...(isMobile
+              ? { display: selection ? "none" : "flex", flex: 1, minHeight: 0 }
+              : { display: "flex", flexShrink: 0 }),
           }}>
             <div style={{ flex: 1, overflowY: "auto", padding: "8px 6px" }}>
               {/* 认证状态加载中：显示加载占位，避免闪「无 provider」/错误推断 */}
@@ -2064,8 +2070,24 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
             </div>
           </div>
 
-          {/* Right: detail */}
-          <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+          {/* Right: detail。移动端无 selection 时隐藏（列表整页），有 selection 时全屏详情 */}
+          <div style={{ flex: 1, overflowY: "auto", padding: 20, display: isMobile && !selection ? "none" : undefined }}>
+            {isMobile && selection && (
+              <button
+                type="button"
+                onClick={() => setSelection(null)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 5,
+                  minHeight: 32, padding: "0 10px", marginBottom: 12,
+                  borderRadius: 7, border: "1px solid var(--border)",
+                  background: "var(--bg-panel)", color: "var(--text-muted)",
+                  cursor: "pointer", fontSize: 12,
+                }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6" /></svg>
+                {t("common_back")}
+              </button>
+            )}
             {loading ? null : detailContent ?? (
               <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 13 }}>
                 {t("models_selectDetail")}
