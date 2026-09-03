@@ -39,7 +39,7 @@
       "target": [
         { "target": "nsis", "arch": ["x64"] }
       ],
-      "icon": "assets/pidance-logo.png"
+      "icon": "assets/pidance-logo.ico"
     },
     "nsis": {
       "oneClick": false,
@@ -47,8 +47,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "shortcutName": "Pidance Desktop",
-      "installerIcon": "assets/pidance-logo.png",
-      "installerHeaderIcon": "assets/pidance-logo.png"
+      "installerIcon": "assets/pidance-logo.ico",
+      "installerHeaderIcon": "assets/pidance-logo.ico"
     },
     "directories": {
       "output": "dist"
