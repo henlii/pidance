@@ -1,6 +1,6 @@
 {
   "name": "@henlii/pidance-desktop",
-  "version": "0.2.17",
+  "version": "0.2.18",
   "description": "Pidance Desktop（Windows 桌面壳）：内置 pidance 服务与窗口",
   "private": true,
   "engines": {
@@ -16,7 +16,7 @@
     "build:win:zip": "electron-builder --win zip --x64"
   },
   "dependencies": {
-    "@henlii/pidance": "0.2.17"
+    "@henlii/pidance": "0.2.18"
   },
   "devDependencies": {
     "electron": "^37.2.0",
