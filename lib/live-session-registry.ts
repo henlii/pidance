@@ -10,6 +10,7 @@ import { getRunningStartedAt as getLocalRunningStartedAt } from "./running-state
 import {
   acquireRunningLease,
   heartbeatRunningLease,
+  isRunningLeaseHeldByOther,
   listFreshRunningLeaseSessionIds,
   listFreshRunningLeaseSessions,
   releaseRunningLease,
@@ -168,6 +169,15 @@ function getLocalRunningAndStartingIds(): string[] {
   return [...ids];
 }
 
+/** lease 需要覆盖整个 live writer 窗口，包含已 settled 但尚未 dispose 的 host。 */
+function getLocalWriterAndStartingIds(): string[] {
+  const ids = new Set<string>(getStartingSessionIds());
+  for (const [sessionId, session] of getRegistry()) {
+    if (session.isAlive()) ids.add(session.sessionId || sessionId);
+  }
+  return [...ids];
+}
+
 export function getRunningRpcSessionIds(): string[] {
   const ids = new Set(getLocalRunningAndStartingIds());
   for (const id of listFreshRunningLeaseSessionIds()) ids.add(id);
@@ -247,7 +257,7 @@ let runningLeaseHeartbeat: ReturnType<typeof setInterval> | null = null;
 const RUNNING_LEASE_HEARTBEAT_MS = 8_000;
 
 function syncOwnedRunningLeases(): void {
-  const local = new Set(getLocalRunningAndStartingIds());
+  const local = new Set(getLocalWriterAndStartingIds());
   for (const id of local) {
     heartbeatRunningLease(id);
     ownedRunningLeases.add(id);
@@ -359,6 +369,9 @@ export async function recoverFollowUpQueues(): Promise<void> {
   for (const sessionId of listRecoverableFollowUpSessionIds(prefs)) {
     const existing = getRpcSession(sessionId);
     if (existing?.isAlive()) continue;
+    // 恢复队列必须先尊重对端 writer lease；startLiveSession 仍会再次
+    // acquire 作原子竞态保护，检查只是避免无意义地初始化 SDK。
+    if (isRunningLeaseHeldByOther(sessionId)) continue;
     const filePath = await resolveSessionPath(sessionId);
     if (!filePath) continue;
     let cwd = process.cwd();

@@ -1,7 +1,8 @@
 /**
  * 跨进程 running/starting 租约：31415 与 31416 共享 agentDir 时，
  * 让对端看见「正在跑」，并拒绝第二套 writable prompt。
- * 只覆盖 starting/running 窗口；空闲 live host 不占租约（避免闲置 10 分钟锁死）。
+ * 覆盖 starting 到 live host dispose 的整个 writer 窗口；空闲 live host 仍持有租约，
+ * 由 host 的立即 dispose 结束该窗口。
  */
 import {
   existsSync,

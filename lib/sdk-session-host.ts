@@ -84,6 +84,7 @@ export type SdkSessionHostOptions = {
   cwd: string;
   toolNames?: string[];
   navigationActions?: NavigationActions;
+  /** 兼容旧调用方；当前 settled host 立即 dispose，不再使用分钟级 idle timeout。 */
   idleTimeoutMs?: number;
   agentDir?: string;
   onRunningChange?: () => void;
@@ -134,6 +135,11 @@ export class SdkSessionHost {
   private unsubscribe: (() => void) | null = null;
   private extensionUi: WebExtensionUIAdapter | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** ensureLive/state?wake 与后续首个写命令之间的短暂交接窗口。 */
+  private startupHoldTimer: ReturnType<typeof setTimeout> | null = null;
+  private startupHold = true;
+  private activeCommandCount = 0;
+  private _scheduledRecheck = false;
   private onDestroyCallback: (() => void) | null = null;
   private _alive = true;
   private promptRunning = false;
@@ -226,8 +232,10 @@ export class SdkSessionHost {
 
   onEvent(listener: SdkEventListener): () => void {
     this.listeners.push(listener);
+    if (this.runtime) this.resetIdleTimer();
     return () => {
       this.listeners = this.listeners.filter((l) => l !== listener);
+      if (this.runtime && this.listeners.length === 0) this.resetIdleTimer();
     };
   }
 
@@ -255,19 +263,34 @@ export class SdkSessionHost {
 
   private resetIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+    if (!this._alive || !this.runtime || this.startupHold || this.isRunning() || this.flushingFollowUp) return;
+    if (this.followUpQueue.length > 0 && !this.isFollowUpHeld()) {
+      this.scheduleFollowUpFlush();
+      return;
+    }
+    // Live host 是 JSONL writer。无人订阅（SSE 未连接，后台 flush 等）时，
+    // settled 且没有可自动投递队列立即释放，不再保留分钟级 idle 窗口。
+    // 仍有事件订阅者（浏览器停在会话页）时保留 host，等订阅断开后再释放；
+    // 这样同一会话的连续操作不会反复重建 SDK，同时浏览历史会话不创建 writer。
+    const delay = this.listeners.length > 0 ? this.idleTimeoutMs : 0;
     this.idleTimer = setTimeout(() => {
-      if (this.isRunning()) {
-        this.resetIdleTimer();
-        return;
-      }
-      // 队列非空且未被 hold 时不能 idle dispose：Host 是队列自动投递的 owner，
-      // 释放后重启虽可从 prefs 水合，但会丢失“已 settled 立即投递”的时机。
+      this.idleTimer = null;
+      if (this.isRunning() || this.flushingFollowUp) return;
       if (this.followUpQueue.length > 0 && !this.isFollowUpHeld()) {
-        this.resetIdleTimer();
+        this.scheduleFollowUpFlush();
         return;
       }
+      // 订阅者存在但超过了长 idle 窗口：释放 writer 前先断开自身订阅。
       void this.destroyAsync();
-    }, this.idleTimeoutMs);
+    }, delay);
+  }
+
+  private releaseStartupHold(): void {
+    if (!this.startupHold) return;
+    this.startupHold = false;
+    if (this.startupHoldTimer) clearTimeout(this.startupHoldTimer);
+    this.startupHoldTimer = null;
   }
 
   private isSettled(): boolean {
@@ -604,6 +627,7 @@ export class SdkSessionHost {
         } else if (this.flushingFollowUp && (this.lastStopReason === "aborted" || this.lastStopReason === "error")) {
           this.abortFollowUpFlush();
         }
+        this.resetIdleTimer();
         break;
       case "compaction_start":
       case "auto_compaction_start":
@@ -618,6 +642,7 @@ export class SdkSessionHost {
         if (event.aborted !== true && !event.errorMessage && this.isSettled()) {
           this.scheduleFollowUpFlush();
         }
+        this.resetIdleTimer();
         break;
       case "message_end": {
         // user 消息确认：SDK 在订阅者回调返回后才执行 sessionManager.appendMessage，
@@ -899,6 +924,12 @@ export class SdkSessionHost {
       await this.rebindSession();
       this.syncIdentityFromSession();
       this.hydrateFollowUpQueue();
+      this.startupHoldTimer = setTimeout(() => {
+        this.startupHoldTimer = null;
+        this.startupHold = false;
+        this.resetIdleTimer();
+      }, 5_000);
+      this.startupHoldTimer.unref?.();
       this.resetIdleTimer();
       // 服务端重启/热重载后从 prefs 水合：空闲且未被 hold 时立即投递。
       if (this.followUpQueue.length > 0 && !this.isFollowUpHeld() && this.isSettled()) {
@@ -1009,10 +1040,17 @@ export class SdkSessionHost {
   }
 
   async send(command: Record<string, unknown>): Promise<unknown> {
-    this.resetIdleTimer();
     if (!this.runtime) throw new Error("SDK session is not alive");
     const type = command.type as string;
+    // get_state 是 wake 的只读预检，保留短暂 startup hold 让紧随其后的
+    // prompt 能建立 SSE 后再写入；真正的命令释放该窗口。
+    if (type !== "get_state") this.releaseStartupHold();
+    // 命令计数：dispose 定时器在命令活跃期间延后，防命令持有
+    // SessionManager 时被释放（compact/steer 的微任务窗口）。
+    this.activeCommandCount += 1;
+    this.resetIdleTimer();
     const session = this.session;
+    try {
 
     switch (type) {
       case "prompt": {
@@ -1067,6 +1105,7 @@ export class SdkSessionHost {
               clearRunningStartedAt(this.realSessionId);
               this.notifyRunning();
               this.emit({ type: "prompt_done" });
+              this.resetIdleTimer();
             };
             void session
               .prompt(parsed.message, {
@@ -1182,12 +1221,18 @@ export class SdkSessionHost {
       }
 
       case "compact": {
+        // 手动压缩期间是 run 边界（compact() 先 abort）。compact 未结束时
+        // isRunning() 仍为 true，不会触发 idle dispose；但 compaction_end 可能
+        // 早于 send 的 promise 结算，需确保结束后再调度 dispose。
         const result = await session.compact(
           typeof command.customInstructions === "string"
             ? command.customInstructions
             : undefined,
         );
         this.options.onSessionListInvalidate?.();
+        this.notifyRunning();
+        // 压缩已在 send 内完成；直接调度 dispose（若有队列由队列 flush 接管）。
+        this.resetIdleTimer();
         return result;
       }
 
@@ -1204,6 +1249,7 @@ export class SdkSessionHost {
         this.persistFollowUpQueue();
         // late-enqueue：如果已经 settled/空闲，立即调度一次投递。
         if (this.isSettled()) this.scheduleFollowUpFlush();
+        this.resetIdleTimer();
         return { ok: true, queued: this.followUpQueue.length };
       }
 
@@ -1301,6 +1347,7 @@ export class SdkSessionHost {
           this.bashRunning = false;
           this.bashCommand = null;
           this.notifyRunning();
+          this.resetIdleTimer();
         }
       }
 
@@ -1457,6 +1504,10 @@ export class SdkSessionHost {
       default:
         throw new Error(`Unsupported command: ${type}`);
     }
+    } finally {
+      this.activeCommandCount = Math.max(0, this.activeCommandCount - 1);
+      if (this.activeCommandCount === 0) this.resetIdleTimer();
+    }
   }
 
   destroy(): void {
@@ -1467,9 +1518,22 @@ export class SdkSessionHost {
     // 单飞：并发重入（Service 多条离线写路径 / idle 定时器）共享同一 dispose。
     if (this.destroyPromise) return this.destroyPromise;
     if (!this._alive && !this.runtime) return;
+    // dispose 定时器只在 host 空闲时建立；若同一 tick 已有新命令开始
+    //（计数递增，compact/steer 等 send 返回前的微任务窗口），延后一帧再检查。
+    if (this.activeCommandCount > 0) {
+      if (this._scheduledRecheck) return;
+      this._scheduledRecheck = true;
+      setTimeout(() => {
+        this._scheduledRecheck = false;
+        if (!this.destroyPromise && this._alive) void this.destroyAsync();
+      }, 0);
+    }
     this._alive = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
+    if (this.startupHoldTimer) clearTimeout(this.startupHoldTimer);
+    this.startupHoldTimer = null;
+    this.startupHold = false;
     this.destroyPromise = (async () => {
       this.unsubscribe?.();
       this.unsubscribe = null;

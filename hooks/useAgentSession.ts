@@ -137,6 +137,7 @@ type AgentStateResponse = {
   /** bash 执行中的命令快照（服务端 ExternalRpcSession 记录；刷新恢复用） */
   pendingBash?: { command: string; excludeFromContext: boolean; startedAt: number } | null;
   isCompacting?: boolean;
+  lockedByOther?: boolean;
   extensionStatuses?: ExtensionStatusItem[];
   extensionWidgets?: ExtensionWidgetItem[];
   queuedMessages?: { steering?: string[]; followUp?: string[] } | null;
@@ -324,6 +325,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const hasMoreBeforeRef = useRef(false);
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
   const [agentRunning, setAgentRunning] = useState(false);
+  const [lockedByOther, setLockedByOther] = useState(false);
   const [bashRunning, setBashRunning] = useState(false);
   const [pendingBash, setPendingBash] = useState<{ command: string; excludeFromContext: boolean; startedAt: number } | null>(null);
   const [modelNames, setModelNames] = useState<Record<string, string>>({});
@@ -701,20 +703,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             live?: boolean;
             running?: boolean;
             activeRun?: boolean;
+            lockedByOther?: boolean;
             state?: AgentStateResponse;
           };
           if (sessionIdRef.current !== sid) return null;
           const live = readAgentLiveFlag(hot);
           if (live && hot.state) {
+            setLockedByOther(false);
             applyLiveState(hot.state);
-            return { running: live, live, activeRun: hot.activeRun === true, state: hot.state };
+            return { running: live, live, activeRun: hot.activeRun === true, lockedByOther: false, state: hot.state };
           }
+          setLockedByOther(hot.lockedByOther === true);
           if (!live) {
             setQueuedMessages({ steering: [], followUp: [...localFollowUpRef.current] });
           }
+          return { running: false, live: false, activeRun: false, lockedByOther: hot.lockedByOther === true };
         }
 
-        return { running: false, live: false, activeRun: false };
+        setLockedByOther(false);
+        return { running: false, live: false, activeRun: false, lockedByOther: false };
       } catch (e) {
         console.error("Failed to load agent state:", e);
         return null;
@@ -2318,6 +2325,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setHasMoreBefore(false);
     dispatch({ type: "reset" });
     setAgentRunning(false);
+    setLockedByOther(false);
     setBashRunning(false);
     bashRunningRef.current = false;
     setPendingBash(null);
@@ -2384,6 +2392,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               void waitForBashSettlement(session.id);
             }
           }
+          if (agentState?.lockedByOther !== undefined) setLockedByOther(agentState.lockedByOther);
           if (agentState?.state) {
             if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
             if (agentState.state.contextUsage !== undefined) setContextUsage(agentState.state.contextUsage ?? null);

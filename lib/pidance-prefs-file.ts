@@ -5,10 +5,13 @@
  * 服务端生命周期（Host 队列水合/清理）直接原子读写同一文件。
  */
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -18,6 +21,10 @@ import { getAgentDir } from "./pi-paths";
 export type PidancePrefs = Record<string, unknown>;
 
 export const PIDANCE_PREFS_FILENAME = "pidance-preferences.json";
+const PIDANCE_PREFS_LOCK_SUFFIX = ".lock";
+const PREFS_LOCK_WAIT_MS = 10;
+const PREFS_LOCK_TIMEOUT_MS = 15_000;
+const PREFS_LOCK_STALE_MS = 60_000;
 
 export function getPidancePrefsPath(agentDir: string = getAgentDir()): string {
   return join(agentDir, PIDANCE_PREFS_FILENAME);
@@ -38,8 +45,46 @@ export function readPidancePrefs(agentDir: string = getAgentDir()): PidancePrefs
   }
 }
 
-/** 原子写：temp + rename，权限 0600。 */
-export function writePidancePrefs(prefs: PidancePrefs, agentDir: string = getAgentDir()): void {
+function sleepSync(milliseconds: number): void {
+  const buffer = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(buffer, 0, 0, milliseconds);
+}
+
+function withPrefsLock<T>(agentDir: string, action: () => T): T {
+  const path = getPidancePrefsPath(agentDir);
+  const dir = dirname(path);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const lockPath = `${path}${PIDANCE_PREFS_LOCK_SUFFIX}`;
+  const deadline = Date.now() + PREFS_LOCK_TIMEOUT_MS;
+  let fd: number | null = null;
+  while (fd === null) {
+    try {
+      fd = openSync(lockPath, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > PREFS_LOCK_STALE_MS) unlinkSync(lockPath);
+      } catch {
+        // The owner may have released the lock between stat/unlink.
+      }
+      if (Date.now() >= deadline) throw new Error("Timed out acquiring Pidance preferences lock");
+      sleepSync(PREFS_LOCK_WAIT_MS);
+    }
+  }
+  try {
+    return action();
+  } finally {
+    closeSync(fd);
+    try {
+      unlinkSync(lockPath);
+    } catch {
+      /* ignore lock cleanup failure */
+    }
+  }
+}
+
+/** 原子写：temp + rename，权限 0600；进程间通过 lock 文件串行化。 */
+function writePidancePrefsUnlocked(prefs: PidancePrefs, agentDir: string): void {
   const path = getPidancePrefsPath(agentDir);
   const dir = dirname(path);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -55,6 +100,10 @@ export function writePidancePrefs(prefs: PidancePrefs, agentDir: string = getAge
     }
     throw error;
   }
+}
+
+export function writePidancePrefs(prefs: PidancePrefs, agentDir: string = getAgentDir()): void {
+  withPrefsLock(agentDir, () => writePidancePrefsUnlocked(prefs, agentDir));
 }
 
 /** 顶层键合并；双方均为对象时再深合并一层（drafts/fileTree 等嵌套键不互相覆盖）。 */
@@ -103,13 +152,26 @@ export function getPidancePref(prefs: PidancePrefs, key: string): unknown {
   return getByDottedKey(prefs, key);
 }
 
-/** 读-改-写一个点路径键（服务端生命周期专用，不经过客户端防抖）。 */
+/** 在同一把跨进程锁内完成读-改-写，避免 Host 与 UI PUT 互相覆盖。 */
 export function updatePidancePref(
   key: string,
   value: unknown,
   agentDir: string = getAgentDir(),
 ): void {
-  const prefs = readPidancePrefs(agentDir);
-  setByDottedKey(prefs, key, value);
-  writePidancePrefs(prefs, agentDir);
+  withPrefsLock(agentDir, () => {
+    const prefs = readPidancePrefs(agentDir);
+    setByDottedKey(prefs, key, value);
+    writePidancePrefsUnlocked(prefs, agentDir);
+  });
+}
+
+/** API 整包 patch 的原子合并入口：锁内重新读取，保留并发写入的嵌套 sessionQueue。 */
+export function mergeAndWritePidancePrefs(
+  patch: PidancePrefs,
+  agentDir: string = getAgentDir(),
+): void {
+  withPrefsLock(agentDir, () => {
+    const current = readPidancePrefs(agentDir);
+    writePidancePrefsUnlocked(mergePidancePrefs(current, patch), agentDir);
+  });
 }

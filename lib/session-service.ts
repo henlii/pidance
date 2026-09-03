@@ -57,8 +57,10 @@ import type { SessionInfo } from "./types";
 import { shouldInheritModel } from "./model-selection";
 import { updatePidancePref } from "./pidance-prefs-file";
 import {
+  acquireRunningLease,
   isRunningLeaseHeldByOther,
   isSessionRunningLockedError,
+  releaseRunningLease,
   SESSION_RUNNING_LOCKED_MESSAGE,
 } from "./session-running-lease";
 import { collectSubagentTree, deleteValidatedSubagents } from "./subagent-sessions";
@@ -230,6 +232,7 @@ export type SessionService = {
   getAgentState(sessionId: string): Promise<{
     live: boolean;
     activeRun: boolean;
+    lockedByOther?: boolean;
     readOnly?: boolean;
     state?: unknown;
   }>;
@@ -344,6 +347,23 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       return;
     }
     if (session.isAlive()) session.destroy();
+  };
+
+  const withHeldWriter = async <T>(sessionId: string, action: () => Promise<T> | T): Promise<T> => {
+    if (!acquireRunningLease(sessionId)) {
+      throw new Error(SESSION_RUNNING_LOCKED_MESSAGE);
+    }
+    try {
+      return await action();
+    } finally {
+      releaseRunningLease(sessionId);
+    }
+  };
+
+  /** 离线写入也临时持有 writer lease，避免检查远端后到 openSessionView 前被抢占。 */
+  const withOfflineWriter = async <T>(sessionId: string, action: () => Promise<T> | T): Promise<T> => {
+    await awaitWriterReleased(sessionId);
+    return withHeldWriter(sessionId, action);
   };
 
   const service: SessionService = {
@@ -537,8 +557,9 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         // host 的真实 id；优先使用 host 自身 id，避免 destroy 误命中空 key。
         await service.destroyAsync(live?.sessionId ?? liveSessionId);
 
-        // 3. 子会话重挂到本会话的 parent（cascade re-parent via SessionManager）。
-        const dir = filePath.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
+        return withHeldWriter(live?.sessionId ?? liveSessionId, async () => {
+          // 3. 子会话重挂到本会话的 parent（cascade re-parent via SessionManager）。
+          const dir = filePath.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
         try {
           const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl") && join(dir, f) !== filePath);
           for (const file of files) {
@@ -548,9 +569,12 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
               if (header?.type === "session" && header.parentSession === filePath) {
                 if (header.id) {
                   await deps.waitForSessionStart?.(header.id);
-                  await awaitWriterReleased(header.id);
+                  await withOfflineWriter(header.id, () => {
+                    deps.reparentSessionFile(childPath, parentSessionPath);
+                  });
+                } else {
+                  deps.reparentSessionFile(childPath, parentSessionPath);
                 }
-                deps.reparentSessionFile(childPath, parentSessionPath);
               }
             } catch {
               /* skip malformed */
@@ -584,8 +608,9 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
 
         invalidateSessionPathCache(sessionId);
         deps.invalidateSessionListCache();
-        service.removeArchiveRecordAfterPermanentDelete(sessionId);
-        return { skippedSubagents };
+          service.removeArchiveRecordAfterPermanentDelete(sessionId);
+          return { skippedSubagents };
+        });
       })();
       deletionFlights.set(sessionId, flight);
       return flight.finally(() => {
@@ -624,7 +649,13 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         return { live: false, activeRun: false, readOnly: true };
       }
       const session = service.getLive(sessionId);
-      if (!session) return { live: false, activeRun: false };
+      if (!session) {
+        return {
+          live: false,
+          activeRun: false,
+          ...(isRunningLeaseHeldByOther(sessionId) ? { lockedByOther: true } : {}),
+        };
+      }
       const state = await session.send({ type: "get_state" });
       const activeRun = typeof (session as { isRunning?: () => boolean }).isRunning === "function"
         ? Boolean((session as { isRunning: () => boolean }).isRunning())
@@ -637,7 +668,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
               || (state as { isBashRunning?: boolean }).isBashRunning
             ),
         );
-      return { live: true, activeRun, state };
+      return { live: true, activeRun, lockedByOther: false, state };
     },
 
     async renameSession(sessionId, name) {
@@ -652,9 +683,10 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       }
       const filePath = await deps.resolveSessionPath(sessionId);
       if (!filePath) throw new Error("Session not found");
-      await awaitWriterReleased(sessionId);
-      deps.openSessionView(filePath).appendSessionInfo(trimmed);
-      deps.invalidateSessionListCache();
+      await withOfflineWriter(sessionId, () => {
+        deps.openSessionView(filePath).appendSessionInfo(trimmed);
+        deps.invalidateSessionListCache();
+      });
     },
 
     async autoNameSession(sessionId) {
@@ -800,28 +832,32 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       if (live?.isAlive() && hasInProcessManager && typeof appendOnWrapper === "function") {
         return await appendOnWrapper.call(live, input);
       }
-      await awaitWriterReleased(sessionId);
-      const filePath = await deps.resolveSessionPath(sessionId);
-      if (!filePath) throw new Error("Session not found");
-      const activity = normalizeActivityInput(input);
-      const manager = deps.openSessionView(filePath);
-      const entryId = manager.appendCustomEntry(PIDANCE_ACTIVITY_CUSTOM_TYPE, activity);
-      deps.invalidateSessionListCache();
-      return { entryId, activity };
+      const result = await withOfflineWriter(sessionId, async () => {
+        const filePath = await deps.resolveSessionPath(sessionId);
+        if (!filePath) throw new Error("Session not found");
+        const activity = normalizeActivityInput(input);
+        const manager = deps.openSessionView(filePath);
+        const entryId = manager.appendCustomEntry(PIDANCE_ACTIVITY_CUSTOM_TYPE, activity);
+        deps.invalidateSessionListCache();
+        return { entryId, activity };
+      });
+      return result;
     },
 
     async appendCommandEntry(sessionId, input) {
       // 与 appendActivity 同一单写者模式：readOnly 拒绝、外部 RPC live 先停进程再写盘。
       await requireWritableSession(sessionId, service.isReadOnly);
-      await awaitWriterReleased(sessionId);
-      const filePath = await deps.resolveSessionPath(sessionId);
-      if (!filePath) throw new Error("Session not found");
-      const data = normalizeCommandEntryData(input);
-      if (!data.command) throw new Error("command is required");
-      const manager = deps.openSessionView(filePath);
-      const entryId = manager.appendCustomEntry(PIDANCE_COMMAND_CUSTOM_TYPE, data);
-      deps.invalidateSessionListCache();
-      return { entryId, data };
+      const result = await withOfflineWriter(sessionId, async () => {
+        const filePath = await deps.resolveSessionPath(sessionId);
+        if (!filePath) throw new Error("Session not found");
+        const data = normalizeCommandEntryData(input);
+        if (!data.command) throw new Error("command is required");
+        const manager = deps.openSessionView(filePath);
+        const entryId = manager.appendCustomEntry(PIDANCE_COMMAND_CUSTOM_TYPE, data);
+        deps.invalidateSessionListCache();
+        return { entryId, data };
+      });
+      return result;
     },
 
     async createNew({ cwd, command }) {
@@ -922,30 +958,30 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       if (liveBefore?.isAlive?.() && liveBefore.inner?.isBashRunning) {
         throw new Error("Cannot switch branch while a shell command is running");
       }
-      await awaitWriterReleased(sessionId);
-
-      const filePath = await deps.resolveSessionPath(sessionId);
-      if (!filePath) throw new Error("Session not found");
-      const sessionManager = deps.openSessionView(filePath);
-      const oldLeafId = sessionManager.getLeafId();
-      // 目标 = 当前 leaf：无导航语义，不写 sidecar（避免固化无变化值）
-      if (trimmedId === oldLeafId) return { cancelled: false };
-      // 目标 = 文件末尾（外部 pi 默认 leaf）：清除过期 sidecar。
-      // 只跳过写入会残留旧分支指针，下次磁盘 open 恢复旧 leaf，
-      // 导航到最新分支的意图丢失（UI 弹回旧分支）。
-      if (trimmedId === sessionManager.getLastEntryId()) {
-        clearLeafSidecar(filePath);
-        return { cancelled: false };
-      }
-      if (!sessionManager.getEntry(trimmedId)) throw new Error(`Entry ${trimmedId} not found`);
-      try {
-        sessionManager.branch(trimmedId);
-        // Pi branch 仅改内存 leaf；非末尾须写 sidecar 供重启恢复
-        writeLeafSidecar(filePath, trimmedId);
-        return { cancelled: false };
-      } finally {
-        deps.invalidateSessionListCache();
-      }
+      return withOfflineWriter(sessionId, async () => {
+        const filePath = await deps.resolveSessionPath(sessionId);
+        if (!filePath) throw new Error("Session not found");
+        const sessionManager = deps.openSessionView(filePath);
+        const oldLeafId = sessionManager.getLeafId();
+        // 目标 = 当前 leaf：无导航语义，不写 sidecar（避免固化无变化值）
+        if (trimmedId === oldLeafId) return { cancelled: false };
+        // 目标 = 文件末尾（外部 pi 默认 leaf）：清除过期 sidecar。
+        // 只跳过写入会残留旧分支指针，下次磁盘 open 恢复旧 leaf，
+        // 导航到最新分支的意图丢失（UI 弹回旧分支）。
+        if (trimmedId === sessionManager.getLastEntryId()) {
+          clearLeafSidecar(filePath);
+          return { cancelled: false };
+        }
+        if (!sessionManager.getEntry(trimmedId)) throw new Error(`Entry ${trimmedId} not found`);
+        try {
+          sessionManager.branch(trimmedId);
+          // Pi branch 仅改内存 leaf；非末尾须写 sidecar 供重启恢复
+          writeLeafSidecar(filePath, trimmedId);
+          return { cancelled: false };
+        } finally {
+          deps.invalidateSessionListCache();
+        }
+      });
     },
 
     async branchFromAssistant(sessionId, assistantEntryId) {
@@ -961,34 +997,34 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       if (liveBefore?.isAlive?.() && liveBefore.inner?.isBashRunning) {
         throw new Error("Cannot branch while a shell command is running");
       }
-      await awaitWriterReleased(sessionId);
-
-      const filePath = await deps.resolveSessionPath(sessionId);
-      if (!filePath) throw new Error("Session not found");
-      const sessionManager = deps.openSessionView(filePath);
-      const leafId = sessionManager.getLeafId();
-      if (!leafId) throw new Error("Session has no leaf");
-      const path = sessionManager.getBranch(leafId);
-      const targetEntry = sessionManager.getEntry(trimmedId);
-      if (!targetEntry) throw new Error("Entry not found");
-      if (
-        targetEntry.type !== "message" ||
-        (targetEntry as { message?: { role?: string } }).message?.role !== "assistant"
-      ) {
-        throw new Error("Only assistant messages can be branched from");
-      }
-      const turnEnd = computeTurnEnd(path as never, trimmedId);
-      try {
-        sessionManager.branch(turnEnd);
-        if (turnEnd === sessionManager.getLastEntryId()) {
-          clearLeafSidecar(filePath);
-        } else {
-          writeLeafSidecar(filePath, turnEnd);
+      return withOfflineWriter(sessionId, async () => {
+        const filePath = await deps.resolveSessionPath(sessionId);
+        if (!filePath) throw new Error("Session not found");
+        const sessionManager = deps.openSessionView(filePath);
+        const leafId = sessionManager.getLeafId();
+        if (!leafId) throw new Error("Session has no leaf");
+        const path = sessionManager.getBranch(leafId);
+        const targetEntry = sessionManager.getEntry(trimmedId);
+        if (!targetEntry) throw new Error("Entry not found");
+        if (
+          targetEntry.type !== "message" ||
+          (targetEntry as { message?: { role?: string } }).message?.role !== "assistant"
+        ) {
+          throw new Error("Only assistant messages can be branched from");
         }
-        return { cancelled: false };
-      } finally {
-        deps.invalidateSessionListCache();
-      }
+        const turnEnd = computeTurnEnd(path as never, trimmedId);
+        try {
+          sessionManager.branch(turnEnd);
+          if (turnEnd === sessionManager.getLastEntryId()) {
+            clearLeafSidecar(filePath);
+          } else {
+            writeLeafSidecar(filePath, turnEnd);
+          }
+          return { cancelled: false };
+        } finally {
+          deps.invalidateSessionListCache();
+        }
+      });
     },
 
     async createSessionFromLeaf(sessionId, entryId) {
@@ -1013,12 +1049,11 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         | undefined;
       const inner = wrapper?.inner;
 
-      // 统一磁盘 Pi SessionManager
-      // 读/分叉源文件前先停 live，避免外部 pi 仍在 append 时读到半写状态
-      await awaitWriterReleased(sessionId);
-      const filePath =
-        (inner?.sessionFile || wrapper?.sessionFile) ??
-        (await deps.resolveSessionPath(sessionId));
+      return withOfflineWriter(sessionId, async () => {
+        // 统一磁盘 Pi SessionManager；lease 覆盖整个 fork 读/写窗口。
+        const filePath =
+          (inner?.sessionFile || wrapper?.sessionFile) ??
+          (await deps.resolveSessionPath(sessionId));
       if (!filePath) throw new Error("Session not found");
       const currentSessionFile = filePath;
       const sessionManager = openSessionView(currentSessionFile);
@@ -1054,8 +1089,8 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       )) {
         newManager.appendModelChange(sourceModel.provider, sourceModel.id);
       }
-      await awaitWriterReleased(sessionId);
-      return { cancelled: false, newSessionId };
+        return { cancelled: false, newSessionId };
+      });
     },
   };
 

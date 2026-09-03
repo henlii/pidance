@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 import {
-  mergePidancePrefs,
+  mergeAndWritePidancePrefs,
   readPidancePrefs,
-  writePidancePrefs,
 } from "@/lib/pidance-prefs-file";
 
 export const dynamic = "force-dynamic";
@@ -41,8 +40,7 @@ export async function PUT(req: Request) {
         { status: 413 },
       );
     }
-    const current = readPidancePrefs();
-    writePidancePrefs(mergePidancePrefs(current, prefs as Record<string, unknown>));
+    mergeAndWritePidancePrefs(prefs as Record<string, unknown>);
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json(
