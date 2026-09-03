@@ -2118,6 +2118,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     notifyAutoFollowSend();
     try {
       await updateLocalFollowUp([...localFollowUpRef.current, text]);
+      // 入队即把本会话 SSE 连上（Host 空闲时 set_follow_up_queue 已 wake host）；
+      // 否则 Host 稍后自动 flush 的 agent_start/message 事件没有订阅源 → UI 不更新，
+      // 直到刷新才看见队列消息真正执行。
+      ensureEventsConnected(sid);
     } catch (error) {
       opts.chatInputRef?.current?.prependText(text);
       addNotice({
@@ -2125,7 +2129,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         message: error instanceof Error ? error.message : String(error),
       });
     }
-  }, [addNotice, isCompacting, isReadOnly, notifyAutoFollowSend, opts.chatInputRef, updateLocalFollowUp]);
+  }, [addNotice, ensureEventsConnected, isCompacting, isReadOnly, notifyAutoFollowSend, opts.chatInputRef, updateLocalFollowUp]);
 
   // 供 handlePromptWithStreamingBehavior（定义在前）引用最新 handleFollowUp
   handleFollowUpRef.current = handleFollowUp;
@@ -2195,6 +2199,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // 空闲：Pi 的 steer 只入进程队列不唤醒；用 prompt 立即发起新回合
         await sendAgentCommand(sid, { type: "prompt", message: merged });
       }
+      // 发送后连 SSE，确保本轮消息/回复实时投影
+      ensureEventsConnected(sid);
     } catch (e) {
       if (queueCleared) {
         try {
@@ -2217,7 +2223,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       console.error("Failed to send queue as steer:", e);
       addNotice({ type: "error", message: String(e instanceof Error ? e.message : e) });
     }
-  }, [isReadOnly, notifyAutoFollowSend, updateLocalFollowUp, addNotice, isExtensionCommandQueueError, opts.chatInputRef]);
+  }, [ensureEventsConnected, isReadOnly, notifyAutoFollowSend, updateLocalFollowUp, addNotice, isExtensionCommandQueueError, opts.chatInputRef]);
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     // 只读会话：set_thinking_level 会写会话状态，拦截。
