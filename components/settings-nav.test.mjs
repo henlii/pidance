@@ -27,6 +27,14 @@ test("页面清单：general/appearance/models/defaults 无 cwd 可用，skills/
   assert.ok(withCwd.every((p) => p.unavailableHint === undefined));
 });
 
+test("桌面配置页仅在 Electron desktop bridge 环境出现", async () => {
+  const { getSettingsPages } = await jiti.import("./settings-nav.ts");
+  assert.equal(getSettingsPages(true).some((page) => page.id === "desktop"), false);
+  const desktopPages = getSettingsPages(true, true);
+  assert.equal(desktopPages.some((page) => page.id === "desktop"), true);
+  assert.equal(desktopPages.find((page) => page.id === "desktop").available, true);
+});
+
 test("最近页解析：合法值还原，损坏/未知/旧格式全部安全回退", async () => {
   const { parseStoredSettingsPage, DEFAULT_SETTINGS_PAGE } = await jiti.import("./settings-nav.ts");
   assert.equal(parseStoredSettingsPage('"models"'), "models");

@@ -13,6 +13,7 @@ import { SessionInfoPanel } from "./SessionInfoPanel";
 import { SettingsView } from "./SettingsView";
 import { CommandPalette } from "./CommandPalette";
 import type { SettingsPageId } from "./settings-nav";
+import { getDesktopBridge } from "@/lib/desktop-bridge";
 import { AboutDialog } from "./AboutDialog";
 import { InstantTooltipHost } from "./InstantTooltipHost";
 import { UpdateBanner } from "./UpdateBanner";
@@ -114,6 +115,14 @@ function AppShellInner() {
   const [pendingHighlightId, setPendingHighlightId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPageId | null>(null);
+  useEffect(() => {
+    const bridge = getDesktopBridge();
+    if (!bridge) return;
+    return bridge.onOpenSettings(() => {
+      setSettingsInitialPage("desktop");
+      setSettingsOpen(true);
+    });
+  }, []);
   /** Ctrl/Cmd+K 命令面板 */
   /** Ctrl/Cmd+K 命令面板 */
   const [paletteOpen, setPaletteOpen] = useState(false);

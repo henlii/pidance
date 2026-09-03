@@ -15,7 +15,7 @@
  * 与 package.json engines 一致），避免 Electron 自带 Node 版本不达标。
  */
 
-const { app, BrowserWindow, dialog } = require("electron");
+const { app, BrowserWindow, Tray, Menu, nativeImage, Notification, dialog, ipcMain } = require("electron");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
 const fs = require("node:fs");
@@ -24,6 +24,7 @@ const http = require("node:http");
 const PORT = process.env.PIDANCE_PORT || "31415";
 const HOST = "127.0.0.1";
 const START_TIMEOUT_MS = 45_000;
+const START_HIDDEN = process.platform === "win32" && process.argv.includes("--hidden");
 
 function resolveServerDir() {
   // 仅开发模式允许切换服务目录；安装版必须使用随应用打包的服务。
@@ -72,10 +73,139 @@ function probeReady(url, timeoutMs) {
   });
 }
 
+const DEFAULT_DESKTOP_SETTINGS = {
+  openAtLogin: false,
+  minimizeToTray: false,
+  notificationsEnabled: true,
+};
+const DESKTOP_SETTINGS_FILE = "desktop-settings.json";
+
+let desktopSettings = { ...DEFAULT_DESKTOP_SETTINGS };
 let child = null;
 let mainWindow = null;
+let tray = null;
 let exiting = false;
 
+function desktopSettingsPath() {
+  return path.join(app.getPath("userData"), DESKTOP_SETTINGS_FILE);
+}
+
+function loadDesktopSettings() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(desktopSettingsPath(), "utf8"));
+    return {
+      openAtLogin: raw?.openAtLogin === true,
+      minimizeToTray: raw?.minimizeToTray === true,
+      notificationsEnabled: raw?.notificationsEnabled !== false,
+    };
+  } catch {
+    return { ...DEFAULT_DESKTOP_SETTINGS };
+  }
+}
+
+function saveDesktopSettings() {
+  fs.mkdirSync(app.getPath("userData"), { recursive: true });
+  fs.writeFileSync(desktopSettingsPath(), `${JSON.stringify(desktopSettings, null, 2)}\n`, { mode: 0o600 });
+}
+
+function applyLoginItemSettings() {
+  if (process.platform !== "win32") return;
+  app.setLoginItemSettings({
+    openAtLogin: desktopSettings.openAtLogin,
+    args: desktopSettings.minimizeToTray ? ["--hidden"] : [],
+  });
+}
+
+function updateTrayMenu() {
+  if (!tray) return;
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: "显示 Pidance", click: showMainWindow },
+    { type: "separator" },
+    {
+      label: "开机启动",
+      type: "checkbox",
+      checked: desktopSettings.openAtLogin,
+      click: (item) => updateDesktopSetting("openAtLogin", item.checked),
+    },
+    {
+      label: "关闭窗口时最小化到托盘",
+      type: "checkbox",
+      checked: desktopSettings.minimizeToTray,
+      click: (item) => updateDesktopSetting("minimizeToTray", item.checked),
+    },
+    {
+      label: "桌面通知",
+      type: "checkbox",
+      checked: desktopSettings.notificationsEnabled,
+      click: (item) => updateDesktopSetting("notificationsEnabled", item.checked),
+    },
+    { label: "桌面版设置…", click: openDesktopSettings },
+    { type: "separator" },
+    { label: "退出", click: quitApplication },
+  ]));
+}
+
+function updateDesktopSetting(key, value) {
+  if (key !== "openAtLogin" && key !== "minimizeToTray" && key !== "notificationsEnabled") {
+    throw new Error("Unsupported desktop setting");
+  }
+  if (typeof value !== "boolean") throw new Error("Desktop setting must be boolean");
+  const previous = desktopSettings;
+  desktopSettings = { ...desktopSettings, [key]: value };
+  try {
+    saveDesktopSettings();
+    applyLoginItemSettings();
+    updateTrayMenu();
+    return desktopSettings;
+  } catch (error) {
+    desktopSettings = previous;
+    updateTrayMenu();
+    throw error;
+  }
+}
+
+function showMainWindow() {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function openDesktopSettings() {
+  showMainWindow();
+  mainWindow?.webContents.send("desktop-settings:open");
+}
+
+function createTray() {
+  if (process.platform !== "win32") return;
+  const iconPath = path.join(__dirname, "pidance-mark.png");
+  const icon = fs.existsSync(iconPath)
+    ? nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 })
+    : nativeImage.createEmpty();
+  tray = new Tray(icon);
+  tray.setToolTip("Pidance Desktop");
+  tray.on("double-click", showMainWindow);
+  updateTrayMenu();
+}
+
+function quitApplication() {
+  exiting = true;
+  app.quit();
+}
+
+ipcMain.handle("desktop-settings:get", () => ({ ...desktopSettings }));
+ipcMain.handle("desktop-settings:set", (_event, key, value) => updateDesktopSetting(key, value));
+ipcMain.handle("desktop-notification:show", (_event, title, body) => {
+  if (!desktopSettings.notificationsEnabled || !Notification.isSupported()) return false;
+  if (typeof title !== "string" || typeof body !== "string") return false;
+  const notification = new Notification({
+    title: title.slice(0, 120),
+    body: body.slice(0, 500),
+  });
+  notification.on("click", showMainWindow);
+  notification.show();
+  return true;
+});
 function stopServer() {
   if (child && !child.killed) {
     child.kill();
@@ -109,6 +239,7 @@ function startServer() {
     console.log(`[pidance] 服务进程退出，code=${code}`);
     child = null;
     if (!exiting && mainWindow) {
+      exiting = true;
       mainWindow.close();
     }
   });
@@ -129,10 +260,17 @@ function createWindow() {
     title: "Pidance",
     autoHideMenuBar: true,
     webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
     },
+  });
+  mainWindow.on("close", (event) => {
+    if (!exiting && process.platform === "win32" && desktopSettings.minimizeToTray) {
+      event.preventDefault();
+      mainWindow.hide();
+    }
   });
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -143,6 +281,7 @@ function createWindow() {
     }
   });
   void mainWindow.loadURL(`http://${HOST}:${PORT}`);
+  if (START_HIDDEN && desktopSettings.minimizeToTray) mainWindow.hide();
 }
 
 const gotLock = app.requestSingleInstanceLock();
@@ -157,6 +296,9 @@ if (!gotLock) {
   });
 
   app.whenReady().then(async () => {
+    desktopSettings = loadDesktopSettings();
+    applyLoginItemSettings();
+    createTray();
     const readyUrl = `http://${HOST}:${PORT}/api/home`;
     try {
       // 端口已有实例（如之前启动的正式版 pidance）：直接复用，不重复 spawn。
@@ -176,6 +318,7 @@ if (!gotLock) {
   });
 
   app.on("window-all-closed", () => {
+    if (process.platform === "win32" && desktopSettings.minimizeToTray && !exiting) return;
     exiting = true;
     stopServer();
     app.quit();
@@ -183,6 +326,8 @@ if (!gotLock) {
 
   app.on("before-quit", () => {
     exiting = true;
+    tray?.destroy();
+    tray = null;
     stopServer();
   });
 }

@@ -17,6 +17,7 @@ import { useI18n, type Locale } from "@/lib/i18n";
 import type { TranslationKey } from "@/lib/locales/en";
 import { SettingsPageFooter } from "./SettingsPageFooter";
 import { loadAutoUpdateCheck, saveAutoUpdateCheck } from "@/lib/ui-preferences";
+import { getDesktopBridge, type DesktopSettingKey, type DesktopSettings } from "@/lib/desktop-bridge";
 import {
   SETTINGS_PAGE_STORAGE_KEY,
   getSettingsPages,
@@ -46,6 +47,8 @@ function settingsPageLabelKey(id: SettingsPageId) {
   switch (id) {
     case "general":
       return "common_general";
+    case "desktop":
+      return "common_desktop";
     case "appearance":
       return "common_appearance";
     case "models":
@@ -749,6 +752,115 @@ function GeneralPage({ onClose }: { onClose?: () => void }) {
   );
 }
 
+function DesktopToggle({ label, hint, checked, disabled, onChange }: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "14px 0", borderBottom: "1px solid var(--border)", cursor: disabled ? "wait" : "pointer", userSelect: "none" }}>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+        style={{ width: 16, height: 16, marginTop: 2, flexShrink: 0, accentColor: "var(--accent)" }}
+      />
+      <span style={{ minWidth: 0 }}>
+        <span style={{ display: "block", color: "var(--text)", fontSize: 13, fontWeight: 600 }}>{label}</span>
+        <span style={{ display: "block", marginTop: 5, color: "var(--text-dim)", fontSize: 11, lineHeight: 1.5 }}>{hint}</span>
+      </span>
+    </label>
+  );
+}
+
+function DesktopPage({ onClose }: { onClose?: () => void }) {
+  const { t } = useI18n();
+  const bridge = getDesktopBridge();
+  const [settings, setSettings] = useState<DesktopSettings | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState<DesktopSettingKey | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!bridge) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    void bridge.getSettings()
+      .then((next) => {
+        if (!cancelled) setSettings(next);
+      })
+      .catch((reason: unknown) => {
+        if (!cancelled) setError(t("desktop_settingsLoadFailed", { error: reason instanceof Error ? reason.message : String(reason) }));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [bridge, t]);
+
+  const updateSetting = useCallback(async (key: DesktopSettingKey, value: boolean) => {
+    if (!bridge || !settings || saving) return;
+    const previous = settings;
+    setSettings({ ...settings, [key]: value });
+    setSaving(key);
+    setError(null);
+    try {
+      setSettings(await bridge.setSetting(key, value));
+    } catch (reason) {
+      setSettings(previous);
+      setError(t("desktop_settingsSaveFailed", { error: reason instanceof Error ? reason.message : String(reason) }));
+    } finally {
+      setSaving(null);
+    }
+  }, [bridge, saving, settings, t]);
+
+  return (
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
+      <div className="settings-page-content" style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.6 }}>{t("desktop_settingsHint")}</div>
+        </div>
+        {loading ? (
+          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{t("common_loading")}</div>
+        ) : settings ? (
+          <div>
+            <DesktopToggle
+              label={t("desktop_openAtLogin")}
+              hint={t("desktop_openAtLoginHint")}
+              checked={settings.openAtLogin}
+              disabled={saving !== null}
+              onChange={(value) => void updateSetting("openAtLogin", value)}
+            />
+            <DesktopToggle
+              label={t("desktop_minimizeToTray")}
+              hint={t("desktop_minimizeToTrayHint")}
+              checked={settings.minimizeToTray}
+              disabled={saving !== null}
+              onChange={(value) => void updateSetting("minimizeToTray", value)}
+            />
+            <DesktopToggle
+              label={t("desktop_notifications")}
+              hint={t("desktop_notificationsHint")}
+              checked={settings.notificationsEnabled}
+              disabled={saving !== null}
+              onChange={(value) => void updateSetting("notificationsEnabled", value)}
+            />
+            {error && <div role="alert" style={{ marginTop: 14, color: "var(--status-danger)", fontSize: 12 }}>{error}</div>}
+          </div>
+        ) : error ? (
+          <div role="alert" style={{ color: "var(--status-danger)", fontSize: 12 }}>{error}</div>
+        ) : null}
+      </div>
+      <SettingsPageFooter onClose={onClose} />
+    </div>
+  );
+}
+
 function AppearancePage({ onClose }: { onClose?: () => void }) {
   const { mode, themeStyle, setTheme, setThemeStyle } = useTheme();
   const { locale, setLocale, t } = useI18n();
@@ -795,6 +907,11 @@ function AppearancePage({ onClose }: { onClose?: () => void }) {
 export function SettingsView({ cwd, sessionId, onClose, onModelsChanged, onAuthStateChange, onPluginsReloaded, initialPage }: SettingsViewProps) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
+  // Electron preload 只在桌面壳注入 bridge；普通 Web 端不显示桌面配置页。
+  const [isDesktop, setIsDesktop] = useState<boolean | null>(null);
+  useEffect(() => {
+    setIsDesktop(getDesktopBridge() !== null);
+  }, []);
   const [activePage, setActivePage] = useState<SettingsPageId>(readInitialPage);
   // 外部入口（命令面板）指定的初始页优先于 localStorage 记忆页。
   useEffect(() => {
@@ -813,8 +930,12 @@ export function SettingsView({ cwd, sessionId, onClose, onModelsChanged, onAuthS
   }, [activePage]);
 
   const hasCwd = Boolean(cwd);
-  const pages = useMemo(() => getSettingsPages(hasCwd), [hasCwd]);
+  const pages = useMemo(() => getSettingsPages(hasCwd, isDesktop === true), [hasCwd, isDesktop]);
   const activePageInfo = pages.find((page) => page.id === activePage) ?? pages[0];
+
+  useEffect(() => {
+    if (isDesktop === false && activePage === "desktop") setActivePage("appearance");
+  }, [activePage, isDesktop]);
 
   const selectPage = useCallback((page: SettingsPageId) => {
     setActivePage(page);
@@ -831,6 +952,8 @@ export function SettingsView({ cwd, sessionId, onClose, onModelsChanged, onAuthS
     switch (activePageInfo.id) {
       case "general":
         return <GeneralPage onClose={onClose} />;
+      case "desktop":
+        return <DesktopPage onClose={onClose} />;
       case "appearance":
         return <AppearancePage onClose={onClose} />;
       case "models":

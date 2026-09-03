@@ -48,6 +48,7 @@ import { useChatAutoFollow } from "@/hooks/useChatAutoFollow";
 import { setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { resolveDisplayModel, settleModelOverride } from "@/lib/model-selection";
 import { useI18n } from "@/lib/i18n";
+import { getDesktopBridge } from "@/lib/desktop-bridge";
 import { guidePageThinkingUpdate, thinkingLevelForEnsureBody } from "@/lib/thinking-level-policy";
 import { isThinkingLevel, type AgentThinkingLevel } from "@/lib/agent-settings";
 
@@ -1130,9 +1131,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setToolExecutionSnapshots(getToolExecutionSnapshots(nextSnapshots));
       }
       dispatch({ type: "end" });
+      const desktop = getDesktopBridge();
+      if (desktop && (document.visibilityState !== "visible" || !document.hasFocus())) {
+        void desktop.notify(t("desktop_notificationTitle"), t("desktop_notificationBody"))
+          .catch(() => undefined);
+      }
       onAgentEnd?.();
     }
-  }, [loadSession, onAgentEnd, applyAgentStateSnapshot, dispatch, setAgentRunning, setAgentPhase, setRetryInfo, notifyAutoFollowEnd]);
+  }, [loadSession, onAgentEnd, applyAgentStateSnapshot, dispatch, setAgentRunning, setAgentPhase, setRetryInfo, notifyAutoFollowEnd, t]);
 
   const waitForPromptSettlement = useCallback(async (sid: string, runId?: number) => {
     const registry = getOrCreateBrowserSessionRuntimeRegistry();

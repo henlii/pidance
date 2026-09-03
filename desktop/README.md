@@ -25,9 +25,19 @@ npm run build:win:installer   :: NSIS 安装版
 CI：`.github/workflows/desktop-win.yml` 在 windows-latest 上执行同一流程，
 产物（Setup exe + SHA256）挂在 workflow run 的 Artifacts 上。
 
+## 桌面版设置
+
+Windows 桌面壳的托盘菜单提供「桌面版设置…」入口，会打开 Web 设置中的桌面版页面；该页面只在 Electron desktop bridge 环境显示，包含：
+
+- 开机启动
+- 关闭窗口时最小化到托盘
+- 桌面通知（窗口不在前台时，本轮回复完成后提醒）
+
+设置保存在 Electron `userData`，不会写入 Web/Pidance 配置文件。
+
 ## 安全边界
 
-- `contextIsolation: true` + `sandbox: true`，页面不注入 Node 能力。
+- `contextIsolation: true` + `sandbox: true`，页面不注入 Node 能力；配置页只通过白名单 IPC 修改桌面设置。
 - 只绑定 `127.0.0.1`，不对外网暴露。
 
 ## 开发模式

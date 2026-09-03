@@ -4,7 +4,7 @@
  * 全部为纯函数，方便 node:test 定向覆盖。
  */
 
-export type SettingsPageId = "general" | "appearance" | "models" | "defaults" | "prompts" | "skills" | "plugins";
+export type SettingsPageId = "general" | "desktop" | "appearance" | "models" | "defaults" | "prompts" | "skills" | "plugins";
 
 export interface SettingsPageInfo {
   id: SettingsPageId;
@@ -17,8 +17,8 @@ export interface SettingsPageInfo {
   unavailableHint?: "skills" | "plugins";
 }
 
-// general / appearance / models / defaults / trust 无 cwd 也可看全局；skills/plugins 需要项目。
-const PAGE_ORDER: SettingsPageId[] = ["general", "appearance", "models", "defaults", "prompts", "skills", "plugins"];
+// general / desktop / appearance / models / defaults / trust 无 cwd 也可看全局；skills/plugins 需要项目。
+const PAGE_ORDER: SettingsPageId[] = ["general", "desktop", "appearance", "models", "defaults", "prompts", "skills", "plugins"];
 
 /** 无 cwd 提示：保留导航项，内容区显示具体指引，不静默隐藏。 */
 const PAGE_NO_CWD_HINT: Partial<Record<SettingsPageId, "skills" | "plugins">> = { skills: "skills", plugins: "plugins" };
@@ -51,8 +51,8 @@ export function loadStoredSettingsPage(storage: StorageLike): SettingsPageId {
 }
 
 /** 页面清单：general/appearance/models/defaults/trust 无 cwd 可用；skills/plugins 无 cwd 时给出提示。 */
-export function getSettingsPages(hasCwd: boolean): SettingsPageInfo[] {
-  return PAGE_ORDER.map((id) => {
+export function getSettingsPages(hasCwd: boolean, isDesktop = false): SettingsPageInfo[] {
+  return PAGE_ORDER.filter((id) => id !== "desktop" || isDesktop).map((id) => {
     const requiresCwd = id === "skills" || id === "plugins";
     const available = !requiresCwd || hasCwd;
     return {
