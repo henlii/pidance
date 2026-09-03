@@ -452,7 +452,15 @@ export function createBrowserSessionRuntimeRegistry(
     const onEvent = (event: AgentStreamEvent) => applyEventToSlot(slot, event);
     const manager = deps.createEventStream
       ? deps.createEventStream(slot.sessionId, onEvent)
-      : createEventStreamManager();
+      : createEventStreamManager({
+        // 弱网自动重连：仅当 slot 认为 agent 仍在跑且页面可见时自动重连；
+        // 404/无 host（空闲 dispose 后）不无限重试，避免对空会话反复握手。
+        shouldAutoReconnect: () => {
+          if (!slot.snapshot.agentRunning) return false;
+          if (typeof document === "undefined") return true;
+          return document.visibilityState !== "hidden";
+        },
+      });
     slot.eventStream = manager;
     void manager.ensureConnected(slot.sessionId, onEvent).catch(() => {
       if (slot.eventStream === manager) slot.eventStream = null;
