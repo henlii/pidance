@@ -371,16 +371,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     extensionUiStateRef, commitExtensionUiState, patchExtensionUiState, dismissExtensionUiRequest,
   } = useExtensionUiState();
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
-  // Pidance follow-up 队列（Codex 风格）：不复用 Pi 原生 queue，
-  // 以便支持整队合并引导、取回和跨会话 Host 自动投递。
-  const [, setLocalFollowUpQueue] = useState<string[]>([]);
+  // 每会话本地 follow-up 队列：localFollowUpRef 始终指向当前会话条目的投影，
+  // 会话切换只换映射条目，不携带上一会话队列；每会话条目内容与 Host 持久化
+  // sessionQueue.<sid> 一致（当前会话由 Host 自动投递，非当前会话队列保留在服务端）。
+  const sessionQueuesRef = useRef<Map<string, string[]>>(new Map());
+  const currentQueueSessionIdRef = useRef<string | null>(session?.id ?? null);
+  // 当前会话的 followUp 投影（作为最后显示的队列块来源）
   const localFollowUpRef = useRef<string[]>([]);
+  const localQueueOwnerRef = useRef<string | null>(session?.id ?? null);
   const followUpSyncRef = useRef<Promise<void>>(Promise.resolve());
-  const applyLocalFollowUpQueue = useCallback((next: string[]) => {
-    localFollowUpRef.current = next;
-    setLocalFollowUpQueue(next);
-    setQueuedMessages((prev) => ({ ...prev, followUp: next }));
+  const applySessionLocalQueue = useCallback((sid: string | null, next: string[]) => {
+    if (!sid) return;
+    const map = new Map(sessionQueuesRef.current);
+    if (next.length === 0) map.delete(sid);
+    else map.set(sid, [...next]);
+    sessionQueuesRef.current = map;
+    if (localQueueOwnerRef.current === sid) {
+      localFollowUpRef.current = [...next];
+      setQueuedMessages({ steering: [], followUp: [...next] });
+    }
   }, []);
+  const applyLocalFollowUpQueue = useCallback((next: string[]) => {
+    applySessionLocalQueue(currentQueueSessionIdRef.current, next);
+  }, [applySessionLocalQueue]);
   const applyProjectedQueues = useCallback((value?: AgentStateResponse["queuedMessages"]) => {
     const next = normalizeQueuedMessages(value);
     applyLocalFollowUpQueue(next.followUp);
@@ -2339,6 +2352,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setThinkingLevel(null);
     pendingModelRef.current = null;
     optimisticUserMessageKeyRef.current = null;
+    // 会话切换：把 followUp 队列投影切到新会话（映射保留旧会话条目，切回恢复）。
+    const queueSid = session?.id ?? null;
+    currentQueueSessionIdRef.current = queueSid;
+    localQueueOwnerRef.current = queueSid;
+    const ownQueue = sessionQueuesRef.current.get(queueSid ?? "") ?? [];
+    localFollowUpRef.current = [...ownQueue];
+    setQueuedMessages({ steering: [], followUp: [...ownQueue] });
+    lastRemoteQueueRef.current = null;
 
     const registry = getOrCreateBrowserSessionRuntimeRegistry();
     const runtimeId = session?.id ?? (isNew && newSessionIntentId ? pendingSessionId(newSessionIntentId) : null);
