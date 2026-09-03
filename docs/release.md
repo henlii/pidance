@@ -179,7 +179,7 @@ gh release create v0.1.0 \
   henlii-pidance-0.1.0.tgz.sha256
 ```
 
-发布说明建议中英双语，基于 `git log` 整理，并写明 npm 包名与版本；**不要**在未 publish 时写「已发布到 npm」。
+发布说明**中英双语，中文在上**，基于 `git log` 整理，并写明 npm 包名与版本；**不要**在未 publish 时写「已发布到 npm」。`push v* tag` 触发的 `release.yml` 会自动生成该双语说明（中文块在上、英文块在下，标题只写一次 `vX.Y.Z` 不带双 v），Windows 安装版说明指向 Release Assets。
 
 ## 7. 最终核对
 

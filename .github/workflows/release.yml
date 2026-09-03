@@ -71,18 +71,15 @@ jobs:
             npm publish henlii-pidance-$PKG_VERSION.tgz --access public --provenance --registry https://registry.npmjs.org/
           fi
 
-      - name: 生成发布说明
+      - name: 生成发布说明（中英双语，中文在上）
         working-directory: /tmp/pidance-release-build
         run: |
-          echo "## v${{ github.ref_name }}" > release-notes.md
-          echo "" >> release-notes.md
-          echo "来自 \`git log\`（相对上一 tag）：" >> release-notes.md
-          echo '```' >> release-notes.md
           PREV=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
+          { echo "# ${{ github.ref_name }}"; echo ""; echo "## 中文（Chinese）"; echo ""; echo "自 $PREV 以来的变更（Changes since $PREV）："; echo '```'; } > release-notes.md
           if [ -n "$PREV" ]; then git log --oneline --no-decorate $PREV..HEAD | head -60; else git log --oneline --no-decorate -60 HEAD; fi >> release-notes.md
-          echo '```' >> release-notes.md
-          echo "" >> release-notes.md
-          echo "npm 包：\`@henlii/pidance@${{ github.ref_name }}\`（CLI 仅 \`pidance\`，端口 31415）" >> release-notes.md
+          { echo '```'; echo ""; echo "---"; echo ""; echo "## English"; echo ""; echo "Changes since $PREV（commits）:"; echo '```'; } >> release-notes.md
+          if [ -n "$PREV" ]; then git log --oneline --no-decorate $PREV..HEAD | head -60; else git log --oneline --no-decorate -60 HEAD; fi >> release-notes.md
+          { echo '```'; echo ""; echo "## 安装 / Install"; echo ""; echo "npm 包 / npm package: \`@henlii/pidance@${{ env.PKG_VERSION }}\`（CLI 仅 \`pidance\`，端口 31415）"; echo "Windows 安装版 / Windows installer: \`Pidance Desktop\`（见下方 Assets）"; } >> release-notes.md
 
       - name: 创建 GitHub Release（同一 tgz + sha256；已存在则跳过）
         env:
