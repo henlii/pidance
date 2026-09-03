@@ -38,6 +38,20 @@ jobs:
           node --check src/settings.js
           node --check scripts/fetch-node-win.mjs
 
+      - name: 瘦身打包输入（仅删调试/dev 资产，零运行引用）
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          # sourcemap：next / pi-sdk 调试数据，运行时无 require，删掉
+          Get-ChildItem node_modules -Recurse -File -Filter *.map -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+          # 非 win32 平台 SWC 原生残留（本机 windows 只装 win32；防平台残差）
+          Get-ChildItem node_modules/@next -Directory -Filter "swc-*" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike "*win32*" } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          # next dev 诊断/调试产物（生产服务不 require）
+          Remove-Item -Recurse -Force node_modules/next/dist/diagnostics -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force node_modules/next/dist/compiled/next-devtools -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force node_modules/.cache -ErrorAction SilentlyContinue
+          Write-Host "slim done"
+
       - name: 下载捆绑 Node win-x64
         working-directory: desktop
         run: npm run fetch-node
