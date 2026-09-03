@@ -100,3 +100,65 @@ jobs:
               henlii-pidance-${{ env.PKG_VERSION }}.tgz \
               henlii-pidance-${{ env.PKG_VERSION }}.tgz.sha256
           fi
+
+  build-windows-installer:
+    name: Build Windows NSIS installer
+    needs: publish
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: 校验 Web 与 desktop 版本一致
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          $webVersion = (Get-Content ../package.json -Raw | ConvertFrom-Json).version
+          $desktopVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($webVersion -ne $desktopVersion) { throw "Version mismatch: web=$webVersion desktop=$desktopVersion" }
+          if ("v$desktopVersion" -ne $env:GITHUB_REF_NAME) { throw "Tag mismatch: tag=$env:GITHUB_REF_NAME desktop=$desktopVersion" }
+
+      - name: 安装 desktop 依赖
+        working-directory: desktop
+        run: npm ci --include=dev --no-audit --no-fund
+
+      - name: 检查桌面壳脚本语法
+        working-directory: desktop
+        run: |
+          node --check src/main.js
+          node --check src/preload.js
+          node --check scripts/fetch-node-win.mjs
+
+      - name: 下载捆绑 Node win-x64
+        working-directory: desktop
+        run: npm run fetch-node
+
+      - name: 校验打包输入
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          if (!(Test-Path node/node.exe)) { throw "bundled node/node.exe is missing" }
+          if (!(Test-Path node_modules/@henlii/pidance/bin/pidance.js)) { throw "Pidance package is missing" }
+
+      - name: 构建 NSIS 安装版
+        working-directory: desktop
+        run: npm run build:win:installer
+
+      - name: 计算并上传 Windows 安装版到 Release
+        working-directory: desktop
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $installers = @(Get-ChildItem dist -Filter *.exe -File)
+          if ($installers.Count -ne 1) { throw "Expected exactly one installer, found $($installers.Count)" }
+          $installer = $installers[0]
+          $hash = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash
+          "$hash  $($installer.Name)" | Out-File -Encoding ascii dist/sha256.txt
+          gh release upload $env:GITHUB_REF_NAME $installer.FullName (Join-Path (Get-Location) "dist/sha256.txt") --repo $env:GITHUB_REPOSITORY --clobber
+          Write-Host "$hash  $($installer.Name)"
