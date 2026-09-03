@@ -1,0 +1,53 @@
+{
+  "name": "@henlii/pidance-desktop",
+  "version": "0.2.15",
+  "description": "Pidance Desktop（Windows 桌面壳）：内置 pidance 服务与窗口",
+  "private": true,
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "main": "src/main.js",
+  "bin": {},
+  "scripts": {
+    "dev": "electron .",
+    "fetch-node": "node scripts/fetch-node-win.mjs",
+    "prebuild:win:installer": "npm run fetch-node",
+    "build:win:installer": "electron-builder --win nsis --x64 --publish never",
+    "build:win:zip": "electron-builder --win zip --x64"
+  },
+  "dependencies": {
+    "@henlii/pidance": "0.2.15"
+  },
+  "devDependencies": {
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "cn.namixinxi.pidance",
+    "productName": "Pidance Desktop",
+    "asar": false,
+    "files": [
+      "src/**/*",
+      "package.json",
+      "node_modules/@henlii/**"
+    ],
+    "extraResources": [
+      { "from": "node", "to": "node" }
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Pidance Desktop"
+    },
+    "directories": {
+      "output": "dist"
+    }
+  }
+}

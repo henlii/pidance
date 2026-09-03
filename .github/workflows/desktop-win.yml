@@ -1,0 +1,72 @@
+name: Desktop Windows Installer
+
+# Windows NSIS 安装版构建：手动触发（workflow_dispatch）或推送 desktop/ 变更。
+# 产物挂在 workflow run 的 Artifacts（Setup exe + sha256），不自动发 GitHub Release；
+# 正式发布仍走 release.yml 与项目发布流程（同一 tgz + SHA256 审计）。
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "desktop/**"
+      - ".github/workflows/desktop-win.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # desktop 壳依赖 npm 包 @henlii/pidance（服务端），按 lockfile 精确安装。
+      # electron 下载依赖网络；electron-builder nsis 需要再拉 nsis 工具链。
+      - name: 安装 desktop 依赖（npm ci，按 lockfile）
+        working-directory: desktop
+        run: npm ci --include=dev --no-audit --no-fund
+
+      - name: 检查桌面壳脚本语法
+        working-directory: desktop
+        run: |
+          node --check src/main.js
+          node --check scripts/fetch-node-win.mjs
+
+      - name: 下载捆绑 Node win-x64
+        working-directory: desktop
+        run: npm run fetch-node
+
+      - name: 校验打包输入
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          if (!(Test-Path node/node.exe)) { throw "bundled node/node.exe is missing" }
+          if (!(Test-Path node_modules/@henlii/pidance/bin/pidance.js)) { throw "Pidance package is missing" }
+
+      - name: 构建 NSIS 安装版
+        working-directory: desktop
+        run: npm run build:win:installer
+
+      - name: 计算产物 SHA256
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -Filter *.exe | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
+            "$hash  $($_.Name)" | Out-File -Append -Encoding ascii dist/sha256.txt
+            Write-Host "$hash  $($_.Name)"
+          }
+
+      - name: 上传产物（Setup exe + sha256）
+        uses: actions/upload-artifact@v4
+        with:
+          name: pidance-desktop-win-installer
+          path: |
+            desktop/dist/*.exe
+            desktop/dist/sha256.txt
+          if-no-files-found: error
+          retention-days: 30
