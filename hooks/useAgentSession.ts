@@ -1283,16 +1283,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     const registry = getOrCreateBrowserSessionRuntimeRegistry();
     const source = registry.getEventSource(sid);
-    const stillOpen = source && (source.readyState === 1 || source.readyState === 0);
-    if (!stillOpen) {
-      ensureEventsConnected(sid);
-    }
+    // 浏览器冻结恢复后 EventSource 可能仍停在 OPEN/CONNECTING 但底层已静默断流，
+    // 仅靠 readyState 判断会漏。手机锁屏/后台回来一律强制重连一次（close→connect），
+    // 再 reconcile + 重拉尾页，保证把冻结期间完成的消息/状态收口（#28 移动端后台）。
+    if (source) registry.getEventSource(sid)?.close?.();
+    ensureEventsConnected(sid);
     void reconcileAgentState(sid);
-    // 仅重拉运行中的会话尾页；空闲会话 loadSession 会带 live 状态，可能有 SSE 已
-    // 送达而 UI 未消费的残余（浏览器冻结时长），重拉是权威收口。
-    if (getRuntimeAgentRunning()) {
-      void loadSession(sid, false);
-    }
+    // 无论是否 running 都重拉：空闲会话也可能在后台跑完（本 slot 未感知）。
+    void loadSession(sid, false);
   }, [ensureEventsConnected, reconcileAgentState, loadSession]);
 
   useEffect(() => {
