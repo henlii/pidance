@@ -33,17 +33,45 @@ async function fetchPrefs(): Promise<ServerPrefs> {
     : {};
 }
 
+const DRAFT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const DRAFT_MAX_KEEP = 30;
+
+/**
+ * 服务端偏好读时 GC：草稿只保留活跃（30 天内更新）且最多 DRAFT_MAX_KEEP 条，
+ * 防止跨客户端同步把桌面端长期残留的草稿全部带到手机/新浏览器。
+ */
+export function pruneServerPrefs(prefs: ServerPrefs): ServerPrefs {
+  const drafts = prefs.drafts;
+  if (!drafts || typeof drafts !== "object" || Array.isArray(drafts)) return prefs;
+  const now = Date.now();
+  const entries = Object.entries(drafts as Record<string, unknown>)
+    .filter(([, value]) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+      const updatedAt = (value as { updatedAt?: unknown }).updatedAt;
+      if (typeof updatedAt !== "number") return true; // 旧格式保留待下轮更新
+      return now - updatedAt <= DRAFT_MAX_AGE_MS;
+    })
+    .sort((a, b) => {
+      const ta = (a[1] as { updatedAt?: number }).updatedAt ?? 0;
+      const tb = (b[1] as { updatedAt?: number }).updatedAt ?? 0;
+      return tb - ta;
+    });
+  const kept = Object.fromEntries(entries.slice(0, DRAFT_MAX_KEEP));
+  if (Object.keys(kept).length === Object.keys(drafts as Record<string, unknown>).length) return prefs;
+  return { ...prefs, drafts: kept };
+}
+
 /** 确保已从服务端加载（并发调用合并为一次请求）。 */
 export function ensureServerPrefsLoaded(): Promise<ServerPrefs> {
   if (singletonLoaded && singletonPrefs) return Promise.resolve(singletonPrefs);
   if (!loadPromise) {
     loadPromise = fetchPrefs()
       .then((prefs) => {
-        singletonPrefs = prefs;
+        singletonPrefs = pruneServerPrefs(prefs);
         singletonLoaded = true;
         loadPromise = null;
         notify();
-        return prefs;
+        return singletonPrefs;
       })
       .catch((err) => {
         // 加载失败：用空对象继续（可降级），下次激活再试

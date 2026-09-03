@@ -35,7 +35,7 @@ import {
   type SidebarPreferences,
 } from "@/lib/ui-preferences";
 import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
-import { flushServerPrefs, getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
+import { setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import {
   bumpGroupVisibleCount,
   derivePinnedSessions,
@@ -55,7 +55,6 @@ import { useI18n } from "@/lib/i18n";
 import {
   loadUnreadSessionIds,
   markSessionRead,
-  mergeUnreadSessionState,
   parseUnreadSessionState,
   pruneUnreadSessionState,
   saveUnreadSessionIds,
@@ -207,7 +206,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // catalog 内 unread 快照与 SSE 权威 running 快照在 store 中维护；这里的
   // serverRunningStartedAt 只承担计时播种（与 store 的 startedAt 同源）。
   const [serverRunningStartedAt, setServerRunningStartedAt] = useState<ReadonlyMap<string, number>>(() => new Map());
-  const unreadHydratedRef = useRef(false);
   const unreadSessionIds = catalogSnapshot.unreadIds;
 
   // 服务端 startedAt 播种（不重算 first-seen 窗口）
@@ -438,26 +436,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     catalogStore.replaceUnread(local);
   }, [catalogStore]);
 
-  useEffect(() => {
-    const remoteState = getServerPref<unknown>("unreadSessionState");
-    const remoteLegacy = getServerPref<unknown>("unreadSessionIds");
-    if (remoteState === undefined && !Array.isArray(remoteLegacy)) return;
-    unreadHydratedRef.current = true;
-    const remote = mergeUnreadSessionState(
-      parseUnreadSessionState(remoteState),
-      parseUnreadSessionState(remoteLegacy),
-    );
-    catalogStore.replaceUnread(mergeUnreadSessionState(catalogStore.getState().unread, remote));
-  }, [serverPrefs, catalogStore]);
-
+  // 未读时钟为「每设备本地」状态：completedAt/readAt 仅存 localStorage。
+  // 不同设备/浏览器各自记录自己观察到的 run 完成时刻与阅读时刻，互不合并，
+  // 避免把桌面端的 completedAt 同步到手机造成「手机显示大量历史未读」。
   useEffect(() => {
     const unread = catalogStore.getState().unread;
     const ids = unreadIdsFromState(unread);
     saveUnreadSessionIds(ids);
-    if (!unreadHydratedRef.current) return;
-    setServerPref("unreadSessionState", unread);
-    setServerPref("unreadSessionIds", [...ids]);
-    flushServerPrefs();
   }, [catalogTick, catalogStore]);
 
   useEffect(() => {

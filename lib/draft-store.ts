@@ -8,6 +8,11 @@ export interface ChatDraft {
   images: ChatDraftImage[];
 }
 
+/** 服务端草稿存 updatedAt，便于跨端 GC（30 天无更新自动清除）。 */
+export interface ServerChatDraft extends ChatDraft {
+  updatedAt?: number;
+}
+
 const drafts = new Map<string, ChatDraft>();
 
 // 服务端持久化草稿（跨客户端同步）：存储路径 drafts.<key>
@@ -40,7 +45,8 @@ export function setDraft(key: string, draft: ChatDraft): void {
     return;
   }
   drafts.set(key, cloneDraft(draft));
-  setServerPref(draftKeyPath(key), cloneDraft(draft));
+  const remote: ServerChatDraft = { ...cloneDraft(draft), updatedAt: Date.now() };
+  setServerPref(draftKeyPath(key), remote);
 }
 
 export function clearDraft(key: string): void {
