@@ -1176,23 +1176,29 @@ function AppShellInner() {
           {showChat && (sessionStats || contextUsage) && (() => {
             const fmt = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
 
+            // 上下文占用：优先热 state（含压缩后 {tokens:null} 的“?”态）；
+            // host 空闲 dispose 后热 state 丢失（loadSession includeState 起始会清
+            // contextUsage），退回磁盘 sessionStats.contextUsage 兜底，避免顶栏
+            // 上下文统计在压缩/队列收尾后整块消失。
+            const ctxUsage = contextUsage ?? sessionStats?.contextUsage ?? null;
+
             let ctxColor = "var(--text-muted)";
             let ctxStr: string | null = null;
-            if (contextUsage?.contextWindow) {
-              const pct = contextUsage.percent;
+            if (ctxUsage?.contextWindow) {
+              const pct = ctxUsage.percent;
               if (pct !== null && pct > 90) ctxColor = "var(--status-danger)";
               else if (pct !== null && pct > 70) ctxColor = "var(--status-warning)";
               // 手机顶栏空间紧：只显示百分比；完整「pct / window」放 tooltip。
               ctxStr = pct !== null
-                ? (isMobile ? `${pct.toFixed(0)}%` : `${pct.toFixed(0)}% / ${fmt(contextUsage.contextWindow)}`)
-                : (isMobile ? "?" : `? / ${fmt(contextUsage.contextWindow)}`);
+                ? (isMobile ? `${pct.toFixed(0)}%` : `${pct.toFixed(0)}% / ${fmt(ctxUsage.contextWindow)}`)
+                : (isMobile ? "?" : `? / ${fmt(ctxUsage.contextWindow)}`);
             }
 
             // 用量统计（词元/费用）已移除；顶栏只保留上下文信息
-            const tooltip = contextUsage?.contextWindow
+            const tooltip = ctxUsage?.contextWindow
               ? (() => {
-                  const pct = contextUsage.percent;
-                  return t("app_contextTooltip", { pct: pct !== null ? pct.toFixed(1) + "%" : t("app_unknown"), total: contextUsage.contextWindow.toLocaleString() });
+                  const pct = ctxUsage.percent;
+                  return t("app_contextTooltip", { pct: pct !== null ? pct.toFixed(1) + "%" : t("app_unknown"), total: ctxUsage.contextWindow.toLocaleString() });
                 })()
               : null;
 

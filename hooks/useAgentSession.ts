@@ -563,10 +563,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (showLoading) setLoading(true);
       const registry = getOrCreateBrowserSessionRuntimeRegistry();
       const hydrateSinceSeq = registry.getSnapshot(sid)?.timelineSeq ?? 0;
-      // 切换会话：先清上一会话的 live 投影，避免 systemPrompt/用量串台
+      // 切换会话：先清上一会话的 live 投影，避免 systemPrompt/用量串台。
+      // contextUsage 不在起点清空：若后续 live/hot state 缺失（压缩/队列收尾后
+      // host 已 dispose），保留旧值或磁盘兜底可继续显示，避免顶栏统计整块消失；
+      // 每次 setData 后统一由 applyLiveState / 兜底路径覆写。
       if (includeState) {
         setSystemPrompt(null);
-        setContextUsage(null);
       }
       // tail-first：首屏只拉最新 N 条，尽快结束 loading；更旧历史按需 prepend。
       const hydrateRequestSeq = registry.beginHydrate(sid);
