@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useRef, useState, useCallback, useEffect, useId, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
+import React, { useRef, useState, useCallback, useEffect, useMemo, useId, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft-store";
@@ -1203,25 +1203,29 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     slashItemRefs.current[slashActiveIndex]?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [slashActiveIndex, slashMenuOpen]);
 
-  // Build model options: prefer modelList (has provider info), fallback to modelNames
-  const modelOptions: ModelOption[] = (() => {
-    if (modelList && modelList.length > 0) {
-      return modelList
-        .map((m) => ({
+  // 第一阶段：共享运行时目录（modelList/modelNames）和 serverPrefs 中的每模型
+  // 思考缓存先到位。第二阶段：把当前会话选择叠加到列表；当前模型即使因
+  // enabledModels/凭据过滤暂时不在共享目录，也必须保留为可见的 active 行。
+  const modelOptions: ModelOption[] = useMemo(() => {
+    const options = modelList && modelList.length > 0
+      ? modelList.map((m) => ({
           provider: m.provider,
           modelId: m.id,
           name: m.name,
           contextWindow: m.contextWindow,
           maxTokens: m.maxTokens,
         }))
-        .sort(compareModelOptions);
+      : Object.entries(modelNames ?? {}).map(([key, name]) => {
+          const separator = key.indexOf(":");
+          return separator > 0
+            ? { provider: key.slice(0, separator), modelId: key.slice(separator + 1), name }
+            : { provider: model?.provider ?? "unknown", modelId: key, name };
+        });
+    if (model && !options.some((option) => option.provider === model.provider && option.modelId === model.modelId)) {
+      options.push({ provider: model.provider, modelId: model.modelId, name: model.modelId });
     }
-    return Object.entries(modelNames ?? {}).map(([modelId, name]) => ({
-      provider: model?.provider ?? "unknown",
-      modelId,
-      name,
-    })).sort(compareModelOptions);
-  })();
+    return options.sort(compareModelOptions);
+  }, [modelList, modelNames, model]);
 
   // Group options by provider, preserving insertion order
   const modelsByProvider: { provider: string; options: ModelOption[] }[] = [];

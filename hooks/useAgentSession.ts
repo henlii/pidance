@@ -45,7 +45,7 @@ import { parseLatestTodoSnapshot } from "@/lib/todo-parser";
 import { getSessionCapabilities } from "@/components/session-capabilities";
 import { useSessionCommands } from "@/hooks/useSessionCommands";
 import { useChatAutoFollow } from "@/hooks/useChatAutoFollow";
-import { setServerPref, useServerPreferences } from "@/lib/server-preferences";
+import { ensureServerPrefsLoaded, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { resolveDisplayModel, settleModelOverride } from "@/lib/model-selection";
 import { useI18n } from "@/lib/i18n";
 import { getDesktopBridge } from "@/lib/desktop-bridge";
@@ -337,7 +337,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
   const [settingsDefaultThinking, setSettingsDefaultThinking] = useState<AgentThinkingLevel | null>(null);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption | null>(null);
-  const resolvedThinking: AgentThinkingLevel = thinkingLevel ?? settingsDefaultThinking ?? "off";
+  // settings.json 默认只服务于新会话引导页；已有会话没有自己的档位时为 off，
+  // 不得把全局默认带入其它会话。
+  const resolvedThinking: AgentThinkingLevel = isNew
+    ? thinkingLevel ?? settingsDefaultThinking ?? "off"
+    : thinkingLevel ?? "off";
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
@@ -482,7 +486,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // 新会话发送中携带的选择（pending），再其次磁盘持久化 model_change
   // （context.model），最后才是默认配置。extension 通知/subagent 完成提示/
   // activity/custom 消息都不会写入 override，因此不会覆盖用户选择。
-  const currentModel = resolveDisplayModel(currentModelOverride, pendingModel, data?.context.model, newSessionDefaultModel);
+  // 全局默认模型只用于新会话引导；已有会话只读自身 override/pending/model_change。
+  const currentModel = resolveDisplayModel(
+    currentModelOverride,
+    pendingModel,
+    data?.context.model,
+    isNew ? newSessionDefaultModel : null,
+  );
   const displayModel = isNew ? (newSessionModel ?? newSessionDefaultModel) : currentModel;
 
   const sessionStats = useMemo(() => {
@@ -641,8 +651,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // reload / subagent 完成等内部 loadSession 把用户选择覆盖回落默认。
       setCurrentModelOverride((prev) => settleModelOverride(prev, d.context.model));
       setError(null);
-      if (d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
-        setThinkingLevel(d.context.thinkingLevel as ThinkingLevelOption);
+      if (isThinkingLevel(d.context.thinkingLevel)) {
+        // off 也是会话的有效值，必须覆盖上一个会话遗留的深度。
+        setThinkingLevel(d.context.thinkingLevel);
       }
 
       messagesLoaded = true;
@@ -1829,9 +1840,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [isCompacting, isReadOnly, loadSession]);
 
   const loadModels = useCallback(async (signal?: AbortSignal) => {
-    const modelCwd = newSessionCwd ?? session?.cwd ?? "";
-    const modelsUrl = modelCwd ? `/api/models?cwd=${encodeURIComponent(modelCwd)}` : "/api/models";
-    const res = await fetch(modelsUrl, signal ? { signal } : undefined);
+    // 模型目录与每模型思考缓存是浏览器运行时共享的基础层；先完成这两项，
+    // 再由 currentModel/resolvedThinking 叠加当前会话，不随会话切换互相污染。
+    const [res] = await Promise.all([
+      fetch("/api/models", signal ? { signal } : undefined),
+      ensureServerPrefsLoaded(),
+    ]);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const d = await res.json() as ModelsResponse;
     setModelNames(d.models);
@@ -1849,7 +1863,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       ?? nextModelList.find((m) => configuredMap[m.provider] !== false)
       ?? nextModelList[0];
     setNewSessionDefaultModel(catalogDefault ? { provider: catalogDefault.provider, modelId: catalogDefault.id } : null);
-  }, [newSessionCwd, session?.cwd]);
+  }, []);
 
   // 命令条目持久化：斜杠命令成功后追加 pidance.command 到会话时间线（type:"custom"）。
   // 写入失败静默（命令已执行成功，条目只是展示）。
@@ -2061,8 +2075,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     const text = message.trim();
     if (!text) return;
-    if (images?.length || !getRuntimeAgentRunning()) {
-      // 有图或空闲：直接 prompt（空闲时无“结束后投递”语义）
+    if (images?.length || (!getRuntimeAgentRunning() && !isCompacting)) {
+      // 有图或空闲：直接 prompt（空闲时无“结束后投递”语义）；压缩中即使
+      // runtime 暂时没有 agentRunning，也必须进入 follow-up 队列。
       notifyAutoFollowSend();
       const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
       try {
@@ -2087,7 +2102,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         message: error instanceof Error ? error.message : String(error),
       });
     }
-  }, [addNotice, isReadOnly, notifyAutoFollowSend, opts.chatInputRef, updateLocalFollowUp]);
+  }, [addNotice, isCompacting, isReadOnly, notifyAutoFollowSend, opts.chatInputRef, updateLocalFollowUp]);
 
   // 供 handlePromptWithStreamingBehavior（定义在前）引用最新 handleFollowUp
   handleFollowUpRef.current = handleFollowUp;
@@ -2312,6 +2327,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setContextUsage(null);
     setCurrentModelOverride(null);
     setPendingModel(null);
+    setNewSessionModel(null);
+    setThinkingLevel(null);
     pendingModelRef.current = null;
     optimisticUserMessageKeyRef.current = null;
 
@@ -2458,7 +2475,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, historyLoading, hasMoreBefore, error, activeLeafId, messages, entryIds, streamState,
-    agentRunning, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, thinkingLevel: resolvedThinking, defaultThinkingLevel: settingsDefaultThinking,
+    agentRunning, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, thinkingLevel: resolvedThinking, defaultThinkingLevel: isNew ? settingsDefaultThinking : null,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,

@@ -612,6 +612,12 @@ export class SdkSessionHost {
       case "compaction_end":
       case "auto_compaction_end":
         this.notifyRunning();
+        // Manual compaction has no agent_settled event of its own. Once it
+        // succeeds, flush messages queued during the compaction immediately;
+        // auto compaction still relies on agent_settled while its run is active.
+        if (event.aborted !== true && !event.errorMessage && this.isSettled()) {
+          this.scheduleFollowUpFlush();
+        }
         break;
       case "message_end": {
         // user 消息确认：SDK 在订阅者回调返回后才执行 sessionManager.appendMessage，
@@ -1018,6 +1024,24 @@ export class SdkSessionHost {
         if (inFlight) return inFlight;
         if (this.bashRunning) {
           throw new Error("Cannot send a prompt while a shell command is running");
+        }
+        // AgentSession.prompt() rejects direct prompts while manual compaction is
+        // running. Preserve the user's message in the existing Pidance follow-up
+        // queue; compaction_end will schedule the normal prompt flush.
+        if (session.isCompacting) {
+          if (parsed.images?.length) {
+            throw new Error("Image attachments cannot be queued while compaction is in progress");
+          }
+          const queuedReceipt: PromptReceipt = {
+            submissionId: parsed.submissionId,
+            sessionId: this.realSessionId,
+            status: "accepted",
+          };
+          this.followUpQueue = [...this.followUpQueue, parsed.message];
+          this.promptReceipts.set(parsed.submissionId, queuedReceipt);
+          this.persistFollowUpQueue();
+          this.options.onSessionListInvalidate?.();
+          return queuedReceipt;
         }
         if (!acquireRunningLease(this.realSessionId)) {
           throw new Error(SESSION_RUNNING_LOCKED_MESSAGE);

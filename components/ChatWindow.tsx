@@ -201,7 +201,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     isMobile,
   });
   const writesDisabled = isReadOnly;
-  const sessionBusy = agentRunning || bashRunning;
+  const sessionBusy = agentRunning || bashRunning || isCompacting;
   const [todosCollapsed, setTodosCollapsed] = useState(true);
   const todoCollapseScope = session?.id ?? (effectiveNewSessionCwd ? `new:${effectiveNewSessionCwd}` : "new-session");
   // Todo 展开状态只属于当前聊天视图；切换会话后恢复默认折叠。
@@ -810,6 +810,23 @@ const chatPlan = composeChatPlan({
           </div>
         </div>
         {todoPanelElement}
+        {isCompacting && (
+          <div
+            role="status"
+            aria-live="polite"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 7,
+              padding: "4px 16px 6px",
+              color: "var(--text-muted)",
+              fontSize: 12,
+            }}
+          >
+            <span className="size-1.5 rounded-full bg-status-running" aria-hidden="true" />
+            <span>{t("input_compacting")}</span>
+          </div>
+        )}
         {chatInputElement}
         {/* belowEditor widget + footer 状态条（对齐 TUI：输入框下方） */}
         <div

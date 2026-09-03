@@ -22,23 +22,14 @@ export async function GET(
     });
   }
 
-  // ensureLive：复用 alive 或 resolve/start；Route 不再直接 import rpc-manager
-  let session;
-  try {
-    session = await sessionService.ensureLive(id);
-  } catch (error) {
-    const status = httpStatusForSessionError(error);
-    const message = error instanceof Error ? error.message : String(error);
-    if (status === 404) {
-      return new Response("Session not found", { status: 404 });
-    }
-    if (status !== 500) {
-      return new Response(JSON.stringify({ error: message }), {
-        status,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-    return new Response(`Failed to start agent: ${error}`, { status: 500 });
+  // SSE 只连接当前进程已经存在的 live host；打开历史会话不得因为 attach
+  // 自动创建 writer。首次写操作由 submitPrompt 显式唤醒。
+  const session = sessionService.getLive(id);
+  if (!session) {
+    return new Response(JSON.stringify({ error: "Agent is not live" }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   const stream = new ReadableStream({

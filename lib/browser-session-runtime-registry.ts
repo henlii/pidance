@@ -484,10 +484,10 @@ export function createBrowserSessionRuntimeRegistry(
       const slot = getSlot(sessionId, true)!;
       slot.attachCount += 1;
       if (onEvent) slot.viewHandlers.add(onEvent);
+      // 打开会话只订阅已有 live；不在 attach 阶段 wake/创建 writer。
+      // 首次写操作由 submitPrompt/ensureEventsConnected 明确唤醒，避免 31415/31416
+      // 共用 agentDir 时仅浏览会话就抢占另一进程的 writer lease。
       connectEvents(slot);
-      if (deps.wake) {
-        void deps.wake(sessionId).catch(() => undefined);
-      }
       publish(slot);
       return {
         sessionId,
@@ -565,10 +565,10 @@ export function createBrowserSessionRuntimeRegistry(
             submission.sessionId = created;
             rekey(initialSessionId, created);
           }
+          // 先显式唤醒/确保 writer，再建立 SSE；attach 本身不会创建 live。
+          // 否则无 live 的 SSE 请求会先被 404，随后真正 prompt 已开始却没有事件订阅。
+          if (deps.wake) await deps.wake(sessionId, controller.signal);
           connectEvents(slot);
-          if (deps.wake) {
-            void deps.wake(sessionId, controller.signal).catch(() => undefined);
-          }
           const receipt = await deps.postPrompt(sessionId, {
             message: input.message,
             images: input.images,
@@ -733,11 +733,9 @@ export function createBrowserSessionRuntimeRegistry(
       applyEventToSlot(slot, event);
     },
     ensureEventsConnected(sessionId) {
+      // 重连也只尝试当前 live host；焦点/可见性恢复不得把冷历史会话唤醒。
       const slot = getSlot(sessionId, true)!;
       connectEvents(slot);
-      if (deps.wake) {
-        void deps.wake(sessionId).catch(() => undefined);
-      }
     },
     getEventSource(sessionId) {
       return slots.get(sessionId)?.eventStream?.getCurrentSource() ?? null;
