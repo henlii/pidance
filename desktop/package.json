@@ -1,6 +1,6 @@
 {
   "name": "@henlii/pidance-desktop",
-  "version": "0.2.18",
+  "version": "0.2.19",
   "description": "Pidance Desktop（Windows 桌面壳）：内置 pidance 服务与窗口",
   "private": true,
   "engines": {
@@ -16,7 +16,7 @@
     "build:win:zip": "electron-builder --win zip --x64"
   },
   "dependencies": {
-    "@henlii/pidance": "0.2.18"
+    "@henlii/pidance": "0.2.19"
   },
   "devDependencies": {
     "electron": "^37.2.0",
@@ -33,11 +33,19 @@
       "node_modules/@henlii/**"
     ],
     "extraResources": [
-      { "from": "node", "to": "node" }
+      {
+        "from": "node",
+        "to": "node"
+      }
     ],
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "assets/pidance-logo.ico"
     },
