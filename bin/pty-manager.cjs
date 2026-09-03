@@ -33,7 +33,18 @@ function startPtySession(options) {
   const cwd = resolvePtyCwd(options.cwd);
   const cols = options.cols && options.cols > 0 ? options.cols : 80;
   const rows = options.rows && options.rows > 0 ? options.rows : 24;
-  const shell = process.env.SHELL && process.env.SHELL.length > 0 ? process.env.SHELL : "/bin/bash";
+  // 平台默认 shell：Windows 没有 POSIX /bin/bash，必须走 PowerShell/cmd。
+  // 优先用户显式 SHELL（Linux/macOS 常见）；win32 用 PowerShell 否则 cmd。
+  let shell = process.env.SHELL && process.env.SHELL.length > 0 ? process.env.SHELL : "";
+  if (!shell) {
+    if (process.platform === "win32") {
+      shell = process.env.COMSPEC && process.env.COMSPEC.length > 0
+        ? process.env.COMSPEC
+        : "powershell.exe";
+    } else {
+      shell = "/bin/bash";
+    }
+  }
   const proc = spawner.spawn(shell, [], {
     name: "xterm-256color",
     cols,

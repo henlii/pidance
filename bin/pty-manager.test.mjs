@@ -57,3 +57,40 @@ test("tryLoadNodePty 在本机返回 spawn 或 null", () => {
   const loaded = tryLoadNodePty();
   if (loaded) assert.equal(typeof loaded.spawn, "function");
 });
+
+test("win32 无 SHELL 时使用 PowerShell/cmd（Windows 终端可交互）", async () => {
+  const { startPtySession: sp } = await import("./pty-manager.cjs");
+  const calls = [];
+  const fake = {
+    spawn(shell, _args, _opts) {
+      calls.push(shell);
+      return { pid: 1, write() {}, resize() {}, kill() {}, onData() {}, onExit() {} };
+    },
+  };
+  const cwd = mkdtempSync(join(tmpdir(), "pidance-pty-win-"));
+  // 模拟 Windows：无 SHELL，有 COMSPEC
+  const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+  const realShell = process.env.SHELL;
+  const realComspec = process.env.COMSPEC;
+  delete process.env.SHELL;
+  process.env.COMSPEC = "C:\\Windows\\System32\\cmd.exe";
+  try {
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    sp({ cwd, pty: fake, onData() {}, onExit() {} });
+    assert.equal(calls.at(-1), "C:\\Windows\\System32\\cmd.exe");
+    delete process.env.COMSPEC;
+    sp({ cwd, pty: fake, onData() {}, onExit() {} });
+    assert.equal(calls.at(-1), "powershell.exe");
+    // 用户显式 SHELL 优先
+    process.env.SHELL = "C:\\custom\\shell.exe";
+    sp({ cwd, pty: fake, onData() {}, onExit() {} });
+    assert.equal(calls.at(-1), "C:\\custom\\shell.exe");
+  } finally {
+    if (realPlatform) Object.defineProperty(process, "platform", realPlatform);
+    else delete process.platform;
+    if (realShell === undefined) delete process.env.SHELL;
+    else process.env.SHELL = realShell;
+    if (realComspec === undefined) delete process.env.COMSPEC;
+    else process.env.COMSPEC = realComspec;
+  }
+});

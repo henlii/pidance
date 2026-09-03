@@ -28,6 +28,7 @@
     "asar": false,
     "files": [
       "src/**/*",
+      "assets/**/*",
       "package.json",
       "node_modules/@henlii/**"
     ],
@@ -37,14 +38,17 @@
     "win": {
       "target": [
         { "target": "nsis", "arch": ["x64"] }
-      ]
+      ],
+      "icon": "assets/pidance-logo.png"
     },
     "nsis": {
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "shortcutName": "Pidance Desktop"
+      "shortcutName": "Pidance Desktop",
+      "installerIcon": "assets/pidance-logo.png",
+      "installerHeaderIcon": "assets/pidance-logo.png"
     },
     "directories": {
       "output": "dist"
