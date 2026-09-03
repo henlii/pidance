@@ -16,6 +16,7 @@ import { preserveCustomRenderedLines } from "@/lib/custom-rendered-lines";
 import type { SessionActivity } from "@/lib/session-activity";
 import { readAgentLiveFlag, sendAgentCommand } from "@/lib/agent-client";
 import { generateSubmissionId } from "@/lib/agent-commands";
+import { clearDraft } from "@/lib/draft-store";
 import { getOrCreateBrowserSessionRuntimeRegistry, type RegistrySubscription } from "@/lib/browser-session-runtime-registry";
 import {
   captureChatTargetToken,
@@ -1648,6 +1649,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       if (sendStillCurrent() && promptSubmittedRef.current && sentSessionId) {
         setServerPref(`sessionQueueHold.${sentSessionId}`, null);
+        // 已提交（accepted）：该草稿不再回填。发送确认后立刻清，避免“发送中切走
+        // 会话 → 旧 draftKey 仍持有已发文本 → 切回草稿复现”。
+        // 只清与本次发送文本一致的草稿；用户已改写成新内容时保留。
+        clearDraft(draftKey);
       }
       if (sendStillCurrent() && isSlashCommandPrompt && sentSessionId) {
         const runId = runtime.getRunState(sentSessionId)?.promptRunId;

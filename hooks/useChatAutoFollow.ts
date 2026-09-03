@@ -181,11 +181,21 @@ export function useChatAutoFollow({
       releaseOnUpIntent();
     };
 
+    // 拖选/长按选中文本 = 用户阅读意图：暂停自动跟随，避免 pin 重设 scrollTop 清掉选区。
+    const onSelectStart = (event: Event) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest("input, textarea, [contenteditable='true']")) return;
+      if (autoFollowModeRef.current !== "following") return;
+      releaseOnUpIntent();
+    };
+
+    container.addEventListener("selectstart", onSelectStart);
     container.addEventListener("wheel", onWheel, { passive: true });
     container.addEventListener("touchstart", onTouchStart, { passive: true });
     container.addEventListener("touchmove", onTouchMove, { passive: true });
     window.addEventListener("keydown", onKeyDown);
     return () => {
+      container.removeEventListener("selectstart", onSelectStart);
       container.removeEventListener("wheel", onWheel);
       container.removeEventListener("touchstart", onTouchStart);
       container.removeEventListener("touchmove", onTouchMove);
