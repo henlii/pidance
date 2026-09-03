@@ -179,6 +179,8 @@ export type BrowserSessionRuntimeRegistry = {
   ensureEventsConnected(sessionId: string): void;
   getEventSource(sessionId: string): EventSourceLike | null;
   getSubmission(sessionId: string, submissionId: string): PromptSubmission | undefined;
+  /** 冷挂载/刷新时把服务端已在跑的 run 导入 slot（防止 reconcile 误收尾、发送被拒）。 */
+  importRunningRun(sessionId: string, startedAt?: number): void;
   /** 测试用：重置单例 */
   resetForTests(): void;
 };
@@ -670,6 +672,20 @@ export function createBrowserSessionRuntimeRegistry(
       slot.snapshot.streamState = emptyStream();
       publish(slot);
       return true;
+    },
+    importRunningRun(sessionId, startedAt) {
+      const slot = getSlot(sessionId, true)!;
+      const snapshot = slot.snapshot;
+      // 只在浏览器侧未感知 run 时导入（刷新/冷挂载后服务端已在跑）。
+      // 已 running / 已有在途 send 不得重复导入（run id 会膨胀）。
+      if (snapshot.agentRunning || snapshot.sendInFlight) return;
+      snapshot.agentRunning = true;
+      snapshot.completedRunId = null;
+      snapshot.finishingRunId = null;
+      snapshot.promptRunId += 1;
+      snapshot.streamState = { isStreaming: true, streamingMessage: null };
+      void startedAt;
+      publish(slot);
     },
     async reconcile(sessionId) {
       const slot = slots.get(sessionId);

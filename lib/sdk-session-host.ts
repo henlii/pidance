@@ -232,10 +232,8 @@ export class SdkSessionHost {
 
   onEvent(listener: SdkEventListener): () => void {
     this.listeners.push(listener);
-    if (this.runtime) this.resetIdleTimer();
     return () => {
       this.listeners = this.listeners.filter((l) => l !== listener);
-      if (this.runtime && this.listeners.length === 0) this.resetIdleTimer();
     };
   }
 
@@ -269,11 +267,12 @@ export class SdkSessionHost {
       this.scheduleFollowUpFlush();
       return;
     }
-    // Live host 是 JSONL writer。无人订阅（SSE 未连接，后台 flush 等）时，
-    // settled 且没有可自动投递队列立即释放，不再保留分钟级 idle 窗口。
-    // 仍有事件订阅者（浏览器停在会话页）时保留 host，等订阅断开后再释放；
-    // 这样同一会话的连续操作不会反复重建 SDK，同时浏览历史会话不创建 writer。
-    const delay = this.listeners.length > 0 ? this.idleTimeoutMs : 0;
+    // Live host 是 JSONL writer。settled 且没有可自动投递队列时立即释放，
+    // 不区分是否仍有 SSE 订阅：SSE 连接生命周期绑定 host（route 在 destroy 时
+    // 关流），浏览器侧对 404/CLOSED 静默重连，需要写时再 wake 重建。
+    // 若仍有订阅，destroy 后 route 的 controller.close() 会让浏览器断开。
+    // 50ms ≈ 一帧：保证事件/命令结算先于 dispose（send/compact 的微任务余量）。
+    const delay = 50;
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
       if (this.isRunning() || this.flushingFollowUp) return;
@@ -281,9 +280,9 @@ export class SdkSessionHost {
         this.scheduleFollowUpFlush();
         return;
       }
-      // 订阅者存在但超过了长 idle 窗口：释放 writer 前先断开自身订阅。
+      // 有队列且未 hold：由 flush 流程推进，不在这里 dispose。
       void this.destroyAsync();
-    }, delay);
+    }, 0);
   }
 
   private releaseStartupHold(): void {

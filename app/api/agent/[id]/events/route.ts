@@ -35,8 +35,11 @@ export async function GET(
   const stream = new ReadableStream({
     start(controller) {
       const encode = (data: unknown) => {
-        const text = `data: ${JSON.stringify(data)}\n\n`;
-        controller.enqueue(new TextEncoder().encode(text));
+        try {
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`));
+        } catch {
+          // controller already closed
+        }
       };
 
       // Send initial connected event
@@ -50,21 +53,28 @@ export async function GET(
         if (projected !== null) encode(projected);
       });
 
+      // SSE 生命周期绑定 host：空闲 dispose 会关闭流，浏览器侧收到 CLOSED
+      // 后不再认为会话仍在 live（否则列表/输入态与宿主脱节，见 #28 A1/A3）。
       // Heartbeat every 30s to prevent server/proxy timeout (Next.js default ~120-150s)
       const heartbeat = setInterval(() => {
-        try {
-          controller.enqueue(new TextEncoder().encode(":\n\n"));
-        } catch {
-          // controller already closed
-        }
+        encode(":");
       }, 30_000);
 
-      // Cleanup when client disconnects
+      let cleaned = false;
       const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
         clearInterval(heartbeat);
         unsubscribe();
-        controller.close();
+        try {
+          controller.close();
+        } catch {
+          // already closed
+        }
       };
+
+      // host destroy（空闲 dispose/删除）时主动终断 SSE 流
+      session.onDestroy(cleanup);
 
       // Detect client disconnect via abort signal
       req.signal?.addEventListener("abort", cleanup);

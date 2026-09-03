@@ -2397,6 +2397,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (agentState?.running || agentState?.live) {
             loadTools(session.id);
             if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
+              // 刷新/冷挂载后服务端已在跑的 run：先导入 registry slot，
+              // 否则 reconcile 会把它当空闲收尾、输入框也会允许 prompt（被服务端拒）。
+              getOrCreateBrowserSessionRuntimeRegistry().importRunningRun(session.id);
               setAgentRunning(true);
               setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
               dispatch({ type: "start" });
