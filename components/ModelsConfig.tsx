@@ -168,7 +168,7 @@ type Selection =
   | { type: "oauth"; providerId: string }
   | { type: "apikey"; providerId: string };
 
-const API_OPTIONS = ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"] as const;
+const API_OPTIONS = ["openai-completions", "openai-responses", "openai-codex-responses", "anthropic-messages", "google-generative-ai"] as const;
 
 function formatContextTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`;

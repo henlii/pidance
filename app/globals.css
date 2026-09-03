@@ -415,6 +415,11 @@ pre, code {
   overflow-y: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  /* 移动端长按选中/复制表格文本：显式允许文本选择，交给系统手势
+     （横向滚动仍是 overflow-x 内滑动，不吞长按选择）。 */
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
 }
 .markdown-body table {
   border-collapse: separate;
@@ -428,6 +433,8 @@ pre, code {
   padding: 6px 10px;
   text-align: left;
   vertical-align: top;
+  user-select: text;
+  -webkit-user-select: text;
 }
 .markdown-body tr:last-child td { border-bottom: 0; }
 .markdown-body th {

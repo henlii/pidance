@@ -163,6 +163,7 @@ type Draft = {
   externalEditor: string;
   defaultProjectTrust: string;
   doubleEscapeAction: string;
+  transport: string;
 };
 
 function rawToDraft(raw: SettingsObject): Draft {
@@ -188,6 +189,7 @@ function rawToDraft(raw: SettingsObject): Draft {
     externalEditor: asStr(raw.externalEditor),
     defaultProjectTrust: asStr(raw.defaultProjectTrust),
     doubleEscapeAction: asStr(raw.doubleEscapeAction),
+    transport: asStr(raw.transport) || "auto",
   };
 }
 
@@ -211,7 +213,8 @@ function draftDirty(draft: Draft, base: Draft): boolean {
     draft.quietStartup !== base.quietStartup ||
     draft.externalEditor !== base.externalEditor ||
     draft.defaultProjectTrust !== base.defaultProjectTrust ||
-    draft.doubleEscapeAction !== base.doubleEscapeAction
+    draft.doubleEscapeAction !== base.doubleEscapeAction ||
+    draft.transport !== base.transport
   );
 }
 
@@ -333,6 +336,7 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
         "externalEditor",
         "defaultProjectTrust",
         "doubleEscapeAction",
+        "transport",
       ] as const) {
         const v = (draft as unknown as Record<string, string>)[key].trim();
         if (v) next[key] = v;
@@ -651,6 +655,18 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
                   <option value="fork">fork</option>
                   <option value="tree">tree</option>
                   <option value="none">none</option>
+                </select>
+              </div>
+              <div>
+                <div style={labelStyle}>transport（模型传输通道）</div>
+                <select
+                  value={draft.transport}
+                  onChange={(e) => setDraft({ ...draft, transport: e.target.value })}
+                  style={selectStyle}
+                >
+                  <option value="auto">auto（默认：Codex/Responses 自动尝试 WebSocket）</option>
+                  <option value="sse">sse（HTTP 流）</option>
+                  <option value="websocket">websocket（WebSocket 直连，GPT Codex 快速通道）</option>
                 </select>
               </div>
               <BooleanField
