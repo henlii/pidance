@@ -762,7 +762,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const filteredSlashCommands = (() => {
     if (slashQuery === null) return [];
-    const commands = [...(isStreaming ? [] : BUILTIN_SLASH_COMMANDS), ...(slashCommands ?? [])];
+    // 运行中（isStreaming）也展示全部内置命令：选择后以 followUp/steer 发送，
+    // 由上层排队到本轮结束再执行（与纯文本 follow-up 一致），避免菜单空面板。
+    const commands = [...BUILTIN_SLASH_COMMANDS, ...(slashCommands ?? [])];
     return [...commands]
       .filter((command) => {
         const name = command.name.toLowerCase();
