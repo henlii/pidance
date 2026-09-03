@@ -147,6 +147,19 @@ export function getStartingSessionIds(): string[] {
   return [...getLocks().keys()];
 }
 
+/** 删除前等待同一 session 的并发启动完成，避免 unlink 与 SessionManager 初始化竞态。 */
+export async function waitForSessionStart(sessionId: string): Promise<string | null> {
+  const pending = getLocks().get(sessionId);
+  if (!pending) return null;
+  try {
+    const result = await pending;
+    return result.realSessionId;
+  } catch {
+    // 启动失败时没有 live writer，删除流程仍可继续清理磁盘对象。
+    return null;
+  }
+}
+
 function getLocalRunningAndStartingIds(): string[] {
   const ids = new Set<string>(getStartingSessionIds());
   for (const [sessionId, session] of getRegistry()) {

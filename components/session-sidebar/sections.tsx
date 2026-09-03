@@ -856,7 +856,11 @@ const handleDeleteConfirm = useCallback(async () => {
     setConfirmDelete(false);
     setDeleting(true);
     try {
-      await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
+      if (!response.ok) {
+        setDeleting(false);
+        return;
+      }
       onDeleted?.(session.id);
     } catch {
       setDeleting(false);
@@ -1047,8 +1051,8 @@ const handleDeleteConfirm = useCallback(async () => {
       closeLabel={t("dialog_close")}
       actions={
         <>
-          <DialogButton onClick={handleDeleteCancel}>{t("sidebar_cancel")}</DialogButton>
-          <DialogButton danger onClick={() => void handleDeleteConfirm()}>
+          <DialogButton disabled={deleting} onClick={handleDeleteCancel}>{t("sidebar_cancel")}</DialogButton>
+          <DialogButton danger disabled={deleting} onClick={() => void handleDeleteConfirm()}>
             {t("sidebar_deleteSession")}
           </DialogButton>
         </>

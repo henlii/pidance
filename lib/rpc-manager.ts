@@ -13,6 +13,7 @@ export {
   getRegistry,
   getRpcSession,
   getLiveSession,
+  waitForSessionStart,
   getRunningRpcSessionIds,
   getRunningSessionIds,
   listPendingExtensionUi,

@@ -20,6 +20,7 @@ import { getThinkingText, isThinkingLikeType } from "./thinking-content";
 import { clearLeafSidecar, writeLeafSidecar } from "./session-leaf-sidecar";
 import {
   getRpcSession,
+  waitForSessionStart,
   getRunningRpcSessionIds,
   listPendingExtensionUi,
   startRpcSession,
@@ -97,7 +98,7 @@ export function httpStatusForSessionError(error: unknown): number {
   if (error instanceof ReadOnlySubagentError || message === READ_ONLY_SUBAGENT_ERROR) return 403;
   if (message.includes("Session not found")) return 404;
   if (isSessionRunningLockedError(error) || message === SESSION_RUNNING_LOCKED_MESSAGE) return 409;
-  if (message.includes("closed while its title")) return 409;
+  if (message === "Session is being deleted" || message.includes("closed while its title")) return 409;
   return 500;
 }
 
@@ -127,6 +128,7 @@ export type SessionServiceDeps = {
   listAllSessions: () => Promise<SessionInfo[]>;
   resolveSessionPath: (sessionId: string) => Promise<string | null>;
   getRpcSession: (sessionId: string) => LiveAgentSession | undefined;
+  waitForSessionStart?: (sessionId: string) => Promise<string | null>;
   startRpcSession: (
     sessionId: string,
     sessionFile: string,
@@ -155,6 +157,7 @@ const defaultDeps: SessionServiceDeps = {
   listAllSessions,
   resolveSessionPath,
   getRpcSession,
+  waitForSessionStart,
   startRpcSession,
   getRunningRpcSessionIds,
   listPendingExtensionUi,
@@ -330,6 +333,9 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
   const currentArchiveRecords = () =>
     listArchiveRecords(deps.archiveFs ?? realArchiveFs, deps.archiveAgentDir?.() ?? getAgentDir());
 
+  /** 同一会话的删除单飞，避免两个 DELETE 竞态 unlink 同一个 JSONL。 */
+  const deletionFlights = new Map<string, Promise<{ skippedSubagents: number }>>();
+
   const awaitWriterReleased = async (sessionId: string): Promise<void> => {
     const session = deps.getRpcSession(sessionId);
     if (!session) return;
@@ -448,6 +454,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
 
     async ensureLive(sessionId) {
       await requireWritableSession(sessionId, service.isReadOnly);
+      if (deletionFlights.has(sessionId)) throw new Error("Session is being deleted");
       const live = service.getLive(sessionId);
       if (live) return live;
       if (isRunningLeaseHeldByOther(sessionId)) {
@@ -479,76 +486,116 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       }
     },
 
-    async deleteSession(sessionId) {
-      await requireWritableSession(sessionId, service.isReadOnly);
-      const filePath = await deps.resolveSessionPath(sessionId);
-      if (!filePath) throw new Error("Session not found");
-
-      // 只读有界 header；删除前收集 subagent 树。
-      const parentSessionPath = readSessionHeader(filePath)?.parentSession;
-      const verifiedChildren = readSessionHeader(filePath)?.id === sessionId
-        ? collectSubagentTree(filePath, sessionId)
-        : [];
-
-      // 1. running 先 abort（不 flush）；abort 失败只记录并继续删除。
-      const live = deps.getRpcSession(sessionId);
-      if (live?.isAlive?.() && deps.getRunningRpcSessionIds().includes(sessionId)) {
-        try {
-          await live.send({ type: "abort" });
-        } catch (error) {
-          console.error("[pidance] abort before delete failed:", error);
-        }
-      }
-
-      // 2. 等待 abort 完成后 await destroy。
-      await service.destroyAsync(sessionId);
-
-      // 3. 子会话重挂到本会话的 parent（cascade re-parent via SessionManager）。
-      const dir = filePath.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
-      try {
-        const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl") && join(dir, f) !== filePath);
-        for (const file of files) {
-          const childPath = join(dir, file);
+    deleteSession(sessionId) {
+      const existing = deletionFlights.get(sessionId);
+      if (existing) return existing;
+      const flight = (async () => {
+        await requireWritableSession(sessionId, service.isReadOnly);
+        // 删除与并发 ensureLive/start 串行：先等已经开始的 host 启动完成，
+        // 后续 ensureLive 会看到 deletionFlights 并拒绝，不会在 unlink 后继续打开 JSONL。
+        const startedSessionId = await deps.waitForSessionStart?.(sessionId);
+        const liveSessionId = startedSessionId ?? sessionId;
+        const filePath = await deps.resolveSessionPath(sessionId);
+        if (!filePath) {
+          // 删除是幂等操作：对象已不存在时仍清理残留偏好/缓存，不把 ENOENT
+          // 变成 500 或让客户端误以为服务进程失效。
           try {
-            const header = readSessionHeader(childPath);
-            if (header?.type === "session" && header.parentSession === filePath) {
-              if (header.id) await awaitWriterReleased(header.id);
-              deps.reparentSessionFile(childPath, parentSessionPath);
-            }
-          } catch {
-            /* skip malformed */
+            updatePidancePref(`sessionQueue.${sessionId}`, null);
+            updatePidancePref(`sessionQueueHold.${sessionId}`, null);
+          } catch (error) {
+            console.error("[pidance] failed to clear queue prefs after missing delete:", error);
+          }
+          invalidateSessionPathCache(sessionId);
+          deps.invalidateSessionListCache();
+          service.removeArchiveRecordAfterPermanentDelete(sessionId);
+          return { skippedSubagents: 0 };
+        }
+
+        // 只读有界 header；删除前收集 subagent 树。
+        // 远端进程持有 writer lease 时，本进程无法发送 abort；拒绝删除，
+        // 否则对端仍会向已 unlink 的 JSONL 写入并可能使服务崩溃。
+        if (isRunningLeaseHeldByOther(sessionId) || isRunningLeaseHeldByOther(liveSessionId)) {
+          throw new Error(SESSION_RUNNING_LOCKED_MESSAGE);
+        }
+        const parentSessionPath = readSessionHeader(filePath)?.parentSession;
+        const verifiedChildren = readSessionHeader(filePath)?.id === sessionId
+          ? collectSubagentTree(filePath, sessionId)
+          : [];
+
+        // 1. running 先 abort（不 flush）；abort 失败只记录并继续删除。
+        const live = deps.getRpcSession(liveSessionId) ?? deps.getRpcSession(sessionId);
+        const runningIds = deps.getRunningRpcSessionIds();
+        if (live?.isAlive?.() && (runningIds.includes(sessionId) || runningIds.includes(liveSessionId))) {
+          try {
+            await live.send({ type: "abort" });
+          } catch (error) {
+            console.error("[pidance] abort before delete failed:", error);
           }
         }
-      } catch {
-        /* skip if dir unreadable */
-      }
 
-      // 4. 删除会话文件与 sidecar；unlink 失败不清队列 prefs。
-      unlinkSync(filePath);
-      clearLeafSidecar(filePath);
-      const parentRoot = resolve(filePath.slice(0, -6));
-      const skippedSubagents = deleteValidatedSubagents(
-        verifiedChildren,
-        parentRoot,
-        invalidateSessionPathCache,
-      );
+        // 2. 等待 abort 完成后 await destroy。rekey 期间 registry 可能只保留
+        // host 的真实 id；优先使用 host 自身 id，避免 destroy 误命中空 key。
+        await service.destroyAsync(live?.sessionId ?? liveSessionId);
 
-      // 5. 删除成功后才清队列/hold。
-      try {
-        updatePidancePref(`sessionQueue.${sessionId}`, null);
-        updatePidancePref(`sessionQueueHold.${sessionId}`, null);
-      } catch (error) {
-        console.error("[pidance] failed to clear queue prefs after delete:", error);
-      }
+        // 3. 子会话重挂到本会话的 parent（cascade re-parent via SessionManager）。
+        const dir = filePath.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
+        try {
+          const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl") && join(dir, f) !== filePath);
+          for (const file of files) {
+            const childPath = join(dir, file);
+            try {
+              const header = readSessionHeader(childPath);
+              if (header?.type === "session" && header.parentSession === filePath) {
+                if (header.id) {
+                  await deps.waitForSessionStart?.(header.id);
+                  await awaitWriterReleased(header.id);
+                }
+                deps.reparentSessionFile(childPath, parentSessionPath);
+              }
+            } catch {
+              /* skip malformed */
+            }
+          }
+        } catch {
+          /* skip if dir unreadable */
+        }
 
-      invalidateSessionPathCache(sessionId);
-      deps.invalidateSessionListCache();
-      service.removeArchiveRecordAfterPermanentDelete(sessionId);
-      return { skippedSubagents };
+        // 4. 删除会话文件与 sidecar；外部并发删除视为已完成。
+        try {
+          unlinkSync(filePath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        clearLeafSidecar(filePath);
+        const parentRoot = resolve(filePath.slice(0, -6));
+        const skippedSubagents = deleteValidatedSubagents(
+          verifiedChildren,
+          parentRoot,
+          invalidateSessionPathCache,
+        );
+
+        // 5. 删除成功后才清队列/hold。
+        try {
+          updatePidancePref(`sessionQueue.${sessionId}`, null);
+          updatePidancePref(`sessionQueueHold.${sessionId}`, null);
+        } catch (error) {
+          console.error("[pidance] failed to clear queue prefs after delete:", error);
+        }
+
+        invalidateSessionPathCache(sessionId);
+        deps.invalidateSessionListCache();
+        service.removeArchiveRecordAfterPermanentDelete(sessionId);
+        return { skippedSubagents };
+      })();
+      deletionFlights.set(sessionId, flight);
+      return flight.finally(() => {
+        if (deletionFlights.get(sessionId) === flight) deletionFlights.delete(sessionId);
+      });
     },
 
     async start(sessionId, sessionFile, cwd, toolNames) {
       await requireWritableSession(sessionId, service.isReadOnly);
+      if (deletionFlights.has(sessionId)) throw new Error("Session is being deleted");
       return deps.startRpcSession(sessionId, sessionFile, cwd, toolNames, navigationActions);
     },
 
