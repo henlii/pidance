@@ -1350,7 +1350,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               : prev;
           });
         }
-        addNotice({ type: "error", message: (event.errorMessage as string | undefined) ?? "Command failed" });
+        addNotice({ type: "error", message: (event.errorMessage as string | undefined) ?? t("input_commandFailed") });
         break;
       case "extension_error":
         if (sessionIdRef.current) setServerPref(`sessionQueueHold.${sessionIdRef.current}`, true);
@@ -1498,7 +1498,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (getRuntimeAgentRunning() || bashRunningRef.current) return false;
     // 分支切换/摘要进行中：prompt 会与 navigateTree 并发写会话文件，先拦住。
     if (branchBusyRef.current) {
-      addNotice({ type: "info", message: "Branch switch in progress — please wait" });
+      addNotice({ type: "info", message: t("input_branchSwitchInProgress") });
       return false;
     }
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
@@ -1918,7 +1918,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (result.error) {
         addNotice({ type: "error", message: result.error });
       } else if (result.action !== "openSessionStats") {
-        addNotice({ type: "success", message: result.message ?? "Command completed" });
+        addNotice({ type: "success", message: result.message ?? t("input_commandCompleted") });
       }
       return result;
     };

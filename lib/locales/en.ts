@@ -1,6 +1,6 @@
 export const en = {
   // common
-   skills_updateSingle: "update", skills_updatePlural: "updates", models_delete: "Delete", models_addModel: "Add model to {provider}", models_apiLabel: "API", models_nameLabel: "Name", models_costLabel: "Cost (per million tokens)", models_subscriptionStatus: "connected", models_subscriptionNotConnected: "not connected", models_openLoginPage: "click here to open the login page", models_submit: "Submit", models_cancel: "Cancel", models_verifyPage: "Open the verification page and enter this code:", models_expiresIn: "Expires in {minutes} minutes.", models_configured: "configured", models_notConfigured: "not configured", models_keyStored: "API key is stored. Enter a new key below to replace it, or disconnect to remove it.", models_enableModels: "Enter your {provider} API key to enable {count} model(s).", models_selectDetail: "Select a provider or model", models_modelsTitle: "Providers", models_newModel: "new model",
+   skills_updateSingle: "update", skills_updatePlural: "updates", models_delete: "Delete", models_addModel: "Add model to {provider}", models_apiLabel: "API", models_nameLabel: "Name", models_costLabel: "Cost (per million tokens)", models_subscriptionStatus: "connected", models_subscriptionNotConnected: "not connected", models_openLoginPage: "click here to open the login page", models_submit: "Submit", models_cancel: "Cancel", models_verifyPage: "Open the verification page and enter this code:", models_expiresIn: "Expires in {minutes} minutes.", models_configured: "configured", models_notConfigured: "not configured", models_keyStored: "API key is stored. Enter a new key below to replace it, or disconnect to remove it.", models_enableModels: "Enter your {provider} API key to enable {count} model(s).", models_selectDetail: "Select a provider or model", models_modelsTitle: "Providers", models_newModel: "new model", models_inheritNone: "— inherit / none —",
   localeName: "English",
   close: "Close",
   chatInputPlaceholder: "Message Pi...",
@@ -558,6 +558,9 @@ export const en = {
   chat_sessionWriteLockedDescription: 'You can still read this session. Sending, steering, and other edits stay on the instance that already has it.',
   input_compactCommandDescription: "Compact the current session",
   input_reloadCommandDescription: "Reload the current session",
+  input_branchSwitchInProgress: "Branch switch in progress — please wait",
+  input_commandCompleted: "Command completed",
+  input_commandFailed: "Command failed",
   input_nameCommandDescription: "Set the session name",
   input_sessionCommandDescription: "Show session information",
   input_copyCommandDescription: "Copy the current session",

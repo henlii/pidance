@@ -2,7 +2,7 @@ import type { TranslationKey } from "./en";
 
 export const zhCN: Record<TranslationKey, string> = {
   localeName: "简体中文",
-   skills_updateSingle: "个更新", skills_updatePlural: "个更新", models_delete: "删除", models_addModel: "向 {provider} 添加模型", models_apiLabel: "API", models_nameLabel: "名称", models_costLabel: "费用（每百万词元）", models_subscriptionStatus: "已连接", models_subscriptionNotConnected: "未连接", models_openLoginPage: "点击此处打开登录页面", models_submit: "提交", models_cancel: "取消", models_verifyPage: "打开验证页面并输入此代码：", models_expiresIn: "将在 {minutes} 分钟后过期。", models_configured: "已配置", models_notConfigured: "未配置", models_keyStored: "API 密钥已保存。请在下方输入新密钥以替换，或断开连接以移除。", models_enableModels: "输入你的 {provider} API 密钥以启用 {count} 个模型。", models_selectDetail: "选择提供商或模型", models_modelsTitle: "供应商", models_newModel: "新模型",
+   skills_updateSingle: "个更新", skills_updatePlural: "个更新", models_delete: "删除", models_addModel: "向 {provider} 添加模型", models_apiLabel: "API", models_nameLabel: "名称", models_costLabel: "费用（每百万词元）", models_subscriptionStatus: "已连接", models_subscriptionNotConnected: "未连接", models_openLoginPage: "点击此处打开登录页面", models_submit: "提交", models_cancel: "取消", models_verifyPage: "打开验证页面并输入此代码：", models_expiresIn: "将在 {minutes} 分钟后过期。", models_configured: "已配置", models_notConfigured: "未配置", models_keyStored: "API 密钥已保存。请在下方输入新密钥以替换，或断开连接以移除。", models_enableModels: "输入你的 {provider} API 密钥以启用 {count} 个模型。", models_selectDetail: "选择提供商或模型", models_modelsTitle: "供应商", models_newModel: "新模型", models_inheritNone: "— 继承 / 无 —",
   close: "关闭",
   chatInputPlaceholder: "给 Pi 发消息...",
   common_settings: "设置", common_general: "通用", common_appearance: "外观", common_models: "供应商", common_defaults: "会话", common_skills: "技能", common_plugins: "插件", common_desktop: "桌面版", common_prompts: '文令', prompts_systemTitle: '系统文令覆盖', prompts_systemAppendTitle: '系统文令追加', prompts_agentsTitle: '全局规则', prompts_enabled: '启用', prompts_hint: '开关控制对应 md 文件是否存在（Pi 启动时加载）。禁用状态下仍可编辑内容，内容会持久化保存，重新启用时写回文件。',
@@ -558,6 +558,9 @@ export const zhCN: Record<TranslationKey, string> = {
   chat_sessionWriteLockedDescription: '仍可查看记录。发送、引导和其它修改请到已打开它的那边操作。',
   input_compactCommandDescription: "压缩当前会话",
   input_reloadCommandDescription: "重新加载当前会话",
+  input_branchSwitchInProgress: "分支切换中——请稍候",
+  input_commandCompleted: "命令已完成",
+  input_commandFailed: "命令失败",
   input_nameCommandDescription: "设置会话名称",
   input_sessionCommandDescription: "显示会话信息",
   input_copyCommandDescription: "复制当前会话",

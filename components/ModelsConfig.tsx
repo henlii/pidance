@@ -288,10 +288,11 @@ function NumInput({ value, onChange, placeholder }: { value: string; onChange: (
 }
 
 function Select({ value, onChange, options, required }: { value: string; onChange: (v: string) => void; options: readonly string[]; required?: boolean }) {
+  const { t } = useI18n();
   return (
     <select value={value} onChange={(e) => onChange(e.target.value)}
       style={{ ...inputStyle, color: value ? "var(--text)" : "var(--text-dim)" }}>
-      {!required && <option value="">— inherit / none —</option>}
+      {!required && <option value="">{t("models_inheritNone")}</option>}
       {options.map((o) => <option key={o} value={o}>{o}</option>)}
     </select>
   );
