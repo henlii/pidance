@@ -361,11 +361,11 @@ export function createBrowserSessionRuntimeRegistry(
           return;
         }
         if (entryId) slot.consumedEntryIds.add(entryId);
-        const match = entryId === null
-          ? undefined
-          : [...slot.submissions.values()].find((sub) =>
-              (sub.status === "accepted" || sub.status === "submitting") && !sub.entryId,
-            );
+        const match = [...slot.submissions.values()].find((sub) =>
+          (sub.status === "accepted" || sub.status === "submitting")
+          && !sub.entryId
+          && slot.submissionMessageIndexes.has(sub.submissionId),
+        );
         const messageIndex = match
           ? slot.submissionMessageIndexes.get(match.submissionId)
           : undefined;
@@ -415,6 +415,9 @@ export function createBrowserSessionRuntimeRegistry(
               bumpTimeline(slot);
             }
           }
+        }
+        if (match && messageIndex !== undefined) {
+          slot.submissionMessageIndexes.delete(match.submissionId);
         }
         // FIFO：下一个未绑定 entry 的 accepted/submitting submission。
         // 同一 entryId 不可二次消费，避免 SSE 重放把两条 submission 绑到同一 entry。
