@@ -2379,6 +2379,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       promptSubmitted: promptSubmittedRef,
       ensuringNewSession: ensuringNewSessionRef,
     }, session?.id ?? null);
+    // 切会话后首帧消息 = 新会话尾页：标记 reset pin，useChatAutoFollow 会在消息
+    // 就绪时钉底（跨会话组件复用导致 initialScrollDone 已置位，不标记则不再滚动）。
+    notifyAutoFollowBranchReset();
     setMessages([]);
     entryIdsRef.current = [];
     setEntryIds([]);
@@ -2503,7 +2506,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         runtimeSubscriptionRef.current = null;
       }
     };
-  }, [session?.id, session?.readOnly, newSessionIntentId, isNew]);
+  }, [session?.id, session?.readOnly, newSessionIntentId, isNew, notifyAutoFollowBranchReset]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);
