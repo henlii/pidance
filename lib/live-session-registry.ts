@@ -180,8 +180,25 @@ function getLocalWriterAndStartingIds(): string[] {
 
 export function getRunningRpcSessionIds(): string[] {
   const ids = new Set(getLocalRunningAndStartingIds());
-  for (const id of listFreshRunningLeaseSessionIds()) ids.add(id);
+  // 跨进程 lease（对端 writer 活）对侧栏是 running/locked。但本进程「保活中但
+  // 已 settled」的 host 也持 lease —— 不向 UI 报 running，否则会话结束后计时不停。
+  const localIdleWriters = new Set(getLocalIdleWriterIds());
+  for (const id of listFreshRunningLeaseSessionIds()) {
+    if (localIdleWriters.has(id)) continue;
+    ids.add(id);
+  }
   return [...ids];
+}
+
+/** 本进程持有 writer 但当前不运行（保活等待端点/30s 兜底）的 host。 */
+function getLocalIdleWriterIds(): Set<string> {
+  const out = new Set<string>();
+  for (const [sessionId, session] of getRegistry()) {
+    if (session.isAlive() && !session.isRunning()) {
+      out.add(session.sessionId || sessionId);
+    }
+  }
+  return out;
 }
 
 const localStartingStartedAt = new Map<string, number>();
@@ -205,7 +222,9 @@ export function getRunningStartedAtTable(
   for (const sessionId of [...localStartingStartedAt.keys()]) {
     if (!localSet.has(sessionId)) localStartingStartedAt.delete(sessionId);
   }
+  const localIdleWriters = new Set(getLocalIdleWriterIds());
   for (const { sessionId, startedAt } of listFreshRunningLeaseSessions(agentDir, now)) {
+    if (localIdleWriters.has(sessionId)) continue;
     table[sessionId] = startedAt;
   }
   return table;
