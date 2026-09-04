@@ -1318,6 +1318,21 @@ export class SdkSessionHost {
             source: "prompt_template",
           });
         }
+        // 与 SDK 会话内语义对齐：skill 以 /skill:<name> 前缀注册，prompt 展开时
+        // 读 SKILL.md 注入；沿用 session.resourceLoader 已加载集合（含项目级）。
+        try {
+          const loaded = session.resourceLoader?.getSkills?.();
+          for (const skill of loaded?.skills ?? []) {
+            commands.push({
+              name: `skill:${skill.name}`,
+              description: skill.description,
+              source: "skill",
+              sourceInfo: skill.sourceInfo,
+            });
+          }
+        } catch {
+          // skill 枚举失败不回退整个命令列表
+        }
         return { commands };
       }
 

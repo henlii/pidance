@@ -958,11 +958,40 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return [] as SlashCommandInfo[];
     }
     // 新会话空态：禁止因 slash 菜单 mount 而提前 POST /api/agent/new。
-    // 仅当已有真实 sid（用户已写操作 ensure 成功）才拉 commands。
+    // 引导页按目标项目只读枚举磁盘 skills（/api/skills?cwd=，sessionless），
+    // 让斜杠菜单显示「当前项目可用的 skill」，点选后以 /skill:<name> 提交，
+    // SDK 会在 prompt 展开时读取 SKILL.md 注入。
     const sid = sessionIdRef.current ?? session?.id ?? null;
     if (!sid) {
-      setSlashCommands([]);
-      return [] as SlashCommandInfo[];
+      const cwd = newSessionCwdRef.current;
+      if (!cwd) {
+        setSlashCommands([]);
+        return [] as SlashCommandInfo[];
+      }
+      setSlashCommandsLoading(true);
+      try {
+        const res = await fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}`);
+        if (!res.ok) {
+          setSlashCommands([]);
+          return [] as SlashCommandInfo[];
+        }
+        const data = await res.json() as {
+          skills?: Array<{ name: string; description?: string; sourceInfo?: { source?: string; scope?: string } }>;
+        };
+        const skills: SlashCommandInfo[] = (data.skills ?? []).map((skill) => ({
+          name: `skill:${skill.name}`,
+          description: skill.description,
+          source: "skill",
+        }));
+        setSlashCommands(skills);
+        return skills;
+      } catch (e) {
+        console.error("Failed to load skills for guide:", e);
+        setSlashCommands([]);
+        return [] as SlashCommandInfo[];
+      } finally {
+        setSlashCommandsLoading(false);
+      }
     }
     setSlashCommandsLoading(true);
     try {
@@ -977,7 +1006,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       setSlashCommandsLoading(false);
     }
-  }, [isReadOnly, session?.id]);
+  }, [isReadOnly, session?.id, sendAgentCommand]);
 
   const ensureEventsConnected = useCallback((sid: string) => {
     if (!capabilities.canConnectEvents) return;
