@@ -1475,6 +1475,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           message: (event.errorMessage as string | undefined) ?? "Follow-up queue flush failed",
         });
         break;
+      case "thinking_level_changed": {
+        // SDK clamp/落盘后的权威深度回写 UI：用户选择经 SDK 校验可能被 clamp
+        // （模型不支持时降档）或已在磁盘生效，必须以事件值覆盖本地预选，否则
+        // UI 显示与真实生效深度分叉（“思考总是乱变”）。
+        const level = event.level as string | undefined;
+        if (level && isThinkingLevel(level)) {
+          setThinkingLevel(level as ThinkingLevelOption);
+        }
+        break;
+      }
       case "queue_update":
         // followUp 以本地队列为准（Pidance 自管）；steering 仍来自 Pi 进程队列
         setQueuedMessages({
