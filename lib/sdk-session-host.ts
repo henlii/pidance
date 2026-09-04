@@ -937,7 +937,10 @@ export class SdkSessionHost {
         this.startupHoldTimer = null;
         this.startupHold = false;
         this.resetIdleTimer();
-      }, 5_000);
+      // 15s：新会话 ensure→首个 prompt 需经浏览器多步（SSE attach、submission
+      // 乐观写、模型选择等），5s 在网络慢/复杂引导下不够，过早 dispose 会让
+      // 随后的 wake/prompt 因文件未落盘而 404。首写命令到达即释放该窗口。
+      }, 15_000);
       this.startupHoldTimer.unref?.();
       this.resetIdleTimer();
       // 服务端重启/热重载后从 prefs 水合：空闲且未被 hold 时立即投递。

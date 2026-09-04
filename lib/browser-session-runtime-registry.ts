@@ -559,6 +559,7 @@ export function createBrowserSessionRuntimeRegistry(
 
       const promise = (async (): Promise<SubmitPromptResult> => {
         let sessionId = initialSessionId;
+        let newSessionJustEnsured = false;
         try {
           if (input.target.kind === "new") {
             if (!deps.ensureNewSession) {
@@ -574,10 +575,16 @@ export function createBrowserSessionRuntimeRegistry(
             sessionId = created;
             submission.sessionId = created;
             rekey(initialSessionId, created);
+            // 刚 ensure 的新 host 必然 live（startup hold 保活窗口内），无需 wake；
+            // wake 走磁盘 resolvePath，新会话文件尚未落盘会 404 → 发送被拒。
+            newSessionJustEnsured = true;
           }
           // 先显式唤醒/确保 writer，再建立 SSE；attach 本身不会创建 live。
           // 否则无 live 的 SSE 请求会先被 404，随后真正 prompt 已开始却没有事件订阅。
-          if (deps.wake) await deps.wake(sessionId, controller.signal);
+          // （仅旧会话需要 wake；新会话跳过，见上）
+          if (!newSessionJustEnsured && deps.wake) {
+            await deps.wake(sessionId, controller.signal);
+          }
           connectEvents(slot);
           const receipt = await deps.postPrompt(sessionId, {
             message: input.message,

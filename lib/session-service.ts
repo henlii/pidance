@@ -7,6 +7,7 @@ import {
   openSessionManager,
   materializeSessionFile,
   reparentSessionFile,
+  type SessionHeader,
 } from "./pi-session-io";
 import { parsePromptCommand, type PromptCommand, type PromptReceipt } from "./agent-commands";
 import {
@@ -632,6 +633,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
     async submitPrompt(sessionId, command) {
       await requireWritableSession(sessionId, service.isReadOnly);
       const parsed = parsePromptCommand(command);
+      console.error(`[pidance][trace] submitPrompt ${sessionId} live=${Boolean(service.getLive(sessionId))} file=${await deps.resolveSessionPath(sessionId).catch(()=>null)}`);
       try {
         const data = await service.send(sessionId, parsed);
         if (data && typeof data === "object" && (data as PromptReceipt).status) {
@@ -640,6 +642,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         return { submissionId: parsed.submissionId, sessionId, status: "accepted" };
       } catch (error) {
         if (isSessionRunningLockedError(error)) throw error;
+        console.error(`[pidance] submitPrompt rejected for ${sessionId}:`, error);
         return { submissionId: parsed.submissionId, sessionId, status: "rejected" };
       }
     },
@@ -897,6 +900,20 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       }
 
       if (promptCommand.type === "ensure_session") {
+        // 落盘 header：新会话占位期文件即存在，之后任何 wake/ensureLive/prompt
+        // 都走磁盘路径（host 空闲 dispose 后也能重开），不再因「无文件」404
+        // 导致首次发送被拒、刷新后会话消失。
+        try {
+          const inner = (session as {
+              inner?: { sessionManager?: { getSessionFile?: () => string | null; sessionId?: string } };
+            }).inner;
+          const manager = inner?.sessionManager;
+          if (manager && typeof manager.getSessionFile === "function") {
+            materializeSessionFile(manager as never);
+          }
+        } catch (error) {
+          console.error("[pidance] materialize ensure_session failed:", error);
+        }
         return { sessionId: realSessionId, data: null };
       }
 
