@@ -325,6 +325,12 @@ if (!gotLock) {
     app.quit();
   });
 
+  // updater 升级退出时供其先停服务再 quit
+  globalThis.__pidanceStopServer = () => {
+    exiting = true;
+    stopServer();
+  };
+
   app.on("before-quit", () => {
     exiting = true;
     tray?.destroy();
