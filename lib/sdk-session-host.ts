@@ -364,7 +364,17 @@ export class SdkSessionHost {
       this.finishFollowUpFlush();
       return;
     }
-    if (!this.isSettled()) return;
+    if (!this.isSettled()) {
+      // 上一轮 run 尚未完全落定（SDK streaming 尾态）。不能静默 return：
+      // 等 agent_settled 事件推进；这里兜底一拍后重试，防事件与 streaming
+      // 清态错位导致整队卡死或漏发。
+      setTimeout(() => {
+        if (this.flushingFollowUp && this.followUpFlushCursor < this.followUpFlushBatch.length) {
+          void this.sendNextFollowUp();
+        }
+      }, 80);
+      return;
+    }
     this.followUpFlushConfirmed = false;
     try {
       await this.send({ type: "prompt", message: item });
@@ -1244,10 +1254,17 @@ export class SdkSessionHost {
         const items = Array.isArray(command.items)
           ? (command.items as unknown[]).filter((item): item is string => typeof item === "string" && item.trim().length > 0)
           : [];
+        // flush 进行中：浏览器整组替换会与 sendNextFollowUp 的 batch 快照并发
+        // （清队 → 消息仍被投递但 UI 已空 / 或反被 abort 丢弃）。先中止自动
+        // 投递，再按新 items 落地；中止只复位批处理状态，未确认条目仍按新
+        // items 语义处理（空 = 用户有意取消）。
+        if (this.flushingFollowUp) {
+          this.abortFollowUpFlush();
+        }
         this.followUpQueue = items;
         this.persistFollowUpQueue();
         // late-enqueue：如果已经 settled/空闲，立即调度一次投递。
-        if (this.isSettled()) this.scheduleFollowUpFlush();
+        if (this.isSettled() && items.length > 0) this.scheduleFollowUpFlush();
         this.resetIdleTimer();
         return { ok: true, queued: this.followUpQueue.length };
       }
