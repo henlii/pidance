@@ -87,6 +87,7 @@ export type SubmitPromptInput = {
   images?: AttachedImage[];
   draftKey: string;
   model?: { provider: string; modelId: string };
+  thinkingLevel?: string;
 };
 
 export type SubmitPromptResult = {
@@ -109,6 +110,16 @@ export type BrowserSessionRuntimeRegistryDeps = {
     cwd: string,
     extras?: { provider?: string; modelId?: string },
   ) => Promise<string>;
+  /** 一步创建并发送（避免 ensure→wake→prompt 两跳：无文件 404 / 双行 / 闪）。 */
+  createAndPrompt?: (cwd: string, input: {
+    message: string;
+    images?: AttachedImage[];
+    submissionId: string;
+    provider?: string;
+    modelId?: string;
+    thinkingLevel?: string;
+    signal?: AbortSignal;
+  }) => Promise<{ sessionId: string; receipt: PromptReceipt }>;
   wake?: (sessionId: string, signal?: AbortSignal) => Promise<void>;
   createEventStream?: (sessionId: string, onEvent: (event: AgentStreamEvent) => void) => EventStreamManager;
   getAgentState?: (sessionId: string) => Promise<RuntimeAgentState>;
@@ -562,6 +573,37 @@ export function createBrowserSessionRuntimeRegistry(
         let newSessionJustEnsured = false;
         try {
           if (input.target.kind === "new") {
+            if (deps.createAndPrompt) {
+              // 一步创建+发送：服务端 POST /api/agent/new {type:"prompt"} 在同一
+              // host 启动窗口内完成 ensure+prompt，返回真实 id；无两跳竞态。
+              const { sessionId: created, receipt } = await deps.createAndPrompt(
+                input.target.cwd,
+                {
+                  message: input.message,
+                  images: input.images,
+                  submissionId,
+                  ...(input.model?.provider ? { provider: input.model.provider, modelId: input.model.modelId } : {}),
+                  ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}),
+                  signal: controller.signal,
+                },
+              );
+              if (controller.signal.aborted) {
+                throw new DOMException("aborted", "AbortError");
+              }
+              sessionId = created;
+              submission.sessionId = created;
+              rekey(initialSessionId, created);
+              newSessionJustEnsured = true;
+              if (receipt.status === "rejected") {
+                settleSubmission(slot, submissionId, "rejected", "rejected");
+                restoreDraftFor(submission);
+                publish(slot);
+                return { submissionId, sessionId, status: "rejected" };
+              }
+              settleSubmission(slot, submissionId, "accepted");
+              publish(slot);
+              return { submissionId, sessionId, status: "accepted" };
+            }
             if (!deps.ensureNewSession) {
               settleSubmission(slot, submissionId, "rejected", "no ensure implementation");
               restoreDraftFor(submission);
@@ -806,6 +848,34 @@ export function resetBrowserSessionRuntimeRegistryForTests(): void {
 
 function createBrowserFetchDeps(): BrowserSessionRuntimeRegistryDeps {
   return {
+    async createAndPrompt(cwd, input) {
+      const res = await fetch("/api/agent/new", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cwd,
+          type: "prompt",
+          message: input.message,
+          submissionId: input.submissionId,
+          ...(input.images?.length
+            ? { images: input.images.map((img) => ({ type: "image", data: img.data, mimeType: img.mimeType })) }
+            : {}),
+          ...(input.provider && input.modelId ? { provider: input.provider, modelId: input.modelId } : {}),
+          ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}),
+        }),
+        signal: input.signal,
+      });
+      const body = await res.json().catch(() => ({})) as {
+        sessionId?: string;
+        data?: PromptReceipt | null;
+        error?: string;
+      };
+      if (!res.ok || body.error || !body.sessionId) {
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      const receipt = body.data ?? { submissionId: input.submissionId, sessionId: body.sessionId, status: "accepted" as const };
+      return { sessionId: body.sessionId, receipt };
+    },
     async postPrompt(sessionId, input) {
       const { submitAgentPrompt } = await import("./agent-client");
       return submitAgentPrompt(sessionId, input, { signal: input.signal });

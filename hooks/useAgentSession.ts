@@ -1619,6 +1619,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           images,
           draftKey,
           model: selectedModel ?? undefined,
+          ...(isNew && resolvedThinking ? { thinkingLevel: resolvedThinking } : {}),
         });
         sentSessionId = receipt.sessionId;
         if (sendStillCurrent()) {
