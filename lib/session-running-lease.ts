@@ -1,8 +1,7 @@
 /**
- * 跨进程 running/starting 租约：31415 与 31416 共享 agentDir 时，
- * 让对端看见「正在跑」，并拒绝第二套 writable prompt。
- * 覆盖 starting 到 live host dispose 的整个 writer 窗口；空闲 live host 仍持有租约，
- * 由 host 的立即 dispose 结束该窗口。
+ * 跨进程 writer 租约：31415 与 31416 共享 agentDir 时互斥 prompt。
+ * 覆盖 starting 到 live host dispose 的整个 writer 窗口（含空闲保活 host）。
+ * 不表示「智能体正在执行」——侧栏 running/计时走 isRunning，对端占用走 lockedByOther。
  */
 import {
   existsSync,
@@ -72,20 +71,35 @@ export function isFresh(lease: RunningLease, now: number): boolean {
   return now - lease.heartbeatAt <= RUNNING_LEASE_TTL_MS && isPidAlive(lease.pid);
 }
 
+function collectFreshLeases(agentDir: string, now: number): RunningLease[] {
+  const dir = leaseDir(agentDir);
+  if (!existsSync(dir)) return [];
+  const fresh: RunningLease[] = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".json")) continue;
+    const path = join(dir, name);
+    const lease = readLeaseFile(path);
+    if (!lease || !isFresh(lease, now)) {
+      try {
+        unlinkSync(path);
+      } catch {
+        /* ignore */
+      }
+      continue;
+    }
+    fresh.push(lease);
+  }
+  return fresh;
+}
+
 export function listFreshRunningLeaseSessions(
   agentDir: string | undefined = getAgentDir(),
   now = Date.now(),
 ): { sessionId: string; startedAt: number }[] {
-  const dir = leaseDir(agentDir);
-  if (!existsSync(dir)) return [];
-  const sessions: { sessionId: string; startedAt: number }[] = [];
-  for (const name of readdirSync(dir)) {
-    if (!name.endsWith(".json")) continue;
-    const lease = readLeaseFile(join(dir, name));
-    if (!lease || !isFresh(lease, now)) continue;
-    sessions.push({ sessionId: lease.sessionId, startedAt: lease.startedAt });
-  }
-  return sessions;
+  return collectFreshLeases(agentDir, now).map((lease) => ({
+    sessionId: lease.sessionId,
+    startedAt: lease.startedAt,
+  }));
 }
 
 export function isSessionRunningLockedError(error: unknown): boolean {
@@ -153,16 +167,7 @@ export function listFreshRunningLeaseSessionIds(
   agentDir: string = getAgentDir(),
   now = Date.now(),
 ): string[] {
-  const dir = leaseDir(agentDir);
-  if (!existsSync(dir)) return [];
-  const ids: string[] = [];
-  for (const name of readdirSync(dir)) {
-    if (!name.endsWith(".json")) continue;
-    const lease = readLeaseFile(join(dir, name));
-    if (!lease || !isFresh(lease, now)) continue;
-    ids.push(lease.sessionId);
-  }
-  return ids;
+  return collectFreshLeases(agentDir, now).map((lease) => lease.sessionId);
 }
 
 export function isRunningLeaseHeldByOther(

@@ -1,9 +1,8 @@
 /**
- * running session 的真实开始时间表（agent_start 记录）。
+ * 本轮执行开始时间表（prompt 发送记录，agent_end 清除）。
  *
- * 刷新后前端据此恢复运行计时（否则 first-seen 语义从 0 重算）；
- * 进程重启后运行态本就丢失，first-seen 兜底。独立模块避免
- * rpc-manager ↔ external-session 循环依赖。
+ * 与 writer lease / host 保活无关。刷新后前端据此恢复运行计时；
+ * 进程重启后运行态丢失，first-seen 兜底。
  */
 
 const GLOBAL_KEY = "__piRunningStartedAt";
@@ -17,7 +16,10 @@ function getTable(): Map<string, number> {
 }
 
 export function recordRunningStartedAt(sessionId: string, startedAt: number): void {
-  getTable().set(sessionId, startedAt);
+  // 本轮首次写入胜：prompt 发送时间不被后续 agent_start 覆盖。
+  const table = getTable();
+  if (table.has(sessionId)) return;
+  table.set(sessionId, startedAt);
 }
 
 export function clearRunningStartedAt(sessionId: string): void {

@@ -924,10 +924,14 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
     },
 
     getRunningStartedAt() {
-      // 本进程 running-state 为权威，跨进程租约 startedAt 补齐缺失 id。
-      const merged = Object.fromEntries(readRunningStartedAt());
+      // 仅本轮正在执行的会话：running-state（发送时间）优先，starting 补齐。
+      const runningIds = new Set(deps.getRunningRpcSessionIds());
+      const merged: Record<string, number> = {};
+      for (const [id, startedAt] of readRunningStartedAt()) {
+        if (runningIds.has(id)) merged[id] = startedAt;
+      }
       for (const [id, startedAt] of Object.entries(getRunningStartedAtTable())) {
-        if (!(id in merged)) merged[id] = startedAt;
+        if (runningIds.has(id) && !(id in merged)) merged[id] = startedAt;
       }
       return merged;
     },

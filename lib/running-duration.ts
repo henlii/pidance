@@ -6,6 +6,7 @@
  * - trackRunningStartedAt：running id 集合的「首次见到时间」跟踪（first-seen 语义）。
  *   刷新后 SSE 重新建立时集合只有 id、无真实开始时间，首次见到的时刻即近似开始；
  *   会话从集合消失后移除记录；下次再出现视为新运行（重新记时）。
+ * - mergeRunningStartedAt：服务端本轮执行 startedAt 覆盖 first-seen（计时=发送→结束）。
  */
 import type { TranslationKey } from "./locales/en";
 
@@ -65,6 +66,34 @@ export function trackRunningStartedAt(
       next.set(id, now);
       changed = true;
     }
+  }
+  return changed ? next : prev as Map<string, number>;
+}
+
+function serverStartedAtFor(
+  serverStartedAt: ReadonlyMap<string, number> | undefined,
+  id: string,
+): number | undefined {
+  const value = serverStartedAt?.get(id);
+  return typeof value === "number" ? value : undefined;
+}
+
+/**
+ * 侧栏计时：服务端本轮执行开始时间为权威；没有服务端值时才用 first-seen。
+ * 离开 running 集合的 id 移除。无变化返回原引用。
+ */
+export function mergeRunningStartedAt(
+  prev: ReadonlyMap<string, number>,
+  ids: readonly string[],
+  serverStartedAt: ReadonlyMap<string, number> | undefined,
+  now: number,
+): Map<string, number> {
+  const next = new Map<string, number>();
+  let changed = prev.size !== ids.length;
+  for (const id of ids) {
+    const value = serverStartedAtFor(serverStartedAt, id) ?? prev.get(id) ?? now;
+    if (prev.get(id) !== value) changed = true;
+    next.set(id, value);
   }
   return changed ? next : prev as Map<string, number>;
 }

@@ -15,7 +15,6 @@ import type { SidebarDisplayMode, ProjectAliases } from "@/lib/ui-preferences";
 import { displayCwd, projectDisplayName } from "@/lib/project-context";
 import { getSessionCapabilities, canArchiveSession } from "../session-capabilities";
 import { archiveSession, archiveFailureKind } from "@/lib/session-archive-client";
-import { trackRunningStartedAt } from "@/lib/running-duration";
 import {
   AnimatedDropdown,
   ArchiveIcon,

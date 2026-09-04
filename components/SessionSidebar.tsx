@@ -100,7 +100,7 @@ import { canArchiveSession } from "./session-capabilities";
 import { archiveSession, archiveFailureKind } from "@/lib/session-archive-client";
 import { useWorktreePreload } from "@/hooks/useWorktreePreload";
 import { useSidebarWorktreeActions } from "@/hooks/useSidebarWorktreeActions";
-import { trackRunningStartedAt } from "@/lib/running-duration";
+import { mergeRunningStartedAt } from "@/lib/running-duration";
 import { createSessionCatalogStore, type SessionCatalogStore } from "@/lib/session-catalog-store";
 
 /**
@@ -200,29 +200,15 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     const now = Date.now();
     setRunningNow(now);
     setRunningStartedAt((prev) =>
-      trackRunningStartedAt(prev, [...effectiveRunningSessionIds, ...subagentRunningIds], now),
+      mergeRunningStartedAt(
+        prev,
+        [...effectiveRunningSessionIds, ...subagentRunningIds],
+        catalogSnapshot.runningStartedAt,
+        now,
+      ),
     );
-  }, [effectiveRunningSessionIds, subagentRunningIds]);
-  // catalog 内 unread 快照与 SSE 权威 running 快照在 store 中维护；这里的
-  // serverRunningStartedAt 只承担计时播种（与 store 的 startedAt 同源）。
-  const [serverRunningStartedAt, setServerRunningStartedAt] = useState<ReadonlyMap<string, number>>(() => new Map());
+  }, [effectiveRunningSessionIds, subagentRunningIds, catalogSnapshot.runningStartedAt]);
   const unreadSessionIds = catalogSnapshot.unreadIds;
-
-  // 服务端 startedAt 播种（不重算 first-seen 窗口）
-  useEffect(() => {
-    if (serverRunningStartedAt.size === 0) return;
-    setRunningStartedAt((prev) => {
-      const next = new Map(prev);
-      let changed = false;
-      for (const [id, ts] of serverRunningStartedAt) {
-        if (!next.has(id)) {
-          next.set(id, ts);
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [serverRunningStartedAt]);
   // 搜索：查询与开关均为组件瞬时态，不写入偏好
   const [sessionQuery, setSessionQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -370,15 +356,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         now: Date.now(),
       });
       saveCachedSessionList(data.sessions);
-      if (data.runningStartedAt) {
-        setServerRunningStartedAt((prev) => {
-          const next = new Map(prev);
-          for (const [id, ts] of Object.entries(data.runningStartedAt ?? {})) {
-            if (!next.has(id) && typeof ts === "number") next.set(id, ts);
-          }
-          return next;
-        });
-      }
       if (!showLoading) {
         setSessionRefreshDone(true);
         if (sessionRefreshTimerRef.current) clearTimeout(sessionRefreshTimerRef.current);

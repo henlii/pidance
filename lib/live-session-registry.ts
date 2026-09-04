@@ -11,8 +11,6 @@ import {
   acquireRunningLease,
   heartbeatRunningLease,
   isRunningLeaseHeldByOther,
-  listFreshRunningLeaseSessionIds,
-  listFreshRunningLeaseSessions,
   releaseRunningLease,
   SESSION_RUNNING_LOCKED_MESSAGE,
 } from "./session-running-lease";
@@ -179,33 +177,17 @@ function getLocalWriterAndStartingIds(): string[] {
 }
 
 export function getRunningRpcSessionIds(): string[] {
-  const ids = new Set(getLocalRunningAndStartingIds());
-  // 跨进程 lease（对端 writer 活）对侧栏是 running/locked。但本进程「保活中但
-  // 已 settled」的 host 也持 lease —— 不向 UI 报 running，否则会话结束后计时不停。
-  const localIdleWriters = new Set(getLocalIdleWriterIds());
-  for (const id of listFreshRunningLeaseSessionIds()) {
-    if (localIdleWriters.has(id)) continue;
-    ids.add(id);
-  }
-  return [...ids];
-}
-
-/** 本进程持有 writer 但当前不运行（保活等待端点/30s 兜底）的 host。 */
-function getLocalIdleWriterIds(): Set<string> {
-  const out = new Set<string>();
-  for (const [sessionId, session] of getRegistry()) {
-    if (session.isAlive() && !session.isRunning()) {
-      out.add(session.sessionId || sessionId);
-    }
-  }
-  return out;
+  // 侧栏 running/计时 = 本进程正在执行（starting ∪ isRunning）。
+  // writer lease 只做跨进程互斥（lockedByOther），不等于「智能体在跑」——
+  // 端点保活的 idle host 仍持 lease，若混进 running 集会话结束后仍计时。
+  return getLocalRunningAndStartingIds();
 }
 
 const localStartingStartedAt = new Map<string, number>();
 
-/** 运行 id → startedAt（本进程 running-state 与跨进程租约合并）。 */
+/** 运行 id → 本轮执行开始（prompt 发送）。不含 writer lease 的 host 存活时间。 */
 export function getRunningStartedAtTable(
-  agentDir?: string,
+  _agentDir?: string,
   now = Date.now(),
 ): Record<string, number> {
   const table: Record<string, number> = {};
@@ -221,11 +203,6 @@ export function getRunningStartedAtTable(
   }
   for (const sessionId of [...localStartingStartedAt.keys()]) {
     if (!localSet.has(sessionId)) localStartingStartedAt.delete(sessionId);
-  }
-  const localIdleWriters = new Set(getLocalIdleWriterIds());
-  for (const { sessionId, startedAt } of listFreshRunningLeaseSessions(agentDir, now)) {
-    if (localIdleWriters.has(sessionId)) continue;
-    table[sessionId] = startedAt;
   }
   return table;
 }
