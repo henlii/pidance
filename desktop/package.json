@@ -61,6 +61,11 @@
     "directories": {
       "output": "dist"
     },
-    "compression": "maximum"
+    "compression": "maximum",
+    "electronLanguages": [
+      "en-US",
+      "zh-CN"
+    ],
+    "npmRebuild": false
   }
 }
