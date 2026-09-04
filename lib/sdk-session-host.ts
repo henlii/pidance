@@ -282,7 +282,7 @@ export class SdkSessionHost {
       }
       // 有队列且未 hold：由 flush 流程推进，不在这里 dispose。
       void this.destroyAsync();
-    }, 0);
+    }, delay);
   }
 
   private releaseStartupHold(): void {
@@ -1051,9 +1051,10 @@ export class SdkSessionHost {
   async send(command: Record<string, unknown>): Promise<unknown> {
     if (!this.runtime) throw new Error("SDK session is not alive");
     const type = command.type as string;
-    // get_state 是 wake 的只读预检，保留短暂 startup hold 让紧随其后的
-    // prompt 能建立 SSE 后再写入；真正的命令释放该窗口。
-    if (type !== "get_state") this.releaseStartupHold();
+    // get_state / ensure_session 都是只读预检（浏览器「新建会话占位」会先 ensure
+    // 再 prompt）：保留 startup hold，避免 host 在首个真实写命令前被 0ms dispose，
+    // 导致随后 wake/prompt 时文件未落盘而 404/被拒。真正的写命令才释放窗口。
+    if (type !== "get_state" && type !== "ensure_session") this.releaseStartupHold();
     // 命令计数：dispose 定时器在命令活跃期间延后，防命令持有
     // SessionManager 时被释放（compact/steer 的微任务窗口）。
     this.activeCommandCount += 1;

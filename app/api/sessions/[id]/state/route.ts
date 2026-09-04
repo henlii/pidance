@@ -15,6 +15,13 @@ export async function GET(
 ) {
   const { id } = await params;
   try {
+    // 内存已 live（含 ensure_session 未落盘的新会话）：直接放行，不要求磁盘文件。
+    // ensure_session 的 host 在 user 消息落盘前没有 JSONL，resolvePath 会 404，
+    // 导致新建会话首次 prompt 的 wake 步骤失败（会话只有乐观 1 条、刷新即消失）。
+    const liveNow = sessionService.getLive(id);
+    if (liveNow) {
+      return NextResponse.json(await sessionService.getAgentState(id));
+    }
     if (!(await sessionService.resolvePath(id))) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
