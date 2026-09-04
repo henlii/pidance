@@ -1288,7 +1288,7 @@ function SplitPatchView({ text }: { text: string }) {
   const showFileHeaders = files.length > 1;
 
   return (
-    <div style={{ maxHeight: 560, overflowY: "auto", overflowX: "hidden", background: "var(--bg)" }}>
+    <div style={{ maxHeight: "min(560px, 50vh)", overflowY: "auto", overflowX: "hidden", background: "var(--bg)" }}>
       {files.map((file, fileIndex) => (
         <div
           key={fileIndex}
@@ -1424,7 +1424,7 @@ function PatchTextView({ text }: { text: string }) {
   const lines = text.split(/\r?\n/);
 
   return (
-    <div style={{ maxHeight: 520, overflowY: "auto", overflowX: "hidden", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, minWidth: 0 }}>
+    <div style={{ maxHeight: "min(520px, 45vh)", overflowY: "auto", overflowX: "hidden", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, minWidth: 0 }}>
       {lines.map((line, i) => {
         const kind =
           line.startsWith("@@") ? "hunk" :
@@ -1567,7 +1567,7 @@ function PairedResult({ text, isEmpty, isError }: {
           fontSize: 12,
           lineHeight: 1.5,
           overflow: "auto",
-          maxHeight: 400,
+          maxHeight: "min(400px, 45vh)",
           background: "var(--bg)",
           whiteSpace: "pre-wrap",
           wordBreak: "break-all",
@@ -2095,7 +2095,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
               lineHeight: 1.5,
               whiteSpace: "pre-wrap",
               wordBreak: "break-word",
-              maxHeight: 360,
+              maxHeight: "min(360px, 45vh)",
               overflow: "auto",
               fontFamily: "var(--font-mono)",
             }}
