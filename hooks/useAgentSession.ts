@@ -2445,7 +2445,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (session.readOnly === true) {
         void loadSession(session.id, true, false);
       } else {
-        loadSession(session.id, true, true).then((agentState) => {
+        // 刚由本页创建/正在跑的新会话：registry slot 已有内存消息（乐观+SSE），
+        // 直接渲染避免「引导页 → 全屏 loading → 会话」闪白；showLoading=false
+        // 时仍走 includeState（热状态/磁盘权威在后台对账）。
+        const hasLiveSlotContent =
+          runtimeId != null
+          && (registry.getSnapshot(runtimeId)?.messages.length ?? 0) > 0;
+        loadSession(session.id, !hasLiveSlotContent, true).then((agentState) => {
           if (agentState === true) return;
           if (agentState?.running || agentState?.live) {
             loadTools(session.id);
