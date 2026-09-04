@@ -58,7 +58,7 @@ export async function GET(
       // Heartbeat every 30s to prevent server/proxy timeout (Next.js default ~120-150s)
       const heartbeat = setInterval(() => {
         encode(":");
-      }, 30_000);
+      }, 10_000);
 
       let cleaned = false;
       const cleanup = () => {

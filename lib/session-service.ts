@@ -633,7 +633,6 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
     async submitPrompt(sessionId, command) {
       await requireWritableSession(sessionId, service.isReadOnly);
       const parsed = parsePromptCommand(command);
-      console.error(`[pidance][trace] submitPrompt ${sessionId} live=${Boolean(service.getLive(sessionId))} file=${await deps.resolveSessionPath(sessionId).catch(()=>null)}`);
       try {
         const data = await service.send(sessionId, parsed);
         if (data && typeof data === "object" && (data as PromptReceipt).status) {
@@ -642,7 +641,6 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         return { submissionId: parsed.submissionId, sessionId, status: "accepted" };
       } catch (error) {
         if (isSessionRunningLockedError(error)) throw error;
-        console.error(`[pidance] submitPrompt rejected for ${sessionId}:`, error);
         return { submissionId: parsed.submissionId, sessionId, status: "rejected" };
       }
     },

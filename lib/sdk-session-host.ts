@@ -186,7 +186,9 @@ export class SdkSessionHost {
   constructor(private readonly options: SdkSessionHostOptions) {
     this.realSessionId = options.sessionId;
     this.realSessionFile = options.sessionFile;
-    this.idleTimeoutMs = options.idleTimeoutMs ?? 10 * 60 * 1000;
+    // 默认 30s 无端点兜底释放（有活跃 SSE 订阅时保活，不设倒计时）；
+    // 测试可注入更短值验证释放路径。
+    this.idleTimeoutMs = options.idleTimeoutMs ?? 30_000;
     this.agentDir = options.agentDir ?? getAgentDir();
     this.activeToolNames = options.toolNames;
   }
@@ -231,9 +233,14 @@ export class SdkSessionHost {
   }
 
   onEvent(listener: SdkEventListener): () => void {
+    const hadNone = this.listeners.length === 0;
     this.listeners.push(listener);
+    if (hadNone) this.resetIdleTimer(); // 首个订阅者：取消 dispose 倒计时
     return () => {
+      const had = this.listeners.length > 0;
       this.listeners = this.listeners.filter((l) => l !== listener);
+      // 最后一个端点关闭：settled 且空队列时开始 30s 兜底释放
+      if (had && this.listeners.length === 0) this.resetIdleTimer();
     };
   }
 
@@ -263,19 +270,21 @@ export class SdkSessionHost {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
     if (!this._alive || !this.runtime || this.startupHold || this.isRunning() || this.flushingFollowUp) return;
+    if (this.listeners.length > 0) return; // 仍有活跃端点（SSE 订阅）→ 保活，不释放
     if (this.followUpQueue.length > 0 && !this.isFollowUpHeld()) {
       this.scheduleFollowUpFlush();
       return;
     }
-    // Live host 是 JSONL writer。settled 且没有可自动投递队列时立即释放，
-    // 不区分是否仍有 SSE 订阅：SSE 连接生命周期绑定 host（route 在 destroy 时
-    // 关流），浏览器侧对 404/CLOSED 静默重连，需要写时再 wake 重建。
-    // 若仍有订阅，destroy 后 route 的 controller.close() 会让浏览器断开。
-    // 50ms ≈ 一帧：保证事件/命令结算先于 dispose（send/compact 的微任务余量）。
-    const delay = 50;
+    // Live host 是 JSONL writer。所有端点都关闭且 settled、空队列时才释放：
+    // 立即 dispose 会让浏览器侧 contextUsage/extension footer/状态条随 live 投影
+    // 消失（用户感知“会话一结束信息就没了”）。30s 兜底窗口给端点重连/重开，
+    // 期间 UI 仍可读热 state；窗口内任何命令/事件都会 reset。
+    const delay = this.idleTimeoutMs;
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
       if (this.isRunning() || this.flushingFollowUp) return;
+      // fire 时又出现订阅者（30s 窗口内端点重开）：取消释放，继续保活。
+      if (this.listeners.length > 0) return;
       if (this.followUpQueue.length > 0 && !this.isFollowUpHeld()) {
         this.scheduleFollowUpFlush();
         return;
