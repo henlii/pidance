@@ -9,13 +9,18 @@ const jiti = createJiti(import.meta.url, {
   tsconfigPaths: true,
 });
 const { MarkdownBody } = await jiti.import("./MarkdownBody.tsx");
+const { I18nProvider } = await jiti.import("../lib/i18n.tsx");
 
 function renderMarkdown(markdown) {
   return renderToStaticMarkup(
-    React.createElement(MarkdownBody, {
-      cwd: "/home/me/project",
-      onOpenFile() {},
-    }, markdown),
+    React.createElement(
+      I18nProvider,
+      null,
+      React.createElement(MarkdownBody, {
+        cwd: "/home/me/project",
+        onOpenFile() {},
+      }, markdown),
+    ),
   );
 }
 
@@ -34,4 +39,10 @@ test("keeps local file markdown links in the app", () => {
 
   assert.match(html, /<a href="components\/MarkdownBody\.tsx">file<\/a>/);
   assert.doesNotMatch(html, /target=|rel=|\snode=/);
+});
+
+test("fenced code 使用可滚动且可选择的正文容器", () => {
+  const html = renderMarkdown("```js\nconst n = 1;\n```");
+  assert.match(html, /class="markdown-code-body"/);
+  assert.match(html, /markdown-code-block/);
 });

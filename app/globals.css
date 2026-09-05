@@ -283,6 +283,19 @@ pre, code {
   font-family: var(--font-mono);
 }
 
+/* 代码/工具输出/表格等特殊块：桌面拖选 + 移动端长按复制。
+   行号仍用内联 user-select:none，不受这条覆盖。 */
+pre, code,
+.chat-selectable,
+.markdown-code-block,
+.markdown-code-body,
+.markdown-table-wrap,
+.compaction-file-list {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
 /* react-markdown output styles */
 .markdown-body {
   font-size: 14px;
@@ -561,6 +574,16 @@ pre, code {
   overflow: hidden;
   background: var(--code-bg);
   box-shadow: none;
+}
+.markdown-code-body {
+  overflow: auto;
+  max-height: min(320px, 45vh);
+  overscroll-behavior: contain;
+}
+@media (max-width: 640px) {
+  .markdown-code-body {
+    max-height: min(240px, 32vh);
+  }
 }
 .markdown-code-header {
   padding: 5px 10px;

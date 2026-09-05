@@ -938,6 +938,7 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
         <div
           ref={bodyRef}
           tabIndex={0}
+          className="chat-selectable"
           onScroll={(event) => {
             if (pinningBodyRef.current) return;
             followBodyRef.current = isNearStreamBlockBottom(event.currentTarget);
@@ -1412,6 +1413,8 @@ function SplitDiffCellView({ cell, side }: { cell: SplitDiffCell; side: "left" |
           color: cell.type === "empty" ? "var(--text-dim)" : "var(--text)",
           whiteSpace: "pre-wrap",
           overflowWrap: "anywhere",
+          userSelect: "text",
+          WebkitUserSelect: "text",
         }}
       >
         {cell.text || "\u00a0"}
@@ -1424,7 +1427,7 @@ function PatchTextView({ text }: { text: string }) {
   const lines = text.split(/\r?\n/);
 
   return (
-    <div style={{ maxHeight: "min(520px, 45vh)", overflowY: "auto", overflowX: "hidden", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, minWidth: 0 }}>
+    <div className="chat-selectable" style={{ maxHeight: "min(520px, 45vh)", overflowY: "auto", overflowX: "hidden", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, minWidth: 0 }}>
       {lines.map((line, i) => {
         const kind =
           line.startsWith("@@") ? "hunk" :

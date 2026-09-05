@@ -233,23 +233,28 @@ function CodeBlock({ code, lang, headerAction }: { code: string; lang: string; h
           </button>
         </div>
       </div>
-      <SyntaxHighlighter
-        language={lang || "text"}
-        style={isDark ? vscDarkPlus : vs}
-        showLineNumbers
-        lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal" }}
-        customStyle={{
-          margin: 0,
-          padding: "11px 13px",
-          fontSize: 12.5,
-          lineHeight: 1.62,
-          borderRadius: 0,
-          background: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))",
-        }}
-        codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
-      >
-        {code}
-      </SyntaxHighlighter>
+      <div className="markdown-code-body">
+        <SyntaxHighlighter
+          language={lang || "text"}
+          style={isDark ? vscDarkPlus : vs}
+          showLineNumbers
+          showInlineLineNumbers={false}
+          lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal", userSelect: "none" }}
+          customStyle={{
+            margin: 0,
+            padding: "11px 13px",
+            fontSize: 12.5,
+            lineHeight: 1.62,
+            borderRadius: 0,
+            background: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))",
+            userSelect: "text",
+            WebkitUserSelect: "text",
+          }}
+          codeTagProps={{ style: { fontFamily: "var(--font-mono)", userSelect: "text", WebkitUserSelect: "text" } }}
+        >
+          {code}
+        </SyntaxHighlighter>
+      </div>
     </div>
   );
 }
