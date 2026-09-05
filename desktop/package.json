@@ -16,7 +16,7 @@
     "build:win:zip": "electron-builder --win zip --x64"
   },
   "dependencies": {
-    "@henlii/pidance": "0.2.21"
+    "@henlii/pidance": "0.2.22"
   },
   "devDependencies": {
     "electron": "^37.2.0",
