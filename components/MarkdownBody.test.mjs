@@ -47,7 +47,7 @@ test("fenced code 使用可滚动且可选择的正文容器", () => {
   assert.match(html, /markdown-code-block/);
 });
 
-test("GFM 表格用可选择的 div 行，而不是 HTML table", () => {
+test("GFM 表格用可选择层包裹，wrap 显式允许选中文本", () => {
   const html = renderMarkdown("| a | b |\n| --- | --- |\n| 1 | 2 |\n");
   assert.match(html, /class="markdown-table-wrap"/);
   assert.match(html, /class="markdown-table-scroll"/);

@@ -426,10 +426,16 @@ pre, code,
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   cursor: text;
+  /* 显式 text：drag 选区 mouseup 才不折叠（auto 在此场景松手即清）。 */
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
 }
 .markdown-table-scroll {
   overflow: visible;
   cursor: text;
+  -webkit-user-select: text;
+  user-select: text;
 }
 /* 不用 HTML table：Chromium 在 flex 会话列里对 table/td 拖选是坏的（段落可选、单元格不行）。 */
 .markdown-table-row {
@@ -449,6 +455,9 @@ pre, code,
   cursor: text;
   overflow-wrap: anywhere;
   word-break: break-word;
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
 }
 .markdown-table-th {
   background: var(--bg-panel);
