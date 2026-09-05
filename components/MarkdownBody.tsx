@@ -1,6 +1,6 @@
 "use client";
 
-import { Children, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
+import { Children, memo, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
@@ -19,87 +19,11 @@ interface MarkdownBodyProps {
   onOpenFile?: (filePath: string) => void;
 }
 
-function caretFromPoint(x: number, y: number): { node: Node; offset: number } | null {
-  if (typeof document.caretRangeFromPoint === "function") {
-    const range = document.caretRangeFromPoint(x, y);
-    if (range) return { node: range.startContainer, offset: range.startOffset };
-  }
-  return null;
-}
-
-let tableSelectBindCount = 0;
-let tableSelectUnbind: (() => void) | null = null;
-
-function bindMarkdownTableSelect(): void {
-  tableSelectBindCount += 1;
-  if (tableSelectUnbind) return;
-  let dragging = false;
-  let anchor: { node: Node; offset: number } | null = null;
-  const down = (event: globalThis.MouseEvent) => {
-    if (event.button !== 0) return;
-    const target = event.target;
-    if (!(target instanceof Element) || !target.closest(".markdown-table-scroll")) return;
-    const caret = caretFromPoint(event.clientX, event.clientY);
-    if (!caret) return;
-    event.preventDefault();
-    dragging = true;
-    anchor = caret;
-    try {
-      window.getSelection()?.setBaseAndExtent(caret.node, caret.offset, caret.node, caret.offset);
-    } catch {
-      /* ignore */
-    }
-  };
-  const move = (event: globalThis.MouseEvent) => {
-    if (!dragging || !anchor) return;
-    const caret = caretFromPoint(event.clientX, event.clientY);
-    if (!caret) return;
-    try {
-      window.getSelection()?.setBaseAndExtent(
-        anchor.node,
-        anchor.offset,
-        caret.node,
-        caret.offset,
-      );
-    } catch {
-      /* 跨节点选区可能抛错 */
-    }
-  };
-  const up = () => {
-    dragging = false;
-    anchor = null;
-  };
-  document.addEventListener("mousedown", down, true);
-  document.addEventListener("mousemove", move, true);
-  window.addEventListener("mouseup", up, true);
-  tableSelectUnbind = () => {
-    document.removeEventListener("mousedown", down, true);
-    document.removeEventListener("mousemove", move, true);
-    window.removeEventListener("mouseup", up, true);
-  };
-}
-
-function unbindMarkdownTableSelect(): void {
-  tableSelectBindCount = Math.max(0, tableSelectBindCount - 1);
-  if (tableSelectBindCount > 0 || !tableSelectUnbind) return;
-  tableSelectUnbind();
-  tableSelectUnbind = null;
-}
-
-function MarkdownTableScroll({ children }: { children: ReactNode }) {
-  useEffect(() => {
-    bindMarkdownTableSelect();
-    return () => unbindMarkdownTableSelect();
-  }, []);
-
-  return (
-    <div className="markdown-table-scroll">
-      {children}
-    </div>
-  );
-}
-
-export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
+/**
+ * memo：聊天频繁重渲染时，文本未变的 MarkdownBody 不再重跑 ReactMarkdown。
+ * 否则每帧生成全新 <code>/<table> 节点，拖选进行中的选区随节点替换被清掉。
+ */
+function MarkdownBodyImpl({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
 
   return (
@@ -162,7 +86,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
           table({ children }) {
             return (
               <div className="markdown-table-wrap">
-                <MarkdownTableScroll>{children}</MarkdownTableScroll>
+                <div className="markdown-table-scroll">{children}</div>
               </div>
             );
           },
@@ -362,3 +286,5 @@ function CodeBlock({ code, lang, headerAction }: { code: string; lang: string; h
     </div>
   );
 }
+
+export const MarkdownBody = memo(MarkdownBodyImpl);
