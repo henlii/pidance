@@ -1,6 +1,6 @@
 "use client";
 
-import { Children, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { Children, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
@@ -27,47 +27,73 @@ function caretFromPoint(x: number, y: number): { node: Node; offset: number } | 
   return null;
 }
 
-function MarkdownTableScroll({ children }: { children: ReactNode }) {
-  const anchorRef = useRef<{ node: Node; offset: number } | null>(null);
-  const draggingRef = useRef(false);
+let tableSelectBindCount = 0;
+let tableSelectUnbind: (() => void) | null = null;
 
+function bindMarkdownTableSelect(): void {
+  tableSelectBindCount += 1;
+  if (tableSelectUnbind) return;
+  let dragging = false;
+  let anchor: { node: Node; offset: number } | null = null;
+  const down = (event: globalThis.MouseEvent) => {
+    if (event.button !== 0) return;
+    const target = event.target;
+    if (!(target instanceof Element) || !target.closest(".markdown-table-scroll")) return;
+    const caret = caretFromPoint(event.clientX, event.clientY);
+    if (!caret) return;
+    event.preventDefault();
+    dragging = true;
+    anchor = caret;
+    try {
+      window.getSelection()?.setBaseAndExtent(caret.node, caret.offset, caret.node, caret.offset);
+    } catch {
+      /* ignore */
+    }
+  };
+  const move = (event: globalThis.MouseEvent) => {
+    if (!dragging || !anchor) return;
+    const caret = caretFromPoint(event.clientX, event.clientY);
+    if (!caret) return;
+    try {
+      window.getSelection()?.setBaseAndExtent(
+        anchor.node,
+        anchor.offset,
+        caret.node,
+        caret.offset,
+      );
+    } catch {
+      /* 跨节点选区可能抛错 */
+    }
+  };
+  const up = () => {
+    dragging = false;
+    anchor = null;
+  };
+  document.addEventListener("mousedown", down, true);
+  document.addEventListener("mousemove", move, true);
+  window.addEventListener("mouseup", up, true);
+  tableSelectUnbind = () => {
+    document.removeEventListener("mousedown", down, true);
+    document.removeEventListener("mousemove", move, true);
+    window.removeEventListener("mouseup", up, true);
+  };
+}
+
+function unbindMarkdownTableSelect(): void {
+  tableSelectBindCount = Math.max(0, tableSelectBindCount - 1);
+  if (tableSelectBindCount > 0 || !tableSelectUnbind) return;
+  tableSelectUnbind();
+  tableSelectUnbind = null;
+}
+
+function MarkdownTableScroll({ children }: { children: ReactNode }) {
   useEffect(() => {
-    const stop = () => {
-      draggingRef.current = false;
-      anchorRef.current = null;
-    };
-    window.addEventListener("mouseup", stop);
-    return () => window.removeEventListener("mouseup", stop);
+    bindMarkdownTableSelect();
+    return () => unbindMarkdownTableSelect();
   }, []);
 
   return (
-    <div
-      className="markdown-table-scroll"
-      onMouseDown={(event) => {
-        if (event.button !== 0) return;
-        const caret = caretFromPoint(event.clientX, event.clientY);
-        if (!caret) return;
-        draggingRef.current = true;
-        anchorRef.current = caret;
-      }}
-      onMouseMove={(event) => {
-        if (!draggingRef.current || !anchorRef.current) return;
-        const caret = caretFromPoint(event.clientX, event.clientY);
-        if (!caret) return;
-        const sel = window.getSelection();
-        if (!sel) return;
-        try {
-          sel.setBaseAndExtent(
-            anchorRef.current.node,
-            anchorRef.current.offset,
-            caret.node,
-            caret.offset,
-          );
-        } catch {
-          /* 跨节点选区可能抛错 */
-        }
-      }}
-    >
+    <div className="markdown-table-scroll">
       {children}
     </div>
   );

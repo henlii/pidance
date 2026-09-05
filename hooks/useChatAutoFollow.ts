@@ -197,10 +197,12 @@ export function useChatAutoFollow({
       const target = event.target;
       if (target instanceof Element && target.closest("input, textarea, [contenteditable='true'], button, a")) return;
       selectingRef.current = true;
-      releaseOnUpIntent();
+      // 只改 ref：pointerdown 里 setState 会重渲染，把还没形成的选区掐掉。
+      autoFollowModeRef.current = reduceAutoFollow(autoFollowModeRef.current, { kind: "up-intent" });
     };
     const onPointerUp = () => {
       selectingRef.current = false;
+      updateJumpButtonVisibility();
     };
 
     container.addEventListener("selectstart", onSelectStart);
@@ -221,7 +223,7 @@ export function useChatAutoFollow({
       container.removeEventListener("touchmove", onTouchMove);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [scrollContainerEl, applyAutoFollowMode]);
+  }, [scrollContainerEl, applyAutoFollowMode, updateJumpButtonVisibility]);
 
   useEffect(() => {
     const container = scrollContainerEl;
