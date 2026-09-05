@@ -60,6 +60,7 @@ export type RuntimeAgentState = {
   live?: boolean;
   running?: boolean;
   activeRun?: boolean;
+  lockedByOther?: boolean;
   state?: {
     isStreaming?: boolean;
     isPromptRunning?: boolean;
@@ -94,6 +95,7 @@ export type SubmitPromptResult = {
   submissionId: string;
   sessionId: string;
   status: "accepted" | "rejected" | "unknown";
+  error?: string;
 };
 
 export type BrowserSessionRuntimeRegistryDeps = {
@@ -335,6 +337,21 @@ export function createBrowserSessionRuntimeRegistry(
       value: submission.message,
       images: submission.images ?? [],
     });
+  };
+
+  const dropUnconfirmedOptimistic = (slot: RuntimeSlot, submissionId: string) => {
+    const index = slot.submissionMessageIndexes.get(submissionId);
+    slot.submissionMessageIndexes.delete(submissionId);
+    if (index === undefined) return;
+    const entryId = slot.snapshot.entryIds[index] ?? "";
+    const message = slot.snapshot.messages[index];
+    if (!message || message.role !== "user" || entryId) return;
+    slot.snapshot.messages = slot.snapshot.messages.filter((_, i) => i !== index);
+    slot.snapshot.entryIds = slot.snapshot.entryIds.filter((_, i) => i !== index);
+    for (const [id, otherIndex] of slot.submissionMessageIndexes) {
+      if (otherIndex > index) slot.submissionMessageIndexes.set(id, otherIndex - 1);
+    }
+    bumpTimeline(slot);
   };
 
   const applyEventToSlot = (slot: RuntimeSlot, event: AgentStreamEvent) => {
@@ -596,9 +613,10 @@ export function createBrowserSessionRuntimeRegistry(
               newSessionJustEnsured = true;
               if (receipt.status === "rejected") {
                 settleSubmission(slot, submissionId, "rejected", "rejected");
+                dropUnconfirmedOptimistic(slot, submissionId);
                 restoreDraftFor(submission);
                 publish(slot);
-                return { submissionId, sessionId, status: "rejected" };
+                return { submissionId, sessionId, status: "rejected", error: "rejected" };
               }
               settleSubmission(slot, submissionId, "accepted");
               publish(slot);
@@ -606,9 +624,10 @@ export function createBrowserSessionRuntimeRegistry(
             }
             if (!deps.ensureNewSession) {
               settleSubmission(slot, submissionId, "rejected", "no ensure implementation");
+              dropUnconfirmedOptimistic(slot, submissionId);
               restoreDraftFor(submission);
               publish(slot);
-              return { submissionId, sessionId, status: "rejected" };
+              return { submissionId, sessionId, status: "rejected", error: "no ensure implementation" };
             }
             const created = await deps.ensureNewSession(input.target.cwd, input.model);
             if (controller.signal.aborted) {
@@ -636,9 +655,10 @@ export function createBrowserSessionRuntimeRegistry(
           });
           if (receipt.status === "rejected") {
             settleSubmission(slot, submissionId, "rejected", "rejected");
+            dropUnconfirmedOptimistic(slot, submissionId);
             restoreDraftFor(submission);
             publish(slot);
-            return { submissionId, sessionId, status: "rejected" };
+            return { submissionId, sessionId, status: "rejected", error: "rejected" };
           }
           settleSubmission(slot, submissionId, "accepted");
           publish(slot);
@@ -650,10 +670,12 @@ export function createBrowserSessionRuntimeRegistry(
             publish(slot);
             return { submissionId, sessionId, status: "unknown" };
           }
-          settleSubmission(slot, submissionId, "unknown", error instanceof Error ? error.message : String(error));
+          const message = error instanceof Error ? error.message : String(error);
+          settleSubmission(slot, submissionId, "unknown", message);
+          dropUnconfirmedOptimistic(slot, submissionId);
           restoreDraftFor(submission);
           publish(slot);
-          return { submissionId, sessionId, status: "unknown" };
+          return { submissionId, sessionId, status: "unknown", error: message };
         } finally {
           slot.inFlight.delete(submissionId);
           slot.promptAborts.delete(submissionId);

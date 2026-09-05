@@ -1325,6 +1325,34 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [ensureEventsConnected, reconcileAgentState, loadSession]);
 
   useEffect(() => {
+    const sid = session?.id;
+    if (!sid || isNew || session?.readOnly) return;
+    let cancelled = false;
+    const refreshLock = () => {
+      if (document.visibilityState !== "visible") return;
+      void fetch(`/api/sessions/${encodeURIComponent(sid)}/state`, { cache: "no-store" })
+        .then((response) => (response.ok ? response.json() : null))
+        .then((hot: { lockedByOther?: boolean } | null) => {
+          if (cancelled || !hot || sessionIdRef.current !== sid) return;
+          setLockedByOther(hot.lockedByOther === true);
+        })
+        .catch(() => undefined);
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refreshLock();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    const interval = lockedByOther ? window.setInterval(refreshLock, 5_000) : undefined;
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+      if (interval) window.clearInterval(interval);
+    };
+  }, [session?.id, session?.readOnly, isNew, lockedByOther]);
+
+  useEffect(() => {
     const onVisible = () => {
       if (document.visibilityState === "visible") void syncOnTabReturn();
     };
@@ -1533,6 +1561,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
     // 只读会话：发送入口 UI 已替换为提示条，这里再拦一层。
     if (isReadOnly) return false;
+    if (lockedByOther) {
+      addNotice({ type: "error", message: t("chat_sessionLocked") });
+      return false;
+    }
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length) return false;
     if (getRuntimeAgentRunning() || bashRunningRef.current) return false;
@@ -1599,6 +1631,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       persistedSessionId: isNew ? null : (session?.id ?? null),
     });
     const sendStillCurrent = () => sendToken !== null && sameChatTargetToken(sendToken, currentTargetTokenRef.current);
+    const failUnsent = (error?: string) => {
+      if (!sendStillCurrent()) return false;
+      const locked = Boolean(error && error.includes("locked by another"));
+      if (locked) setLockedByOther(true);
+      addNotice({
+        type: "error",
+        message: locked
+          ? t("chat_sessionLocked")
+          : (error && error !== "rejected" ? error : t("chat_sendFailed")),
+      });
+      optimisticUserMessageKeyRef.current = null;
+      setAgentRunning(false);
+      setAgentPhase(null);
+      dispatch({ type: "end" });
+      return false;
+    };
 
     try {
       let sentSessionId: string | null = null;
@@ -1629,16 +1677,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
         }
         if (receipt.status !== "accepted") {
-          if (receipt.status === "rejected" && sendStillCurrent()) {
-            const optimisticKey = optimisticUserMessageKeyRef.current;
-            setMessages((prev) => recoverFailedSend({
-              messages: prev,
-              optimisticKey,
-              isOptimisticMatch: (msg) => userMessageKey(msg) === optimisticKey,
-            }).messages);
-            optimisticUserMessageKeyRef.current = null;
-          }
-          return false;
+          return failUnsent(receipt.error);
         }
         if (sendStillCurrent()) promptSubmittedRef.current = true;
       } else if (target.kind === "persisted") {
@@ -1674,16 +1713,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           draftKey,
         });
         if (receipt.status !== "accepted") {
-          if (receipt.status === "rejected" && sendStillCurrent()) {
-            const optimisticKey = optimisticUserMessageKeyRef.current;
-            setMessages((prev) => recoverFailedSend({
-              messages: prev,
-              optimisticKey,
-              isOptimisticMatch: (msg) => userMessageKey(msg) === optimisticKey,
-            }).messages);
-            optimisticUserMessageKeyRef.current = null;
-          }
-          return false;
+          return failUnsent(receipt.error);
         }
         if (sendStillCurrent()) promptSubmittedRef.current = true;
       }
@@ -1740,6 +1770,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       {
         const message = e instanceof Error ? e.message : String(e);
+        if (message.includes("locked by another")) setLockedByOther(true);
         addNotice({
           type: "error",
           message: message.includes("locked by another") ? t("chat_sessionLocked") : message,
@@ -1752,11 +1783,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       return false;
     }
-  }, [isNew, isReadOnly, newSessionModel, newSessionDefaultModel, session, promoteNewSession, waitForPromptSettlement, addNotice, notifyAutoFollowSend, opts.chatInputRef, t, onSessionCreated]);
+  }, [isNew, isReadOnly, lockedByOther, newSessionModel, newSessionDefaultModel, session, promoteNewSession, waitForPromptSettlement, addNotice, notifyAutoFollowSend, opts.chatInputRef, t, onSessionCreated]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean): Promise<boolean> => {
     // 只读会话：bash 命令同样会写 session 文件，拦截。
     if (isReadOnly) return false;
+    if (lockedByOther) {
+      addNotice({ type: "error", message: t("chat_sessionLocked") });
+      return false;
+    }
     if (getRuntimeAgentRunning() || bashRunningRef.current || branchBusyRef.current) return false;
     const inputText = `${excludeFromContext ? "!!" : "!"}${command}`;
     bashRunningRef.current = true;
@@ -1784,7 +1819,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setPendingBash(null);
       setBashRunning(false);
     }
-  }, [addNotice, isReadOnly, ensureNewSession, loadSession, opts.chatInputRef, promoteNewSession, session]);
+  }, [addNotice, isReadOnly, lockedByOther, ensureNewSession, loadSession, opts.chatInputRef, promoteNewSession, session, t]);
   executeBashRef.current = executeBash;
 
   const handleAbort = useCallback(async () => {
@@ -2568,7 +2603,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, historyLoading, hasMoreBefore, error, activeLeafId, messages, entryIds, streamState,
-    agentRunning, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, thinkingLevel: resolvedThinking, defaultThinkingLevel: isNew ? settingsDefaultThinking : null,
+    agentRunning, lockedByOther, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, thinkingLevel: resolvedThinking, defaultThinkingLevel: isNew ? settingsDefaultThinking : null,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
