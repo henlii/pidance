@@ -81,7 +81,9 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
           table({ children }) {
             return (
               <div className="markdown-table-wrap">
-                <table>{children}</table>
+                <div className="markdown-table-scroll">
+                  <table>{children}</table>
+                </div>
               </div>
             );
           },

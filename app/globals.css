@@ -290,6 +290,7 @@ pre, code,
 .markdown-code-block,
 .markdown-code-body,
 .markdown-table-wrap,
+.markdown-table-scroll,
 .compaction-file-list {
   -webkit-user-select: text;
   user-select: text;
@@ -424,21 +425,25 @@ pre, code,
 .markdown-table-wrap {
   width: 100%;
   margin: 8px 0;
-  overflow-x: auto;
-  overflow-y: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  /* 移动端长按选中/复制表格文本：显式允许文本选择，交给系统手势
-     （横向滚动仍是 overflow-x 内滑动，不吞长按选择）。 */
-  user-select: text;
+}
+.markdown-table-scroll {
+  /* 滚动层不带 border-radius：overflow 与圆角裁切叠在同一节点时 WebKit 会吞掉拖选。 */
+  overflow-x: auto;
+  cursor: text;
   -webkit-user-select: text;
+  user-select: text;
   -webkit-touch-callout: default;
+  touch-action: auto;
 }
 .markdown-body table {
   border-collapse: separate;
   border-spacing: 0;
   min-width: 100%;
   font-size: 13px;
+  -webkit-user-select: text;
+  user-select: text;
 }
 .markdown-body th, .markdown-body td {
   border: 0;
@@ -446,8 +451,10 @@ pre, code,
   padding: 6px 10px;
   text-align: left;
   vertical-align: top;
-  user-select: text;
+  cursor: text;
   -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
 }
 .markdown-body tr:last-child td { border-bottom: 0; }
 .markdown-body th {
