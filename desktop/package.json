@@ -1,6 +1,6 @@
 {
   "name": "@henlii/pidance-desktop",
-  "version": "0.2.21",
+  "version": "0.2.22",
   "description": "Pidance Desktop（Windows 桌面壳）：内置 pidance 服务与窗口",
   "private": true,
   "engines": {
