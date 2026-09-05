@@ -73,6 +73,7 @@ export function useChatAutoFollow({
   const wasSessionBusyRef = useRef(false);
   const isMobileRef = useRef(false);
   const prefersReducedMotionRef = useRef(false);
+  const selectingRef = useRef(false);
   const [scrollContainerEl, setScrollContainerEl] = useState<HTMLDivElement | null>(null);
   isMobileRef.current = isMobile;
 
@@ -100,6 +101,8 @@ export function useChatAutoFollow({
   const pinToBottom = useCallback((behavior: ScrollBehavior = "instant") => {
     const container = scrollContainerRef.current;
     if (!container) return;
+    if (selectingRef.current) return;
+    if (typeof window !== "undefined" && window.getSelection()?.type === "Range") return;
     const top = Math.max(0, container.scrollHeight - container.clientHeight);
     if (behavior === "smooth") {
       programmaticSmoothUntilRef.current = Date.now() + PROGRAMMATIC_SMOOTH_IGNORE_MS;
@@ -182,20 +185,37 @@ export function useChatAutoFollow({
     };
 
     // 拖选/长按选中文本 = 用户阅读意图：暂停自动跟随，避免 pin 重设 scrollTop 清掉选区。
+    // 表格等特殊块在 Chromium 里可能不触发 selectstart，所以 pointerdown 也释放。
     const onSelectStart = (event: Event) => {
       const target = event.target;
       if (target instanceof Element && target.closest("input, textarea, [contenteditable='true']")) return;
       if (autoFollowModeRef.current !== "following") return;
       releaseOnUpIntent();
     };
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.button !== 0) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest("input, textarea, [contenteditable='true'], button, a")) return;
+      selectingRef.current = true;
+      releaseOnUpIntent();
+    };
+    const onPointerUp = () => {
+      selectingRef.current = false;
+    };
 
     container.addEventListener("selectstart", onSelectStart);
+    container.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
     container.addEventListener("wheel", onWheel, { passive: true });
     container.addEventListener("touchstart", onTouchStart, { passive: true });
     container.addEventListener("touchmove", onTouchMove, { passive: true });
     window.addEventListener("keydown", onKeyDown);
     return () => {
       container.removeEventListener("selectstart", onSelectStart);
+      container.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
       container.removeEventListener("wheel", onWheel);
       container.removeEventListener("touchstart", onTouchStart);
       container.removeEventListener("touchmove", onTouchMove);

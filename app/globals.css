@@ -289,8 +289,6 @@ pre, code,
 .chat-selectable,
 .markdown-code-block,
 .markdown-code-body,
-.markdown-table-wrap,
-.markdown-table-scroll,
 .compaction-file-list {
   -webkit-user-select: text;
   user-select: text;
@@ -427,42 +425,39 @@ pre, code,
   margin: 8px 0;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  cursor: text;
 }
 .markdown-table-scroll {
-  /* 滚动层不带 border-radius：overflow 与圆角裁切叠在同一节点时 WebKit 会吞掉拖选。 */
-  overflow-x: auto;
+  overflow: visible;
   cursor: text;
-  -webkit-user-select: text;
-  user-select: text;
-  -webkit-touch-callout: default;
-  touch-action: auto;
 }
-.markdown-body table {
-  border-collapse: separate;
-  border-spacing: 0;
-  min-width: 100%;
-  font-size: 13px;
-  -webkit-user-select: text;
-  user-select: text;
-}
-.markdown-body th, .markdown-body td {
-  border: 0;
+/* 不用 HTML table：Chromium 在 flex 会话列里对 table/td 拖选是坏的（段落可选、单元格不行）。 */
+.markdown-table-row {
+  display: grid;
+  align-items: stretch;
   border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.markdown-table-body .markdown-table-row:last-child {
+  border-bottom: 0;
+}
+.markdown-table-th,
+.markdown-table-td {
+  min-width: 0;
   padding: 6px 10px;
   text-align: left;
-  vertical-align: top;
   cursor: text;
-  -webkit-user-select: text;
-  user-select: text;
-  -webkit-touch-callout: default;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
-.markdown-body tr:last-child td { border-bottom: 0; }
-.markdown-body th {
+.markdown-table-th {
   background: var(--bg-panel);
   color: color-mix(in srgb, var(--text) 88%, var(--text-muted));
   font-weight: 650;
 }
-.markdown-body tbody tr:nth-child(even) td { background: var(--bg-subtle); }
+.markdown-table-body .markdown-table-row:nth-child(even) .markdown-table-td {
+  background: var(--bg-subtle);
+}
 .markdown-body hr {
   border: none;
   height: 1px;

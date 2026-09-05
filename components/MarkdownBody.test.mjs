@@ -47,9 +47,10 @@ test("fenced code 使用可滚动且可选择的正文容器", () => {
   assert.match(html, /markdown-code-block/);
 });
 
-test("GFM 表格滚动层与边框层分离，便于选中单元格", () => {
+test("GFM 表格用可选择的 div 行，而不是 HTML table", () => {
   const html = renderMarkdown("| a | b |\n| --- | --- |\n| 1 | 2 |\n");
   assert.match(html, /class="markdown-table-wrap"/);
   assert.match(html, /class="markdown-table-scroll"/);
-  assert.match(html, /<table>/);
+  assert.match(html, /class="markdown-table-td"/);
+  assert.doesNotMatch(html, /<table>/);
 });

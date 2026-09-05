@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
+import { Children, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
@@ -19,6 +19,60 @@ interface MarkdownBodyProps {
   onOpenFile?: (filePath: string) => void;
 }
 
+function caretFromPoint(x: number, y: number): { node: Node; offset: number } | null {
+  if (typeof document.caretRangeFromPoint === "function") {
+    const range = document.caretRangeFromPoint(x, y);
+    if (range) return { node: range.startContainer, offset: range.startOffset };
+  }
+  return null;
+}
+
+function MarkdownTableScroll({ children }: { children: ReactNode }) {
+  const anchorRef = useRef<{ node: Node; offset: number } | null>(null);
+  const draggingRef = useRef(false);
+
+  useEffect(() => {
+    const stop = () => {
+      draggingRef.current = false;
+      anchorRef.current = null;
+    };
+    window.addEventListener("mouseup", stop);
+    return () => window.removeEventListener("mouseup", stop);
+  }, []);
+
+  return (
+    <div
+      className="markdown-table-scroll"
+      onMouseDown={(event) => {
+        if (event.button !== 0) return;
+        const caret = caretFromPoint(event.clientX, event.clientY);
+        if (!caret) return;
+        draggingRef.current = true;
+        anchorRef.current = caret;
+      }}
+      onMouseMove={(event) => {
+        if (!draggingRef.current || !anchorRef.current) return;
+        const caret = caretFromPoint(event.clientX, event.clientY);
+        if (!caret) return;
+        const sel = window.getSelection();
+        if (!sel) return;
+        try {
+          sel.setBaseAndExtent(
+            anchorRef.current.node,
+            anchorRef.current.offset,
+            caret.node,
+            caret.offset,
+          );
+        } catch {
+          /* 跨节点选区可能抛错 */
+        }
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
 export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
 
@@ -29,6 +83,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
         rehypePlugins={markdownRehypePlugins}
         components={{
           code({ className, children, ...props }) {
+            delete props.node;
             const lang = className?.replace("language-", "").toLowerCase() ?? "";
             const raw = String(children);
             const isBlock = className?.includes("language-") || raw.includes("\n");
@@ -81,11 +136,32 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
           table({ children }) {
             return (
               <div className="markdown-table-wrap">
-                <div className="markdown-table-scroll">
-                  <table>{children}</table>
-                </div>
+                <MarkdownTableScroll>{children}</MarkdownTableScroll>
               </div>
             );
+          },
+          thead({ children }) {
+            return <div className="markdown-table-head">{children}</div>;
+          },
+          tbody({ children }) {
+            return <div className="markdown-table-body">{children}</div>;
+          },
+          tr({ children }) {
+            const count = Children.count(children) || 1;
+            return (
+              <div
+                className="markdown-table-row"
+                style={{ gridTemplateColumns: `repeat(${count}, minmax(0, 1fr))` }}
+              >
+                {children}
+              </div>
+            );
+          },
+          th({ children }) {
+            return <div className="markdown-table-th">{children}</div>;
+          },
+          td({ children }) {
+            return <div className="markdown-table-td">{children}</div>;
           },
         }}
       >
