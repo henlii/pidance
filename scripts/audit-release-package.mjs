@@ -35,6 +35,7 @@ import {
 } from "../lib/release-package-audit.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 /** package/workspace 根：npm pack、读 package.json、读待打包文件 */
 const packageRoot = path.resolve(__dirname, "..");
 
@@ -91,12 +92,13 @@ function loadPackageJson(root) {
 
 function runNpmPackDryRun(root) {
   const result = spawnSync(
-    "npm",
+    npmCommand,
     ["pack", "--dry-run", "--json", "--ignore-scripts"],
     {
       cwd: root,
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
+      shell: process.platform === "win32",
       env: process.env,
     },
   );
@@ -146,6 +148,7 @@ function runPre() {
     // package 根仍传 repoRoot 仅作兼容；实际敏感扫描以 sensitiveRoots 为准
     repoRoot: null,
     sensitiveRoots: ctx.sensitiveRoots,
+    neutralRoots: ctx.neutralRoot ? [ctx.neutralRoot] : [],
     homeDir: os.homedir(),
     fileContents,
     requireTextContents: true,
@@ -166,6 +169,7 @@ function runTgz(tgzPath) {
     filename: path.basename(tgzPath),
     repoRoot: null,
     sensitiveRoots: ctx.sensitiveRoots,
+    neutralRoots: ctx.neutralRoot ? [ctx.neutralRoot] : [],
     homeDir: os.homedir(),
     expectedName: typeof pkg.name === "string" ? pkg.name : null,
     expectedVersion: typeof pkg.version === "string" ? pkg.version : null,

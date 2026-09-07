@@ -227,7 +227,9 @@ function startServer() {
     return false;
   }
   const distDir = app.isPackaged ? ".next" : (process.env.PIDANCE_DIST_DIR || ".next");
-  child = spawn(nodeBin, [serverBin, "--hostname", HOST, "--port", PORT, "--no-open"], {
+  // 31415 由 Windows 安装版占用；监听地址交给 pidance-server.json 的
+  // remoteEnabled 决定，不能显式传 127.0.0.1 覆盖桌面版远程访问设置。
+  child = spawn(nodeBin, [serverBin, "--port", PORT, "--no-open"], {
     cwd: serverDir,
     env: { ...process.env, PIDANCE_DIST_DIR: distDir },
     windowsHide: true,

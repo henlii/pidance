@@ -13,6 +13,10 @@ spawn；关闭窗口即停本进程拉起的服务。
 - 服务进程使用 `resources/node/node.exe`（Node v24.18.0 win-x64，满足主包
   `engines.node >=22.19.0`），不依赖用户安装 Node。
 
+桌面版窗口始终通过本机 `127.0.0.1:31415` 打开；服务的监听地址由
+`~/.pi/agent/pidance-server.json` 中的远程访问设置决定。开启远程访问前先设置服务密码，
+保存后重启桌面版使监听地址生效。
+
 ## 构建（Windows 产物在 Windows 上打，或 CI windows runner）
 
 ```bat

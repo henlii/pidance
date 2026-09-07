@@ -96,10 +96,11 @@ npx @henlii/pidance@latest
 
 ```bash
 npm install
-npm run dev
+npm run dev       # 非 Windows 源码开发入口；Windows 的 31415 使用已安装版
 ```
 
-本地开发端口为 [http://localhost:31415](http://localhost:31415)。若同机还运行上游 [pi-web](https://github.com/agegr/pi-web)，请为其保留独立端口与数据目录，勿与 Pidance 混用。
+Windows 开发约定：**31415 固定使用已安装的 Pidance 版本**；工作区源码的持续测试使用 **31416**，通过
+`.agents/skills/pidance-development/scripts/local-deploy.mjs restart` 部署到 `.next-public`。勿混用安装版与工作区的进程、数据目录和构建产物。
 
 常用检查：
 

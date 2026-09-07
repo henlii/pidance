@@ -10,7 +10,7 @@
 
 Pidance is an open-source web client for the [Pi](https://github.com/badlogic/pi-mono) coding agent. It reads local Pi session files directly and preserves Pi SDK session and runtime semantics, bringing live chat, project files, Git, worktrees, subagents, and configuration into one browser workspace. Pi remains the source of truth for data and execution semantics; Pidance provides a clearer and more complete interface.
 
-> Current version: `0.2.18` · npm package: `@henlii/pidance` · CLI: `pidance`
+> Current version: `0.2.23` · npm package: `@henlii/pidance` · CLI: `pidance`
 
 ## Preview
 
@@ -86,7 +86,7 @@ pidance
 
 ```bash
 npm install
-npm run dev       # http://localhost:31415
+npm run dev       # non-Windows source development entry (default http://localhost:31415)
 npm run check     # typecheck + lint + unit tests
 ```
 
@@ -99,7 +99,8 @@ npm run test:browser          # browser regression (needs a running instance; de
 
 Do **not** run `npm run build` or `next build` during everyday development: it writes to `.next/` and can disrupt the development server. Production builds belong in an isolated release checkout through `npm run release:check`.
 
-The default development and product port is **31415**. If you also run upstream [pi-web](https://github.com/agegr/pi-web) on the same machine, keep its own port and do not share processes or data directories with Pidance.
+Windows development convention: **31415 is reserved for the installed Pidance build**. Continuous testing of the working tree uses **31416** via
+`.agents/skills/pidance-development/scripts/local-deploy.mjs restart`, with artifacts isolated in `.next-public`. Do not mix installed and working-tree processes, data directories, or build artifacts.
 
 ## Release process
 

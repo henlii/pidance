@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(__dirname, "..");
 const DEFAULT_BUILD_ROOT = path.join(os.tmpdir(), "pidance-release-build");
+const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 
 /** 不镜像进构建根的目录/文件（node_modules / 构建产物 / 本地治理 / 缓存 / 旧制品）。 */
 const EXCLUDED_NAMES = new Set([
@@ -70,7 +71,12 @@ function sha256File(filePath) {
 
 function run(cmd, args, opts = {}) {
   const env = opts.env || process.env;
-  const result = spawnSync(cmd, args, { stdio: "inherit", cwd: opts.cwd, env });
+  const result = spawnSync(cmd, args, {
+    stdio: "inherit",
+    cwd: opts.cwd,
+    env,
+    shell: process.platform === "win32" && /\.(?:cmd|bat)$/i.test(cmd),
+  });
   if (result.error) {
     console.error(`[candidate] 执行失败: ${cmd} ${args.join(" ")} → ${result.error.message}`);
     process.exit(2);
@@ -136,7 +142,7 @@ if (srcLockHash !== null && srcLockHash === dstLockHash && hasModules) {
   console.log("[candidate] ② 依赖: package-lock.json 未变，复用 node_modules（跳过 npm ci）");
 } else {
   console.log("[candidate] ② 依赖: package-lock.json 变更或首次，npm ci …");
-  run("npm", ["ci", "--no-audit", "--no-fund", "--include=dev"], { cwd: buildRoot });
+  run(npmCommand, ["ci", "--no-audit", "--no-fund", "--include=dev"], { cwd: buildRoot });
 }
 
 // 3. 隔离 webpack 构建（正式产物到构建根 .next）
@@ -156,7 +162,7 @@ run("node", ["scripts/audit-release-package.mjs", "--pre"], { cwd: buildRoot, en
 
 // 5. npm pack
 console.log("[candidate] ⑤ npm pack …");
-run("npm", ["pack", "--ignore-scripts"], { cwd: buildRoot, env: makeAuditEnv() });
+run(npmCommand, ["pack", "--ignore-scripts"], { cwd: buildRoot, env: makeAuditEnv() });
 if (!fs.existsSync(tgzPath)) {
   console.error(`[candidate] 未找到预期制品: ${tgzPath}`);
   process.exit(2);

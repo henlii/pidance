@@ -2,7 +2,7 @@
 /**
  * Pidance Desktop 自升级（Windows NSIS 静默替换）。
  *
- * 流程：查 GitHub Release 最新版 → 比较版本 → 下载 Pidance.Desktop.Setup.<v>.exe
+ * 流程：查 GitHub Release 最新版 → 比较版本 → 下载 Pidance Desktop Setup <v>.exe
  * → 校验发布 sha256.txt 中该 Setup 的哈希 → 退出当前 app → 静默运行安装器
  * （/S 覆盖安装到原位置，不弹向导）→ 安装完成（可选 relaunch）。
  *
@@ -19,8 +19,10 @@ const crypto = require("node:crypto");
 
 const REPO = "henlii/pidance";
 const API_LATEST = `https://api.github.com/repos/${REPO}/releases/latest`;
-// 桌面安装器资源名（CI 上传：Pidance.Desktop.Setup.<version>.exe + sha256.txt）
-const SETUP_PREFIX = "Pidance.Desktop.Setup.";
+// 桌面安装器资源名（electron-builder 默认：Pidance Desktop Setup <version>.exe）。
+// 同时兼容历史 CI 约定的点号命名，避免发布资产命名变化导致无法升级。
+const SETUP_NAME_RE = /^Pidance[ ._-]+Desktop[ ._-]+Setup[ ._-]+[0-9A-Za-z.-]+\.exe$/i;
+const MAX_REDIRECTS = 5;
 
 function currentDesktopVersion() {
   try {
@@ -41,6 +43,17 @@ function compareVersions(a, b) {
     if (x !== y) return x > y ? 1 : -1;
   }
   return 0;
+}
+
+function resolveHttpsUrl(value, label) {
+  const url = new URL(value);
+  if (url.protocol !== "https:") throw new Error(`${label} 必须使用 HTTPS`);
+  return url.toString();
+}
+
+function resolveRedirect(baseUrl, location, redirects) {
+  if (redirects >= MAX_REDIRECTS) throw new Error("下载重定向次数过多");
+  return resolveHttpsUrl(new URL(location, baseUrl).toString(), "下载地址");
 }
 
 function httpsGetJson(url) {
@@ -67,12 +80,22 @@ function httpsGetJson(url) {
   });
 }
 
-function httpsGetText(url) {
+function httpsGetText(url, redirects = 0) {
+  const requestUrl = resolveHttpsUrl(url, "校验文件地址");
   return new Promise((resolve, reject) => {
-    const req = https.get(url, { headers: { "User-Agent": "pidance-desktop-updater" } }, (res) => {
+    const req = https.get(requestUrl, { headers: { "User-Agent": "pidance-desktop-updater" } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        try {
+          httpsGetText(resolveRedirect(requestUrl, res.headers.location, redirects), redirects + 1).then(resolve, reject);
+        } catch (error) {
+          reject(error);
+        }
+        return;
+      }
       if (res.statusCode !== 200) {
         res.resume();
-        reject(new Error(`HTTP ${res.statusCode} from ${url}`));
+        reject(new Error(`HTTP ${res.statusCode} from ${requestUrl}`));
         return;
       }
       let body = "";
@@ -86,30 +109,44 @@ function httpsGetText(url) {
 }
 
 /** 下载到临时文件，返回 { file, size }。 */
-function downloadFile(url, destPath, onProgress) {
+function downloadFile(url, destPath, onProgress, redirects = 0) {
+  const requestUrl = resolveHttpsUrl(url, "安装包地址");
   return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(destPath);
-    const req = https.get(url, { headers: { "User-Agent": "pidance-desktop-updater" } }, (res) => {
+    let file = null;
+    const req = https.get(requestUrl, { headers: { "User-Agent": "pidance-desktop-updater" } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        try {
+          downloadFile(resolveRedirect(requestUrl, res.headers.location, redirects), destPath, onProgress, redirects + 1).then(resolve, reject);
+        } catch (error) {
+          reject(error);
+        }
+        return;
+      }
       if (res.statusCode !== 200) {
         res.resume();
         reject(new Error(`HTTP ${res.statusCode} downloading installer`));
-        file.destroy();
         return;
       }
       const total = parseInt(res.headers["content-length"] || "0", 10) || 0;
       let received = 0;
+      file = fs.createWriteStream(destPath);
       res.on("data", (chunk) => {
         received += chunk.length;
         if (total > 0 && onProgress) onProgress(received / total);
       });
+      res.on("error", (error) => {
+        file?.destroy(error);
+        reject(error);
+      });
       res.pipe(file);
+      file.on("finish", () => file.close(() => resolve({ file: destPath, size: received })));
+      file.on("error", reject);
     });
     req.on("error", (error) => {
-      file.destroy();
+      file?.destroy();
       reject(error);
     });
-    file.on("finish", () => file.close(() => resolve({ file: destPath, size: received })));
-    file.on("error", reject);
   });
 }
 
@@ -149,8 +186,10 @@ async function checkForUpdate() {
     }
     const assets = Array.isArray(release.assets) ? release.assets : [];
     const setup = assets.find((asset) => typeof asset.name === "string"
-      && asset.name.startsWith(SETUP_PREFIX) && asset.name.toLowerCase().endsWith(".exe"));
-    const shaAsset = assets.find((asset) => asset.name === "sha256.txt");
+      && SETUP_NAME_RE.test(asset.name)
+      && typeof asset.browser_download_url === "string");
+    const shaAsset = assets.find((asset) => asset.name === "sha256.txt"
+      && typeof asset.browser_download_url === "string");
     if (!setup || !shaAsset) {
       return { updateAvailable: false, currentVersion: current, latestVersion: tag, reason: "missing-assets" };
     }
@@ -204,9 +243,15 @@ async function applyUpdate(parentWindow) {
     });
     if (choice.response !== 0) return { applied: false, message: "declined" };
 
+    const setupAsset = info.setupAsset;
+    if (!setupAsset || path.basename(setupAsset) !== setupAsset
+      || !SETUP_NAME_RE.test(setupAsset)) {
+      throw new Error("GitHub Release 安装包名称无效");
+    }
     const tmpDir = app.getPath("temp");
-    const setupPath = path.join(tmpDir, `${info.setupAsset}.dl`);
-    const shaPath = path.join(tmpDir, `${info.setupAsset}.sha256.txt`);
+    // 保留 .exe 扩展名；Windows CreateProcess 不会执行 .exe.dl。
+    const setupPath = path.join(tmpDir, setupAsset);
+    const shaPath = path.join(tmpDir, `${setupAsset}.sha256.txt`);
     try {
       fs.unlinkSync(setupPath);
       fs.unlinkSync(shaPath);
@@ -239,11 +284,10 @@ async function applyUpdate(parentWindow) {
     });
     if (typeof globalThis.__pidanceStopServer === "function") globalThis.__pidanceStopServer();
     app.quit();
-    const installer = spawn(info.setupAsset.includes(" ") ? `"${setupPath}"` : setupPath, installerArgs, {
+    const installer = spawn(setupPath, installerArgs, {
       detached: true,
       stdio: "ignore",
       windowsHide: true,
-      shell: true,
     });
     installer.unref();
     return { applied: true, message: "installer-spawned" };

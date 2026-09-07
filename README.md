@@ -10,7 +10,7 @@
 
 Pidance 是面向 [Pi](https://github.com/badlogic/pi-mono) coding agent 的开源 Web 客户端。它直接读取本机 Pi 会话文件，并沿用 Pi SDK 的会话与运行时语义，把实时对话、项目文件、Git、工作树、子代理和配置管理汇集到一个浏览器工作区。Pi 仍是数据与执行语义的事实来源；Pidance 负责提供更清晰、更完整的操作界面。
 
-> 当前版本：`0.2.22` · npm 包：`@henlii/pidance` · CLI：`pidance`
+> 当前版本：`0.2.23` · npm 包：`@henlii/pidance` · CLI：`pidance`
 
 ## 界面预览
 
@@ -89,7 +89,7 @@ pidance
 
 ```bash
 npm install
-npm run dev       # http://localhost:31415
+npm run dev       # 非 Windows 源码开发入口（默认 http://localhost:31415）
 npm run check     # typecheck + lint + 单元测试
 ```
 
@@ -102,7 +102,8 @@ npm run test:browser          # 浏览器回归（需已运行的实例，默认
 
 日常开发**不要**执行 `npm run build` 或 `next build`：它会写入 `.next/` 并干扰开发服务。正式构建只在隔离发布 checkout 中通过 `npm run release:check` 执行。
 
-默认开发/产品端口为 **31415**。若同机还运行上游 [pi-web](https://github.com/agegr/pi-web)，请为其保留其自己的端口，勿与 Pidance 混用进程与数据目录。
+Windows 开发约定：**31415 固定使用已安装的 Pidance 版本**；工作区源码的持续测试使用 **31416**，通过
+`.agents/skills/pidance-development/scripts/local-deploy.mjs restart` 部署到 `.next-public`。勿混用安装版与工作区的进程、数据目录和构建产物。
 
 ## 发布
 

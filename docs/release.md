@@ -16,7 +16,7 @@ Pidance 源自 [agegr/pi-web](https://github.com/agegr/pi-web)，底层仍兼容
 3. 正式 `next build` **只允许**在隔离发布 checkout 中作为 `release:check` 的一部分执行；日常开发禁止 `next build`（会污染 `.next/`，干扰 `npm run dev`）。
 4. **生成前后均须审计**：`release:audit`（pack dry-run + 完整文本扫描）→ 显式 `npm pack` → `release:audit:tgz`（解析真实 tgz）→ 再 sha256 / 安装冒烟 / publish。不得用工作区文件冒充制品内容。
 5. `npm login` **仅在**实际 `npm publish` 前需要；预检与审计不需要登录。本机默认 registry 可为镜像（如 npmmirror），但**正式登录、身份检查、publish 与查询必须指向官方源** `https://registry.npmjs.org/`。`package.json` 的 `publishConfig.registry` / `access` 是防误发护栏，命令行仍应显式传 `--registry`。
-6. 公开安装入口 CLI **仅** `pidance`；**不得**注册 `pi-web`（该命令归上游）。产品默认端口 **31415**；**30141** 留给上游 pi-web，禁止操作。
+6. 公开安装入口 CLI **仅** `pidance`；**不得**注册 `pi-web`（该命令归上游）。产品默认端口 **31415**；正式服务只使用已安装的 Pidance 制品。
 7. npm 与 GitHub Release **必须使用同一个已验收 tgz**（及对应 SHA-256）。
 
 ## 0. 版本提交（在开发分支 / PR）
