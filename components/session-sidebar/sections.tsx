@@ -7,7 +7,7 @@
  */
 
 import { useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
-import { RunningTimeContext } from "./running-time";
+import { RunningTimeContext, useWaitingSessionIds } from "./running-time";
 import { ViewportDialog } from "../ui/ViewportDialog";
 import { useI18n } from "@/lib/i18n";
 import type { SessionInfo } from "@/lib/types";
@@ -41,6 +41,7 @@ import {
   SlidersIcon,
   TrashIcon,
   UnreadSessionIndicator,
+  WaitingSessionIndicator,
   WorktreeActions,
   XIcon,
 } from "@/components/session-sidebar/display";
@@ -482,6 +483,7 @@ function WorktreeGroupSection({
   onTogglePin?: (id: string) => void;
 }) {
   const { t } = useI18n();
+  const waitingIds = useWaitingSessionIds();
   const collapsed = isSessionNodeEffectivelyCollapsed(collapsedWorktreePaths, group.path, searchActive);
   const label = group.branch ?? displayCwd(group.path, homeDir);
   const collapseLabel = collapsed
@@ -494,6 +496,12 @@ function WorktreeGroupSection({
       nodes.some((node) => running.has(node.session.id) || anyRunning(node.children));
     return anyRunning(group.tree);
   }, [group, runningSessionIds, subagentRunningIds]);
+  // 聚合等待黄点：组内任一会话在询问用户（暂停）即显示（优先于运行圆环）。
+  const groupHasWaiting = useMemo(() => {
+    const anyWaiting = (nodes: SessionDisplayNode[]): boolean =>
+      nodes.some((node) => waitingIds.has(node.session.id) || anyWaiting(node.children));
+    return anyWaiting(group.tree);
+  }, [group, waitingIds]);
 
   return (
     <div>
@@ -541,7 +549,7 @@ function WorktreeGroupSection({
         <span aria-hidden="true" className="sidebar-indicator-icon" style={{ position: "absolute", left: sidebarIndicatorLeft(0), top: "50%", display: "flex", width: SIDEBAR_INDICATOR_SLOT, height: 20, alignItems: "center", justifyContent: "center", transform: "translateY(-50%)", color: "var(--text-dim)" }}>
           <BranchIcon size={11} />
         </span>
-        {groupHasRunning && (
+        {groupHasRunning && !groupHasWaiting && (
           <span aria-hidden="true" style={{ position: "absolute", left: sidebarIndicatorLeft(0), top: "50%", display: "flex", width: SIDEBAR_INDICATOR_SLOT, height: 20, alignItems: "center", justifyContent: "center", transform: "translateY(-50%)", pointerEvents: "none" }}>
             <RunningSessionIndicator size={18} />
           </span>
@@ -555,7 +563,7 @@ function WorktreeGroupSection({
             fontFamily: "var(--font-mono)",
           }}
         />
-        {groupHasRunning && <RunningSessionIndicator size={10} />}
+        {groupHasWaiting ? <WaitingSessionIndicator size={10} /> : groupHasRunning && <RunningSessionIndicator size={10} />}
         <SidebarIconButton
           label={t("sidebar_newSessionIn", { project: label })}
           hoverReveal
@@ -784,6 +792,9 @@ function SessionItem({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  // agent 询问用户中（extension 弹窗/ask）：暂停态显示黄点，不转动画。
+  const waitingIds = useWaitingSessionIds();
+  const isWaitingUser = session.id ? waitingIds.has(session.id) : false;
 
   const capabilities = getSessionCapabilities(session);
   // 归档能力：running 或只读 subagent 禁用（后端 409/403 的 UI 先行拦截 + 原因说明）。
@@ -962,8 +973,9 @@ const handleDeleteConfirm = useCallback(async () => {
               style={{ position: "absolute", left: sidebarIndicatorLeft(depth), top: "50%", width: SIDEBAR_INDICATOR_SLOT, height: 20, transform: "translateY(-50%)" }}
             />
           )}
-          {/* 运行中：圆环套在图标列（与折叠/项目图标同槽位，居中，旋转动画）。 */}
-          {isRunning && (
+          {/* 运行中：圆环套在图标列（与折叠/项目图标同槽位，居中，旋转动画）。
+              询问用户中（暂停）不转动画，由标题前的等待黄点表达。 */}
+          {isRunning && !isWaitingUser && (
             <span aria-hidden="true" style={{ position: "absolute", left: sidebarIndicatorLeft(depth), top: "50%", display: "flex", width: SIDEBAR_INDICATOR_SLOT, height: 20, alignItems: "center", justifyContent: "center", transform: "translateY(-50%)", pointerEvents: "none" }}>
               <RunningSessionIndicator size={18} />
             </span>
@@ -982,10 +994,13 @@ const handleDeleteConfirm = useCallback(async () => {
               }}
               title={title}
             >
-              {/* 状态指示置前：未读显示在标题之前（OpenChamber 风格）；运行中已上移到图标列。 */}
-              {!isRunning && isUnread && <UnreadSessionIndicator size={10} />}
+              {/* 状态指示置前：询问用户中显示等待黄点（优先于未读/动画）；
+                  未读显示在标题之前（OpenChamber 风格）；运行中已上移到图标列。 */}
+              {isWaitingUser ? (
+                <WaitingSessionIndicator size={10} />
+              ) : (!isRunning && isUnread && <UnreadSessionIndicator size={10} />)}
               {/* Compact：运行时长内联在圆点后（行右侧信息区）；折叠父组只留圆点 */}
-              {showRunningDuration && compact && (
+              {!isWaitingUser && showRunningDuration && compact && (
                 <RunningDurationText startedAt={runningStartedAt} now={runningTime.now} running />
               )}
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
@@ -1004,7 +1019,7 @@ const handleDeleteConfirm = useCallback(async () => {
             {!compact && (
               <div style={{ marginTop: 1, display: "flex", alignItems: "center", gap: 8, color: "var(--text-dim)", fontSize: 10.5, minWidth: 0 }}>
               {/* P1-5 运行时长：展开行 secondary 信息区右侧（modified 前）；折叠父组只留圆点 */}
-              {showRunningDuration && (
+              {!isWaitingUser && showRunningDuration && (
                 <RunningDurationText startedAt={runningStartedAt} now={runningTime.now} running />
               )}
               <span title={session.modified}>{formatRelativeTime(session.modified, t)}</span>

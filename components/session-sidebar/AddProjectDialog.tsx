@@ -5,14 +5,6 @@ import { useI18n } from "@/lib/i18n";
 import { ViewportDialog } from "../ui/ViewportDialog";
 import { DialogButton, HomeIcon } from "./display";
 
-declare global {
-  interface Window {
-    piDesktop?: {
-      selectDirectory: () => Promise<string | null>;
-    };
-  }
-}
-
 export interface AddProjectDialogProps {
   open: boolean;
   onClose: () => void;
@@ -37,12 +29,7 @@ export function AddProjectDialog({ open, onClose, resolveProjectRoot, onAdded }:
   const [missing, setMissing] = useState(false);
   const [browsePath, setBrowsePath] = useState<string | null>(null);
   const [parentPath, setParentPath] = useState<string | null>(null);
-  const [desktopPickerAvailable, setDesktopPickerAvailable] = useState(false);
   const browseGenRef = useRef(0);
-
-  useEffect(() => {
-    setDesktopPickerAvailable(typeof window !== "undefined" && Boolean(window.piDesktop?.selectDirectory));
-  }, []);
 
   const reset = useCallback(() => {
     setValue("");
@@ -133,21 +120,6 @@ export function AddProjectDialog({ open, onClose, resolveProjectRoot, onAdded }:
       setValidating(false);
     }
   }, [browsePath, value, validating, onAdded, resolveProjectRoot]);
-
-  const handlePickDirectory = useCallback(async () => {
-    const desktop = window.piDesktop;
-    if (!desktop) return;
-    try {
-      setError(null);
-      const path = await desktop.selectDirectory();
-      if (path !== null) {
-        setValue(path);
-        void browseDirectory(path);
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, [browseDirectory]);
 
   const handleDefaultCwd = useCallback(async () => {
     if (validating) return;
@@ -248,11 +220,6 @@ export function AddProjectDialog({ open, onClose, resolveProjectRoot, onAdded }:
           >
             {loading ? t("sidebar_browseLoading") : t("sidebar_browseGo")}
           </DialogButton>
-          {desktopPickerAvailable && (
-            <DialogButton onClick={() => void handlePickDirectory()}>
-              {t("sidebar_selectDirectory")}
-            </DialogButton>
-          )}
         </div>
         {browsePath && (
           <div style={{ marginTop: 10 }}>

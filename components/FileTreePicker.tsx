@@ -4,14 +4,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import { ViewportDialog } from "./ui/ViewportDialog";
 
-declare global {
-  interface Window {
-    piDesktop?: {
-      selectDirectory: () => Promise<string | null>;
-    };
-  }
-}
-
 type BrowseEntry = { name: string; path: string };
 
 /**

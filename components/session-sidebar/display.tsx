@@ -581,6 +581,10 @@ export function GroupPagination({ groupKey, total, visibleCount, searchActive, o
   );
 }
 
+/**
+ * 会话列表的运行指示：旋转圆环动画（运行中）。
+ * 折叠的父组/项目/worktree 行也用本组件做聚合点。
+ */
 export function RunningSessionIndicator({ size = 14 }: { size?: number }) {
   const { t } = useI18n();
   return (
@@ -612,6 +616,31 @@ export function RunningSessionIndicator({ size = 14 }: { size?: number }) {
           animation: "sidebar-running-spin 1s linear infinite",
         }}
       />
+    </span>
+  );
+}
+
+/**
+ * 会话列表的等待指示：agent 在询问用户（extension 弹窗/ask）时暂停，
+ * 会话既不在跑也不再转动画，改为与未读点同构的黄色圆点（等待中）。
+ */
+export function WaitingSessionIndicator({ size = 14 }: { size?: number }) {
+  const { t } = useI18n();
+  return (
+    <span
+      title={t("sidebar_waiting")}
+      aria-label={t("sidebar_waiting")}
+      style={{
+        width: size,
+        height: size,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+        color: "var(--status-waiting)",
+      }}
+    >
+      <span aria-hidden="true" style={{ display: "block", width: 6, height: 6, borderRadius: "50%", background: "currentColor" }} />
     </span>
   );
 }

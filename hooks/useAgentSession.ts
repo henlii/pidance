@@ -49,7 +49,6 @@ import { useChatAutoFollow } from "@/hooks/useChatAutoFollow";
 import { ensureServerPrefsLoaded, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { resolveDisplayModel, settleModelOverride } from "@/lib/model-selection";
 import { useI18n } from "@/lib/i18n";
-import { getDesktopBridge } from "@/lib/desktop-bridge";
 import { guidePageThinkingUpdate, thinkingLevelForEnsureBody } from "@/lib/thinking-level-policy";
 import { isThinkingLevel, type AgentThinkingLevel } from "@/lib/agent-settings";
 
@@ -340,6 +339,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
   const [settingsDefaultThinking, setSettingsDefaultThinking] = useState<AgentThinkingLevel | null>(null);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption | null>(null);
+  // 当前会话的思考档是否已被权威源（loadSession context / 引导页默认）确认：
+  // 确认前模型按钮不显示档位，避免切回会话瞬间残留上一会话/中间态档位。
+  const [thinkingReady, setThinkingReady] = useState(false);
+  const thinkingReadyRef = useRef(false);
+  thinkingReadyRef.current = thinkingReady;
+  // 档位权威已确认的会话 id（loadSession 应用 context 后置位，切会话复位）：
+  // 用于过滤 attach 重放/加载窗口内的 thinking_level_changed 回写。
+  const thinkingSettledRef = useRef<string | null>(null);
   // settings.json 默认只服务于新会话引导页；已有会话没有自己的档位时为 off，
   // 不得把全局默认带入其它会话。
   const resolvedThinking: AgentThinkingLevel = isNew
@@ -673,6 +680,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // off 也是会话的有效值，必须覆盖上一个会话遗留的深度。
         setThinkingLevel(d.context.thinkingLevel);
       }
+      // 权威档位已到（无论有无档）：解锁思考档显示/事件回写。
+      thinkingSettledRef.current = sid;
+      setThinkingReady(true);
 
       messagesLoaded = true;
       if (showLoading) setLoading(false);
@@ -1194,11 +1204,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setToolExecutionSnapshots(getToolExecutionSnapshots(nextSnapshots));
       }
       dispatch({ type: "end" });
-      const desktop = getDesktopBridge();
-      if (desktop && (document.visibilityState !== "visible" || !document.hasFocus())) {
-        void desktop.notify(t("desktop_notificationTitle"), t("desktop_notificationBody"))
-          .catch(() => undefined);
-      }
       onAgentEnd?.();
     }
   }, [loadSession, onAgentEnd, applyAgentStateSnapshot, dispatch, setAgentRunning, setAgentPhase, setRetryInfo, notifyAutoFollowEnd, t]);
@@ -1506,10 +1511,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "thinking_level_changed": {
         // SDK clamp/落盘后的权威深度回写 UI：用户选择经 SDK 校验可能被 clamp
         // （模型不支持时降档）或已在磁盘生效，必须以事件值覆盖本地预选，否则
-        // UI 显示与真实生效深度分叉（“思考总是乱变”）。
+        // UI 显示与真实生效深度分叉（"思考总是乱变"）。
+        // 只接受当前会话且档位权威已确认后的回写：切回会话瞬间 attach 重放的
+        // 历史事件不抢在 loadSession 前落 UI（loadSession 的 context 值更权威）。
         const level = event.level as string | undefined;
         if (level && isThinkingLevel(level)) {
-          setThinkingLevel(level as ThinkingLevelOption);
+          if (thinkingReadyRef.current && thinkingSettledRef.current === sessionIdRef.current) {
+            setThinkingLevel(level as ThinkingLevelOption);
+          }
         }
         break;
       }
@@ -2439,6 +2448,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setPendingModel(null);
     setNewSessionModel(null);
     setThinkingLevel(null);
+    thinkingSettledRef.current = null;
+    setThinkingReady(false);
+    if (!session?.id) {
+      // 引导页/无会话：直接用 settings 默认档（发送时 ensure body 会带档），
+      // 无需等 loadSession。
+      setThinkingReady(true);
+    }
     pendingModelRef.current = null;
     optimisticUserMessageKeyRef.current = null;
     // 会话切换：把 followUp 队列投影切到新会话（映射保留旧会话条目，切回恢复）。
@@ -2603,7 +2619,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, historyLoading, hasMoreBefore, error, activeLeafId, messages, entryIds, streamState,
-    agentRunning, lockedByOther, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, thinkingLevel: resolvedThinking, defaultThinkingLevel: isNew ? settingsDefaultThinking : null,
+    agentRunning, lockedByOther, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, thinkingLevel: resolvedThinking, thinkingReady, defaultThinkingLevel: isNew ? settingsDefaultThinking : null,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,

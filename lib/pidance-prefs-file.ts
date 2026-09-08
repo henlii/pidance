@@ -106,12 +106,23 @@ export function writePidancePrefs(prefs: PidancePrefs, agentDir: string = getAge
   withPrefsLock(agentDir, () => writePidancePrefsUnlocked(prefs, agentDir));
 }
 
-/** 顶层键合并；双方均为对象时再深合并一层（drafts/fileTree 等嵌套键不互相覆盖）。 */
+/**
+ * 顶层键合并；双方均为对象时再深合并一层（drafts/fileTree 等嵌套键不互相覆盖）。
+ * patch 中显式 null = 删除键（墓碑语义）：merge 是并集，客户端整包 PUT 若不携带
+ * 某键会被当作「未改动」保留，导致 clearDraft 等服务端残留旧值、刷新后草稿复活。
+ */
 export function mergePidancePrefs(base: PidancePrefs, patch: PidancePrefs): PidancePrefs {
   const out: PidancePrefs = { ...base };
   for (const [key, value] of Object.entries(patch)) {
-    if (isPlainRecord(value) && isPlainRecord(out[key])) {
-      out[key] = { ...(out[key] as PidancePrefs), ...(value as PidancePrefs) };
+    if (value === null) {
+      delete out[key];
+    } else if (isPlainRecord(value) && isPlainRecord(out[key])) {
+      const merged: PidancePrefs = { ...(out[key] as PidancePrefs) };
+      for (const [subKey, subValue] of Object.entries(value as PidancePrefs)) {
+        if (subValue === null) delete merged[subKey];
+        else merged[subKey] = subValue;
+      }
+      out[key] = merged;
     } else {
       out[key] = value;
     }

@@ -16,6 +16,7 @@
   --color-tool-bg: var(--tool-bg);
   --color-bg-subtle: var(--bg-subtle);
   --color-status-running: var(--status-running);
+  --color-status-waiting: var(--status-waiting);
   --color-status-unread: var(--status-unread);
   --color-status-success: var(--status-success);
   --color-status-warning: var(--status-warning);
@@ -44,6 +45,7 @@
   --tool-bg: #efeeec80;
   --code-bg: #f4f3f1;
   --status-running: #b35017;
+  --status-waiting: #c99700;
   --status-unread: #2d72c4;
   --status-success: #5f8d3d;
   --status-warning: #8d6c15;
@@ -101,6 +103,7 @@ html.dark {
   --tool-bg: #120f0e80;
   --code-bg: #0e0c0b;
   --status-running: #da7c47;
+  --status-waiting: #eab308;
   --status-unread: #479fe6;
   --status-success: #76ad4f;
   --status-warning: #c67f13;
@@ -152,6 +155,7 @@ html[data-theme-style="fusion"] {
   --tool-bg: #f0f5f4;
   --code-bg: #172126;
   --status-running: #27836e;
+  --status-waiting: #cf9f1d;
   --status-unread: #286e98;
   --status-success: #49805d;
   --status-warning: #9a6a1a;
@@ -199,6 +203,7 @@ html.dark[data-theme-style="fusion"] {
   --tool-bg: #121d1f;
   --code-bg: #0b1113;
   --status-running: #5eb39b;
+  --status-waiting: #ecc94b;
   --status-unread: #69a7ca;
   --status-success: #79ad78;
   --status-warning: #d0a356;

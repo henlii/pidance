@@ -176,7 +176,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
 
   const {
     loading, historyLoading, hasMoreBefore, error, messages, entryIds, streamState,
-    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel,
+    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, thinkingReady,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, defaultThinkingLevel,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -439,6 +439,7 @@ const chatPlan = composeChatPlan({
       compactError={compactError}
       compactResult={compactResult}
       thinkingLevel={thinkingLevel}
+      thinkingReady={thinkingReady}
       defaultThinkingLevel={defaultThinkingLevel}
       onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
       availableThinkingLevels={availableThinkingLevels}

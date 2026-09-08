@@ -10,9 +10,6 @@ const eslintConfig = [
       "coverage/**",
       "dist/**",
       "build/**",
-      // Electron 桌面壳（desktop/）是独立 CommonJS 包，有自己的构建链
-      // （electron-builder，见 .github/workflows/desktop-win.yml），不属 Web lint 范围。
-      "desktop/**",
     ],
   },
   ...coreWebVitals,

@@ -127,7 +127,9 @@ export function setServerPref(key: string, value: unknown): void {
   }
   const last = parts[parts.length - 1];
   if (value === undefined || value === null) {
-    delete target[last];
+    // 墓碑语义：PUT 整包 patch 缺键会被服务端 merge 当成「未改动」保留，删除
+    // 必须以显式 null 表达（服务端 merge null = 删键）。
+    target[last] = null;
   } else {
     target[last] = value;
   }
@@ -135,6 +137,10 @@ export function setServerPref(key: string, value: unknown): void {
   scheduleSave();
 }
 
+/**
+ * 内存 prefs 的删除以 null 墓碑表达；读侧统一归一为 undefined，
+ * 调用方无需区分「键不存在」与「已删除」。
+ */
 export function getServerPref<T = unknown>(key: string): T | undefined {
   const parts = key.split(".");
   let target: unknown = readPrefs();
@@ -142,7 +148,7 @@ export function getServerPref<T = unknown>(key: string): T | undefined {
     if (typeof target !== "object" || target === null) return undefined;
     target = (target as ServerPrefs)[part];
   }
-  return target as T;
+  return (target ?? undefined) as T | undefined;
 }
 
 /** 强制立即同步（页面隐藏/卸载时调用可减少丢失窗口）。 */
@@ -182,7 +188,35 @@ export function useServerPreferences(): ServerPrefs {
     };
   }, []);
 
-  // 网页激活同步：focus / visibilitychange(visible) 时重新拉取
+  /** 收集对象深层所有值为 null 的点路径（如 drafts.abc → ["drafts.abc"]）。 */
+function collectNullPaths(value: unknown, prefix: string, out: string[]): string[] {
+  if (value === null) {
+    out.push(prefix);
+    return out;
+  }
+  if (typeof value !== "object" || value === undefined || Array.isArray(value)) return out;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    collectNullPaths(child, prefix ? `${prefix}.${key}` : key, out);
+  }
+  return out;
+}
+
+/** 按点路径在目标对象上置 null（创建中间对象）。 */
+function setPathNull(target: Record<string, unknown>, key: string): void {
+  const parts = key.split(".");
+  let node = target;
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    const part = parts[i];
+    const next = node[part];
+    if (typeof next !== "object" || next === null || Array.isArray(next)) {
+      node[part] = {};
+    }
+    node = node[part] as Record<string, unknown>;
+  }
+  node[parts[parts.length - 1]] = null;
+}
+
+// 网页激活同步：focus / visibilitychange(visible) 时重新拉取
   useEffect(() => {
     const sync = () => {
       if (document.visibilityState !== "visible") return;
@@ -195,6 +229,11 @@ export function useServerPreferences(): ServerPrefs {
               parseUnreadSessionState(local.unreadSessionState),
               parseUnreadSessionState(remote.unreadSessionState ?? remote.unreadSessionIds),
             );
+            // 本地删除墓碑优先于远端旧值：删除 PUT 可能仍在途/未发出，
+            // 不能被 sync 覆盖，否则服务端残留（已发送草稿等）会拉回本地复活。
+            for (const path of collectNullPaths(local, "", [])) {
+              setPathNull(merged, path);
+            }
           }
           singletonPrefs = merged;
           singletonLoaded = true;

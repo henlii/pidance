@@ -6,7 +6,7 @@
  * 避免 sections ↔ SessionSidebar 循环 import。
  */
 
-import { createContext } from "react";
+import { createContext, useContext } from "react";
 
 export interface RunningTimeContextValue {
   startedAt: ReadonlyMap<string, number>;
@@ -17,3 +17,14 @@ export const RunningTimeContext = createContext<RunningTimeContextValue>({
   startedAt: new Map(),
   now: Date.now(),
 });
+
+/**
+ * 询问用户中的会话集合（agent 暂停等待 extension 弹窗/ask 回复）：
+ * 这些会话显示等待黄点而不是运行动画。由 SessionSidebar 从
+ * /api/agent/running(+events) 的 pendingExtensionUi 维护并提供。
+ */
+export const WaitingSessionIdsContext = createContext<ReadonlySet<string>>(new Set());
+
+export function useWaitingSessionIds(): ReadonlySet<string> {
+  return useContext(WaitingSessionIdsContext);
+}

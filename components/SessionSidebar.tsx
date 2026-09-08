@@ -123,7 +123,7 @@ const SIDEBAR_BASE_LEFT = SIDEBAR_GUTTER + SIDEBAR_INDICATOR_SLOT + SIDEBAR_INDI
 const sidebarRowPaddingLeft = (depth: number) => SIDEBAR_BASE_LEFT + depth * SIDEBAR_DEPTH_STEP;
 const sidebarIndicatorLeft = (depth: number) => SIDEBAR_GUTTER + depth * SIDEBAR_DEPTH_STEP;
 
-import { RunningTimeContext } from "@/components/session-sidebar/running-time";
+import { RunningTimeContext, WaitingSessionIdsContext } from "@/components/session-sidebar/running-time";
 
 interface Props {
   selectedSessionId: string | null;
@@ -143,6 +143,18 @@ interface Props {
 
 
 // ── 主组件 ─────────────────────────────────────────────────────────────────
+
+function extractWaitingSessionIds(pending: unknown): Set<string> {
+  const out = new Set<string>();
+  if (!Array.isArray(pending)) return out;
+  for (const item of pending) {
+    if (item && typeof item === "object") {
+      const sid = (item as { sessionId?: unknown }).sessionId;
+      if (typeof sid === "string" && sid) out.add(sid);
+    }
+  }
+  return out;
+}
 
 export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, restoreNonce = 0, refreshKey, onSessionDeleted, onProjectAdded, catalogStore: catalogStoreProp }: Props) {
   const { t } = useI18n();
@@ -187,6 +199,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // subagent 活跃运行（子会话 + 等待中的主会话）；由 /api/subagent-runs 推导。
   const [subagentRunningIds, setSubagentRunningIds] = useState<Set<string>>(() => new Set());
   const subagentPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // agent 询问用户中的会话（extension 弹窗/ask 暂停）：侧栏显示等待黄点。
+  const [waitingUserIds, setWaitingUserIds] = useState<ReadonlySet<string>>(() => new Set());
   // ── P1-5 共享运行计时：1Hz ticker + first-seen 时间跟踪（见 RunningTimeContext）──
   const [runningNow, setRunningNow] = useState(() => Date.now());
   const [runningStartedAt, setRunningStartedAt] = useState<ReadonlyMap<string, number>>(() => new Map());
@@ -433,6 +447,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           type?: string;
           runningSessionIds?: string[];
           runningStartedAt?: Record<string, number>;
+          pendingExtensionUi?: unknown;
         };
         if (data.type === "running") {
           runningSnapshotAuthoritativeRef.current = true;
@@ -442,6 +457,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               ? data.runningStartedAt
               : undefined,
           );
+          setWaitingUserIds(extractWaitingSessionIds(data.pendingExtensionUi));
         }
       } catch {
         // ignore malformed frames
@@ -461,7 +477,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       const requestRevision = runningSnapshotRevisionRef.current;
       void fetch("/api/agent/running", { cache: "no-store" })
         .then((r) => r.json())
-        .then((d: { runningSessionIds?: unknown; runningStartedAt?: Record<string, number> }) => {
+        .then((d: { runningSessionIds?: unknown; runningStartedAt?: Record<string, number>; pendingExtensionUi?: unknown }) => {
           if (!Array.isArray(d.runningSessionIds)) return;
           if (!mountedRef.current || !shouldApplyRunningReconciliation(
             requestRevision,
@@ -476,6 +492,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               ? d.runningStartedAt
               : undefined,
           );
+          setWaitingUserIds(extractWaitingSessionIds(d.pendingExtensionUi));
         })
         .catch(() => undefined);
     };
@@ -1148,6 +1165,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   return (
     <RunningTimeContext.Provider value={{ startedAt: runningStartedAt, now: runningNow }}>
+    <WaitingSessionIdsContext.Provider value={waitingUserIds}>
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       {/* Header：品牌 + 全图标工具栏（OpenChamber 规格 24×24 / 图标 18 / 6px 圆角） */}
       <div
@@ -1689,6 +1707,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         onSaveName={handleSaveProjectAlias}
       />
       </div>
+    </WaitingSessionIdsContext.Provider>
     </RunningTimeContext.Provider>
     );
   }

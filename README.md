@@ -102,8 +102,8 @@ npm run test:browser          # 浏览器回归（需已运行的实例，默认
 
 日常开发**不要**执行 `npm run build` 或 `next build`：它会写入 `.next/` 并干扰开发服务。正式构建只在隔离发布 checkout 中通过 `npm run release:check` 执行。
 
-Windows 开发约定：**31415 固定使用已安装的 Pidance 版本**；工作区源码的持续测试使用 **31416**，通过
-`.agents/skills/pidance-development/scripts/local-deploy.mjs restart` 部署到 `.next-public`。勿混用安装版与工作区的进程、数据目录和构建产物。
+Windows 开发约定：**31415 固定使用正式服务制品**；工作区源码的持续测试使用 **31416**，通过
+`.agents/skills/pidance-development/scripts/local-deploy.mjs restart` 部署到 `.next-public`。勿混用正式服务与工作区的进程、数据目录和构建产物。
 
 ## 发布
 

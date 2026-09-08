@@ -16,7 +16,7 @@ export interface ServerChatDraft extends ChatDraft {
 const drafts = new Map<string, ChatDraft>();
 
 // 服务端持久化草稿（跨客户端同步）：存储路径 drafts.<key>
-import { setServerPref, getServerPref } from "./server-preferences";
+import { setServerPref, getServerPref, flushServerPrefs } from "./server-preferences";
 
 function cloneDraft(draft: ChatDraft): ChatDraft {
   return {
@@ -42,6 +42,8 @@ export function setDraft(key: string, draft: ChatDraft): void {
   if (isEmptyDraft(draft)) {
     drafts.delete(key);
     setServerPref(draftKeyPath(key), undefined);
+    // 清空/删除立即同步：防抖 400ms 内切会话 + 页面 sync 会把服务端残留拉回复活
+    flushServerPrefs();
     return;
   }
   drafts.set(key, cloneDraft(draft));
@@ -52,6 +54,8 @@ export function setDraft(key: string, draft: ChatDraft): void {
 export function clearDraft(key: string): void {
   drafts.delete(key);
   setServerPref(draftKeyPath(key), undefined);
+  // 发送确认后立即同步删除（同上：避免已发送文本残留在服务端、下次 sync 复活）
+  flushServerPrefs();
 }
 
 /** 从服务端恢复指定 key 的草稿（网页激活/多客户端同步用）。 */

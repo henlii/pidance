@@ -105,6 +105,8 @@ interface Props {
   compactError?: string | null;
   compactResult?: CompactResultInfo | null;
   thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  /** 会话思考档是否已被权威源确认；未确认（会话切换/加载中）时不显示档位标签。 */
+  thinkingReady?: boolean;
   onThinkingLevelChange?: (level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") => void;
   /** settings.json defaultThinkingLevel，无会话档/无缓存时的回退 */
   defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
@@ -292,7 +294,7 @@ function QueuedMessageRow({ kind, text }: { kind: "steer" | "follow-up"; text: s
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelAuthConfigured, onModelChange,
   onAbortCompaction, isCompacting, compactError, compactResult,
-  thinkingLevel, onThinkingLevelChange, defaultThinkingLevel, availableThinkingLevels, thinkingLevelMap, thinkingLevelMaps,
+  thinkingLevel, thinkingReady, onThinkingLevelChange, defaultThinkingLevel, availableThinkingLevels, thinkingLevelMap, thinkingLevelMaps,
   retryInfo, queuedMessages, onRecallQueue, onSendQueueAsSteer,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
@@ -421,6 +423,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   );
 
   const thinkingFallback = defaultThinkingLevel ?? "off";
+  // 未确认档位（切会话/加载中）：不显示档位标签，避免残留/中间态误导；
+  // 确认后展示会话真实档或兜底（引导页为 settings 默认，已有会话为 off 语义）。
+  const thinkingDisplayLabel = thinkingReady !== false
+    ? thinkingLevel ?? thinkingFallback
+    : null;
 
   /** 每模型可用思考深度：仅 map 显式 null 禁用；省略（含 xhigh/max）可用。 */
   const levelsForModel = useCallback(
@@ -1266,7 +1273,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         saved: formatTokenCount(compactSavedTokens),
       })
     : null;
-  const thinkingDisplayLabel = thinkingLevel ?? thinkingFallback;
 
   // ── 视口安全浮层定位 ─────────────────────────────────────────────────────
   // 所有菜单共享 useAnchoredOverlay：visualViewport 感知、上下翻转、边界
@@ -2130,9 +2136,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     </svg>
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{currentName ?? t("input_modelTitle")}</span>
                     {/* 思考深度并入模型选择按钮显示（外层已保证 onModelChange 存在） */}
-                    <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginLeft: 2 }}>
-                      ·{thinkingDisplayLabel}
-                    </span>
+                    {thinkingDisplayLabel ? (
+                      <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginLeft: 2 }}>
+                        ·{thinkingDisplayLabel}
+                      </span>
+                    ) : null}
                   </button>
                   {/* Portal 到 body：与思考/工具菜单一致，fixed 坐标免疫任何祖先
                       containing block（transform/filter/backdrop-filter）干扰 */}

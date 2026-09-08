@@ -99,8 +99,8 @@ npm run test:browser          # browser regression (needs a running instance; de
 
 Do **not** run `npm run build` or `next build` during everyday development: it writes to `.next/` and can disrupt the development server. Production builds belong in an isolated release checkout through `npm run release:check`.
 
-Windows development convention: **31415 is reserved for the installed Pidance build**. Continuous testing of the working tree uses **31416** via
-`.agents/skills/pidance-development/scripts/local-deploy.mjs restart`, with artifacts isolated in `.next-public`. Do not mix installed and working-tree processes, data directories, or build artifacts.
+Windows development convention: **31415 is reserved for the formal service build**. Continuous testing of the working tree uses **31416** via
+`.agents/skills/pidance-development/scripts/local-deploy.mjs restart`, with artifacts isolated in `.next-public`. Do not mix formal-service and working-tree processes, data directories, or build artifacts.
 
 ## Release process
 
