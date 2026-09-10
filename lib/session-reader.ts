@@ -831,8 +831,11 @@ export function buildSessionContext(
     }
   }
 
+  const projectedMessages = options.deferToolResultImages
+    ? messages.map(omitBinaryBackedUserImages)
+    : messages;
   return {
-    messages,
+    messages: projectedMessages,
     entryIds,
     thinkingLevel: settings.thinkingLevel ?? "off",
     model: (settings.model as SessionContext["model"]) ?? null,
@@ -864,6 +867,15 @@ function base64ImageInfo(block: unknown): { bytes: number; mime?: string } | nul
 
   const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
   return { bytes: Math.max(0, Math.floor(data.length * 3 / 4) - padding), mime };
+}
+
+function omitBinaryBackedUserImages(message: AgentMessage): AgentMessage {
+  if (message.role !== "user" || !Array.isArray(message.content)) return message;
+  if (!message.binaryBlocks?.some((block) => block.kind === "image")) return message;
+  return {
+    ...message,
+    content: message.content.filter((block) => block.type !== "image"),
+  };
 }
 
 function omitToolResultBase64Images(message: AgentMessage): AgentMessage {
