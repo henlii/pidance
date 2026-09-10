@@ -3,17 +3,25 @@
  * Parsed at the Route/client trust boundary; Host uses the same shapes.
  */
 
+import type { BinaryMessageInput } from "./types";
+import { normalizeBinaryMimeType } from "./message-binary";
+
+export const PROMPT_IMAGE_MAX_BASE64_BYTES = 4 * 1024 * 1024;
+
 export type PromptImage = {
   type: "image";
   data: string;
   mimeType: string;
 };
 
+export type PromptBinaryBlock = BinaryMessageInput;
+
 export type PromptCommand = {
   type: "prompt";
   message: string;
   submissionId: string;
   images?: PromptImage[];
+  binaryBlocks?: PromptBinaryBlock[];
 };
 
 export type AbortCommand = {
@@ -67,15 +75,50 @@ export function parsePromptImages(value: unknown): PromptImage[] | undefined {
     }
     const record = item as Record<string, unknown>;
     const data = typeof record.data === "string" ? record.data : undefined;
-    const mimeType = typeof record.mimeType === "string"
+    const rawMimeType = typeof record.mimeType === "string"
       ? record.mimeType
       : typeof record.mime_type === "string" ? record.mime_type : undefined;
-    if (!data || !mimeType) {
+    const mimeType = normalizeBinaryMimeType(rawMimeType);
+    if (!data || !mimeType?.startsWith("image/")) {
       throw new Error("invalid image");
+    }
+    if (data.length > PROMPT_IMAGE_MAX_BASE64_BYTES) {
+      throw new Error("invalid image: payload too large");
     }
     images.push({ type: "image", data, mimeType });
   }
   return images;
+}
+
+export function parsePromptBinaryBlocks(value: unknown): PromptBinaryBlock[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error("binaryBlocks must be an array");
+  if (value.length > 32) throw new Error("too many binary blocks");
+  const blocks: PromptBinaryBlock[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error("invalid binary block");
+    }
+    const record = item as Record<string, unknown>;
+    const path = typeof record.path === "string" ? record.path.trim() : "";
+    const name = typeof record.name === "string" ? record.name.trim() : "";
+    const mimeType = normalizeBinaryMimeType(record.mimeType);
+    const size = record.size;
+    const previewPath = record.previewPath === undefined
+      ? undefined
+      : typeof record.previewPath === "string" ? record.previewPath.trim() : null;
+    if (!path || !name || !mimeType || !Number.isSafeInteger(size) || (size as number) < 0 || previewPath === null) {
+      throw new Error("invalid binary block");
+    }
+    blocks.push({
+      path,
+      name,
+      mimeType,
+      size: size as number,
+      ...(previewPath ? { previewPath } : {}),
+    });
+  }
+  return blocks;
 }
 
 function requireMessage(body: Record<string, unknown>): string {
@@ -98,6 +141,7 @@ export function parsePromptCommand(
     message,
     submissionId,
     images: parsePromptImages(body.images),
+    binaryBlocks: parsePromptBinaryBlocks(body.binaryBlocks),
   };
 }
 

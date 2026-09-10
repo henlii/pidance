@@ -7,6 +7,7 @@ import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { composeChatPlan, type ChatRenderItem } from "@/lib/chat-compositor";
 import { MessageView } from "./MessageView";
+import { ImagePreviewPanel } from "./MessageImage";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ExtensionDialog } from "./ExtensionDialog";
@@ -414,6 +415,16 @@ const chatPlan = composeChatPlan({
 
   const chatInputElement = (
     <>
+      <ImagePreviewPanel />
+      {extensionDialog && (
+        <ExtensionDialog
+          request={extensionDialog}
+          disabled={writesDisabled || !sessionIdRef.current}
+          onRespond={(response) => {
+            void respondToExtensionUi(extensionDialog, response);
+          }}
+        />
+      )}
       {isReadOnly && session ? (
         <ReadOnlySessionBar session={session} isMobile={isMobile} />
       ) : lockedByOther ? (
@@ -460,6 +471,7 @@ const chatPlan = composeChatPlan({
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? (effectiveNewSessionCwd ? `new:${effectiveNewSessionCwd}` : undefined)}
       cwd={session?.cwd ?? effectiveNewSessionCwd}
+      blocked={Boolean(extensionDialog)}
     />
       )}
     </>
@@ -603,16 +615,6 @@ const chatPlan = composeChatPlan({
         </div>
       ) : (
       <>
-      {/* 扩展阻塞请求弹窗（对齐 TUI modal；固定视口覆盖层） */}
-      {extensionDialog && (
-        <ExtensionDialog
-          request={extensionDialog}
-          disabled={writesDisabled || !sessionIdRef.current}
-          onRespond={(response) => {
-            void respondToExtensionUi(extensionDialog, response);
-          }}
-        />
-      )}
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
         <div
           style={{
@@ -633,8 +635,8 @@ const chatPlan = composeChatPlan({
           ref={scrollContainerRef}
           className="min-h-0 flex-1 overflow-y-auto pt-4 [scrollbar-width:none]"
           // overflow-anchor:none：钉底由自动跟随显式负责，浏览器不再自行锚定；
-          // overscroll-behavior:contain：滚到底/顶不连锁滚动外层。
-          style={{ overflowAnchor: "none", overscrollBehavior: "contain" }}
+          // 内嵌消息块滚到边界后允许滚轮/触屏继续传给会话容器。
+          style={{ overflowAnchor: "none", overscrollBehavior: "auto" }}
         >
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div style={{ maxWidth: 760, margin: "0 auto" }}>
@@ -769,7 +771,7 @@ const chatPlan = composeChatPlan({
               />
             )}
 
-            {/* 扩展阻塞请求改为弹窗承载（对齐 TUI），不再内联进消息流。 */}
+            {/* 扩展阻塞请求由输入区上方的阻塞面板承载，不插入消息时间线。 */}
 
             {/* OpenChamber 风格底部常驻 spacer（桌面 10vh / 移动 40px）：给末端留呼吸感，
                 取代旧的 agentRunning 整视口占位——跟随钉底由 useAgentSession 的自动跟随负责。 */}

@@ -30,6 +30,9 @@ const nextConfig: NextConfig = {
   // 缓存位于 distDir/cache/turbopack；local-deploy 不得删除整个 .next-public。
   experimental: {
     turbopackFileSystemCacheForBuild: true,
+    // Chat message media uses a streamed upload; keep enough headroom for large
+    // originals while the prompt JSON only carries the resized model copy.
+    proxyClientMaxBodySize: "512mb",
   },
   // 父目录 /home/moss/works/open 会被 Next 推断为 workspace root，
   // CSS `@import "tailwindcss"` 就会从仓库外解析失败。固定为本仓根。

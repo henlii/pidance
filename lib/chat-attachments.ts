@@ -4,15 +4,19 @@
  * /api/files 预览需把该目录加入 allow-list。
  */
 
-import { existsSync, mkdirSync, writeFileSync } from "fs";
+import { createWriteStream, existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
+import { Readable, Transform } from "stream";
+import { pipeline } from "stream/promises";
 import { getAgentDir } from "./pi-paths";
 import { allowFileRoot, normalizeSlashes } from "./file-access";
 
 export const CHAT_ATTACHMENTS_DIR_NAME = "pidance-attachments";
 export const CHAT_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
 export const CHAT_ATTACHMENT_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
+/** 消息媒体使用流式上传；这是传输安全上限，不限制会话中的显示尺寸。 */
+export const MESSAGE_MEDIA_MAX_BYTES = 512 * 1024 * 1024;
 
 export function getChatAttachmentsDir(agentDir: string = getAgentDir()): string {
   return normalizeSlashes(join(agentDir, CHAT_ATTACHMENTS_DIR_NAME));
@@ -56,6 +60,53 @@ export type SavedChatAttachment = {
   storedName: string;
   size: number;
 };
+
+/**
+ * 将消息媒体流式写入附件目录，避免把原图/大视频同时读入 Node 内存。
+ * 调用方负责校验 MIME；这里以实际读取字节数为准并原子改名。
+ */
+export async function saveChatAttachmentStream(
+  originalName: string,
+  body: ReadableStream<Uint8Array>,
+  agentDir: string = getAgentDir(),
+  maxBytes: number = MESSAGE_MEDIA_MAX_BYTES,
+): Promise<SavedChatAttachment> {
+  const dir = ensureChatAttachmentsDir(agentDir);
+  const storedName = uniqueAttachmentFileName(originalName);
+  const target = join(dir, storedName);
+  const temporary = join(dir, `.${storedName}.${randomUUID()}.tmp`);
+  let size = 0;
+  const counter = new Transform({
+    transform(chunk, _encoding, callback) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += bytes.length;
+      if (size > maxBytes) {
+        callback(new Error(`message media exceeds ${maxBytes} bytes`));
+        return;
+      }
+      callback(null, bytes);
+    },
+  });
+
+  try {
+    await pipeline(
+      Readable.fromWeb(body as unknown as import("node:stream/web").ReadableStream),
+      counter,
+      createWriteStream(temporary, { flags: "wx", mode: 0o600 }),
+    );
+    renameSync(temporary, target);
+  } catch (error) {
+    try { unlinkSync(temporary); } catch { /* best effort cleanup */ }
+    throw error;
+  }
+
+  return {
+    path: normalizeSlashes(target),
+    name: sanitizeAttachmentFileName(originalName),
+    storedName,
+    size,
+  };
+}
 
 /**
  * 将字节写入附件目录，返回绝对路径。

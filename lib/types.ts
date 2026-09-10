@@ -23,7 +23,11 @@ export interface TextContent {
 
 export interface ImageContent {
   type: "image";
-  source: {
+  /** Pi 原生 0.85 ImageContent 的扁平结构。 */
+  data?: string;
+  mimeType?: string;
+  /** 兼容历史/供应商 source 结构的图片块。 */
+  source?: {
     type: "base64" | "url";
     media_type?: string;
     data?: string;
@@ -31,10 +35,35 @@ export interface ImageContent {
   };
 }
 
+export type BinaryMessageKind = "image" | "audio" | "video" | "file";
+
+/** 上传后由 Pidance 文件存储返回的二进制消息输入。 */
+export interface BinaryMessageInput {
+  path: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  /** image 的小尺寸预览文件；原图仍由 path 指向。 */
+  previewPath?: string;
+}
+
+/** Pi custom entry 中保存的 UI-only 二进制消息元数据。 */
+export interface BinaryMessageData extends BinaryMessageInput {
+  type: "binary";
+  version: 1;
+  kind: BinaryMessageKind;
+  /** 关联的 Pi user message entry；缺省表示独立二进制消息。 */
+  messageEntryId?: string;
+}
+
 export interface AttachedImage {
+  /** 发送给模型的安全尺寸图片 Base64，不是原图。 */
   data: string;
   mimeType: string;
+  /** 当前输入框缩略图 URL；仅浏览器临时态。 */
   previewUrl: string;
+  /** 原图上传后的 UI-only 元数据，不写入 Pi ImageContent。 */
+  original?: BinaryMessageInput;
 }
 
 export interface ChatInputHandle {
@@ -68,6 +97,8 @@ export interface UserMessage {
   role: "user";
   content: string | (TextContent | ImageContent)[];
   timestamp?: number;
+  /** Pidance UI 投影：原图/其它二进制消息块，不写入 Pi 原生 user message。 */
+  binaryBlocks?: BinaryMessageData[];
 }
 
 export interface AssistantMessage {

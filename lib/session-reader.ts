@@ -18,6 +18,11 @@ import {
   activityToUiMessage,
   parseActivityData,
 } from "./session-activity";
+import {
+  PIDANCE_BINARY_CUSTOM_TYPE,
+  binaryMessageToUiMessage,
+  parseBinaryMessageData,
+} from "./message-binary";
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { discoverSubagentSessions } from "./subagent-sessions";
 import { getAgentDir } from "./pi-paths";
@@ -800,6 +805,22 @@ export function buildSessionContext(
   }
   for (const entry of contextEntries) {
     const m = entryToUiMessage(entry, options);
+    if (m?.role === "custom" && m.customType === PIDANCE_BINARY_CUSTOM_TYPE) {
+      const binary = parseBinaryMessageData(m.details);
+      const targetIndex = binary?.messageEntryId
+        ? entryIds.indexOf(binary.messageEntryId)
+        : -1;
+      const target = targetIndex >= 0 ? messages[targetIndex] : undefined;
+      if (binary && target?.role === "user") {
+        messages[targetIndex] = {
+          ...target,
+          binaryBlocks: [...(target.binaryBlocks ?? []), binary],
+        };
+        // Binary custom entries are UI metadata attached to the Pi user entry;
+        // they do not get a second visible row or a fake branch target.
+        continue;
+      }
+    }
     if (m) {
       messages.push(
         m.role === "assistant"
@@ -983,6 +1004,11 @@ function entryToUiMessage(
       // 其它 customType（om / workspace-history 等）保持侧栏投影，不进聊天气泡。
       // 非法/未知 version 安全跳过。压缩语义跟随 piBuildContextEntries 可见集：
       // 被压缩掉的普通消息前的 activity 不复活。
+      if (entry.customType === PIDANCE_BINARY_CUSTOM_TYPE) {
+        const binary = parseBinaryMessageData(entry.data);
+        if (!binary) return null;
+        return binaryMessageToUiMessage(binary, parseEntryTimestamp(entry.timestamp));
+      }
       if (entry.customType === PIDANCE_COMMAND_CUSTOM_TYPE) {
         const command = parseCommandEntryData(entry.data);
         if (!command) return null;

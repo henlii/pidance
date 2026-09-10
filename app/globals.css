@@ -567,6 +567,8 @@ pre, code,
   margin: 0;
   padding: 7px 8px;
   overflow: auto;
+  overscroll-behavior: auto;
+  touch-action: auto;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg-panel);
@@ -594,7 +596,8 @@ pre, code,
 .markdown-code-body {
   overflow: auto;
   max-height: min(320px, 45vh);
-  overscroll-behavior: contain;
+  overscroll-behavior: auto;
+  touch-action: auto;
 }
 @media (max-width: 640px) {
   .markdown-code-body {

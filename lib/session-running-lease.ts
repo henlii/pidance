@@ -1,6 +1,7 @@
 /**
- * 跨进程 writer 租约：31415 与 31416 共享 agentDir 时互斥 prompt。
- * 覆盖 starting 到 live host dispose 的整个 writer 窗口（含空闲保活 host）。
+ * 跨进程 writer 租约：31415 与 31416 共享 agentDir 时互斥 session 写入。
+ * 正常运行从 starting 到 agent_settled 后 host dispose；settled 后立即释放，
+ * 不因 SSE 订阅继续占用空闲会话。
  * 不表示「智能体正在执行」——侧栏 running/计时走 isRunning，对端占用走 lockedByOther。
  */
 import {

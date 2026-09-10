@@ -17,7 +17,8 @@ import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useAnchoredOverlay } from "@/hooks/useAnchoredOverlay";
 import { useI18n } from "@/lib/i18n";
-import type { AttachedImage, ChatInputHandle } from "@/lib/types";
+import { prepareImageForModel } from "@/lib/image-input";
+import type { AttachedImage, BinaryMessageInput, ChatInputHandle } from "@/lib/types";
 import {
   loadStreamingEnterAction,
   type StreamingEnterAction,
@@ -26,7 +27,7 @@ import { isAudioPath, isImagePath, isVideoPath } from "@/lib/file-types";
 
 export type { AttachedImage, ChatInputHandle } from "@/lib/types";
 
-/** 非图片附件：落到 ~/.pi/agent/pidance-attachments/，发送时把绝对路径注入 prompt。 */
+/** 非图片附件：落到 ~/.pi/agent/pidance-attachments/，二进制消息保存后把路径注入 prompt。 */
 type AttachedUpload = {
   id: string;
   name: string;
@@ -46,25 +47,38 @@ function makeUploadId(): string {
 }
 
 /** 上传到 Pidance 附件目录（不依赖项目 cwd）。 */
-async function uploadChatAttachment(file: File): Promise<{ path: string; name: string }> {
-  const formData = new FormData();
-  formData.append("files", file, file.name);
-  const res = await fetch("/api/attachments", { method: "POST", body: formData });
+async function uploadMessageMedia(
+  body: Blob,
+  name: string,
+  mimeType: string,
+): Promise<{ path: string; name: string; storedName: string; size: number; mimeType: string }> {
+  const contentType = mimeType || body.type || "application/octet-stream";
+  const res = await fetch("/api/message-media", {
+    method: "POST",
+    headers: {
+      "Content-Type": contentType,
+      "X-Pidance-Filename": encodeURIComponent(name || "file"),
+    },
+    body,
+  });
   const data = (await res.json().catch(() => ({}))) as {
-    uploaded?: Array<{ path: string; name: string }>;
-    errors?: Array<{ name: string; error: string }>;
+    path?: string;
+    name?: string;
+    storedName?: string;
+    size?: number;
+    mimeType?: string;
     error?: string;
   };
-  if (!res.ok && res.status !== 207) {
+  if (!res.ok || typeof data.path !== "string" || typeof data.storedName !== "string" || typeof data.size !== "number") {
     throw new Error(data.error ?? `HTTP ${res.status}`);
   }
-  const err = data.errors?.[0];
-  if (err && (!data.uploaded || data.uploaded.length === 0)) {
-    throw new Error(err.error);
-  }
-  const uploaded = data.uploaded?.[0];
-  if (!uploaded?.path) throw new Error(data.error ?? err?.error ?? "upload failed");
-  return { path: uploaded.path, name: uploaded.name || file.name };
+  return {
+    path: data.path,
+    name: data.name || name || "file",
+    storedName: data.storedName,
+    size: data.size,
+    mimeType: data.mimeType || contentType,
+  };
 }
 
 interface ModelOption {
@@ -80,12 +94,14 @@ interface Props {
    * P0-1：返回发送确认结果——false = 发送失败（draft 由上层恢复，此处不清空）；
    * true/undefined = 已确认或无可确认（清空 draft）。
    */
-  onSend: (message: string, images?: AttachedImage[]) => Promise<boolean> | boolean;
+  onSend: (message: string, images?: AttachedImage[], binaryBlocks?: BinaryMessageInput[]) => Promise<boolean> | boolean;
   onAbort: () => void;
   onSteer?: (message: string, images?: AttachedImage[]) => void;
   onFollowUp?: (message: string, images?: AttachedImage[]) => void;
   onPromptWithStreamingBehavior?: (message: string, behavior: "steer" | "followUp", images?: AttachedImage[]) => void;
   isStreaming: boolean;
+  /** 阻塞式扩展问答显示时，保留输入框布局但冻结普通聊天操作。 */
+  blocked?: boolean;
   model?: { provider: string; modelId: string } | null;
   isAutoModelSelection?: boolean;
   modelNames?: Record<string, string>;
@@ -214,7 +230,11 @@ function slashMatchRank(command: SlashCommandPaletteItem, query: string): number
 }
 
 function imageToDraftImage(image: AttachedImage): ChatDraftImage {
-  return { data: image.data, mimeType: image.mimeType };
+  return {
+    data: image.data,
+    mimeType: image.mimeType,
+    ...(image.original ? { original: image.original } : {}),
+  };
 }
 
 function draftImageToAttachedImage(image: ChatDraftImage): AttachedImage {
@@ -292,7 +312,7 @@ function QueuedMessageRow({ kind, text }: { kind: "steer" | "follow-up"; text: s
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelAuthConfigured, onModelChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, blocked = false, model, isAutoModelSelection, modelNames, modelList, modelAuthConfigured, onModelChange,
   onAbortCompaction, isCompacting, compactError, compactResult,
   thinkingLevel, thinkingReady, onThinkingLevelChange, defaultThinkingLevel, availableThinkingLevels, thinkingLevelMap, thinkingLevelMaps,
   retryInfo, queuedMessages, onRecallQueue, onSendQueueAsSteer,
@@ -326,10 +346,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
+  const [queueExpanded, setQueueExpanded] = useState(true);
 
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? getDraft(draftKey)?.images.map(draftImageToAttachedImage) ?? [] : []
   ));
+  const [imageUploading, setImageUploading] = useState(false);
+  const [imageAttachError, setImageAttachError] = useState<string | null>(null);
   const trimmedValue = value.trimStart();
   const bashMode = attachedImages.length === 0 && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
@@ -571,29 +594,50 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (isStreaming) return;
     const imageFiles = files.filter(isRasterImageFile);
     if (!imageFiles.length) return;
-    const newImages = await Promise.all(
-      imageFiles.map(
-        (file) =>
-          new Promise<AttachedImage>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => {
-              const result = reader.result as string;
-              // result is "data:<mime>;base64,<data>"
-              const base64 = result.split(",")[1];
-              resolve({ data: base64, mimeType: file.type, previewUrl: URL.createObjectURL(file) });
-            };
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-          })
-      )
-    );
-    setAttachedImages((prev) => [...prev, ...newImages]);
-  }, [isStreaming]);
+    setImageUploading(true);
+    setImageAttachError(null);
+    try {
+      const newImages = await Promise.all(
+        imageFiles.map(async (file): Promise<AttachedImage> => {
+          // 原图走二进制流，模型副本才进入 JSON prompt，避免 8MB 图片被
+          // Base64 放大后撞上 Next.js 的请求体截断。
+          const [prepared, original] = await Promise.all([
+            prepareImageForModel(file),
+            uploadMessageMedia(file, file.name, file.type),
+          ]);
+          const preview = prepared.blob === file
+            ? original
+            : await uploadMessageMedia(
+              prepared.blob,
+              `${file.name}.preview.jpg`,
+              prepared.mimeType,
+            );
+          return {
+            data: prepared.data,
+            mimeType: prepared.mimeType,
+            previewUrl: URL.createObjectURL(file),
+            original: {
+              path: original.path,
+              name: original.name,
+              mimeType: original.mimeType,
+              size: original.size,
+              previewPath: preview.path,
+            },
+          };
+        }),
+      );
+      setAttachedImages((prev) => [...prev, ...newImages]);
+    } catch {
+      setImageAttachError(t("input_imagePrepareFailed"));
+    } finally {
+      setImageUploading(false);
+    }
+  }, [isStreaming, t]);
 
   /**
    * 附件策略：
-   * - 位图图片 → 多模态 AttachedImage
-   * - 其余 → 上传到 ~/.pi/agent/pidance-attachments/（不限项目），路径注入 prompt 由 agent read
+   * - 位图图片 → 原图保存为二进制消息，模型只接收安全尺寸副本
+   * - 其余 → 上传到 ~/.pi/agent/pidance-attachments/（不限项目），二进制消息保存后路径注入 prompt 由 agent read
    */
   const processAttachmentFiles = useCallback(async (files: File[]) => {
     if (isStreaming || files.length === 0) return;
@@ -617,7 +661,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       otherFiles.map(async (file, index) => {
         const id = pending[index]!.id;
         try {
-          const { path, name } = await uploadChatAttachment(file);
+          const uploaded = await uploadMessageMedia(file, file.name, file.type);
+          const { path, name } = uploaded;
           setAttachedUploads((prev) =>
             prev.map((item) => (item.id === id ? { ...item, path, name, status: "ready" } : item))
           );
@@ -660,6 +705,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     setAtQuery(null);
     if (draftKey) clearDraft(draftKey);
     if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
+    setImageAttachError(null);
     clearImages();
     clearUploads();
     if (textareaRef.current) {
@@ -671,7 +717,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const composeMessageWithUploads = useCallback((base: string): string => {
     const ready = attachedUploadsRef.current.filter((u) => u.status === "ready" && u.path);
     if (ready.length === 0) return base;
-    const list = ready.map((u) => `- \`${u.path}\``).join("\n");
+    // 用 path= 让 agent 能读取附件，同时避免 MessageMediaGallery 把同一
+    // 个二进制块当成普通正文路径再渲染一遍（BinaryMessageView 负责阈值）。
+    const list = ready.map((u) => `- path=${u.path}`).join("\n");
     const block = `${t("input_attachedFilesPrompt")}\n${list}`;
     return base.trim() ? `${base.trim()}\n\n${block}` : block;
   }, [t]);
@@ -719,7 +767,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   const hasReadyUploads = attachedUploads.some((u) => u.status === "ready" && u.path);
-  const hasUploading = attachedUploads.some((u) => u.status === "uploading");
+  const hasUploading = imageUploading || attachedUploads.some((u) => u.status === "uploading");
   const hasAttachments = attachedImages.length > 0 || hasReadyUploads;
 
   const handleSend = useCallback(async () => {
@@ -749,7 +797,17 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       }
     }
     const msg = composeMessageWithUploads(base);
-    const submitted = await onSend(msg, attachedImages.length ? attachedImages : undefined);
+    const binaryBlocks = [
+      ...attachedImages.map((image) => image.original).filter((value): value is BinaryMessageInput => value !== undefined),
+      ...attachedUploads
+        .filter((item): item is typeof item & { path: string } => item.status === "ready" && typeof item.path === "string")
+        .map((item) => ({ path: item.path, name: item.name, mimeType: item.mimeType, size: item.size })),
+    ];
+    const submitted = await onSend(
+      msg,
+      attachedImages.length ? attachedImages : undefined,
+      binaryBlocks.length ? binaryBlocks : undefined,
+    );
     if (submitted === false) {
       // 按发送时 draftKey 恢复，避免切到会话 B 后写进 B 的输入框。
       if (!hasAttachment && capturedDraftKey) {
@@ -761,7 +819,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       return;
     }
     if (hasAttachment) clearInput();
-  }, [value, attachedImages, hasReadyUploads, hasUploading, isStreaming, onBuiltinCommand, onSend, clearInput, insertIfEmptyLocal, onAudioUnlock, composeMessageWithUploads]);
+  }, [value, attachedImages, attachedUploads, hasReadyUploads, hasUploading, isStreaming, onBuiltinCommand, onPromptWithStreamingBehavior, onSend, clearInput, insertIfEmptyLocal, onAudioUnlock, composeMessageWithUploads]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -1382,12 +1440,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         paddingRight: isMobile ? 16 : 52, // desktop: 16px base + 36px for ChatMinimap alignment
       }}
     >
-      {/* Hidden file input：图片走多模态附件；文本类写入消息正文 */}
+      {/* Hidden file input：图片走模型副本；所有原文件作为二进制消息保存 */}
       <input
         ref={fileInputRef}
         type="file"
         multiple
-        disabled={isStreaming}
+        disabled={blocked || isStreaming}
         style={{ display: "none" }}
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
@@ -1396,6 +1454,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }}
       />
       <div style={{ maxWidth: 820, margin: "0 auto" }}>
+        <fieldset
+          disabled={blocked}
+          aria-disabled={blocked || undefined}
+          style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
+        >
         {/* Queued follow-up messages（steering 即时投递，不在队列块显示） */}
         {(queuedMessages?.followUp.length ?? 0) > 0 && (
           <div style={{
@@ -1422,6 +1485,24 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 {t("input_queued", { count: queuedMessages?.followUp.length ?? 0 })}
               </span>
               <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                <button
+                  type="button"
+                  onClick={() => setQueueExpanded((expanded) => !expanded)}
+                  aria-expanded={queueExpanded}
+                  aria-label={queueExpanded ? t("input_collapseQueue") : t("input_expandQueue")}
+                  title={queueExpanded ? t("input_collapseQueue") : t("input_expandQueue")}
+                  className="instant-tooltip tooltip-up"
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 26, height: 26, padding: 0,
+                    border: "1px solid var(--border)", borderRadius: 6,
+                    background: "transparent", color: "var(--text-dim)", cursor: "pointer",
+                  }}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ transform: queueExpanded ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 0.12s" }}>
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                </button>
                 {onSendQueueAsSteer && (
                   <button
                     type="button"
@@ -1495,7 +1576,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 )}
               </div>
             </div>
-            {queuedMessages?.followUp.map((text, i) => (
+            {queueExpanded && queuedMessages?.followUp.map((text, i) => (
               <QueuedMessageRow key={`followup-${i}`} kind="follow-up" text={text} />
             ))}
           </div>
@@ -1539,8 +1620,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           </div>
         )}
         {/* 图片缩略图 + 已上传文件芯片 */}
-        {(attachedImages.length > 0 || attachedUploads.length > 0) && (
+        {(attachedImages.length > 0 || attachedUploads.length > 0 || imageAttachError) && (
           <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap", alignItems: "center" }}>
+            {imageAttachError && (
+              <div role="alert" style={{ flexBasis: "100%", color: "var(--status-danger)", fontSize: 11 }}>
+                {imageAttachError}
+              </div>
+            )}
             {attachedImages.map((img, i) => (
               <div key={`img-${i}`} style={{ position: "relative", flexShrink: 0 }}>
                 {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -2391,6 +2477,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           </div>
 
         </div>
+        </fieldset>
       </div>
     </div>
   );

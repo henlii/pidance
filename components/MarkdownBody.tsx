@@ -10,6 +10,7 @@ import { copyText } from "@/lib/clipboard";
 import { resolveLocalFileHref } from "@/lib/file-links";
 import { markdownRehypePlugins, markdownRemarkPlugins } from "@/lib/markdown";
 import { useI18n } from "@/lib/i18n";
+import { MessageImage } from "./MessageImage";
 
 interface MarkdownBodyProps {
   children: string;
@@ -54,6 +55,11 @@ function MarkdownBodyImpl({ children, className, isStreaming, cwd, onOpenFile }:
           },
           pre({ children }) {
             return <>{children}</>;
+          },
+          img({ src, alt, title, ...props }) {
+            delete props.node;
+            if (typeof src !== "string" || !src) return null;
+            return <MessageImage src={src} fullSrc={src} alt={alt} title={title} maxWidth="100%" maxHeight={480} />;
           },
           a({ href, children, ...props }) {
             // `node` is react-markdown metadata, not a DOM attribute.

@@ -10,6 +10,7 @@ import {
   type AgentSession,
   type AgentSessionRuntime,
   type AgentSessionServices,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "./pi-paths";
 import {
@@ -50,6 +51,19 @@ import {
   withPassThroughExtendedThinking,
 } from "./thinking-levels";
 import { parsePromptCommand, type PromptReceipt } from "./agent-commands";
+import {
+  PIDANCE_BINARY_CUSTOM_TYPE,
+  binaryMessageToUiMessage,
+} from "./message-binary";
+import { normalizeBinaryMessageInputs } from "./message-binary-store";
+import {
+  appendPidanceFileDeliveryPrompt,
+  createSendFileToUserExecutor,
+  SEND_FILE_TO_USER_PARAMETERS,
+  SEND_FILE_TO_USER_TOOL_NAME,
+  type SendFileToUserParams,
+} from "./send-file-to-user";
+import type { BinaryMessageData, BinaryMessageInput } from "./types";
 import {
   loadPiTheme,
   renderCustomMessageLines,
@@ -168,6 +182,8 @@ export class SdkSessionHost {
   private promptReceipts = new Map<string, PromptReceipt>();
   /** submissionId → in-flight prompt promise（单飞；结算后删除） */
   private promptInFlight = new Map<string, Promise<PromptReceipt>>();
+  /** 已接受 prompt 的二进制块；user message 落盘后追加 UI-only custom entry。 */
+  private pendingBinaryBatches: Array<{ submissionId: string; blocks: BinaryMessageData[] }> = [];
   /** 共享 destroy 完成信号：destroyAsync 并发重入时 await 同一 dispose */
   private destroyPromise: Promise<void> | null = null;
   private hasQueueSnapshot = false;
@@ -607,6 +623,35 @@ export class SdkSessionHost {
     return null;
   }
 
+  private removePendingBinaryBatch(submissionId: string): void {
+    this.pendingBinaryBatches = this.pendingBinaryBatches.filter((batch) => batch.submissionId !== submissionId);
+  }
+
+  private persistPendingBinaryBlocks(blocks: BinaryMessageData[]): void {
+    if (blocks.length === 0) return;
+    try {
+      const manager = this.session.sessionManager;
+      materializeSessionFile(manager);
+      const entries = manager.getEntries() as Array<{ id?: string; type?: string; message?: { role?: string } }>;
+      const messageEntryId = [...entries].reverse().find(
+        (entry) => entry.type === "message" && entry.message?.role === "user" && typeof entry.id === "string",
+      )?.id || manager.getLeafId() || undefined;
+      for (const block of blocks) {
+        const data = messageEntryId ? { ...block, messageEntryId } : block;
+        const entryId = manager.appendCustomEntry(PIDANCE_BINARY_CUSTOM_TYPE, data);
+        this.emit({
+          type: "message_end",
+          entryId,
+          message: binaryMessageToUiMessage(data, Date.now()),
+        });
+      }
+      materializeSessionFile(manager);
+      this.options.onSessionListInvalidate?.();
+    } catch (error) {
+      console.error("[pidance] persist binary message failed:", error);
+    }
+  }
+
   private handleSessionEvent(event: SdkAgentEvent): void {
     switch (event.type) {
       case "agent_start":
@@ -645,7 +690,15 @@ export class SdkSessionHost {
         } else if (this.flushingFollowUp && (this.lastStopReason === "aborted" || this.lastStopReason === "error")) {
           this.abortFollowUpFlush();
         }
+        // agent_settled 表示 SDK 已完成本轮及其内部 continuation。没有未 hold
+        // 的产品队列时立即销毁 host，释放跨进程 writer lease；否则继续由队列
+        // flush 持有 host，直到最后一轮完成。
+        const disposeAfterSettle =
+          event.type === "agent_settled"
+          && !this.flushingFollowUp
+          && (this.followUpQueue.length === 0 || this.isFollowUpHeld());
         this.resetIdleTimer();
+        if (disposeAfterSettle) void this.destroyAsync();
         break;
       case "compaction_start":
       case "auto_compaction_start":
@@ -669,10 +722,12 @@ export class SdkSessionHost {
         if (msg?.role === "user") {
           // follow-up 投递的 user 消息确认：这里才推进队列，不能在 prompt preflight 清队。
           this.confirmFollowUpFlush();
+          const binaryBatch = this.pendingBinaryBatches.shift();
           setImmediate(() => {
             try {
               materializeSessionFile(this.session.sessionManager);
               this.syncIdentityFromSession();
+              this.persistPendingBinaryBlocks(binaryBatch?.blocks ?? []);
               this.options.onSessionListInvalidate?.();
             } catch (err) {
               console.error("[pidance] materialize after user message failed:", err);
@@ -695,7 +750,35 @@ export class SdkSessionHost {
       default:
         break;
     }
-    this.emit(this.withRenderedToolLines(event));
+    let eventToEmit = event;
+    if (event.type === "agent_end") {
+      // agent_end 已包含本轮最终 assistant；若该轮发生过压缩，此时 SDK
+      // getContextUsage() 才能给出压缩后的有效估算。随边界事件下发，避免
+      // settled 后立即 dispose 使浏览器错过最后一次热 state。
+      try {
+        const stats = this.session.getSessionStats() as {
+          contextUsage?: {
+            percent?: number;
+            contextWindow?: number;
+            tokens?: number;
+          };
+        };
+        const usage = stats.contextUsage;
+        if (usage && typeof usage.contextWindow === "number" && usage.contextWindow > 0) {
+          eventToEmit = {
+            ...event,
+            contextUsage: {
+              contextWindow: usage.contextWindow,
+              percent: typeof usage.percent === "number" ? usage.percent : null,
+              tokens: typeof usage.tokens === "number" ? usage.tokens : null,
+            },
+          };
+        }
+      } catch {
+        /* stats 可选；不阻断 agent_end */
+      }
+    }
+    this.emit(this.withRenderedToolLines(eventToEmit));
   }
 
   /**
@@ -903,9 +986,38 @@ export class SdkSessionHost {
         sessionManager: SessionManager;
         sessionStartEvent?: unknown;
       }) => {
+        const sendFileExecutor = createSendFileToUserExecutor({
+          cwd: runtimeCwd,
+          agentDir: runtimeAgentDir,
+          appendBinary: (input) => this.appendBinary(input, sm),
+        });
+        const sendFileTool: ToolDefinition = {
+          name: SEND_FILE_TO_USER_TOOL_NAME,
+          label: "Send file to user",
+          description: "Publish an agent-created project file as a user-visible attachment with preview/download support.",
+          promptSnippet: "deliver a generated file to the user as a downloadable attachment",
+          promptGuidelines: [
+            "When the user needs a generated file, call send_file_to_user; do not only print a local path or paste Base64.",
+            "Only report a file as delivered after send_file_to_user returns successfully.",
+          ],
+          parameters: SEND_FILE_TO_USER_PARAMETERS as unknown as ToolDefinition["parameters"],
+          async execute(_toolCallId, params, signal) {
+            const result = await sendFileExecutor(params as SendFileToUserParams, signal);
+            return {
+              content: [{ type: "text", text: `Delivered ${result.name} to the user (entry ${result.entryId}).` }],
+              details: result,
+            };
+          },
+        };
         const services = await createAgentSessionServices({
           cwd: runtimeCwd,
           agentDir: runtimeAgentDir,
+          resourceLoaderOptions: {
+            // 说明固定写入并声明“工具可用时”；工具是否启用交给 SDK 的
+            // tools/noTools/set_tools 语义，避免 allow-list 会话无法后续启用。
+            appendSystemPromptOverride: appendPidanceFileDeliveryPrompt,
+            extensionFactories: [(pi) => pi.registerTool(sendFileTool)],
+          },
         });
         // 省略的 xhigh/max 补恒等，让 settings 默认 xhigh 在建 session 时不被 Pi 钳成 high
         for (const m of services.modelRuntime.getModels()) {
@@ -989,7 +1101,7 @@ export class SdkSessionHost {
       // SDK 同进程可直接投影完整 system prompt（RPC 时代协议不含该字段）
       systemPrompt: session.systemPrompt ?? "",
       model: model
-        ? { id: model.id, provider: model.provider }
+        ? { id: model.id, provider: model.provider, modelId: model.id }
         : undefined,
       messageCount: session.messages.length,
       pendingMessageCount: session.pendingMessageCount,
@@ -1060,6 +1172,50 @@ export class SdkSessionHost {
     return { entryId, activity };
   }
 
+  appendBinary(
+    input: Record<string, unknown> | unknown,
+    expectedSessionManager?: SessionManager,
+  ): {
+    entryId: string;
+    binary: BinaryMessageData;
+  } {
+    if (!this._alive || !this.runtime || this.destroyPromise) {
+      throw new Error("Cannot append binary message: session not alive");
+    }
+    const session = this.session;
+    const manager = session.sessionManager;
+    if (expectedSessionManager && manager !== expectedSessionManager) {
+      throw new Error("Cannot publish file after the session changed");
+    }
+    const record = input && typeof input === "object" && !Array.isArray(input)
+      ? input as Record<string, unknown>
+      : {};
+    const raw = record.type === "append_binary" ? record.binaryBlock : input;
+    const binary = normalizeBinaryMessageInputs(
+      raw ? [raw as BinaryMessageInput] : undefined,
+      this.agentDir,
+    )[0];
+    if (!binary) throw new Error("binaryBlock is required");
+    const entryId = manager.appendCustomEntry(PIDANCE_BINARY_CUSTOM_TYPE, binary);
+    // The entry is already durable before notifications. A listener failure must
+    // not make the tool delete the published attachment.
+    try {
+      this.options.onSessionListInvalidate?.();
+    } catch (error) {
+      console.error("[pidance] binary message list notification failed:", error);
+    }
+    try {
+      this.emit({
+        type: "message_end",
+        entryId,
+        message: binaryMessageToUiMessage(binary, Date.now()),
+      });
+    } catch (error) {
+      console.error("[pidance] binary message event notification failed:", error);
+    }
+    return { entryId, binary };
+  }
+
   async send(command: Record<string, unknown>): Promise<unknown> {
     if (!this.runtime) throw new Error("SDK session is not alive");
     const type = command.type as string;
@@ -1082,6 +1238,7 @@ export class SdkSessionHost {
         const key = parsed.submissionId;
         const inFlight = this.promptInFlight.get(key);
         if (inFlight) return inFlight;
+        const binaryBlocks = normalizeBinaryMessageInputs(parsed.binaryBlocks, this.agentDir);
         if (this.bashRunning) {
           throw new Error("Cannot send a prompt while a shell command is running");
         }
@@ -1089,8 +1246,8 @@ export class SdkSessionHost {
         // running. Preserve the user's message in the existing Pidance follow-up
         // queue; compaction_end will schedule the normal prompt flush.
         if (session.isCompacting) {
-          if (parsed.images?.length) {
-            throw new Error("Image attachments cannot be queued while compaction is in progress");
+          if (parsed.images?.length || binaryBlocks.length > 0) {
+            throw new Error("Media attachments cannot be queued while compaction is in progress");
           }
           const queuedReceipt: PromptReceipt = {
             submissionId: parsed.submissionId,
@@ -1137,6 +1294,9 @@ export class SdkSessionHost {
                 preflightResult: (ok) => {
                   if (!ok) return;
                   settled = true;
+                  if (binaryBlocks.length > 0) {
+                    this.pendingBinaryBatches.push({ submissionId: key, blocks: binaryBlocks });
+                  }
                   // 注意：此时 user 消息尚未 append 到 sessionManager（SDK 在预检后
                   // 才把消息交给 agent 事件流），materialize 只会写出 header-only；
                   // 真正的落盘在 message_end(user) 处理后的 setImmediate 中完成。
@@ -1180,6 +1340,7 @@ export class SdkSessionHost {
           this.promptReceipts.set(key, receipt);
           return receipt;
           } catch (error) {
+          this.removePendingBinaryBatch(key);
           this.promptRunning = false;
           this.lastStopReason = this.lastStopReason === "aborted" ? "aborted" : "error";
           this.setFollowUpHeld(true);
@@ -1259,7 +1420,21 @@ export class SdkSessionHost {
       }
 
       case "steer": {
-        await session.steer(String(command.message ?? ""), command.images as never);
+        const message = String(command.message ?? "");
+        // 浏览器运行态可能因 SSE 收尾/重连竞态落后于 host。Pi SDK 在空闲时
+        // steer() 只入 steering queue、不会启动 LLM，消息会静默挂起；由 host
+        // 以权威运行态决定：运行中保留原生 steer，空闲时转成下一轮 prompt。
+        // flushingFollowUp 也视为 busy：让引导进入即将投递的下一轮，而不是
+        // 和 Host 的队列 flush 并发启动两个 prompt。
+        if (!this.isRunning() && !this.flushingFollowUp) {
+          return this.send({
+            type: "prompt",
+            message,
+            images: command.images,
+            streamingBehavior: "steer",
+          });
+        }
+        await session.steer(message, command.images as never);
         return null;
       }
 
@@ -1431,6 +1606,9 @@ export class SdkSessionHost {
       case "append_activity":
         return this.appendActivity(command);
 
+      case "append_binary":
+        return this.appendBinary(command);
+
       case "fork": {
         if (this.bashRunning) throw new Error("Cannot fork while a shell command is running");
         const entryId = String(command.entryId ?? "");
@@ -1571,6 +1749,7 @@ export class SdkSessionHost {
         this._scheduledRecheck = false;
         if (!this.destroyPromise && this._alive) void this.destroyAsync();
       }, 0);
+      return;
     }
     this._alive = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);

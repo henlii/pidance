@@ -1,6 +1,10 @@
+import type { BinaryMessageInput } from "./types";
+
 export interface ChatDraftImage {
   data: string;
   mimeType: string;
+  /** 原图已上传时保留引用；draft 不保存原始二进制。 */
+  original?: BinaryMessageInput;
 }
 
 export interface ChatDraft {

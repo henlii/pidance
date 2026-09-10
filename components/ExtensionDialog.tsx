@@ -70,10 +70,10 @@ const inputStyle: CSSProperties = {
 };
 
 /**
- * 扩展阻塞请求弹窗（对齐 Pi TUI：select/confirm/input/editor 一律 modal 承载）。
+ * 扩展阻塞请求面板（对齐 Pi TUI：select/confirm/input/editor 一律阻塞等待响应）。
  *
- * 覆盖层固定视口居中，遮罩点击不关闭（响应必须显式给出，避免伪造协议响应）；
- * Esc 仅在 input/editor 内处理，不冒泡关闭弹窗。
+ * 面板固定展开在输入框上方，不覆盖会话内容；响应必须显式给出，避免伪造协议响应。
+ * Esc 仅在 input/editor 内处理，不冒泡关闭面板。
  */
 export function ExtensionDialog({ request, disabled = false, onRespond }: ExtensionDialogProps) {
   const { t } = useI18n();
@@ -131,22 +131,18 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
       aria-modal="true"
       aria-label={`${t("extension_extension")}: ${request.title}`}
       style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 60,
+        flexShrink: 0,
         display: "flex",
-        alignItems: "center",
         justifyContent: "center",
-        padding: 24,
-        background: "color-mix(in srgb, var(--bg) 55%, transparent)",
-        backdropFilter: "blur(2px)",
+        padding: "0 16px 8px",
+        background: "var(--bg)",
       }}
     >
       <section
         aria-label={`${t("extension_extension")}: ${request.title}`}
         style={{
           width: "min(560px, 100%)",
-          maxHeight: "80vh",
+          maxHeight: "min(52vh, 560px)",
           display: "flex",
           flexDirection: "column",
           overflow: "hidden",
@@ -203,7 +199,7 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
           </span>
         </div>
 
-        <div style={{ padding: "10px 12px", overflowY: "auto" }}>
+        <div style={{ padding: "10px 12px", overflowY: "auto", overscrollBehavior: "auto", touchAction: "auto" }}>
           {request.method === "confirm" && (
             <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
               <div

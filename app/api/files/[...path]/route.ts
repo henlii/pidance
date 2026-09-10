@@ -13,6 +13,7 @@ import {
   getDocumentMime,
   getFileExt,
   getImageMime,
+  getVideoMime,
 } from "@/lib/file-types";
 import { readFileConfig } from "@/lib/file-config";
 import { resolveDirentIsDirectory } from "@/lib/file-dirent";
@@ -82,6 +83,12 @@ function filePathFromSegments(segments: string[]): string {
 
 function parseFileRequestType(value: string): FileRequestType | null {
   return FILE_REQUEST_TYPE_SET.has(value) ? (value as FileRequestType) : null;
+}
+
+function parseRequestedMediaMime(value: string | null): string | null {
+  if (!value) return null;
+  const mime = value.trim().toLowerCase();
+  return /^(?:image|audio|video)\/[a-z0-9.+-]+$/.test(mime) ? mime : null;
 }
 
 async function getUploadDirectory(segments: string[]): Promise<
@@ -507,6 +514,8 @@ export async function GET(
       return NextResponse.json({ error: "Invalid file request type" }, { status: 400 });
     }
     const sessionId = request.nextUrl.searchParams.get("sessionId");
+    const requestedMime = parseRequestedMediaMime(request.nextUrl.searchParams.get("mime"));
+    const isMessageMedia = request.nextUrl.searchParams.get("messageMedia") === "1";
 
     const allowedRoots = await getAllowedFileRoots();
     const allowedByRoot = isFilePathAllowed(filePath, allowedRoots);
@@ -544,16 +553,20 @@ export async function GET(
       if (!stat.isFile()) {
         return NextResponse.json({ error: "Not a file" }, { status: 400 });
       }
-      const imageMime = getImageMime(realPath);
+      const imageMime = getImageMime(realPath) ?? (requestedMime?.startsWith("image/") ? requestedMime : null);
       if (imageMime) {
-        if (stat.size > readFileConfig().imagePreviewMaxBytes) {
-          return NextResponse.json({ error: "Image too large (>10MB)" }, { status: 413 });
+        if (!isMessageMedia && stat.size > readFileConfig().imagePreviewMaxBytes) {
+          return NextResponse.json({ error: "Image too large for preview" }, { status: 413 });
         }
         return streamFile(realPath, stat, imageMime, request.headers.get("range"));
       }
-      const audioMime = getAudioMime(realPath);
+      const audioMime = getAudioMime(realPath) ?? (requestedMime?.startsWith("audio/") ? requestedMime : null);
       if (audioMime) {
         return streamFile(realPath, stat, audioMime, request.headers.get("range"));
+      }
+      const videoMime = getVideoMime(realPath) ?? (requestedMime?.startsWith("video/") ? requestedMime : null);
+      if (videoMime) {
+        return streamFile(realPath, stat, videoMime, request.headers.get("range"));
       }
       const documentMime = getDocumentMime(realPath);
       if (documentMime) {
@@ -593,7 +606,7 @@ export async function GET(
       if (!stat.isFile()) {
         return NextResponse.json({ error: "Not a file" }, { status: 400 });
       }
-      const mime = getImageMime(realPath) || getAudioMime(realPath) || getDocumentMime(realPath) || "application/octet-stream";
+      const mime = getImageMime(realPath) || getAudioMime(realPath) || getVideoMime(realPath) || requestedMime || getDocumentMime(realPath) || "application/octet-stream";
       return streamFile(realPath, stat, mime, request.headers.get("range"), true);
     }
 
@@ -603,12 +616,13 @@ export async function GET(
       }
       const imageMime = getImageMime(realPath);
       const audioMime = getAudioMime(realPath);
+      const videoMime = getVideoMime(realPath);
       const documentMime = getDocumentMime(realPath);
       return NextResponse.json({
         size: stat.size,
         mtimeMs: stat.mtimeMs,
         language: getLanguage(realPath),
-        mime: imageMime || audioMime || documentMime || "text/plain",
+        mime: imageMime || audioMime || videoMime || requestedMime || documentMime || "text/plain",
         previewKind: documentPreviewKind(realPath),
       });
     }

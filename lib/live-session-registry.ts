@@ -167,7 +167,7 @@ function getLocalRunningAndStartingIds(): string[] {
   return [...ids];
 }
 
-/** lease 需要覆盖整个 live writer 窗口，包含已 settled 但尚未 dispose 的 host。 */
+/** lease 覆盖 live writer 窗口；正常 settled run 会立即 dispose host。 */
 function getLocalWriterAndStartingIds(): string[] {
   const ids = new Set<string>(getStartingSessionIds());
   for (const [sessionId, session] of getRegistry()) {

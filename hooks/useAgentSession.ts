@@ -9,13 +9,14 @@ import type {
   SessionInfo,
   SessionTreeNode,
   AttachedImage,
+  BinaryMessageInput,
   ChatInputHandle,
 } from "@/lib/types";
 import { recoverFailedSend } from "@/lib/send-failure";
 import { preserveCustomRenderedLines } from "@/lib/custom-rendered-lines";
 import type { SessionActivity } from "@/lib/session-activity";
 import { readAgentLiveFlag, sendAgentCommand } from "@/lib/agent-client";
-import { generateSubmissionId } from "@/lib/agent-commands";
+import { generateSubmissionId, type PromptReceipt } from "@/lib/agent-commands";
 import { clearDraft } from "@/lib/draft-store";
 import { getOrCreateBrowserSessionRuntimeRegistry, type RegistrySubscription } from "@/lib/browser-session-runtime-registry";
 import {
@@ -131,6 +132,8 @@ type AgentStateResponse = {
   contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null;
   systemPrompt?: string;
   thinkingLevel?: string;
+  /** host 热投影的当前模型（切回会话时 loadSession 返回前恢复模型显示用） */
+  model?: { provider: string; modelId: string } | null;
   isStreaming?: boolean;
   isPromptRunning?: boolean;
   isBashRunning?: boolean;
@@ -321,6 +324,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [entryIds, setEntryIds] = useState<string[]>([]);
+  /** 同一会话并发 tail/state 请求的响应代数；只允许最新请求提交 React 状态。 */
+  const loadRequestSeqRef = useRef(0);
   const historyLoadingRef = useRef(false);
   const hasMoreBeforeRef = useRef(false);
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
@@ -360,6 +365,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [pendingModel, setPendingModel] = useState<{ provider: string; modelId: string } | null>(null);
   /** pendingModel 的 ref 副本（handleSend 闭包读取最新值） */
   const pendingModelRef = useRef<{ provider: string; modelId: string } | null>(null);
+  /**
+   * 每会话最近已知模型（sessionId → model）：切换会话 setData(null) 清磁盘投影后、
+   * loadSession 返回前的窗口内恢复模型显示，避免输入框显示「模型」占位。
+   * 数据源：hot/live state 投影与磁盘 context.model（loadSession 成功后登记）。
+   */
+  const [lastKnownModel, setLastKnownModel] = useState<{ provider: string; modelId: string } | null>(null);
+  const lastKnownModelBySessionRef = useRef<Map<string, { provider: string; modelId: string }>>(new Map());
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactError, setCompactError] = useState<string | null>(null);
   const [compactResult, setCompactResult] = useState<CompactResultInfo | null>(null);
@@ -402,8 +414,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const applyLocalFollowUpQueue = useCallback((next: string[]) => {
     applySessionLocalQueue(currentQueueSessionIdRef.current, next);
   }, [applySessionLocalQueue]);
+  /** follow-up 同步在途标记：入队请求未确认前，服务端旧队列投影不得覆盖本地。 */
+  const followUpSyncInFlightRef = useRef(false);
   const applyProjectedQueues = useCallback((value?: AgentStateResponse["queuedMessages"]) => {
     const next = normalizeQueuedMessages(value);
+    // 同步在途：本地投影（含乐观新条目）比服务端快照新，直接采用服务端旧值
+    // 会让队列块「闪空又重现」。只采 steering，followUp 保持本地。
+    if (followUpSyncInFlightRef.current) {
+      setQueuedMessages({ steering: next.steering, followUp: [...localFollowUpRef.current] });
+      return;
+    }
     applyLocalFollowUpQueue(next.followUp);
     setQueuedMessages({ steering: next.steering, followUp: next.followUp });
   }, [applyLocalFollowUpQueue]);
@@ -413,6 +433,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     applyLocalFollowUpQueue(applied);
     const sid = sessionIdRef.current;
     if (!sid) return;
+    followUpSyncInFlightRef.current = true;
     const sync = followUpSyncRef.current
       .catch(() => undefined)
       .then(async () => {
@@ -427,6 +448,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         applyLocalFollowUpQueue(previous);
       }
       throw error;
+    } finally {
+      followUpSyncInFlightRef.current = false;
     }
   }, [applyLocalFollowUpQueue]);
   // 分支切换/总结进行中：树节点、发送与再次导航全部暂停，避免与 navigateTree 并发写。
@@ -513,7 +536,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const currentModel = resolveDisplayModel(
     currentModelOverride,
     pendingModel,
-    data?.context.model,
+    data?.context.model ?? lastKnownModel,
     isNew ? newSessionDefaultModel : null,
   );
   const displayModel = isNew ? (newSessionModel ?? newSessionDefaultModel) : currentModel;
@@ -565,6 +588,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     resetBranchFollow = false,
     onMessagesReplaced?: () => void,
   ) => {
+    const loadRequestSeq = ++loadRequestSeqRef.current;
     let messagesLoaded = false;
     try {
       if (showLoading) setLoading(true);
@@ -585,6 +609,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         limit: String(DEFAULT_SESSION_TAIL_LIMIT),
       });
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}?${params}`);
+      if (loadRequestSeq !== loadRequestSeqRef.current || sessionIdRef.current !== sid) return null;
       if (res.status === 404) {
         if (showLoading) {
           setData(null);
@@ -601,7 +626,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as SessionData;
-      if (sessionIdRef.current !== sid) return null;
+      if (loadRequestSeq !== loadRequestSeqRef.current || sessionIdRef.current !== sid) return null;
       const runState = registry.getRunState(sid);
       if (
         runState?.finishingRunId !== null
@@ -683,6 +708,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 权威档位已到（无论有无档）：解锁思考档显示/事件回写。
       thinkingSettledRef.current = sid;
       setThinkingReady(true);
+      // 登记磁盘权威模型（每会话）：供后续切换时即时恢复显示。
+      if (d.context.model?.provider && d.context.model?.modelId) {
+        lastKnownModelBySessionRef.current.set(sid, { provider: d.context.model.provider, modelId: d.context.model.modelId });
+        setLastKnownModel({ provider: d.context.model.provider, modelId: d.context.model.modelId });
+      }
 
       messagesLoaded = true;
       if (showLoading) setLoading(false);
@@ -696,6 +726,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt ?? null);
         if (liveState.thinkingLevel !== undefined) {
           if (isThinkingLevel(liveState.thinkingLevel)) setThinkingLevel(liveState.thinkingLevel);
+        }
+        if (liveState.model?.provider && liveState.model?.modelId) {
+          lastKnownModelBySessionRef.current.set(sid, { provider: liveState.model.provider, modelId: liveState.model.modelId });
+          setLastKnownModel({ provider: liveState.model.provider, modelId: liveState.model.modelId });
         }
         if (liveState.extensionStatuses !== undefined) {
           patchExtensionUiState({ statuses: liveState.extensionStatuses ?? [] });
@@ -732,7 +766,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             lockedByOther?: boolean;
             state?: AgentStateResponse;
           };
-          if (sessionIdRef.current !== sid) return null;
+          if (loadRequestSeq !== loadRequestSeqRef.current || sessionIdRef.current !== sid) return null;
           const live = readAgentLiveFlag(hot);
           if (live && hot.state) {
             setLockedByOther(false);
@@ -1148,13 +1182,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (state.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
     if (state.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt ?? null);
     if (isThinkingLevel(state.thinkingLevel)) setThinkingLevel(state.thinkingLevel);
+    // host 热投影的模型：磁盘 loadSession 未返回前恢复模型显示，避免切换窗口
+    // 内 displayModel 为空显示「模型」占位。
+    if (state.model?.provider && state.model?.modelId) {
+      setLastKnownModel({ provider: state.model.provider, modelId: state.model.modelId });
+    }
     if (state.isCompacting !== undefined) setIsCompacting(state.isCompacting);
     if (state.extensionStatuses !== undefined) patchExtensionUiState({ statuses: state.extensionStatuses ?? [] });
     if (state.extensionWidgets !== undefined) patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
     if (state.queuedMessages !== undefined) {
       applyProjectedQueues(state.queuedMessages);
     }
-  }, [applyProjectedQueues, patchExtensionUiState]);
+  }, [applyProjectedQueues, patchExtensionUiState, setLastKnownModel]);
 
   /**
    * 统一 agent run 结束路径（P2）：agent_end / prompt_done / reconcile idle 三路合一。
@@ -1348,7 +1387,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", onVisible);
-    const interval = lockedByOther ? window.setInterval(refreshLock, 5_000) : undefined;
+    // 跨进程运行锁在 agent_settled 后立即释放；已显示锁定条的页面用短轮询
+    // 感知释放，避免旧的 5s 窗口让用户还要等一轮才能发送。
+    const interval = lockedByOther ? window.setInterval(refreshLock, 1_000) : undefined;
     return () => {
       cancelled = true;
       document.removeEventListener("visibilitychange", onVisible);
@@ -1391,6 +1432,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       case "agent_end":
       case "prompt_done": {
+        if (event.type === "agent_end") {
+          const usage = event.contextUsage as AgentStateResponse["contextUsage"] | undefined;
+          if (usage && typeof usage.contextWindow === "number" && usage.contextWindow > 0) {
+            setContextUsage(usage);
+          }
+        }
         const sid = sessionIdRef.current;
         const runId = sid
           ? getOrCreateBrowserSessionRuntimeRegistry().getRunState(sid)?.promptRunId
@@ -1556,8 +1603,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setCompactError(event.errorMessage as string);
           setCompactResult(null);
         } else if (!event.aborted) {
+          // Pi 在成功压缩后会明确把 contextUsage 标成「未知」：压缩前最后一条
+          // assistant usage 不能代表压缩后的上下文，下一次 assistant 返回前不能继续
+          // 显示旧百分比。保留 contextWindow，仅清除 tokens/percent，顶栏显示 ?。
+          setContextUsage((previous) => previous
+            ? { ...previous, tokens: null, percent: null }
+            : null);
           setCompactResult(readCompactResult(event.result, (event.reason as string | undefined) ?? "auto"));
-          if (sessionIdRef.current) loadSession(sessionIdRef.current);
+          if (sessionIdRef.current) void loadSession(sessionIdRef.current, false, true);
         }
         break;
       case "extension_ui_request":
@@ -1567,7 +1620,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [addNotice, applyLocalFollowUpQueue, commitToolExecutions, finishAgentRun, handleExtensionUiRequest, loadSession, t]);
   handleAgentEventRef.current = handleAgentEvent;
 
-  const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
+  const handleSend = useCallback(async (message: string, images?: AttachedImage[], binaryBlocks?: BinaryMessageInput[]): Promise<boolean> => {
     // 只读会话：发送入口 UI 已替换为提示条，这里再拦一层。
     if (isReadOnly) return false;
     if (lockedByOther) {
@@ -1575,16 +1628,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return false;
     }
     const trimmedMessage = message.trim();
-    if (!trimmedMessage && !images?.length) return false;
+    if (!trimmedMessage && !images?.length && !binaryBlocks?.length) return false;
     if (getRuntimeAgentRunning() || bashRunningRef.current) return false;
     // 分支切换/摘要进行中：prompt 会与 navigateTree 并发写会话文件，先拦住。
     if (branchBusyRef.current) {
       addNotice({ type: "info", message: t("input_branchSwitchInProgress") });
       return false;
     }
-    const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
+    const isSlashCommandPrompt = !images?.length && !binaryBlocks?.length && trimmedMessage.startsWith("/");
 
-    const isBashCommand = !images?.length && trimmedMessage.startsWith("!");
+    const isBashCommand = !images?.length && !binaryBlocks?.length && trimmedMessage.startsWith("!");
     if (isBashCommand) {
       const isExcluded = trimmedMessage.startsWith("!!");
       const bashCmd = (isExcluded ? trimmedMessage.slice(2) : trimmedMessage.slice(1)).trim();
@@ -1674,6 +1727,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           submissionId,
           message,
           images,
+          binaryBlocks,
           draftKey,
           model: selectedModel ?? undefined,
           ...(isNew && resolvedThinking ? { thinkingLevel: resolvedThinking } : {}),
@@ -1719,6 +1773,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           submissionId,
           message,
           images,
+          binaryBlocks,
           draftKey,
         });
         if (receipt.status !== "accepted") {
@@ -2190,11 +2245,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       notifyAutoFollowSend();
       const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
       try {
-        await sendAgentCommand(sid, {
+        const receipt = await sendAgentCommand<PromptReceipt>(sid, {
           type: "prompt",
           message: text,
           ...(piImages?.length ? { images: piImages } : {}),
         });
+        // runtime 误判空闲（agent_start 事件未到/竞态窗口）时服务器会拒绝：
+        // 必须转入 follow-up 队列，否则消息静默丢失，引导看起来「失效」。
+        if (receipt?.status === "rejected") {
+          await updateLocalFollowUp([...localFollowUpRef.current, text]);
+          ensureEventsConnected(sid);
+        }
       } catch (e) {
         console.error("Failed to send prompt:", e);
       }
@@ -2272,17 +2333,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 先让 Host 停止 settled 自动投递，再发送合并消息，避免当前 run 恰好结束时双发。
       await updateLocalFollowUp([]);
       queueCleared = true;
-      if (getRuntimeAgentRunning()) {
-        try {
-          // 运行中：steer（打断当前思考，立即引导）
-          await sendAgentCommand(sid, { type: "steer", message: merged });
-        } catch (e) {
-          if (!isExtensionCommandQueueError(e)) throw e;
-          // 扩展命令（/xxx）不能被 steer 排队；prompt() 在 streaming 时立即执行
-          await sendAgentCommand(sid, { type: "prompt", message: merged });
-        }
-      } else {
-        // 空闲：Pi 的 steer 只入进程队列不唤醒；用 prompt 立即发起新回合
+      try {
+        // 运行态由 host 权威判断：运行中 steer，空闲时 host 转 prompt；不能用
+        // 浏览器 slot 的 running 快照分支，否则收尾/SSE 竞态会把引导静默挂起。
+        await sendAgentCommand(sid, { type: "steer", message: merged });
+      } catch (e) {
+        if (!isExtensionCommandQueueError(e)) throw e;
+        // 扩展命令（/xxx）不能被 steer 排队；prompt() 在 streaming 时立即执行。
         await sendAgentCommand(sid, { type: "prompt", message: merged });
       }
       // 发送后连 SSE，确保本轮消息/回复实时投影
@@ -2446,7 +2503,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setContextUsage(null);
     setCurrentModelOverride(null);
     setPendingModel(null);
+    pendingModelRef.current = null;
     setNewSessionModel(null);
+    // 模型即时恢复：切换后 loadSession 返回前，从上一会话记录恢复当前会话的
+    // 最近已知模型，避免输入框在窗口期内显示「模型」占位。
+    const rememberedModel = (session?.id ? lastKnownModelBySessionRef.current.get(session.id) : undefined) ?? null;
+    setLastKnownModel(rememberedModel);
     setThinkingLevel(null);
     thinkingSettledRef.current = null;
     setThinkingReady(false);
@@ -2503,8 +2565,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const hasLiveSlotContent =
           runtimeId != null
           && (registry.getSnapshot(runtimeId)?.messages.length ?? 0) > 0;
+        // 记录切回前的 run token：loadSession 期间若有新 agent_start，不能用
+        // 旧的 idle 快照清掉新 run。
+        const runAtLoad = runtimeId ? registry.getRunState(runtimeId) : null;
         loadSession(session.id, !hasLiveSlotContent, true).then((agentState) => {
           if (agentState === true) return;
+          const runAfterLoad = registry.getRunState(session.id);
+          const serviceConfirmedIdle =
+            agentState?.activeRun === false
+            && agentState.lockedByOther !== true;
+          if (
+            serviceConfirmedIdle
+            && runAtLoad?.agentRunning
+            && !runAtLoad.sendInFlight
+            && runAfterLoad?.agentRunning
+            && runAfterLoad.promptRunId === runAtLoad.promptRunId
+          ) {
+            // host 已在 agent_settled 后销毁，但旧 slot 未收到边界事件；磁盘
+            // hydrate 已在 loadSession 中完成，此处只收口浏览器运行态。
+            registry.completeRun(session.id, runAfterLoad.promptRunId);
+            setAgentPhase(null);
+            setRetryInfo(null);
+            optimisticUserMessageKeyRef.current = null;
+          }
           if (agentState?.running || agentState?.live) {
             loadTools(session.id);
             if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {

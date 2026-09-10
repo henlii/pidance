@@ -272,8 +272,8 @@ export type SessionService = {
     entryId: string,
     blockIndex: number,
   ): Promise<{ thinking: string } | null>;
-  /** 只读：toolResult entry 的 details；未命中返回 null。 */
-  getToolResultDetails(sessionId: string, toolCallId: string): Promise<{ details: unknown } | null>;
+  /** 只读：toolResult entry 的 details/content；未命中返回 null。 */
+  getToolResultDetails(sessionId: string, toolCallId: string): Promise<{ details: unknown; content?: unknown[] } | null>;
   /**
    * 类型安全的持久活动写入。
    * 单写者：仅当 live 暴露 in-process SessionManager（inner.sessionManager）时走 live.appendActivity；
@@ -802,14 +802,17 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
     async getToolResultDetails(sessionId, toolCallId) {
       const view = await service.getReadView(sessionId);
       if (!view) return null;
-      const entry = (view.manager.getEntries() as Array<{ type?: string; message?: { role?: string; toolCallId?: string; details?: unknown } }>)
+      const entry = (view.manager.getEntries() as Array<{ type?: string; message?: { role?: string; toolCallId?: string; details?: unknown; content?: unknown[] } }>)
         .find((candidate) =>
           candidate.type === "message"
           && candidate.message?.role === "toolResult"
           && candidate.message.toolCallId === toolCallId,
         );
       if (!entry) return null;
-      return { details: entry.message?.details ?? null };
+      return {
+        details: entry.message?.details ?? null,
+        content: Array.isArray(entry.message?.content) ? entry.message.content : [],
+      };
     },
 
     async appendActivity(sessionId, input) {

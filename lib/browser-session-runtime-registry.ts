@@ -9,14 +9,16 @@ import {
   type AgentStreamEvent,
   type EventSourceLike,
   type EventStreamManager,
+  type TimerHandle,
 } from "./event-stream-manager";
 import { pendingSessionId } from "./new-session-intent";
 import type { PromptReceipt } from "./agent-commands";
 import { generateSubmissionId } from "./agent-commands";
 import { attachCustomRenderedLines } from "./custom-rendered-lines";
 import { normalizeToolCalls } from "./normalize";
+import { PIDANCE_BINARY_CUSTOM_TYPE, parseBinaryMessageData } from "./message-binary";
 import { shouldFinishFromReconcile } from "./finish-agent-run";
-import type { AgentMessage, AttachedImage } from "./types";
+import type { AgentMessage, AttachedImage, BinaryMessageData, BinaryMessageInput } from "./types";
 
 export type SubmissionStatus = "submitting" | "accepted" | "persisted" | "rejected" | "unknown";
 
@@ -26,6 +28,7 @@ export type PromptSubmission = {
   draftKey: string;
   message: string;
   images?: AttachedImage[];
+  binaryBlocks?: BinaryMessageInput[];
   status: SubmissionStatus;
   /** persisted 时对应 Pi JSONL user entry id；未确认前为 null */
   entryId?: string | null;
@@ -86,6 +89,7 @@ export type SubmitPromptInput = {
   submissionId?: string;
   message: string;
   images?: AttachedImage[];
+  binaryBlocks?: BinaryMessageInput[];
   draftKey: string;
   model?: { provider: string; modelId: string };
   thinkingLevel?: string;
@@ -104,6 +108,7 @@ export type BrowserSessionRuntimeRegistryDeps = {
     input: {
       message: string;
       images?: AttachedImage[];
+      binaryBlocks?: BinaryMessageInput[];
       submissionId: string;
       signal?: AbortSignal;
     },
@@ -116,6 +121,7 @@ export type BrowserSessionRuntimeRegistryDeps = {
   createAndPrompt?: (cwd: string, input: {
     message: string;
     images?: AttachedImage[];
+    binaryBlocks?: BinaryMessageInput[];
     submissionId: string;
     provider?: string;
     modelId?: string;
@@ -128,6 +134,9 @@ export type BrowserSessionRuntimeRegistryDeps = {
   restoreDraft?: (draftKey: string, draft: { value: string; images: AttachedImage[] }) => void;
   now?: () => number;
   makeSubmissionId?: () => string;
+  /** slot 空闲 SSE 关闭定时器（测试注入；生产 setTimeout/clearTimeout） */
+  schedule?: (fn: () => void, ms: number) => TimerHandle;
+  clearSchedule?: (id: TimerHandle) => void;
 };
 
 export type RegistrySubscription = {
@@ -160,7 +169,17 @@ type RuntimeSlot = {
   hydrateSeq: number;
   /** 最近一次已应用 hydrate 的请求号 */
   hydrateAppliedSeq: number;
+  /** 无视图且空闲时延迟关闭 SSE 的兜底定时器 */
+  idleCloseTimer: TimerHandle | null;
+  /** SSE 确连失败后的有限重试：当前定时器与已用次数 */
+  sseRetryTimer: TimerHandle | null;
+  sseRetryAttempt: number;
+  /** 当前视图订阅是否在（attach/detach 计数 0/1 过渡用） */
+  viewAttached: boolean;
 };
+
+/** slot 空闲 SSE 关闭兜底窗口：切走后留一小段时间给快速切回，随后释放服务端 host。 */
+export const IDLE_SSE_CLOSE_DELAY_MS = 5_000;
 
 export type BrowserSessionRuntimeRegistry = {
   getSnapshot(sessionId: string): SessionRuntimeSnapshot | null;
@@ -230,21 +249,45 @@ function createSlot(sessionId: string): RuntimeSlot {
     submissionMessageIndexes: new Map(),
     hydrateSeq: 0,
     hydrateAppliedSeq: 0,
+    idleCloseTimer: null,
+    sseRetryTimer: null,
+    sseRetryAttempt: 0,
+    viewAttached: false,
   };
 }
 
-function userMessageFromSubmit(message: string, images: AttachedImage[] | undefined, now: number): AgentMessage {
+function userMessageFromSubmit(
+  message: string,
+  images: AttachedImage[] | undefined,
+  binaryBlocks: BinaryMessageInput[] | undefined,
+  now: number,
+): AgentMessage {
   const imageBlocks = images?.map((img) => ({
     type: "image" as const,
     source: { type: "base64" as const, media_type: img.mimeType, data: img.data },
   }));
-  return {
+  const projected: AgentMessage & { binaryBlocks?: BinaryMessageData[] } = {
     role: "user",
     content: imageBlocks?.length
       ? [...(message.trim() ? [{ type: "text" as const, text: message }] : []), ...imageBlocks]
       : message,
     timestamp: now,
   };
+  if (binaryBlocks?.length) {
+    projected.binaryBlocks = binaryBlocks.map((block) => ({
+      type: "binary",
+      version: 1,
+      kind: block.mimeType.toLowerCase().startsWith("image/")
+        ? "image"
+        : block.mimeType.toLowerCase().startsWith("audio/")
+          ? "audio"
+          : block.mimeType.toLowerCase().startsWith("video/")
+            ? "video"
+            : "file",
+      ...block,
+    }));
+  }
+  return projected;
 }
 
 export function hashMessageIdentity(message: string, images: AttachedImage[] | undefined): string {
@@ -252,6 +295,25 @@ export function hashMessageIdentity(message: string, images: AttachedImage[] | u
     .map((img) => `${img.mimeType}:${img.data}`)
     .join("|");
   return `${message}\x1f${imageSig}`;
+}
+
+/**
+ * 从 content 提取纯文本（string 或 blocks 数组两种形状）。
+ * Pi 投递的 message_end user content 是 blocks 数组，而乐观气泡是 string；
+ * 去重比对必须统一两种形状，否则比对失败导致乐观气泡与投递消息重复。
+ */
+function messageContentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) =>
+      block && typeof block === "object"
+        && (block as { type?: string }).type === "text"
+        && typeof (block as { text?: unknown }).text === "string"
+        ? (block as { text: string }).text
+        : "")
+    .filter(Boolean)
+    .join("\n");
 }
 
 function defaultRestoreDraft(draftKey: string, draft: { value: string; images: AttachedImage[] }): void {
@@ -264,6 +326,10 @@ export function createBrowserSessionRuntimeRegistry(
   const restoreDraft = deps.restoreDraft ?? defaultRestoreDraft;
   const now = deps.now ?? (() => Date.now());
   const makeSubmissionId = deps.makeSubmissionId ?? generateSubmissionId;
+  const schedule: (fn: () => void, ms: number) => TimerHandle = deps.schedule
+    ?? ((fn, ms) => setTimeout(fn, ms));
+  const clearSchedule: (id: TimerHandle) => void = deps.clearSchedule
+    ?? ((id) => clearTimeout(id));
   const slots = new Map<string, RuntimeSlot>();
 
   const getSlot = (sessionId: string, create: boolean): RuntimeSlot | null => {
@@ -283,6 +349,44 @@ export function createBrowserSessionRuntimeRegistry(
       attachCount: slot.attachCount,
     };
     for (const listener of slot.snapshotListeners) listener(slot.snapshot);
+  };
+
+  /**
+   * SSE 生命周期对齐服务端 host 保活语义：视图挂载或 run 进行中才保持连接；
+   * 切走后无人观看且空闲的会话关闭 SSE，让服务端 idle dispose 释放 writer 租约，
+   * 另一实例（31415/31416）才能打开同一会话。挂载/新 run 会重连（connectEvents）。
+   */
+  const closeIdleEventStream = (slot: RuntimeSlot) => {
+    if (slot.idleCloseTimer) {
+      clearSchedule(slot.idleCloseTimer);
+      slot.idleCloseTimer = null;
+    }
+    if (slot.sseRetryTimer) {
+      clearSchedule(slot.sseRetryTimer);
+      slot.sseRetryTimer = null;
+      slot.sseRetryAttempt = 0;
+    }
+    if (slot.viewAttached || slot.attachCount > 0) return;
+    if (slot.snapshot.agentRunning || slot.snapshot.sendInFlight || slot.inFlight.size > 0) return;
+    const manager = slot.eventStream;
+    if (!manager) return;
+    slot.eventStream = null;
+    manager.close();
+    publish(slot);
+  };
+
+  const scheduleIdleEventStreamClose = (slot: RuntimeSlot) => {
+    if (slot.idleCloseTimer) {
+      clearSchedule(slot.idleCloseTimer);
+      slot.idleCloseTimer = null;
+    }
+    if (slot.viewAttached || slot.attachCount > 0) return;
+    if (slot.snapshot.agentRunning || slot.snapshot.sendInFlight || slot.inFlight.size > 0) return;
+    if (!slot.eventStream) return;
+    slot.idleCloseTimer = schedule(() => {
+      slot.idleCloseTimer = null;
+      closeIdleEventStream(slot);
+    }, IDLE_SSE_CLOSE_DELAY_MS);
   };
 
   const bumpTimeline = (slot: RuntimeSlot) => {
@@ -421,14 +525,36 @@ export function createBrowserSessionRuntimeRegistry(
           bumpTimeline(slot);
         } else {
           const last = slot.snapshot.messages[slot.snapshot.messages.length - 1];
-          const lastContent = last && "content" in last ? (last as { content?: unknown }).content : undefined;
-          const nextContent = completed && "content" in completed ? (completed as { content?: unknown }).content : undefined;
-          const lastText = typeof lastContent === "string" ? lastContent : "";
-          const nextText = typeof nextContent === "string" ? nextContent : "";
+          const lastText = messageContentText(last && "content" in last ? (last as { content?: unknown }).content : undefined);
+          const nextText = messageContentText(completed && "content" in completed ? (completed as { content?: unknown }).content : undefined);
           const isNextEntryPresent = entryId !== null
             ? slot.snapshot.messages.some((msg) => (msg as { entryId?: unknown }).entryId === entryId)
             : false;
-          if (!isNextEntryPresent && (!last || last.role !== "user" || lastText !== nextText)) {
+          // 重复防御：磁盘 hydrate 后乐观/引导气泡（同文本、空 entryId）可能不在末尾。
+          // 先找同文本且空 entryId 的 user 消息，命中则就地绑定 entryId，不追加。
+          let bindIndex = -1;
+          if (!isNextEntryPresent) {
+            bindIndex = slot.snapshot.messages.findLastIndex((msg, index) =>
+              msg?.role === "user"
+              && !(slot.snapshot.entryIds[index])
+              // 统一 string/blocks 两种 content 形状后比对文本。
+              && (msg as { content?: unknown }).content !== undefined
+              && messageContentText((msg as { content?: unknown }).content) === nextText
+              && nextText.length > 0
+            );
+          }
+          if (bindIndex >= 0) {
+            const messages = [...slot.snapshot.messages];
+            const aligned = alignEntryIds(slot.snapshot.messages, slot.snapshot.entryIds);
+            messages[bindIndex] = {
+              ...(completed as unknown as Record<string, unknown>),
+              entryId: entryId ?? "",
+            } as unknown as AgentMessage;
+            aligned[bindIndex] = entryId ?? "";
+            slot.snapshot.messages = messages;
+            slot.snapshot.entryIds = aligned;
+            bumpTimeline(slot);
+          } else if (!isNextEntryPresent && (!last || last.role !== "user" || lastText !== nextText)) {
             appendMessageWithEntry(slot, completed, entryId);
           } else if (!isNextEntryPresent && entryId !== null && last?.role === "user") {
             const lastIndex = slot.snapshot.messages.length - 1;
@@ -455,6 +581,34 @@ export function createBrowserSessionRuntimeRegistry(
           match.status = "persisted";
           match.entryId = entryId;
         }
+      } else if (completed?.role === "custom" && completed.customType === PIDANCE_BINARY_CUSTOM_TYPE) {
+        const binary = parseBinaryMessageData(completed.details);
+        const targetIndex = binary?.messageEntryId
+          ? slot.snapshot.entryIds.indexOf(binary.messageEntryId)
+          : -1;
+        const fallbackIndex = targetIndex >= 0
+          ? targetIndex
+          : binary?.messageEntryId
+            ? slot.snapshot.messages.findLastIndex((message, index) => message.role === "user" && !slot.snapshot.entryIds[index])
+            : -1;
+        const target = fallbackIndex >= 0 ? slot.snapshot.messages[fallbackIndex] : undefined;
+        if (binary && target?.role === "user") {
+          const existing = target.binaryBlocks ?? [];
+          const alreadyAttached = existing.some((block) => (
+            block.path === binary.path
+            && block.previewPath === binary.previewPath
+          ));
+          if (!alreadyAttached) {
+            slot.snapshot.messages = slot.snapshot.messages.map((message, index) => (
+              index === fallbackIndex && message.role === "user"
+                ? { ...message, binaryBlocks: [...(message.binaryBlocks ?? []), binary] }
+                : message
+            ));
+            bumpTimeline(slot);
+          }
+        } else if (slot.snapshot.agentRunning) {
+          appendMessageWithEntry(slot, completed, entryId);
+        }
       } else if (completed && slot.snapshot.agentRunning) {
         const rendered = attachCustomRenderedLines(completed, event.renderedLines);
         appendMessageWithEntry(slot, normalizeToolCalls(rendered), entryId);
@@ -469,9 +623,28 @@ export function createBrowserSessionRuntimeRegistry(
         /* view errors must not break the runtime */
       }
     }
+    // 无视图且空闲（run 结束后无人观看）：调度延迟关闭 SSE，释放服务端 idle host。
+    scheduleIdleEventStreamClose(slot);
   };
 
+  /**
+   * attach 后 SSE 确连失败的重试窗口（host dispose/创建竞态的瞬态 404）。
+   * 有限次短重试：期间用户能看到投递/回复事件；全败则放弃，后续写动作
+   * （ensureEventsConnected / submitPrompt）仍会重建。
+   */
+  const SSE_ENSURE_RETRY_DELAYS_MS = [500, 1_500, 3_000];
+
   const connectEvents = (slot: RuntimeSlot) => {
+    // 挂载/新 run 到来：取消待执行的空闲关闭与重试，保持连接。
+    if (slot.idleCloseTimer) {
+      clearSchedule(slot.idleCloseTimer);
+      slot.idleCloseTimer = null;
+    }
+    if (slot.sseRetryTimer) {
+      clearSchedule(slot.sseRetryTimer);
+      slot.sseRetryTimer = null;
+      slot.sseRetryAttempt = 0;
+    }
     const source = slot.eventStream?.getCurrentSource();
     if (slot.eventStream && source && source.readyState !== 2 && slot.eventStream.isCurrent(slot.sessionId)) {
       return;
@@ -492,6 +665,21 @@ export function createBrowserSessionRuntimeRegistry(
     slot.eventStream = manager;
     void manager.ensureConnected(slot.sessionId, onEvent).catch(() => {
       if (slot.eventStream === manager) slot.eventStream = null;
+      // 视图仍在且无 run 在途：有限次重试，覆盖 host 瞬态 404（dispose/ensure 竞态）。
+      if (!slot.viewAttached || slot.attachCount === 0) return;
+      const attempt = slot.sseRetryAttempt;
+      if (attempt >= SSE_ENSURE_RETRY_DELAYS_MS.length) return;
+      const delay = SSE_ENSURE_RETRY_DELAYS_MS[attempt];
+      slot.sseRetryAttempt = attempt + 1;
+      if (slot.sseRetryTimer) clearSchedule(slot.sseRetryTimer);
+      slot.sseRetryTimer = schedule(() => {
+        slot.sseRetryTimer = null;
+        // 重试前再确认：视图仍挂载、连接未重建、run 未结束。
+        if (!slot.viewAttached || slot.attachCount === 0) return;
+        if (slot.eventStream && slot.eventStream !== manager) return;
+        if (slot.snapshot.agentRunning || slot.snapshot.sendInFlight) return;
+        connectEvents(slot);
+      }, delay);
     });
   };
 
@@ -521,6 +709,7 @@ export function createBrowserSessionRuntimeRegistry(
     attach(sessionId, onEvent) {
       const slot = getSlot(sessionId, true)!;
       slot.attachCount += 1;
+      slot.viewAttached = true;
       if (onEvent) slot.viewHandlers.add(onEvent);
       // 打开会话只订阅已有 live；不在 attach 阶段 wake/创建 writer。
       // 首次写操作由 submitPrompt/ensureEventsConnected 明确唤醒，避免 31415/31416
@@ -534,7 +723,10 @@ export function createBrowserSessionRuntimeRegistry(
           if (!current) return;
           if (onEvent) current.viewHandlers.delete(onEvent);
           current.attachCount = Math.max(0, current.attachCount - 1);
+          if (current.attachCount === 0) current.viewAttached = false;
           publish(current);
+          // 切走后无人观看：延迟关闭 SSE，释放服务端 idle host 与 writer 租约。
+          scheduleIdleEventStreamClose(current);
         },
       };
     },
@@ -564,6 +756,7 @@ export function createBrowserSessionRuntimeRegistry(
         draftKey: input.draftKey,
         message: input.message,
         images: input.images,
+        binaryBlocks: input.binaryBlocks,
         status: "submitting",
         entryId: null,
       };
@@ -578,7 +771,7 @@ export function createBrowserSessionRuntimeRegistry(
       const optimisticMessageIndex = slot.snapshot.messages.length;
       slot.snapshot.messages = [
         ...slot.snapshot.messages,
-        userMessageFromSubmit(input.message, input.images, now()),
+        userMessageFromSubmit(input.message, input.images, input.binaryBlocks, now()),
       ];
       slot.snapshot.entryIds = [...slot.snapshot.entryIds, ""];
       slot.submissionMessageIndexes.set(submissionId, optimisticMessageIndex);
@@ -598,6 +791,7 @@ export function createBrowserSessionRuntimeRegistry(
                 {
                   message: input.message,
                   images: input.images,
+                  binaryBlocks: input.binaryBlocks,
                   submissionId,
                   ...(input.model?.provider ? { provider: input.model.provider, modelId: input.model.modelId } : {}),
                   ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}),
@@ -650,6 +844,7 @@ export function createBrowserSessionRuntimeRegistry(
           const receipt = await deps.postPrompt(sessionId, {
             message: input.message,
             images: input.images,
+            binaryBlocks: input.binaryBlocks,
             submissionId,
             signal: controller.signal,
           });
@@ -681,6 +876,8 @@ export function createBrowserSessionRuntimeRegistry(
           slot.promptAborts.delete(submissionId);
           slot.snapshot.sendInFlight = slot.inFlight.size > 0;
           publish(slot);
+          // 提交结算后仍无视图且已空闲（rejected/unknown）：调度延迟关闭 SSE。
+          scheduleIdleEventStreamClose(slot);
         }
       })();
       slot.inFlight.set(submissionId, promise);
@@ -714,6 +911,7 @@ export function createBrowserSessionRuntimeRegistry(
       slot.snapshot.agentRunning = false;
       slot.snapshot.sendInFlight = slot.inFlight.size > 0;
       publish(slot);
+      scheduleIdleEventStreamClose(slot);
     },
     getRunState(sessionId) {
       const snapshot = slots.get(sessionId)?.snapshot;
@@ -777,6 +975,7 @@ export function createBrowserSessionRuntimeRegistry(
       }
       const live = data.live === true || (data.live === undefined && data.running === true);
       const state = data.state;
+      const knownIdleWithoutLive = data.activeRun === false && data.lockedByOther !== true;
       return {
         runId,
         stale: false,
@@ -785,6 +984,7 @@ export function createBrowserSessionRuntimeRegistry(
           sendInFlight: current.snapshot.sendInFlight,
           clientRunning: current.snapshot.agentRunning,
           live,
+          knownIdleWithoutLive,
           isStreaming: state?.isStreaming === true,
           isPromptRunning: state?.isPromptRunning === true,
           isCompacting: state?.isCompacting === true,
@@ -882,6 +1082,7 @@ function createBrowserFetchDeps(): BrowserSessionRuntimeRegistryDeps {
           ...(input.images?.length
             ? { images: input.images.map((img) => ({ type: "image", data: img.data, mimeType: img.mimeType })) }
             : {}),
+          ...(input.binaryBlocks?.length ? { binaryBlocks: input.binaryBlocks } : {}),
           ...(input.provider && input.modelId ? { provider: input.provider, modelId: input.modelId } : {}),
           ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}),
         }),

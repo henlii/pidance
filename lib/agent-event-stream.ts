@@ -10,7 +10,7 @@
  * - tool_execution_update：原样保留（含 toolCallId / toolName / args / partialResult）。
  * - message_update：删除 assistantMessageEvent 大字段、保留其余字段；
  *   返回浅拷贝，不修改原事件对象（纯函数）。
- * - agent_end：瘦身为 { type: "agent_end" }。
+ * - agent_end：瘦身为 { type: "agent_end" }，若 host 附带 contextUsage 则保留该小型快照。
  * - 其他带合法 type 的事件：原样保留（返回原对象，避免多余拷贝）。
  * - 无合法 type（缺 type / type 非非空字符串 / 非对象）：返回 null，不发送。
  */
@@ -38,8 +38,13 @@ export function projectAgentEvent(event: unknown): Record<string, unknown> | nul
     return slim;
   }
 
-  // agent_end：瘦身为 { type: "agent_end" }
+  // agent_end：默认只保留边界；host 若附带压缩后的 contextUsage，保留该
+  // 小型状态快照，避免 settled/dispose 后浏览器错过最后一次上下文更新。
   if (type === "agent_end") {
+    const contextUsage = record.contextUsage;
+    if (typeof contextUsage === "object" && contextUsage !== null) {
+      return { type: "agent_end", contextUsage };
+    }
     return { type: "agent_end" };
   }
 

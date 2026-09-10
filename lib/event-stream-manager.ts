@@ -29,7 +29,7 @@ export class EventStreamConnectionError extends Error {
 // 定时器句柄类型：浏览器 setTimeout 返回 number，Node 返回 NodeJS.Timeout。
 // 这里宽松成 any 以避免两套 lib 类型混入时的并集不兼容。
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-type TimerHandle = any;
+export type TimerHandle = any;
 
 export type EventStreamManagerOptions = {
   createEventSource?: (url: string) => EventSourceLike;

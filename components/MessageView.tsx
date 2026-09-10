@@ -4,6 +4,8 @@ import { memo, useState, useRef, useEffect, useMemo, type ReactNode } from "reac
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { AlertTriangle, Check, CheckCircle2, ChevronDown, ChevronUp, Copy, FilePlus, FileText, GitBranch, Globe, ListTodo, Pencil, Search, ShieldCheck, Terminal, Webhook, XCircle } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
+import { BinaryMessageGallery, BinaryMessageView } from "./BinaryMessageView";
+import { MessageImage, resolveImageContent } from "./MessageImage";
 import { copyText } from "@/lib/clipboard";
 import {
   ACTIVITY_KINDS,
@@ -13,6 +15,7 @@ import {
   type SessionActivity,
 } from "@/lib/session-activity";
 import { PIDANCE_COMMAND_CUSTOM_TYPE } from "@/lib/session-command-entry";
+import { PIDANCE_BINARY_CUSTOM_TYPE, parseBinaryMessageData } from "@/lib/message-binary";
 import { getBranchSummaryFileMetadata } from "@/lib/branch-bookmarks";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isActiveStreamBlock, isEmptyThinkingBlock } from "@/lib/message-display";
@@ -37,8 +40,23 @@ import type {
   ThinkingContent,
 } from "@/lib/types";
 
-function fileApiReadUrl(filePath: string): string {
-  return `/api/files/${encodeFilePathForApi(filePath)}?type=read`;
+function fileApiUrl(filePath: string, type: "read" | "download", mimeType?: string, messageMedia = false): string {
+  const params = new URLSearchParams({ type });
+  if (mimeType && type === "read") params.set("mime", mimeType);
+  if (messageMedia) params.set("messageMedia", "1");
+  return `/api/files/${encodeFilePathForApi(filePath)}?${params.toString()}`;
+}
+
+function fileApiReadUrl(filePath: string, mimeType?: string, messageMedia = false): string {
+  return fileApiUrl(filePath, "read", mimeType, messageMedia);
+}
+
+function fileApiDownloadUrl(filePath: string): string {
+  return fileApiUrl(filePath, "download");
+}
+
+function fileBaseName(filePath: string): string {
+  return filePath.replace(/\\/g, "/").split("/").pop() || "image";
 }
 
 /** 消息内嵌媒体预览：路径附件 / 多模态图片。 */
@@ -65,33 +83,31 @@ function MessageMediaGallery({
       {(blocks.length > 0 || images.length > 0) && (
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {blocks.map((img, i) => {
-            const flat = img as unknown as { data?: string; mimeType?: string };
-            const src = img.source
-              ? img.source.type === "base64"
-                ? `data:${img.source.media_type};base64,${img.source.data}`
-                : img.source.url ?? ""
-              : flat.data
-                ? `data:${flat.mimeType};base64,${flat.data}`
-                : "";
-            if (!src) return null;
+            const resolved = resolveImageContent(img);
+            if (!resolved) return null;
             return (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
+              <MessageImage
                 key={`b-${i}`}
-                src={src}
+                src={resolved.src}
+                fullSrc={resolved.src}
+                mimeType={resolved.mimeType}
                 alt=""
-                style={{ maxWidth: 280, maxHeight: 280, borderRadius: 6, objectFit: "contain", display: "block", border: "1px solid var(--border)" }}
+                maxWidth={280}
+                maxHeight={280}
               />
             );
           })}
           {images.map((path) => (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
+            <MessageImage
               key={path}
               src={fileApiReadUrl(path)}
+              fullSrc={fileApiReadUrl(path)}
+              downloadHref={fileApiDownloadUrl(path)}
+              downloadName={fileBaseName(path)}
               alt={path}
               title={path}
-              style={{ maxWidth: 280, maxHeight: 280, borderRadius: 6, objectFit: "contain", display: "block", border: "1px solid var(--border)" }}
+              maxWidth={280}
+              maxHeight={280}
             />
           ))}
         </div>
@@ -149,14 +165,22 @@ function loadThinkingContent(sessionId: string, entryId: string, blockIndex: num
 }
 
 const MAX_TOOL_DETAILS_CACHE_ENTRIES = 50;
-const toolDetailsCache = new Map<string, Promise<unknown>>();
+type DeferredToolResult = { details: unknown; content: (TextContent | ImageContent)[] };
+const toolDetailsCache = new Map<string, Promise<DeferredToolResult>>();
 
 function isDeferredHeavyToolDetails(details: unknown): boolean {
   return typeof details === "object" && details !== null && !Array.isArray(details)
     && (details as { deferredHeavy?: unknown }).deferredHeavy === true;
 }
 
-function loadToolResultDetails(sessionId: string, toolCallId: string): Promise<unknown> {
+function hasDeferredToolResultImages(result: ToolResultMessage): boolean {
+  return result.content.some((block) => (
+    block.type === "text"
+    && /^\[\d+ tool result image(?:s)? omitted from initial history payload/.test(block.text)
+  ));
+}
+
+function loadToolResultDetails(sessionId: string, toolCallId: string): Promise<DeferredToolResult> {
   const key = `${sessionId}:${toolCallId}`;
   const cached = toolDetailsCache.get(key);
   if (cached) {
@@ -169,8 +193,15 @@ function loadToolResultDetails(sessionId: string, toolCallId: string): Promise<u
     `/api/sessions/${encodeURIComponent(sessionId)}/tool-results/${encodeURIComponent(toolCallId)}`,
   ).then(async (response) => {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json() as { details?: unknown };
-    return data.details ?? null;
+    const data = await response.json() as { details?: unknown; content?: unknown };
+    const content = Array.isArray(data.content)
+      ? data.content.filter((block): block is TextContent | ImageContent => (
+        typeof block === "object"
+        && block !== null
+        && ((block as { type?: unknown }).type === "text" || (block as { type?: unknown }).type === "image")
+      ))
+      : [];
+    return { details: data.details ?? null, content };
   }).catch((error) => {
     toolDetailsCache.delete(key);
     throw error;
@@ -248,6 +279,10 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     return null;
   }
   if (message.role === "custom") {
+    if ((message as CustomMessage).customType === PIDANCE_BINARY_CUSTOM_TYPE) {
+      const binary = parseBinaryMessageData((message as CustomMessage).details);
+      return binary ? <BinaryMessageView binary={binary} /> : null;
+    }
     if ((message as CustomMessage).customType === "compaction") {
       return <CompactionMessageView message={message as CustomMessage} />;
     }
@@ -315,6 +350,8 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onBranchHere, onNe
     typeof message.content === "string"
       ? []
       : message.content.filter((b): b is ImageContent => b.type === "image");
+  const binaryBlocks = message.binaryBlocks ?? [];
+  const hasBinaryImage = binaryBlocks.some((block) => block.kind === "image");
   const pathMedia = useMemo(() => extractMediaPathsFromText(content), [content]);
 
   const time = formatTime(message.timestamp);
@@ -350,11 +387,12 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onBranchHere, onNe
           }}
         >
           <MessageMediaGallery
-            imageBlocks={imageBlocks}
+            imageBlocks={hasBinaryImage ? [] : imageBlocks}
             pathImages={pathMedia.images}
             pathAudio={pathMedia.audio}
             pathVideo={pathMedia.video}
           />
+          {binaryBlocks.length > 0 && <BinaryMessageGallery binaries={binaryBlocks} />}
           {content && <MarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{content}</MarkdownBody>}
         </div>
 
@@ -785,6 +823,19 @@ function BlockView({ block, toolResults, toolExecutionMap, isStreaming, activeSt
   if (block.type === "thinking") {
     return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} isStreaming={Boolean(activeStreamBlock)} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} />;
   }
+  if (block.type === "image") {
+    const resolved = resolveImageContent(block as ImageContent);
+    return resolved ? (
+      <MessageImage
+        src={resolved.src}
+        fullSrc={resolved.src}
+        mimeType={resolved.mimeType}
+        alt=""
+        maxWidth={520}
+        maxHeight={360}
+      />
+    ) : null;
+  }
   if (block.type === "toolCall") {
     const tc = block as ToolCallContent;
     const result = toolResults?.get(tc.toolCallId);
@@ -953,7 +1004,8 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
             borderTop: "1px solid var(--border)",
             maxHeight: streamBlockMaxHeight,
             overflow: "auto",
-            overscrollBehavior: "contain",
+            overscrollBehavior: "auto",
+            touchAction: "pan-y",
           }}
         >
           {bodyText}
@@ -980,6 +1032,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
   const [expandedOverride, setExpandedOverride] = useState<boolean | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [resolvedDetails, setResolvedDetails] = useState<unknown>(undefined);
+  const [resolvedResultContent, setResolvedResultContent] = useState<ToolResultMessage["content"] | undefined>(undefined);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const outputRef = useRef<HTMLPreElement>(null);
   const followOutputRef = useRef(true);
@@ -989,8 +1042,12 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
   const expanded = expandedOverride ?? isRunning;
   const isEditTool = isEditToolName(block.toolName);
   // 首屏可能 deferredHeavy：展开后懒加载完整 details 再算 diff
-  const effectiveResult = result && resolvedDetails !== undefined
-    ? { ...result, details: resolvedDetails }
+  const effectiveResult = result && (resolvedDetails !== undefined || resolvedResultContent !== undefined)
+    ? {
+        ...result,
+        ...(resolvedDetails !== undefined ? { details: resolvedDetails } : {}),
+        ...(resolvedResultContent !== undefined ? { content: resolvedResultContent } : {}),
+      }
     : result;
   const resultDiff = effectiveResult && !effectiveResult.isError ? getResultDiff(effectiveResult) : null;
 
@@ -998,6 +1055,9 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
   const resultText = effectiveResult
     ? effectiveResult.content.filter((b): b is { type: "text"; text: string } => b.type === "text").map((b) => b.text).join("\n")
     : null;
+  const resultImages = effectiveResult
+    ? effectiveResult.content.filter((b): b is ImageContent => b.type === "image")
+    : [];
   const resultIsEmpty = resultText === null ? false : (resultText.trim() === "(no output)" || resultText.trim() === "");
   const isError = effectiveResult?.isError ?? false;
   const status = snapshot?.status;
@@ -1030,24 +1090,28 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
 
   // 展开工具卡且 details 被首屏剥离时，按 toolCallId 补全 diff/patch
   useEffect(() => {
-    if (!expanded || !result || !sessionId) return;
-    if (!isDeferredHeavyToolDetails(result.details)) return;
-    if (resolvedDetails !== undefined || detailsLoading) return;
+    if (!expanded || !result || !sessionId || detailsLoading) return;
+    const needDetails = isDeferredHeavyToolDetails(result.details) && resolvedDetails === undefined;
+    const needImages = hasDeferredToolResultImages(result) && resolvedResultContent === undefined;
+    if (!needDetails && !needImages) return;
     let cancelled = false;
     setDetailsLoading(true);
     void loadToolResultDetails(sessionId, block.toolCallId)
-      .then((details) => {
-        if (!cancelled) setResolvedDetails(details);
+      .then((payload) => {
+        if (cancelled) return;
+        if (needDetails) setResolvedDetails(payload.details);
+        if (needImages) setResolvedResultContent(payload.content);
       })
       .catch(() => {
-        // 失败时保留轻量 details + 文本结果，不阻塞展开
-        if (!cancelled) setResolvedDetails(result.details);
+        // 失败时保留轻量 details + 占位文本，不阻塞展开
+        if (!cancelled && needDetails) setResolvedDetails(result.details);
+        if (!cancelled && needImages) setResolvedResultContent(result.content);
       })
       .finally(() => {
         if (!cancelled) setDetailsLoading(false);
       });
     return () => { cancelled = true; };
-  }, [expanded, result, sessionId, block.toolCallId, resolvedDetails, detailsLoading]);
+  }, [expanded, result, sessionId, block.toolCallId, resolvedDetails, resolvedResultContent, detailsLoading]);
 
   return (
     <div
@@ -1107,7 +1171,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
       {expanded && command && (
         <div style={{ padding: "8px 10px", borderTop: `1px solid color-mix(in srgb, ${statusColor} 22%, var(--border))`, background: "var(--bg-subtle)" }}>
           <div style={{ marginBottom: 4, color: "var(--text-dim)", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em" }}>{t("message_toolCommand")}</div>
-          <code style={{ display: "block", maxHeight: streamBlockMaxHeight, overflow: "auto", overscrollBehavior: "contain", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{command}</code>
+          <code style={{ display: "block", maxHeight: streamBlockMaxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{command}</code>
         </div>
       )}
 
@@ -1125,7 +1189,8 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
             lineHeight: 1.5,
 maxHeight: streamBlockMaxHeight,
             overflow: "auto",
-            overscrollBehavior: "contain",
+            overscrollBehavior: "auto",
+            touchAction: "pan-y",
             background: "var(--bg-subtle)",
             borderTop: `1px solid color-mix(in srgb, ${statusColor} 20%, var(--border))`,
             display: "flex",
@@ -1155,30 +1220,37 @@ maxHeight: streamBlockMaxHeight,
               if (pinningOutputRef.current) return;
               followOutputRef.current = isNearStreamBlockBottom(event.currentTarget);
             }}
-            style={{ margin: 0, padding: "4px 10px 10px", maxHeight: streamBlockMaxHeight, overflow: "auto", overscrollBehavior: "contain", color: renderedLiveLines || snapshot.output ? "var(--text-muted)" : "var(--text-dim)", background: "var(--tool-bg)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
+            style={{ margin: 0, padding: "4px 10px 10px", maxHeight: streamBlockMaxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", color: renderedLiveLines || snapshot.output ? "var(--text-muted)" : "var(--text-dim)", background: "var(--tool-bg)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
           >{renderedLiveLines ? renderAnsiLines(renderedLiveLines, "tool-live") : snapshot.output || t("message_toolWaitingOutput")}</pre>
         </div>
       )}
 
       {/* ── Paired result — only shown when expanded ── */}
       {expanded && effectiveResult && (
-        renderedResultLines ? (
-          <AnsiToolLines lines={renderedResultLines} statusColor={statusColor} />
-        ) : detailsLoading && isDeferredHeavyToolDetails(result?.details) && !resultDiff ? (
-          <div style={{ padding: "8px 10px", borderTop: "1px solid var(--border)", color: "var(--text-dim)", fontSize: 11 }}>
-            {t("message_thinkingLoading")}
-          </div>
-        ) : resultDiff ? (
-          <PairedDiffResult
-            diff={resultDiff}
-          />
-        ) : (
-          <PairedResult
-            text={resultText ?? ""}
-            isEmpty={resultIsEmpty}
-            isError={isError}
-          />
-        )
+        <>
+          {resultImages.length > 0 && (
+            <div style={{ borderTop: "1px solid var(--border)", padding: "8px 10px", background: "var(--bg-subtle)" }}>
+              <MessageMediaGallery imageBlocks={resultImages} />
+            </div>
+          )}
+          {renderedResultLines ? (
+            <AnsiToolLines lines={renderedResultLines} statusColor={statusColor} />
+          ) : detailsLoading && isDeferredHeavyToolDetails(result?.details) && !resultDiff ? (
+            <div style={{ padding: "8px 10px", borderTop: "1px solid var(--border)", color: "var(--text-dim)", fontSize: 11 }}>
+              {t("message_thinkingLoading")}
+            </div>
+          ) : resultDiff ? (
+            <PairedDiffResult
+              diff={resultDiff}
+            />
+          ) : (
+            <PairedResult
+              text={resultText ?? ""}
+              isEmpty={resultIsEmpty}
+              isError={isError}
+            />
+          )}
+        </>
       )}
     </div>
   );
@@ -1212,7 +1284,7 @@ function AnsiToolLines({ lines, statusColor }: { lines: string[]; statusColor: s
   return (
     <pre
       tabIndex={0}
-      style={{ margin: 0, padding: "8px 10px", maxHeight, overflow: "auto", overscrollBehavior: "contain", borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--bg-subtle)", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
+      style={{ margin: 0, padding: "8px 10px", maxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--bg-subtle)", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
     >
       {renderAnsiLines(lines, "tool-rendered")}
     </pre>
@@ -1289,7 +1361,7 @@ function SplitPatchView({ text }: { text: string }) {
   const showFileHeaders = files.length > 1;
 
   return (
-    <div style={{ maxHeight: "min(560px, 50vh)", overflowY: "auto", overflowX: "hidden", background: "var(--bg)" }}>
+    <div style={{ maxHeight: "min(560px, 50vh)", overflowY: "auto", overflowX: "hidden", overscrollBehavior: "auto", touchAction: "pan-y", background: "var(--bg)" }}>
       {files.map((file, fileIndex) => (
         <div
           key={fileIndex}
@@ -1427,7 +1499,7 @@ function PatchTextView({ text }: { text: string }) {
   const lines = text.split(/\r?\n/);
 
   return (
-    <div className="chat-selectable" style={{ maxHeight: "min(520px, 45vh)", overflowY: "auto", overflowX: "hidden", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, minWidth: 0 }}>
+    <div className="chat-selectable" style={{ maxHeight: "min(520px, 45vh)", overflowY: "auto", overflowX: "hidden", overscrollBehavior: "auto", touchAction: "pan-y", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, minWidth: 0 }}>
       {lines.map((line, i) => {
         const kind =
           line.startsWith("@@") ? "hunk" :
@@ -1570,6 +1642,8 @@ function PairedResult({ text, isEmpty, isError }: {
           fontSize: 12,
           lineHeight: 1.5,
           overflow: "auto",
+          overscrollBehavior: "auto",
+          touchAction: "pan-y",
           maxHeight: "min(400px, 45vh)",
           background: "var(--bg)",
           whiteSpace: "pre-wrap",
@@ -1873,6 +1947,8 @@ function PidanceActivityView({ message, activity }: { message: CustomMessage; ac
               padding: "8px 12px",
               maxHeight: streamBlockMaxHeight,
               overflow: "auto",
+              overscrollBehavior: "auto",
+              touchAction: "pan-y",
               color: "var(--text)",
               fontSize: 12,
               lineHeight: 1.6,
@@ -1995,15 +2071,17 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
             {images.length > 0 && (
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: text ? 8 : 0 }}>
                 {images.map((img, i) => {
-                  const src = imageSource(img);
-                  if (!src) return null;
+                  const resolved = resolveImageContent(img);
+                  if (!resolved) return null;
                   return (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
+                    <MessageImage
                       key={i}
-                      src={src}
+                      src={resolved.src}
+                      fullSrc={resolved.src}
+                      mimeType={resolved.mimeType}
                       alt=""
-                      style={{ maxWidth: 240, maxHeight: 240, borderRadius: 6, objectFit: "contain", display: "block", border: "1px solid var(--border)" }}
+                      maxWidth={240}
+                      maxHeight={240}
                     />
                   );
                 })}
@@ -2100,6 +2178,8 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
               wordBreak: "break-word",
               maxHeight: "min(360px, 45vh)",
               overflow: "auto",
+              overscrollBehavior: "auto",
+              touchAction: "pan-y",
               fontFamily: "var(--font-mono)",
             }}
           >
@@ -2122,16 +2202,6 @@ function getMessageText(content: CustomMessage["content"] | UserMessage["content
 function getMessageImages(content: CustomMessage["content"] | UserMessage["content"]): ImageContent[] {
   if (typeof content === "string") return [];
   return content.filter((b): b is ImageContent => b.type === "image");
-}
-
-function imageSource(img: ImageContent): string {
-  const flat = img as unknown as { data?: string; mimeType?: string };
-  if (img.source) {
-    return img.source.type === "base64"
-      ? `data:${img.source.media_type};base64,${img.source.data}`
-      : img.source.url ?? "";
-  }
-  return flat.data ? `data:${flat.mimeType};base64,${flat.data}` : "";
 }
 
 function safeJson(value: unknown): string {

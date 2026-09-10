@@ -71,8 +71,10 @@ export interface ReconcileIdleSnapshot {
   /** wake/prompt HTTP 仍在途：本进程 live 可能尚未建立 */
   sendInFlight: boolean;
   clientRunning: boolean;
-  /** 本进程是否已有 live host（GET /api/agent/[id] 的 running 字段） */
+  /** 本进程是否已有 live host（GET /api/agent/[id] 的 live 字段） */
   live: boolean;
+  /** host 已销毁但 API 明确报告 activeRun=false 时，允许已知旧 run 收尾 */
+  knownIdleWithoutLive?: boolean;
   isStreaming: boolean;
   isPromptRunning: boolean;
   isCompacting: boolean;
@@ -82,8 +84,11 @@ export interface ReconcileIdleSnapshot {
  * reconcile 不得把「未知」当成「空闲」。
  * 无 live、发送尚未返回、或仍 busy 时都不能收尾，否则会出现：
  * 客户端已结束 running → 无法停止/引导，而服务端随后才真正跑起来。
+ * `knownIdleWithoutLive` 仅由服务端明确给出 activeRun=false 且没有对端锁时设置，
+ * 用于正常 run 结束后 host 立即 dispose 的生命周期。
  */
 export function shouldFinishFromReconcile(snapshot: ReconcileIdleSnapshot): boolean {
-  if (!snapshot.clientRunning || snapshot.sendInFlight || !snapshot.live) return false;
+  if (!snapshot.clientRunning || snapshot.sendInFlight) return false;
+  if (!snapshot.live && !snapshot.knownIdleWithoutLive) return false;
   return !snapshot.isStreaming && !snapshot.isPromptRunning && !snapshot.isCompacting;
 }

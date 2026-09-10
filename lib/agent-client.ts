@@ -8,7 +8,7 @@
 // hooks/useAgentSession.ts. This helper collapses that down to one line.
 
 import type { PromptReceipt } from "./agent-commands";
-import type { AttachedImage } from "./types";
+import type { AttachedImage, BinaryMessageInput } from "./types";
 
 export async function sendAgentCommand<T = unknown>(
   sessionId: string,
@@ -34,7 +34,7 @@ export async function sendAgentCommand<T = unknown>(
 
 export async function submitAgentPrompt(
   sessionId: string,
-  input: { message: string; images?: AttachedImage[]; submissionId: string },
+  input: { message: string; images?: AttachedImage[]; binaryBlocks?: BinaryMessageInput[]; submissionId: string },
   options?: { signal?: AbortSignal },
 ): Promise<PromptReceipt> {
   const data = await sendAgentCommand<unknown>(sessionId, {
@@ -44,6 +44,7 @@ export async function submitAgentPrompt(
     ...(input.images?.length ? {
       images: input.images.map((img) => ({ type: "image", data: img.data, mimeType: img.mimeType })),
     } : {}),
+    ...(input.binaryBlocks?.length ? { binaryBlocks: input.binaryBlocks } : {}),
   }, options);
   if (!data || typeof data !== "object") {
     throw new Error("Invalid prompt receipt: expected an object");
