@@ -76,11 +76,11 @@ jobs:
         working-directory: desktop
         run: npm run build:win:installer
 
-      - name: 计算产物 SHA256
+      - name: 计算产物 SHA256（只算顶层制品，不含解包目录里的 exe）
         working-directory: desktop
         shell: pwsh
         run: |
-          Get-ChildItem dist -Include *.exe,*.zip -Recurse | ForEach-Object {
+          Get-ChildItem dist -File | Where-Object { $_.Extension -in ".exe", ".zip" } | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
             "$hash  $($_.Name)" | Out-File -Append -Encoding ascii dist/sha256.txt
             Write-Host "$hash  $($_.Name)"
