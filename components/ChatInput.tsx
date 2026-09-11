@@ -17,7 +17,7 @@ import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useAnchoredOverlay } from "@/hooks/useAnchoredOverlay";
 import { useI18n } from "@/lib/i18n";
-import { prepareImageForModel } from "@/lib/image-input";
+import { prepareImageForModel, prepareImagePreview } from "@/lib/image-input";
 import type { AttachedImage, BinaryMessageInput, ChatInputHandle } from "@/lib/types";
 import {
   loadStreamingEnterAction,
@@ -605,12 +605,19 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             prepareImageForModel(file),
             uploadMessageMedia(file, file.name, file.type),
           ]);
-          const preview = prepared.blob === file
+          // 内联预览必须小：原图直接当预览会按原图下载（实测 1.9 MB 截图
+          // 在历史里拉满 1.9 MB）。给「原图即预览」加字节上限，超过则另存缩小副本。
+          const shrink = prepared.blob === file ? await prepareImagePreview(file) : null;
+          const previewBlob = shrink?.blob ?? prepared.blob;
+          const previewMime = shrink?.mimeType ?? prepared.mimeType;
+          // 预览文件名的扩展名决定服务端下发的 Content-Type，必须与编码一致。
+          const previewExt = previewMime === "image/webp" ? "webp" : previewMime === "image/png" ? "png" : "jpg";
+          const preview = prepared.blob === file && !shrink
             ? original
             : await uploadMessageMedia(
-              prepared.blob,
-              `${file.name}.preview.jpg`,
-              prepared.mimeType,
+              previewBlob,
+              `${file.name}.preview.${previewExt}`,
+              previewMime,
             );
           return {
             data: prepared.data,

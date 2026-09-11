@@ -18,6 +18,22 @@ import { attachCustomRenderedLines } from "./custom-rendered-lines";
 import { normalizeToolCalls } from "./normalize";
 import { PIDANCE_BINARY_CUSTOM_TYPE, parseBinaryMessageData } from "./message-binary";
 import { shouldFinishFromReconcile } from "./finish-agent-run";
+import {
+  appendRecord,
+  confirmUserMessage,
+  dropAllPendingRecords,
+  dropPendingRecord,
+  findRecord,
+  mergeTailRecords,
+  optimisticRecord,
+  prependOlderRecords,
+  retainPendingRecords,
+  submissionKey,
+  timelineEntryIds,
+  timelineFromDisk,
+  timelineMessages,
+  type TimelineRecord,
+} from "./session-timeline";
 import type { AgentMessage, AttachedImage, BinaryMessageData, BinaryMessageInput } from "./types";
 
 export type SubmissionStatus = "submitting" | "accepted" | "persisted" | "rejected" | "unknown";
@@ -30,6 +46,10 @@ export type PromptSubmission = {
   images?: AttachedImage[];
   binaryBlocks?: BinaryMessageInput[];
   status: SubmissionStatus;
+  /** 是否已观察到服务端对该 user 消息的确认（事件或磁盘对账）。
+   *  失败清理、返回结果与草稿恢复都必须受它约束：已投递的消息不得因迟到的
+   *  HTTP 错误被抹掉或把文本弹回输入框。 */
+  delivered: boolean;
   /** persisted 时对应 Pi JSONL user entry id；未确认前为 null */
   entryId?: string | null;
   error?: string;
@@ -40,12 +60,81 @@ export type StreamSnapshot = {
   streamingMessage: Partial<AgentMessage> | null;
 };
 
+export type PendingBash = {
+  command: string;
+  excludeFromContext: boolean;
+  startedAt: number;
+};
+
+/**
+ * 一轮 run 的延迟与解码吞吐读数。
+ *
+ * 算法对齐 dsh 的 `turn-metrics`（`@deepseek-ai/dsh-client-ui-conversation`）：
+ * - 每个 assistant step 的 `decodeMs` 是「首个 token → 消息结束」，**不含** TTFT；
+ * - `outputTokens` 只用 provider 上报的 usage，不做字符估算；
+ * - 只统计同时具备解码时间与 output tokens 的 step，再按轮求和后相除
+ *   （即按解码时间加权，而不是各 step 速率的算术平均）；
+ * - TTFT 取该轮最早的读数。
+ */
+export type TurnMetrics = {
+  /** 本轮 agent_start → 首个内容帧，毫秒。 */
+  ttftMs?: number;
+  /** 本轮 provider 上报 output tokens / 解码总耗时。 */
+  tokensPerSecond?: number;
+};
+
+type TurnMetricsAccumulator = {
+  startedAt: number;
+  /** 当前 step 的首个内容帧时刻；null 表示该 step 尚无内容。 */
+  firstTokenAt: number | null;
+  ttftMs: number | null;
+  decodeMs: number;
+  outputTokens: number;
+  sampled: boolean;
+};
+
+function emptyTurnMetrics(startedAt: number): TurnMetricsAccumulator {
+  return { startedAt, firstTokenAt: null, ttftMs: null, decodeMs: 0, outputTokens: 0, sampled: false };
+}
+
+function projectTurnMetrics(accumulator: TurnMetricsAccumulator): TurnMetrics {
+  const metrics: TurnMetrics = {};
+  // 起点未知（startedAt=0）时宁可不出 TTFT，也不显示一个荒谬的数字。
+  if (accumulator.ttftMs !== null && accumulator.startedAt > 0) metrics.ttftMs = accumulator.ttftMs;
+  if (accumulator.sampled && accumulator.decodeMs > 0) {
+    metrics.tokensPerSecond = accumulator.outputTokens / (accumulator.decodeMs / 1e3);
+  }
+  return metrics;
+}
+
+/** 该帧是否已经含可显示内容（空壳帧不算「首个 token」）。 */
+function hasRenderableContent(message: Partial<AgentMessage> | undefined): boolean {
+  if (!message) return false;
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === "string") return content.length > 0;
+  return Array.isArray(content) && content.length > 0;
+}
+
+/** provider 上报的 output tokens；缺失/非法返回 null（不估算）。 */
+function usageOutputTokens(message: AgentMessage | undefined): number | null {
+  const usage = (message as { usage?: { output?: unknown } } | undefined)?.usage;
+  const value = usage?.output;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
 export type SessionRuntimeSnapshot = {
   sessionId: string;
   messages: AgentMessage[];
   entryIds: string[];
+  /** 与 messages 平行的稳定记录 key，供 React 列表用；不随下标平移而变。 */
+  messageKeys: string[];
   streamState: StreamSnapshot;
   agentRunning: boolean;
+  /** 最近一轮 run 的延迟/吞吐读数；run 结束后保留供展示。 */
+  turnMetrics: TurnMetrics;
+  /** bash 运行态与 registry 的运行态同一快照发布，避免第三套状态机。 */
+  bashRunning: boolean;
+  pendingBash: PendingBash | null;
   sendInFlight: boolean;
   submissions: PromptSubmission[];
   promptRunId: number;
@@ -58,6 +147,12 @@ export type SessionRuntimeSnapshot = {
    * connected/agent_start 等运行态事件不递增，避免阻塞初始磁盘 hydrate。 */
   timelineSeq: number;
 };
+
+/** hydrate 的归并方式：整体替换 / prepend 更旧页 / 同会话尾页重载。 */
+export type TimelineHydrateMode = "replace" | "prepend" | "tail";
+
+/** hydrate 结果：见 `hydrate` 的接口注释。 */
+export type HydrateOutcome = "applied" | "stale" | "superseded";
 
 export type RuntimeAgentState = {
   live?: boolean;
@@ -159,12 +254,33 @@ type RuntimeSlot = {
   /** submissionId → AbortController（Stop 用） */
   promptAborts: Map<string, AbortController>;
   eventStream: EventStreamManager | null;
+  /**
+   * 视图附件。每个 attach 产生一个 token，dispose 只删自己的 token。
+   *
+   * 用集合而不是计数器：别名/pending id 并存时，计数一旦失配就会永久停在 >0，
+   * 于是「无人观看」永远不成立 → 空闲不收流 → 服务端 host 不 dispose →
+   * **writer 租约不释放**，另一实例（31415）就打不开这个会话。
+   * 集合天然幂等，dispose 重复调用或找不到 slot 都不会漏减。
+   */
+  attachments: Set<ViewAttachment>;
+  /** 由 attachments 派生（见 syncViewDerived）：不是独立状态。 */
   viewHandlers: Set<(event: AgentStreamEvent) => void>;
   snapshotListeners: Set<(snapshot: SessionRuntimeSnapshot) => void>;
-  attachCount: number;
   consumedEntryIds: Set<string>;
-  /** submitPrompt 乐观消息的稳定位置；message_end 回来时按 submission 绑定 entryId */
-  submissionMessageIndexes: Map<string, number>;
+  /** 消息时间线；`snapshot.messages/entryIds` 是它的只读派生投影。 */
+  timeline: TimelineRecord[];
+  /** timeline 派生数组缓存：仅在 timeline 引用变化时重建，
+   *  避免运行态/流式帧 publish 也换掉 messages 身份（触发多余重渲染与滚动 effects）。 */
+  derived: {
+    source: TimelineRecord[] | null;
+    messages: AgentMessage[];
+    entryIds: string[];
+    messageKeys: string[];
+  };
+  /** submissionId → 乐观记录的稳定 key（不存数组下标，避免 hydrate/prepend 后错位）。 */
+  submissionKeys: Map<string, string>;
+  /** 无 entryId 记录（引导投递、外部追加）的 key 序号。 */
+  localKeySeq: number;
   /** slot-owned hydrate 请求（按发起序）的单调号 */
   hydrateSeq: number;
   /** 最近一次已应用 hydrate 的请求号 */
@@ -174,8 +290,13 @@ type RuntimeSlot = {
   /** SSE 确连失败后的有限重试：当前定时器与已用次数 */
   sseRetryTimer: TimerHandle | null;
   sseRetryAttempt: number;
-  /** 当前视图订阅是否在（attach/detach 计数 0/1 过渡用） */
-  viewAttached: boolean;
+  /** 本轮 run 的吞吐累积（见 TurnMetrics 注释）。 */
+  metrics: TurnMetricsAccumulator;
+};
+
+/** 视图附件 token：dispose 的身份，与 sessionId 解耦。 */
+type ViewAttachment = {
+  onEvent: ((event: AgentStreamEvent) => void) | undefined;
 };
 
 /** slot 空闲 SSE 关闭兜底窗口：切走后留一小段时间给快速切回，随后释放服务端 host。 */
@@ -192,6 +313,8 @@ export type BrowserSessionRuntimeRegistry = {
   /** 显式 Stop：取消唯一在途 submission 的 POST 并等待结算 */
   abortSubmission(sessionId: string, submissionId?: string): Promise<SubmitPromptResult | null>;
   abort(sessionId: string): void;
+  /** bash 运行态（含 pending 命令）；与 run 态同一 owner。 */
+  setBashRunning(sessionId: string, running: boolean, pending?: PendingBash | null): void;
   /** 当前 per-session run 状态；视图只读此 snapshot，不维护 sendInFlight 单槽。 */
   getRunState(sessionId: string): Pick<SessionRuntimeSnapshot, "promptRunId" | "agentRunning" | "sendInFlight" | "finishingRunId" | "completedRunId"> | null;
   beginRunFinish(sessionId: string, runId: number): boolean;
@@ -200,13 +323,25 @@ export type BrowserSessionRuntimeRegistry = {
   reconcile(sessionId: string): Promise<RuntimeReconcileResult | null>;
   /** 在 HTTP context 发起前取得 slot-owned 请求代数。 */
   beginHydrate(sessionId: string): number;
+  /**
+   * - `superseded`：更新的响应已落地，本次响应整体作废。
+   * - `stale`：期间有 live 事件，时间线不得覆盖；但响应仍是最新磁盘读取，
+   *   调用方应继续提交 leaf/model/分页等会话级状态。
+   * - `applied`：时间线已按本次响应更新。
+   */
   hydrate(
     sessionId: string,
     messages: AgentMessage[],
     entryIds?: string[],
-    options?: { sinceSeq?: number; hydrateRequestSeq?: number },
-  ): boolean;
-  appendLocal(sessionId: string, message: AgentMessage): void;
+    options?: { sinceSeq?: number; hydrateRequestSeq?: number; mode?: TimelineHydrateMode },
+  ): HydrateOutcome;
+  /**
+   * 追加本地乐观消息（引导/合并队列）。返回生成的稳定 key，后续用它原子回滚，
+   * 不依赖数组下标，也不依赖正文（同文两条引导必须能各自回滚）。
+   */
+  appendLocal(sessionId: string, message: AgentMessage): string;
+  /** 按 key 移除尚无交付证据的本地记录；返回是否真的移除（已确认的不动）。 */
+  dropLocal(sessionId: string, key: string): boolean;
   applyEvent(sessionId: string, event: AgentStreamEvent): void;
   ensureEventsConnected(sessionId: string): void;
   getEventSource(sessionId: string): EventSourceLike | null;
@@ -228,8 +363,12 @@ function createSlot(sessionId: string): RuntimeSlot {
       sessionId,
       messages: [],
       entryIds: [],
+      messageKeys: [],
       streamState: emptyStream(),
       agentRunning: false,
+      turnMetrics: {},
+      bashRunning: false,
+      pendingBash: null,
       sendInFlight: false,
       submissions: [],
       promptRunId: 0,
@@ -242,17 +381,20 @@ function createSlot(sessionId: string): RuntimeSlot {
     inFlight: new Map(),
     promptAborts: new Map(),
     eventStream: null,
+    attachments: new Set(),
     viewHandlers: new Set(),
     snapshotListeners: new Set(),
-    attachCount: 0,
     consumedEntryIds: new Set(),
-    submissionMessageIndexes: new Map(),
+    timeline: [],
+    derived: { source: null, messages: [], entryIds: [], messageKeys: [] },
+    submissionKeys: new Map(),
+    localKeySeq: 0,
     hydrateSeq: 0,
     hydrateAppliedSeq: 0,
     idleCloseTimer: null,
     sseRetryTimer: null,
     sseRetryAttempt: 0,
-    viewAttached: false,
+    metrics: emptyTurnMetrics(0),
   };
 }
 
@@ -297,25 +439,6 @@ export function hashMessageIdentity(message: string, images: AttachedImage[] | u
   return `${message}\x1f${imageSig}`;
 }
 
-/**
- * 从 content 提取纯文本（string 或 blocks 数组两种形状）。
- * Pi 投递的 message_end user content 是 blocks 数组，而乐观气泡是 string；
- * 去重比对必须统一两种形状，否则比对失败导致乐观气泡与投递消息重复。
- */
-function messageContentText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((block) =>
-      block && typeof block === "object"
-        && (block as { type?: string }).type === "text"
-        && typeof (block as { text?: unknown }).text === "string"
-        ? (block as { text: string }).text
-        : "")
-    .filter(Boolean)
-    .join("\n");
-}
-
 function defaultRestoreDraft(draftKey: string, draft: { value: string; images: AttachedImage[] }): void {
   setDraft(draftKey, { value: draft.value, images: draft.images });
 }
@@ -331,22 +454,60 @@ export function createBrowserSessionRuntimeRegistry(
   const clearSchedule: (id: TimerHandle) => void = deps.clearSchedule
     ?? ((id) => clearTimeout(id));
   const slots = new Map<string, RuntimeSlot>();
+  /**
+   * 别名 → 规范 id（new 会话 promote 后，pending id 仍要能命中同一 slot）。
+   * 只登记映射、不复制 slots 键：否则同一 slot 会有两个键，两边各自 attach
+   * 都会累加，而 dispose 顺序一乱就会漏减。
+   */
+  const aliases = new Map<string, string>();
 
   const getSlot = (sessionId: string, create: boolean): RuntimeSlot | null => {
     const existing = slots.get(sessionId);
     if (existing) return existing;
+    const canonical = aliases.get(sessionId);
+    if (canonical !== undefined) {
+      const slot = slots.get(canonical);
+      if (slot) return slot;
+      // 目标已不在：别名失效，顺手清理，避免长期指向空。
+      aliases.delete(sessionId);
+    }
     if (!create) return null;
     const slot = createSlot(sessionId);
     slots.set(sessionId, slot);
     return slot;
   };
 
+  /** 附件变化后重算派生值：viewHandlers 与「是否有人观看」都只看 attachments。 */
+  const syncViewDerived = (slot: RuntimeSlot): void => {
+    const handlers = new Set<(event: AgentStreamEvent) => void>();
+    for (const attachment of slot.attachments) {
+      if (attachment.onEvent) handlers.add(attachment.onEvent);
+    }
+    slot.viewHandlers = handlers;
+  };
+
+  const hasViewers = (slot: RuntimeSlot): boolean => slot.attachments.size > 0;
+
   const publish = (slot: RuntimeSlot) => {
+    // messages/entryIds/messageKeys 是 timeline 的派生投影：永远平行，且只在这一处产出。
+    // timeline 的每次变更都换新数组引用，所以按引用缓存即可。
+    if (slot.derived.source !== slot.timeline) {
+      slot.derived = {
+        source: slot.timeline,
+        messages: timelineMessages(slot.timeline),
+        entryIds: timelineEntryIds(slot.timeline),
+        messageKeys: slot.timeline.map((record) => record.key),
+      };
+    }
     slot.snapshot = {
       ...slot.snapshot,
       sessionId: slot.sessionId,
+      messages: slot.derived.messages,
+      entryIds: slot.derived.entryIds,
+      messageKeys: slot.derived.messageKeys,
+      turnMetrics: projectTurnMetrics(slot.metrics),
       submissions: [...slot.submissions.values()],
-      attachCount: slot.attachCount,
+      attachCount: slot.attachments.size,
     };
     for (const listener of slot.snapshotListeners) listener(slot.snapshot);
   };
@@ -366,8 +527,13 @@ export function createBrowserSessionRuntimeRegistry(
       slot.sseRetryTimer = null;
       slot.sseRetryAttempt = 0;
     }
-    if (slot.viewAttached || slot.attachCount > 0) return;
-    if (slot.snapshot.agentRunning || slot.snapshot.sendInFlight || slot.inFlight.size > 0) return;
+    if (hasViewers(slot)) return;
+    if (
+      slot.snapshot.agentRunning
+      || slot.snapshot.bashRunning
+      || slot.snapshot.sendInFlight
+      || slot.inFlight.size > 0
+    ) return;
     const manager = slot.eventStream;
     if (!manager) return;
     slot.eventStream = null;
@@ -380,8 +546,13 @@ export function createBrowserSessionRuntimeRegistry(
       clearSchedule(slot.idleCloseTimer);
       slot.idleCloseTimer = null;
     }
-    if (slot.viewAttached || slot.attachCount > 0) return;
-    if (slot.snapshot.agentRunning || slot.snapshot.sendInFlight || slot.inFlight.size > 0) return;
+    if (hasViewers(slot)) return;
+    if (
+      slot.snapshot.agentRunning
+      || slot.snapshot.bashRunning
+      || slot.snapshot.sendInFlight
+      || slot.inFlight.size > 0
+    ) return;
     if (!slot.eventStream) return;
     slot.idleCloseTimer = schedule(() => {
       slot.idleCloseTimer = null;
@@ -393,23 +564,42 @@ export function createBrowserSessionRuntimeRegistry(
     slot.snapshot.timelineSeq += 1;
   };
 
+  const nextLocalKey = (slot: RuntimeSlot): string => {
+    slot.localKeySeq += 1;
+    return `local:${slot.localKeySeq}`;
+  };
+
   const appendMessageWithEntry = (
     slot: RuntimeSlot,
     message: AgentMessage,
     entryId: string | null,
   ): void => {
+    const resolved = entryId ?? "";
     const withEntry = {
       ...(message as unknown as Record<string, unknown>),
-      entryId: entryId ?? (message as unknown as Record<string, unknown>).entryId ?? "",
-    };
-    const alignedEntryIds = alignEntryIds(slot.snapshot.messages, slot.snapshot.entryIds);
-    slot.snapshot.messages = [...slot.snapshot.messages, withEntry as unknown as AgentMessage];
-    slot.snapshot.entryIds = [...alignedEntryIds, entryId ?? ""];
+      entryId: resolved,
+    } as unknown as AgentMessage;
+    slot.timeline = appendRecord(slot.timeline, {
+      key: resolved || nextLocalKey(slot),
+      message: withEntry,
+      entryId: resolved,
+      pending: false,
+    });
     bumpTimeline(slot);
   };
 
-  const alignEntryIds = (messages: readonly AgentMessage[], entryIds: readonly string[]): string[] =>
-    messages.map((_message, index) => entryIds[index] ?? "");
+  /**
+   * submission 状态只能单调推进：`persisted` 与失败态均为终态。
+   * SSE 确认可能早于 HTTP receipt 到达，迟到的 receipt 不能把已落盘的状态
+   * 回退成 accepted，也不能把已确认的提交重新标成失败。
+   */
+  const advanceSubmissionStatus = (
+    current: SubmissionStatus,
+    next: SubmissionStatus,
+  ): SubmissionStatus => {
+    if (current === "persisted") return current;
+    return next;
+  };
 
   const settleSubmission = (
     slot: RuntimeSlot,
@@ -418,17 +608,22 @@ export function createBrowserSessionRuntimeRegistry(
     error?: string,
   ) => {
     const submission = slot.submissions.get(submissionId);
+    let applied = status;
     if (submission) {
-      submission.status = status;
+      applied = advanceSubmissionStatus(submission.status, status);
+      submission.status = applied;
       submission.error = error;
     }
     slot.snapshot.sendInFlight = slot.inFlight.size > 0;
     // 当前 promise 在 settle 时仍位于 inFlight；size<=1 表示没有其它提交。
     // rejected/unknown 不是正在执行的 Agent run，必须结束本次乐观 running，
     // 否则失败恢复 draft 后会把会话永久留在 Stop/禁止再次发送状态。
+    // 例外：已有交付证据（SSE 已确认这条 user 消息）时，本轮 run 可能仍在跑，
+    // 不得因一个迟到的 HTTP 错误把它标成结束。
     if (
       slot.inFlight.size <= 1
-      && (status === "rejected" || status === "unknown")
+      && submission?.delivered !== true
+      && (applied === "rejected" || applied === "unknown")
     ) {
       slot.snapshot.agentRunning = false;
       slot.snapshot.completedRunId = slot.snapshot.promptRunId;
@@ -443,19 +638,38 @@ export function createBrowserSessionRuntimeRegistry(
     });
   };
 
-  const dropUnconfirmedOptimistic = (slot: RuntimeSlot, submissionId: string) => {
-    const index = slot.submissionMessageIndexes.get(submissionId);
-    slot.submissionMessageIndexes.delete(submissionId);
-    if (index === undefined) return;
-    const entryId = slot.snapshot.entryIds[index] ?? "";
-    const message = slot.snapshot.messages[index];
-    if (!message || message.role !== "user" || entryId) return;
-    slot.snapshot.messages = slot.snapshot.messages.filter((_, i) => i !== index);
-    slot.snapshot.entryIds = slot.snapshot.entryIds.filter((_, i) => i !== index);
-    for (const [id, otherIndex] of slot.submissionMessageIndexes) {
-      if (otherIndex > index) slot.submissionMessageIndexes.set(id, otherIndex - 1);
+  /**
+   * 失败结算：只在**没有任何交付证据**时才回滚乐观气泡与草稿。
+   * 服务端已确认过这条 user 消息（哪怕 SSE 未给 entryId）时，失败清理只会
+   * 把已显示的聊天内容抹掉并把文本弹回输入框，必须改为按已投递返回。
+   */
+  const settleFailure = (
+    slot: RuntimeSlot,
+    submission: PromptSubmission,
+    status: "rejected" | "unknown",
+    error: string,
+  ): SubmitPromptResult => {
+    settleSubmission(slot, submission.submissionId, status, error);
+    if (submission.delivered) {
+      publish(slot);
+      return { submissionId: submission.submissionId, sessionId: slot.sessionId, status: "accepted" };
     }
+    dropUnconfirmedOptimistic(slot, submission.submissionId);
+    restoreDraftFor(submission);
+    publish(slot);
+    return { submissionId: submission.submissionId, sessionId: slot.sessionId, status, error };
+  };
+
+  /** 移除尚无交付证据的乐观记录；返回是否真的移除（调用方据此决定恢复 draft）。 */
+  const dropUnconfirmedOptimistic = (slot: RuntimeSlot, submissionId: string): boolean => {
+    const key = slot.submissionKeys.get(submissionId);
+    slot.submissionKeys.delete(submissionId);
+    if (key === undefined) return false;
+    const result = dropPendingRecord(slot.timeline, key);
+    if (!result.dropped) return false;
+    slot.timeline = result.timeline;
     bumpTimeline(slot);
+    return true;
   };
 
   const applyEventToSlot = (slot: RuntimeSlot, event: AgentStreamEvent) => {
@@ -468,6 +682,7 @@ export function createBrowserSessionRuntimeRegistry(
       // 只能按 runId 条件释放，不能阻塞当前 run。
       slot.snapshot.finishingRunId = null;
       slot.snapshot.streamState = { isStreaming: true, streamingMessage: null };
+      slot.metrics = emptyTurnMetrics(now());
     } else if (type === "agent_end" || type === "prompt_done") {
       slot.snapshot.agentRunning = false;
       slot.snapshot.completedRunId = slot.snapshot.promptRunId;
@@ -477,6 +692,14 @@ export function createBrowserSessionRuntimeRegistry(
       if (!slot.snapshot.agentRunning) return;
       if (message?.role === "user") return;
       if (message) {
+        // 首个内容帧：TTFT 的终点，也是本 step 解码时长的起点。
+        if (slot.metrics.firstTokenAt === null && hasRenderableContent(message)) {
+          const at = now();
+          slot.metrics.firstTokenAt = at;
+          if (slot.metrics.ttftMs === null && slot.metrics.startedAt > 0 && at >= slot.metrics.startedAt) {
+            slot.metrics.ttftMs = at - slot.metrics.startedAt;
+          }
+        }
         const rendered = attachCustomRenderedLines(
           message as AgentMessage,
           event.renderedLines,
@@ -485,6 +708,18 @@ export function createBrowserSessionRuntimeRegistry(
           isStreaming: true,
           streamingMessage: normalizeToolCalls(rendered),
         };
+      }
+    } else if (type === "prompt_error") {
+      // prompt 异步失败：移除尚无交付证据的乐观记录。
+      // 必须在 slot 内执行——由视图 hook 代劳时，会话已切走/组件已卸载
+      // 就不会运行，假气泡会永久留在时间线里。
+      const dropped = dropAllPendingRecords(slot.timeline);
+      if (dropped.dropped) {
+        slot.timeline = dropped.timeline;
+        for (const [submissionId, key] of slot.submissionKeys) {
+          if (!findRecord(slot.timeline, key)) slot.submissionKeys.delete(submissionId);
+        }
+        bumpTimeline(slot);
       }
     } else if (type === "message_end") {
       const completed = event.message as AgentMessage | undefined;
@@ -495,115 +730,61 @@ export function createBrowserSessionRuntimeRegistry(
           return;
         }
         if (entryId) slot.consumedEntryIds.add(entryId);
+        // FIFO：下一个未绑定 entry 且仍有乐观记录的 accepted/submitting submission。
         const match = [...slot.submissions.values()].find((sub) =>
           (sub.status === "accepted" || sub.status === "submitting")
           && !sub.entryId
-          && slot.submissionMessageIndexes.has(sub.submissionId),
+          && slot.submissionKeys.has(sub.submissionId),
         );
-        const messageIndex = match
-          ? slot.submissionMessageIndexes.get(match.submissionId)
-          : undefined;
-        const currentMessage = messageIndex === undefined
-          ? undefined
-          : slot.snapshot.messages[messageIndex];
-        const currentEntryIds = alignEntryIds(slot.snapshot.messages, slot.snapshot.entryIds);
-        const currentEntryId = messageIndex === undefined ? undefined : currentEntryIds[messageIndex];
-        if (
-          messageIndex !== undefined
-          && currentMessage?.role === "user"
-          && !currentEntryId
-        ) {
-          const withEntry = {
-            ...(completed as unknown as Record<string, unknown>),
-            entryId: entryId ?? "",
-          } as unknown as AgentMessage;
-          const messages = [...slot.snapshot.messages];
-          messages[messageIndex] = withEntry;
-          currentEntryIds[messageIndex] = entryId ?? "";
-          slot.snapshot.messages = messages;
-          slot.snapshot.entryIds = currentEntryIds;
+        const key = match ? slot.submissionKeys.get(match.submissionId) ?? null : null;
+        // 生产 SSE 不携带 entryId/submissionId（见 session-timeline 注释），
+        // 因此按 stable key → 同文本未绑定项 → 追加 的优先级归并。
+        const result = confirmUserMessage(slot.timeline, {
+          key,
+          message: completed,
+          entryId: entryId ?? "",
+          fallbackKey: entryId ?? nextLocalKey(slot),
+        });
+        if (result.outcome !== "duplicate") {
+          slot.timeline = result.timeline;
           bumpTimeline(slot);
-        } else {
-          const last = slot.snapshot.messages[slot.snapshot.messages.length - 1];
-          const lastText = messageContentText(last && "content" in last ? (last as { content?: unknown }).content : undefined);
-          const nextText = messageContentText(completed && "content" in completed ? (completed as { content?: unknown }).content : undefined);
-          const isNextEntryPresent = entryId !== null
-            ? slot.snapshot.messages.some((msg) => (msg as { entryId?: unknown }).entryId === entryId)
-            : false;
-          // 重复防御：磁盘 hydrate 后乐观/引导气泡（同文本、空 entryId）可能不在末尾。
-          // 先找同文本且空 entryId 的 user 消息，命中则就地绑定 entryId，不追加。
-          let bindIndex = -1;
-          if (!isNextEntryPresent) {
-            bindIndex = slot.snapshot.messages.findLastIndex((msg, index) =>
-              msg?.role === "user"
-              && !(slot.snapshot.entryIds[index])
-              // 统一 string/blocks 两种 content 形状后比对文本。
-              && (msg as { content?: unknown }).content !== undefined
-              && messageContentText((msg as { content?: unknown }).content) === nextText
-              && nextText.length > 0
-            );
-          }
-          if (bindIndex >= 0) {
-            const messages = [...slot.snapshot.messages];
-            const aligned = alignEntryIds(slot.snapshot.messages, slot.snapshot.entryIds);
-            messages[bindIndex] = {
-              ...(completed as unknown as Record<string, unknown>),
-              entryId: entryId ?? "",
-            } as unknown as AgentMessage;
-            aligned[bindIndex] = entryId ?? "";
-            slot.snapshot.messages = messages;
-            slot.snapshot.entryIds = aligned;
-            bumpTimeline(slot);
-          } else if (!isNextEntryPresent && (!last || last.role !== "user" || lastText !== nextText)) {
-            appendMessageWithEntry(slot, completed, entryId);
-          } else if (!isNextEntryPresent && entryId !== null && last?.role === "user") {
-            const lastIndex = slot.snapshot.messages.length - 1;
-            const aligned = alignEntryIds(slot.snapshot.messages, slot.snapshot.entryIds);
-            if (!aligned[lastIndex]) {
-              const messages = [...slot.snapshot.messages];
-              messages[lastIndex] = {
-                ...(last as unknown as Record<string, unknown>),
-                entryId,
-              } as unknown as AgentMessage;
-              aligned[lastIndex] = entryId;
-              slot.snapshot.messages = messages;
-              slot.snapshot.entryIds = aligned;
-              bumpTimeline(slot);
-            }
-          }
         }
-        if (match && messageIndex !== undefined) {
-          slot.submissionMessageIndexes.delete(match.submissionId);
-        }
-        // FIFO：下一个未绑定 entry 的 accepted/submitting submission。
-        // 同一 entryId 不可二次消费，避免 SSE 重放把两条 submission 绑到同一 entry。
-        if (match && entryId !== null) {
-          match.status = "persisted";
-          match.entryId = entryId;
+        if (match) {
+          slot.submissionKeys.delete(match.submissionId);
+          // 交付证据与 entryId 分开记：生产 SSE 无 entryId，但事件本身已证明
+          // 服务端观察到了这条消息，后续失败清理不得再把它当「未投递」回滚。
+          if (result.outcome !== "duplicate") match.delivered = true;
+          // 同一 entryId 不可二次消费，避免 SSE 重放把两条 submission 绑到同一 entry。
+          if (entryId !== null) {
+            match.status = advanceSubmissionStatus(match.status, "persisted");
+            match.entryId = entryId;
+          }
         }
       } else if (completed?.role === "custom" && completed.customType === PIDANCE_BINARY_CUSTOM_TYPE) {
         const binary = parseBinaryMessageData(completed.details);
-        const targetIndex = binary?.messageEntryId
-          ? slot.snapshot.entryIds.indexOf(binary.messageEntryId)
+        let targetIndex = binary?.messageEntryId
+          ? slot.timeline.findIndex((record) => record.entryId === binary.messageEntryId)
           : -1;
-        const fallbackIndex = targetIndex >= 0
-          ? targetIndex
-          : binary?.messageEntryId
-            ? slot.snapshot.messages.findLastIndex((message, index) => message.role === "user" && !slot.snapshot.entryIds[index])
-            : -1;
-        const target = fallbackIndex >= 0 ? slot.snapshot.messages[fallbackIndex] : undefined;
-        if (binary && target?.role === "user") {
-          const existing = target.binaryBlocks ?? [];
+        if (targetIndex < 0 && binary?.messageEntryId) {
+          targetIndex = slot.timeline.findLastIndex((record) => record.message.role === "user" && !record.entryId);
+        }
+        const target = targetIndex >= 0 ? slot.timeline[targetIndex] : undefined;
+        if (binary && target?.message.role === "user") {
+          const existing = target.message.binaryBlocks ?? [];
           const alreadyAttached = existing.some((block) => (
             block.path === binary.path
             && block.previewPath === binary.previewPath
           ));
           if (!alreadyAttached) {
-            slot.snapshot.messages = slot.snapshot.messages.map((message, index) => (
-              index === fallbackIndex && message.role === "user"
-                ? { ...message, binaryBlocks: [...(message.binaryBlocks ?? []), binary] }
-                : message
-            ));
+            const next = [...slot.timeline];
+            next[targetIndex] = {
+              ...target,
+              message: {
+                ...target.message,
+                binaryBlocks: [...(target.message.binaryBlocks ?? []), binary],
+              } as AgentMessage,
+            };
+            slot.timeline = next;
             bumpTimeline(slot);
           }
         } else if (slot.snapshot.agentRunning) {
@@ -612,6 +793,21 @@ export function createBrowserSessionRuntimeRegistry(
       } else if (completed && slot.snapshot.agentRunning) {
         const rendered = attachCustomRenderedLines(completed, event.renderedLines);
         appendMessageWithEntry(slot, normalizeToolCalls(rendered), entryId);
+      }
+      // 吞吐累积：只在**同时**拿到本 step 解码时长与 provider output tokens 时
+      // 计入（与 dsh 的 turn-metrics 同条件），否则该 step 不参与加权平均。
+      if (completed?.role === "assistant") {
+        const endedAt = now();
+        const decodeMs = slot.metrics.firstTokenAt === null
+          ? null
+          : Math.max(0, endedAt - slot.metrics.firstTokenAt);
+        slot.metrics.firstTokenAt = null;
+        const outputTokens = usageOutputTokens(completed);
+        if (decodeMs !== null && outputTokens !== null) {
+          slot.metrics.decodeMs += decodeMs;
+          slot.metrics.outputTokens += outputTokens;
+          slot.metrics.sampled = true;
+        }
       }
       slot.snapshot.streamState = emptyStream();
     }
@@ -649,6 +845,10 @@ export function createBrowserSessionRuntimeRegistry(
     if (slot.eventStream && source && source.readyState !== 2 && slot.eventStream.isCurrent(slot.sessionId)) {
       return;
     }
+    // 丢弃前必须 close()：致命断线的 manager 可能已排了重连定时器
+    // （此时 getCurrentSource() 为 null），只清引用会让它之后自行 connect
+    // 出一条无人跟踪的重复流，同一会话同时收两份事件。
+    slot.eventStream?.close();
     slot.eventStream = null;
     const onEvent = (event: AgentStreamEvent) => applyEventToSlot(slot, event);
     const manager = deps.createEventStream
@@ -666,7 +866,7 @@ export function createBrowserSessionRuntimeRegistry(
     void manager.ensureConnected(slot.sessionId, onEvent).catch(() => {
       if (slot.eventStream === manager) slot.eventStream = null;
       // 视图仍在且无 run 在途：有限次重试，覆盖 host 瞬态 404（dispose/ensure 竞态）。
-      if (!slot.viewAttached || slot.attachCount === 0) return;
+      if (!hasViewers(slot)) return;
       const attempt = slot.sseRetryAttempt;
       if (attempt >= SSE_ENSURE_RETRY_DELAYS_MS.length) return;
       const delay = SSE_ENSURE_RETRY_DELAYS_MS[attempt];
@@ -675,7 +875,7 @@ export function createBrowserSessionRuntimeRegistry(
       slot.sseRetryTimer = schedule(() => {
         slot.sseRetryTimer = null;
         // 重试前再确认：视图仍挂载、连接未重建、run 未结束。
-        if (!slot.viewAttached || slot.attachCount === 0) return;
+        if (!hasViewers(slot)) return;
         if (slot.eventStream && slot.eventStream !== manager) return;
         if (slot.snapshot.agentRunning || slot.snapshot.sendInFlight) return;
         connectEvents(slot);
@@ -683,19 +883,37 @@ export function createBrowserSessionRuntimeRegistry(
     });
   };
 
+  /**
+   * pending id → 真实 id。把槽位搬到规范键下，并登记别名。
+   *
+   * 不再用「两个键指向同一 slot」：那样 getSlot 两个键都会返回同一对象，
+   * 谁都不知道哪个是权威 id；这里保证 slots 里只有规范 id 这一个键。
+   */
   const rekey = (fromId: string, toId: string): RuntimeSlot => {
     const slot = getSlot(fromId, true)!;
+    const previousKey = slot.sessionId;
+    // 目标 id 上若已存在别的 slot（正常流程不会）：先放掉它的连接，避免
+    // 留下一条无人跟踪的流继续收事件。
+    const stale = slots.get(toId);
+    if (stale && stale !== slot) {
+      stale.eventStream?.close();
+      stale.eventStream = null;
+      slots.delete(toId);
+    }
+    slots.delete(previousKey);
+    if (previousKey !== fromId) aliases.delete(previousKey);
     slot.sessionId = toId;
     slot.snapshot.sessionId = toId;
     slots.set(toId, slot);
     // pending id 继续指向同一 slot，ensure 完成后 Stop 仍能按原 intent 命中。
-    slots.set(fromId, slot);
+    if (fromId !== toId) aliases.set(fromId, toId);
     return slot;
   };
 
   const registry: BrowserSessionRuntimeRegistry = {
     getSnapshot(sessionId) {
-      const slot = slots.get(sessionId);
+      // 走别名解析：pending id 与真实 id 必须看到同一份状态。
+      const slot = getSlot(sessionId, false);
       return slot ? slot.snapshot : null;
     },
     subscribe(sessionId, listener) {
@@ -708,25 +926,29 @@ export function createBrowserSessionRuntimeRegistry(
     },
     attach(sessionId, onEvent) {
       const slot = getSlot(sessionId, true)!;
-      slot.attachCount += 1;
-      slot.viewAttached = true;
-      if (onEvent) slot.viewHandlers.add(onEvent);
+      // 每个附件一个 token：dispose 只删自己那一个，重复 dispose 或 id 解析
+      // 变化都不会漏减，因此「无人观看」必然能回到 true。
+      const attachment: ViewAttachment = { onEvent };
+      slot.attachments.add(attachment);
+      syncViewDerived(slot);
       // 打开会话只订阅已有 live；不在 attach 阶段 wake/创建 writer。
       // 首次写操作由 submitPrompt/ensureEventsConnected 明确唤醒，避免 31415/31416
       // 共用 agentDir 时仅浏览会话就抢占另一进程的 writer lease。
       connectEvents(slot);
       publish(slot);
+      let disposed = false;
       return {
-        sessionId,
+        sessionId: slot.sessionId,
         dispose: () => {
-          const current = slots.get(sessionId);
-          if (!current) return;
-          if (onEvent) current.viewHandlers.delete(onEvent);
-          current.attachCount = Math.max(0, current.attachCount - 1);
-          if (current.attachCount === 0) current.viewAttached = false;
-          publish(current);
+          if (disposed) return;
+          disposed = true;
+          // 直接操作 slot 对象，不按 id 回查：rekey / 别名清理都不会让这次
+          // 释放落空（落空就等于把这台机器上的 writer 租约永久占住）。
+          slot.attachments.delete(attachment);
+          syncViewDerived(slot);
+          publish(slot);
           // 切走后无人观看：延迟关闭 SSE，释放服务端 idle host 与 writer 租约。
-          scheduleIdleEventStreamClose(current);
+          scheduleIdleEventStreamClose(slot);
         },
       };
     },
@@ -758,6 +980,7 @@ export function createBrowserSessionRuntimeRegistry(
         images: input.images,
         binaryBlocks: input.binaryBlocks,
         status: "submitting",
+        delivered: false,
         entryId: null,
       };
       const controller = new AbortController();
@@ -768,13 +991,19 @@ export function createBrowserSessionRuntimeRegistry(
       slot.snapshot.promptRunId += 1;
       slot.snapshot.completedRunId = null;
       slot.snapshot.finishingRunId = null;
-      const optimisticMessageIndex = slot.snapshot.messages.length;
-      slot.snapshot.messages = [
-        ...slot.snapshot.messages,
-        userMessageFromSubmit(input.message, input.images, input.binaryBlocks, now()),
-      ];
-      slot.snapshot.entryIds = [...slot.snapshot.entryIds, ""];
-      slot.submissionMessageIndexes.set(submissionId, optimisticMessageIndex);
+      slot.snapshot.streamState = { isStreaming: true, streamingMessage: null };
+      // 一轮从用户提交那一刻开始计：TTFT 含提交到首字的全部等待。
+      // 也保证 agent_start 缺失时 startedAt 不会是 0（那会让 TTFT 变成天文数字）。
+      slot.metrics = emptyTurnMetrics(now());
+      const optimisticKey = submissionKey(submissionId);
+      slot.timeline = appendRecord(
+        slot.timeline,
+        optimisticRecord(
+          optimisticKey,
+          userMessageFromSubmit(input.message, input.images, input.binaryBlocks, now()),
+        ),
+      );
+      slot.submissionKeys.set(submissionId, optimisticKey);
       bumpTimeline(slot);
       publish(slot);
 
@@ -806,22 +1035,14 @@ export function createBrowserSessionRuntimeRegistry(
               rekey(initialSessionId, created);
               newSessionJustEnsured = true;
               if (receipt.status === "rejected") {
-                settleSubmission(slot, submissionId, "rejected", "rejected");
-                dropUnconfirmedOptimistic(slot, submissionId);
-                restoreDraftFor(submission);
-                publish(slot);
-                return { submissionId, sessionId, status: "rejected", error: "rejected" };
+                return settleFailure(slot, submission, "rejected", "rejected");
               }
               settleSubmission(slot, submissionId, "accepted");
               publish(slot);
               return { submissionId, sessionId, status: "accepted" };
             }
             if (!deps.ensureNewSession) {
-              settleSubmission(slot, submissionId, "rejected", "no ensure implementation");
-              dropUnconfirmedOptimistic(slot, submissionId);
-              restoreDraftFor(submission);
-              publish(slot);
-              return { submissionId, sessionId, status: "rejected", error: "no ensure implementation" };
+              return settleFailure(slot, submission, "rejected", "no ensure implementation");
             }
             const created = await deps.ensureNewSession(input.target.cwd, input.model);
             if (controller.signal.aborted) {
@@ -849,11 +1070,7 @@ export function createBrowserSessionRuntimeRegistry(
             signal: controller.signal,
           });
           if (receipt.status === "rejected") {
-            settleSubmission(slot, submissionId, "rejected", "rejected");
-            dropUnconfirmedOptimistic(slot, submissionId);
-            restoreDraftFor(submission);
-            publish(slot);
-            return { submissionId, sessionId, status: "rejected", error: "rejected" };
+            return settleFailure(slot, submission, "rejected", "rejected");
           }
           settleSubmission(slot, submissionId, "accepted");
           publish(slot);
@@ -861,16 +1078,12 @@ export function createBrowserSessionRuntimeRegistry(
         } catch (error) {
           const aborted = error instanceof Error && (error.name === "AbortError" || controller.signal.aborted);
           if (aborted) {
-            settleSubmission(slot, submissionId, "unknown", "aborted");
-            publish(slot);
-            return { submissionId, sessionId, status: "unknown" };
+            // 与其它失败共用结算：已观察到投递时按已投递返回（run 可能仍在跑）；
+            // 未投递则回滚假气泡并恢复草稿。
+            return settleFailure(slot, submission, "unknown", "aborted");
           }
           const message = error instanceof Error ? error.message : String(error);
-          settleSubmission(slot, submissionId, "unknown", message);
-          dropUnconfirmedOptimistic(slot, submissionId);
-          restoreDraftFor(submission);
-          publish(slot);
-          return { submissionId, sessionId, status: "unknown", error: message };
+          return settleFailure(slot, submission, "unknown", message);
         } finally {
           slot.inFlight.delete(submissionId);
           slot.promptAborts.delete(submissionId);
@@ -884,7 +1097,7 @@ export function createBrowserSessionRuntimeRegistry(
       return promise;
     },
     cancellationFor(sessionId) {
-      const slot = slots.get(sessionId);
+      const slot = getSlot(sessionId, false);
       if (!slot) return null;
       const first = [...slot.promptAborts.entries()][0];
       if (!first) return null;
@@ -892,7 +1105,7 @@ export function createBrowserSessionRuntimeRegistry(
       return { submissionId, cancel: () => controller.abort(), signal: controller.signal };
     },
     abortSubmission(sessionId, submissionId) {
-      const slot = slots.get(sessionId);
+      const slot = getSlot(sessionId, false);
       if (!slot) return Promise.resolve(null);
       const controller = submissionId
         ? slot.promptAborts.get(submissionId)
@@ -905,16 +1118,23 @@ export function createBrowserSessionRuntimeRegistry(
       return Promise.resolve(null);
     },
     abort(sessionId) {
-      const slot = slots.get(sessionId);
+      const slot = getSlot(sessionId, false);
       if (!slot) return;
       for (const controller of slot.promptAborts.values()) controller.abort();
       slot.snapshot.agentRunning = false;
+      slot.snapshot.streamState = emptyStream();
       slot.snapshot.sendInFlight = slot.inFlight.size > 0;
       publish(slot);
       scheduleIdleEventStreamClose(slot);
     },
+    setBashRunning(sessionId, running, pending) {
+      const slot = getSlot(sessionId, true)!;
+      slot.snapshot.bashRunning = running;
+      slot.snapshot.pendingBash = running ? (pending ?? null) : null;
+      publish(slot);
+    },
     getRunState(sessionId) {
-      const snapshot = slots.get(sessionId)?.snapshot;
+      const snapshot = getSlot(sessionId, false)?.snapshot;
       if (!snapshot) return null;
       return {
         promptRunId: snapshot.promptRunId,
@@ -925,7 +1145,7 @@ export function createBrowserSessionRuntimeRegistry(
       };
     },
     beginRunFinish(sessionId, runId) {
-      const slot = slots.get(sessionId);
+      const slot = getSlot(sessionId, false);
       if (!slot) return false;
       const snapshot = slot.snapshot;
       if (snapshot.promptRunId !== runId) return false;
@@ -936,13 +1156,13 @@ export function createBrowserSessionRuntimeRegistry(
       return true;
     },
     releaseRunFinish(sessionId, runId) {
-      const slot = slots.get(sessionId);
+      const slot = getSlot(sessionId, false);
       if (!slot || slot.snapshot.finishingRunId !== runId) return;
       slot.snapshot.finishingRunId = null;
       publish(slot);
     },
     completeRun(sessionId, runId) {
-      const slot = slots.get(sessionId);
+      const slot = getSlot(sessionId, false);
       if (!slot || slot.snapshot.promptRunId !== runId) return false;
       slot.snapshot.agentRunning = false;
       slot.snapshot.completedRunId = runId;
@@ -961,15 +1181,19 @@ export function createBrowserSessionRuntimeRegistry(
       snapshot.finishingRunId = null;
       snapshot.promptRunId += 1;
       snapshot.streamState = { isStreaming: true, streamingMessage: null };
-      void startedAt;
+      // 冷挂载恢复：用服务端记录的启动时刻，避免 startedAt=0 导致 TTFT 荒谬。
+      const resumedFrom = typeof startedAt === "number" && Number.isFinite(startedAt) && startedAt > 0
+        ? startedAt
+        : now();
+      slot.metrics = emptyTurnMetrics(resumedFrom);
       publish(slot);
     },
     async reconcile(sessionId) {
-      const slot = slots.get(sessionId);
+      const slot = getSlot(sessionId, false);
       if (!slot || !deps.getAgentState) return null;
       const runId = slot.snapshot.promptRunId;
       const data = await deps.getAgentState(sessionId);
-      const current = slots.get(sessionId);
+      const current = getSlot(sessionId, false);
       if (current !== slot || current.snapshot.promptRunId !== runId) {
         return { runId, stale: true, live: false, shouldFinish: false };
       }
@@ -999,29 +1223,51 @@ export function createBrowserSessionRuntimeRegistry(
     },
     hydrate(sessionId, messages, entryIds = [], options) {
       const slot = getSlot(sessionId, true)!;
-      if (options?.sinceSeq !== undefined && slot.snapshot.timelineSeq > options.sinceSeq) {
-        return false;
-      }
       const requestSeq = options?.hydrateRequestSeq ?? ++slot.hydrateSeq;
-      if (requestSeq <= slot.hydrateAppliedSeq) return false;
+      // 更新的响应已经落地 → 本次响应整体作废（含会话级状态）。
+      if (requestSeq <= slot.hydrateAppliedSeq) return "superseded";
+      // 期间已有 live 事件：时间线不得被磁盘快照覆盖，但这份响应仍是**最新的
+      // 磁盘读取**，调用方仍应提交 leaf/model 等会话级状态。
+      if (options?.sinceSeq !== undefined && slot.snapshot.timelineSeq > options.sinceSeq) {
+        return "stale";
+      }
       slot.hydrateSeq = Math.max(slot.hydrateSeq, requestSeq);
       slot.hydrateAppliedSeq = requestSeq;
-      const alignedEntryIds = alignEntryIds(messages, entryIds);
-      slot.snapshot.messages = [...messages];
-      slot.snapshot.entryIds = alignedEntryIds;
-      for (const id of alignedEntryIds) {
-        if (id) slot.consumedEntryIds.add(id);
+      // 归并一律从 slot 自己的 timeline 计算（调用方不再回传 previous），
+      // 杜绝依赖 React updater 同步执行而把空数组写进时间线。
+      const mode = options?.mode ?? "replace";
+      const previous = slot.timeline;
+      const merged = mode === "prepend"
+        ? prependOlderRecords(previous, messages, entryIds)
+        : mode === "tail"
+          ? mergeTailRecords(previous, messages, entryIds)
+          : timelineFromDisk(messages, entryIds);
+      // 同会话重载不得吞掉磁盘尚未包含的乐观气泡：否则它会先消失、
+      // 之后又出现，迟到的 message_end 也再没有记录可绑定。
+      slot.timeline = mode === "replace" ? merged : [...retainPendingRecords(previous, merged)];
+      for (const entryId of timelineEntryIds(slot.timeline)) {
+        if (entryId) slot.consumedEntryIds.add(entryId);
       }
       publish(slot);
-      return true;
+      return "applied";
     },
     appendLocal(sessionId, message) {
       const slot = getSlot(sessionId, true)!;
-      const alignedEntryIds = alignEntryIds(slot.snapshot.messages, slot.snapshot.entryIds);
-      slot.snapshot.messages = [...slot.snapshot.messages, message];
-      slot.snapshot.entryIds = [...alignedEntryIds, ""];
+      const key = nextLocalKey(slot);
+      slot.timeline = appendRecord(slot.timeline, optimisticRecord(key, message));
       bumpTimeline(slot);
       publish(slot);
+      return key;
+    },
+    dropLocal(sessionId, key) {
+      const slot = getSlot(sessionId, false);
+      if (!slot) return false;
+      const result = dropPendingRecord(slot.timeline, key);
+      if (!result.dropped) return false;
+      slot.timeline = result.timeline;
+      bumpTimeline(slot);
+      publish(slot);
+      return true;
     },
     applyEvent(sessionId, event) {
       const slot = getSlot(sessionId, true)!;
@@ -1033,10 +1279,10 @@ export function createBrowserSessionRuntimeRegistry(
       connectEvents(slot);
     },
     getEventSource(sessionId) {
-      return slots.get(sessionId)?.eventStream?.getCurrentSource() ?? null;
+      return getSlot(sessionId, false)?.eventStream?.getCurrentSource() ?? null;
     },
     getSubmission(sessionId, submissionId) {
-      return slots.get(sessionId)?.submissions.get(submissionId);
+      return getSlot(sessionId, false)?.submissions.get(submissionId);
     },
     resetForTests() {
       resetSingleton();
@@ -1129,7 +1375,11 @@ function createBrowserFetchDeps(): BrowserSessionRuntimeRegistryDeps {
       }
     },
     async getAgentState(sessionId) {
-      const response = await fetch(`/api/agent/${encodeURIComponent(sessionId)}`, { cache: "no-store" });
+      // light=1：这是轮询路径（reconcile/prompt settle），systemPrompt 是最大字段
+      // 且几乎不变，由 loadSession 的 includeState 权威提供。
+      const response = await fetch(`/api/agent/${encodeURIComponent(sessionId)}?light=1`, {
+        cache: "no-store",
+      });
       const data = await response.json().catch(() => ({})) as RuntimeAgentState & { error?: string };
       if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
       return data;

@@ -6,8 +6,9 @@ import type { BranchActions } from "@/lib/branch-bookmarks";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { composeChatPlan, type ChatRenderItem } from "@/lib/chat-compositor";
+import type { TurnMetrics } from "@/lib/browser-session-runtime-registry";
 import { MessageView } from "./MessageView";
-import { ImagePreviewPanel } from "./MessageImage";
+import { ImagePreviewOverlay } from "./MessageImage";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ExtensionDialog } from "./ExtensionDialog";
@@ -54,6 +55,8 @@ interface Props {
   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
   onSessionStatsPanelOpen?: () => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
+  /** 最近一轮 run 的延迟/吞吐，供顶栏显示。 */
+  onTurnMetricsChange?: (metrics: TurnMetrics) => void;
   onOpenFile?: (filePath: string) => void;
 }
 
@@ -119,7 +122,7 @@ export function ProcessDetailsGroup({ messageCount, toolCallCount, children, t }
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, onGuideTargetChange, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, onGuideTargetChange, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onTurnMetricsChange, onOpenFile }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -176,8 +179,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   }, [onAgentEnd]);
 
   const {
-    loading, historyLoading, hasMoreBefore, error, messages, entryIds, streamState,
-    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, thinkingReady,
+    loading, historyLoading, hasMoreBefore, error, messages, entryIds, messageKeys, streamState,
+    agentRunning, turnMetrics, bashRunning, pendingBash, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, thinkingReady,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, defaultThinkingLevel,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -368,6 +371,15 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   }, [ctxKey, onContextUsageChange]);
   useEffect(() => () => { onContextUsageChange?.(null); }, [onContextUsageChange]);
 
+  // 吞吐读数只在 message_end 时变，用标量 key 避免流式帧触发多余推送。
+  const metricsKey = `${turnMetrics.ttftMs ?? ""}|${turnMetrics.tokensPerSecond ?? ""}`;
+  const turnMetricsRef = useRef(turnMetrics);
+  turnMetricsRef.current = turnMetrics;
+  useEffect(() => {
+    onTurnMetricsChange?.(turnMetricsRef.current);
+  }, [metricsKey, onTurnMetricsChange]);
+  useEffect(() => () => { onTurnMetricsChange?.({}); }, [onTurnMetricsChange]);
+
   const onDrop = useCallback((files: File[]) => {
     if (sessionBusy || writesDisabled) return;
     chatInputRef?.current?.addImages(files);
@@ -415,7 +427,6 @@ const chatPlan = composeChatPlan({
 
   const chatInputElement = (
     <>
-      <ImagePreviewPanel />
       {extensionDialog && (
         <ExtensionDialog
           request={extensionDialog}
@@ -543,6 +554,9 @@ const chatPlan = composeChatPlan({
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
+      {/* 图片查看器：全屏遮罩，只在组件根挂载一次（它自带 portal 到 body，
+          与输入区/移动端分支无关）。 */}
+      <ImagePreviewOverlay />
       {isDragOver && !sessionBusy && !writesDisabled && (
         <div className="pointer-events-none absolute inset-0 z-50 flex animate-[drop-zone-in_0.15s_ease_both] items-center justify-center bg-[color-mix(in_srgb,var(--accent)_6%,transparent)] backdrop-blur-[1px]">
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
@@ -668,9 +682,12 @@ const chatPlan = composeChatPlan({
                 const msg = item.messageOverride ?? messages[idx];
                 const isVisible = msg.role === "user" || msg.role === "assistant";
                 const currentRefIdx = isLive ? undefined : visibleRefIndexByMessage.get(idx);
+                // 稳定身份：prepend 更旧历史后下标会整体平移，用记录 key 才能让
+                // 已有 MessageView 保持挂载（折叠态、选区、局部状态不被重置）。
+                const stableKey = isLive ? "live" : (messageKeys[idx] ?? `idx:${idx}`);
                 const view = (
                   <MessageView
-                    key={`${item.keyPrefix}-view-${idx}`}
+                    key={`${item.keyPrefix}-view-${stableKey}`}
                     message={msg}
                     toolResults={toolResultsMap}
                     toolExecutionSnapshots={toolExecutionSnapshots}
@@ -694,7 +711,7 @@ const chatPlan = composeChatPlan({
                 );
                 if (!isVisible || !item.attachRef || currentRefIdx === undefined) return view;
                 return (
-                  <div key={`${item.keyPrefix}-${idx}`} ref={attachVisibleRef(idx, currentRefIdx)}>
+                  <div key={`${item.keyPrefix}-${stableKey}`} ref={attachVisibleRef(idx, currentRefIdx)}>
                     {view}
                   </div>
                 );
@@ -719,7 +736,7 @@ const chatPlan = composeChatPlan({
                   );
                   rendered.push(
                     <div
-                      key={`process-group-${item.userIdx}-${item.finalAssistantIdx}`}
+                      key={`process-group-${messageKeys[item.userIdx] ?? `u:${item.userIdx}`}-${messageKeys[item.finalAssistantIdx] ?? `a:${item.finalAssistantIdx}`}`}
                       ref={processRefIdx === undefined ? undefined : (el) => { messageRefs.current[processRefIdx] = el; }}
                     >
                       {processGroup}

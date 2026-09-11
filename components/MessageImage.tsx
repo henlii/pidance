@@ -1,9 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type WheelEvent } from "react";
+import { createPortal } from "react-dom";
 import { Download, Minus, Plus, RotateCcw } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 import { closeImagePreview, openImagePreview, useImagePreview } from "@/lib/image-preview-store";
+import { readDialogViewportRect } from "@/components/ui/ViewportDialog";
 import type { ImageContent } from "@/lib/types";
 
 export interface ResolvedImageContent {
@@ -107,18 +109,20 @@ function inferDownloadName(src: string, mimeType?: string): string {
   return `image.${mimeType ? MIME_EXTENSIONS[mimeType.toLowerCase()] ?? "png" : "png"}`;
 }
 
-const controlStyle = {
+/** 全屏遮罩上的控件：始终压在深色背景上，故用固定浅色而非主题变量。 */
+const overlayControlStyle = {
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
   minWidth: 30,
   minHeight: 30,
   padding: 4,
-  border: "1px solid var(--border)",
+  border: "1px solid rgba(255,255,255,0.22)",
   borderRadius: 6,
-  background: "var(--bg-subtle)",
-  color: "var(--text-muted)",
+  background: "rgba(255,255,255,0.10)",
+  color: "#fff",
   cursor: "pointer",
+  flexShrink: 0,
 };
 
 export function MessageImage({
@@ -180,20 +184,66 @@ export function MessageImage({
   );
 }
 
-export function ImagePreviewPanel() {
+/**
+ * 全屏遮罩层的图片查看器。
+ *
+ * 用固定全屏遮罩直接显示原图，而不是在输入区上方展开一块受限面板
+ * （原先高度被 `min(34vh, 360px)` 限制，看大图要反复缩放平移）。
+ * 遮罩本身即背景：点击图片以外区域关闭。
+ *
+ * 用 visual viewport（而非 inset）定位，理由与 components/ui/ViewportDialog 相同：
+ * iOS 的 fixed 元素相对 layout viewport 定位，软键盘/缩放时 inset 会跑偏。
+ */
+export function ImagePreviewOverlay() {
   const { t } = useI18n();
   const preview = useImagePreview();
   const [zoom, setZoom] = useState(MIN_ZOOM);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [viewport, setViewport] = useState(() => readDialogViewportRect());
+  // 记录是否发生拖动：拖完不应被当成「点击背景」而误关闭。
+  const movedRef = useRef(false);
   const dragRef = useRef<{ pointerId: number; x: number; y: number; offsetX: number; offsetY: number } | null>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
+
+  const clampZoom = (value: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number(value.toFixed(2))));
+
+  /**
+   * 把平移量限制在「图片超出可视区的那部分」之内。
+   *
+   * `transform` 是 `translate(x,y) scale(z)`：平移在外层，不受缩放影响，
+   * 所以单纯改 zoom 不会自动把图拉回中间——必须显式收敛平移量。
+   * 允许的最大位移 = (渲染尺寸 × 缩放 − 可视区) / 2，下限 0：
+   * 图没超出可视区时（含缩回 100%）位移必然归零，即回到居中。
+   */
+  const clampOffset = useCallback((next: { x: number; y: number }, zoomLevel: number) => {
+    const img = imgRef.current;
+    const surface = surfaceRef.current;
+    if (!img || !surface || zoomLevel <= MIN_ZOOM) return { x: 0, y: 0 };
+    const style = window.getComputedStyle(surface);
+    const availWidth = surface.clientWidth - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
+    const availHeight = surface.clientHeight - Number.parseFloat(style.paddingTop) - Number.parseFloat(style.paddingBottom);
+    // offsetWidth/Height 是布局尺寸（fit 后、未受 transform 影响）。
+    const maxX = Math.max(0, (img.offsetWidth * zoomLevel - availWidth) / 2);
+    const maxY = Math.max(0, (img.offsetHeight * zoomLevel - availHeight) / 2);
+    return {
+      x: Math.min(maxX, Math.max(-maxX, next.x)),
+      y: Math.min(maxY, Math.max(-maxY, next.y)),
+    };
+  }, []);
 
   const resetView = useCallback(() => {
     setZoom(MIN_ZOOM);
     setOffset({ x: 0, y: 0 });
   }, []);
   const changeZoom = useCallback((delta: number) => {
-    setZoom((previous) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number((previous + delta).toFixed(2)))));
-  }, []);
+    setZoom((previous) => {
+      const next = clampZoom(previous + delta);
+      // 同步收敛平移量：缩小时把图拉回可视区，缩回 100% 即完全居中。
+      setOffset((current) => clampOffset(current, next));
+      return next;
+    });
+  }, [clampOffset]);
 
   useEffect(() => {
     resetView();
@@ -202,17 +252,48 @@ export function ImagePreviewPanel() {
 
   useEffect(() => () => closeImagePreview(), []);
 
+  // visual viewport 变化（软键盘、双指缩放、旋转）时重新贴合。
+  useEffect(() => {
+    if (!preview) return;
+    const update = () => {
+      setViewport(readDialogViewportRect());
+      // 可视区变了，允许的平移范围也变了：重新收敛，避免图停在区外。
+      setOffset((current) => clampOffset(current, zoom));
+    };
+    update();
+    const vv = typeof window === "undefined" ? null : window.visualViewport;
+    vv?.addEventListener("resize", update);
+    vv?.addEventListener("scroll", update);
+    window.addEventListener("resize", update);
+    window.addEventListener("orientationchange", update);
+    return () => {
+      vv?.removeEventListener("resize", update);
+      vv?.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+      window.removeEventListener("orientationchange", update);
+    };
+  }, [preview, clampOffset, zoom]);
+
   useEffect(() => {
     if (!preview) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
         closeImagePreview();
+      } else if (event.key === "+" || event.key === "=") {
+        event.preventDefault();
+        changeZoom(ZOOM_STEP);
+      } else if (event.key === "-") {
+        event.preventDefault();
+        changeZoom(-ZOOM_STEP);
+      } else if (event.key === "0") {
+        event.preventDefault();
+        resetView();
       }
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [preview]);
+  }, [preview, changeZoom, resetView]);
 
   const onWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -220,6 +301,8 @@ export function ImagePreviewPanel() {
   }, [changeZoom]);
 
   const onPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    movedRef.current = false;
+    // 未放大时拖动没有意义，交给遮罩的点击关闭处理。
     if (zoom <= MIN_ZOOM) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -235,11 +318,11 @@ export function ImagePreviewPanel() {
   const onPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
-    setOffset({
-      x: drag.offsetX + event.clientX - drag.x,
-      y: drag.offsetY + event.clientY - drag.y,
-    });
-  }, []);
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) movedRef.current = true;
+    setOffset(clampOffset({ x: drag.offsetX + dx, y: drag.offsetY + dy }, zoom));
+  }, [clampOffset, zoom]);
 
   const stopDragging = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (dragRef.current?.pointerId !== event.pointerId) return;
@@ -249,114 +332,136 @@ export function ImagePreviewPanel() {
     }
   }, []);
 
+  /**
+   * 点击图片以外区域关闭。
+   *
+   * 挂在**图片区**而不是遮罩根节点：图片区 `flex: 1` 铺满整个遮罩，
+   * 真实点击永远落在它（或图）上，遮罩根节点自身没有可点区域——
+   * 挂在根节点上等于这条交互不存在。
+   * 刚拖动过则吞掉这一次 click（浏览器在 pointerup 后仍会派发 click）。
+   */
+  const onSurfaceClick = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    if (movedRef.current) {
+      movedRef.current = false;
+      return;
+    }
+    if (event.target !== event.currentTarget) return;
+    closeImagePreview();
+  }, []);
+
   if (!preview) return null;
 
-  return (
+  return createPortal(
     <div
-      role="region"
+      role="dialog"
+      aria-modal="true"
       aria-label={t("message_imageViewer")}
       style={{
-        flexShrink: 0,
-        padding: "0 16px 8px",
-        background: "var(--bg)",
+        position: "fixed",
+        top: viewport.top,
+        left: viewport.left,
+        width: viewport.width,
+        height: viewport.height,
+        zIndex: 1100,
+        background: "color-mix(in srgb, #000 82%, transparent)",
+        display: "flex",
+        flexDirection: "column",
+        // 阻断滚动链：触屏/触控板在遮罩上的手势不传给背景页面。
+        overscrollBehavior: "contain",
       }}
     >
+      {/* 顶部工具条：悬浮在图片之上，不挤压图片可用高度 */}
       <div
         style={{
-          width: "min(100%, 820px)",
-          // 预览是输入区上方的显示块，不应占满移动端或桌面会话视口。
-          maxHeight: "min(34vh, 360px)",
-          margin: "0 auto",
+          position: "absolute",
+          top: 8,
+          left: 8,
+          right: 8,
           display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-          border: "1px solid var(--border)",
+          alignItems: "center",
+          gap: 6,
+          padding: "6px 8px 6px 12px",
           borderRadius: 9,
-          background: "var(--bg-panel)",
-          boxShadow: "0 8px 24px color-mix(in srgb, var(--text) 10%, transparent)",
+          background: "color-mix(in srgb, #000 55%, transparent)",
+          backdropFilter: "blur(6px)",
+          color: "#fff",
+          zIndex: 1,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 6, minHeight: 42, padding: "6px 8px 6px 12px", borderBottom: "1px solid var(--border)" }}>
-          <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12, fontWeight: 650 }} title={preview.title || preview.alt}>
-            {preview.title || preview.alt}
-          </span>
-          <button type="button" onClick={() => changeZoom(-ZOOM_STEP)} disabled={zoom <= MIN_ZOOM} aria-label={t("message_zoomOut")} title={t("message_zoomOut")} style={{ ...controlStyle, opacity: zoom <= MIN_ZOOM ? 0.45 : 1 }}>
-            <Minus size={14} strokeWidth={1.9} aria-hidden="true" />
-          </button>
-          <button type="button" onClick={resetView} aria-label={t("message_resetZoom")} title={t("message_resetZoom")} style={{ ...controlStyle, minWidth: 48, fontSize: 11 }}>
-            {Math.round(zoom * 100)}%
-          </button>
-          <button type="button" onClick={() => changeZoom(ZOOM_STEP)} disabled={zoom >= MAX_ZOOM} aria-label={t("message_zoomIn")} title={t("message_zoomIn")} style={{ ...controlStyle, opacity: zoom >= MAX_ZOOM ? 0.45 : 1 }}>
-            <Plus size={14} strokeWidth={1.9} aria-hidden="true" />
-          </button>
-          <button type="button" onClick={resetView} aria-label={t("message_resetZoom")} title={t("message_resetZoom")} style={controlStyle}>
-            <RotateCcw size={14} strokeWidth={1.9} aria-hidden="true" />
-          </button>
-          <a href={preview.downloadHref} download={preview.downloadName} aria-label={t("message_downloadImage")} title={t("message_downloadImage")} style={{ ...controlStyle, gap: 5, color: "var(--accent)", textDecoration: "none", fontSize: 12 }}>
-            <Download size={14} strokeWidth={1.9} aria-hidden="true" />
-            {t("message_downloadImage")}
-          </a>
-          <button type="button" onClick={closeImagePreview} aria-label={t("message_closeImage")} title={t("message_closeImage")} style={{ ...controlStyle, fontSize: 18, lineHeight: 1 }}>
-            ×
-          </button>
-        </div>
-        <div
-          tabIndex={0}
-          role="group"
-          aria-label={t("message_imageViewer")}
-          onWheel={onWheel}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={stopDragging}
-          onPointerCancel={stopDragging}
-          onDoubleClick={() => (zoom > MIN_ZOOM ? resetView() : changeZoom(1))}
-          onKeyDown={(event) => {
-            if (event.key === "+" || event.key === "=") {
-              event.preventDefault();
-              changeZoom(ZOOM_STEP);
-            } else if (event.key === "-") {
-              event.preventDefault();
-              changeZoom(-ZOOM_STEP);
-            } else if (event.key === "0") {
-              event.preventDefault();
-              resetView();
-            }
-          }}
-          style={{
-            width: "100%",
-            height: "min(30vh, 320px)",
-            minHeight: 140,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            overflow: "hidden",
-            cursor: zoom > MIN_ZOOM ? "grab" : "zoom-in",
-            touchAction: "none",
-            background: "var(--bg)",
-          }}
+        <span
+          style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, fontWeight: 650 }}
+          title={preview.title || preview.alt}
         >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={preview.src}
-            alt={preview.alt}
-            draggable={false}
-            decoding="async"
-            style={{
-              display: "block",
-              maxWidth: "100%",
-              maxHeight: "100%",
-              width: "auto",
-              height: "auto",
-              objectFit: "contain",
-              userSelect: "none",
-              WebkitUserSelect: "none",
-              transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
-              transformOrigin: "center center",
-              transition: dragRef.current ? "none" : "transform 0.12s ease-out",
-            }}
-          />
-        </div>
+          {preview.title || preview.alt}
+        </span>
+        <button type="button" onClick={() => changeZoom(-ZOOM_STEP)} disabled={zoom <= MIN_ZOOM} aria-label={t("message_zoomOut")} title={t("message_zoomOut")} style={{ ...overlayControlStyle, opacity: zoom <= MIN_ZOOM ? 0.45 : 1 }}>
+          <Minus size={14} strokeWidth={1.9} aria-hidden="true" />
+        </button>
+        <button type="button" onClick={resetView} aria-label={t("message_resetZoom")} title={t("message_resetZoom")} style={{ ...overlayControlStyle, minWidth: 48, fontSize: 11 }}>
+          {Math.round(zoom * 100)}%
+        </button>
+        <button type="button" onClick={() => changeZoom(ZOOM_STEP)} disabled={zoom >= MAX_ZOOM} aria-label={t("message_zoomIn")} title={t("message_zoomIn")} style={{ ...overlayControlStyle, opacity: zoom >= MAX_ZOOM ? 0.45 : 1 }}>
+          <Plus size={14} strokeWidth={1.9} aria-hidden="true" />
+        </button>
+        <button type="button" onClick={resetView} aria-label={t("message_resetZoom")} title={t("message_resetZoom")} style={overlayControlStyle}>
+          <RotateCcw size={14} strokeWidth={1.9} aria-hidden="true" />
+        </button>
+        <a href={preview.downloadHref} download={preview.downloadName} aria-label={t("message_downloadImage")} title={t("message_downloadImage")} style={{ ...overlayControlStyle, gap: 5, textDecoration: "none", fontSize: 12 }}>
+          <Download size={14} strokeWidth={1.9} aria-hidden="true" />
+          <span className="hidden sm:inline">{t("message_downloadImage")}</span>
+        </a>
+        <button type="button" onClick={closeImagePreview} aria-label={t("message_closeImage")} title={t("message_closeImage")} style={{ ...overlayControlStyle, fontSize: 20, lineHeight: 1 }}>
+          ×
+        </button>
       </div>
-    </div>
+
+      {/* 图片区：占满遮罩剩余空间，只在这里处理缩放/拖动 */}
+      <div
+        ref={surfaceRef}
+        role="group"
+        aria-label={t("message_imageViewer")}
+        onWheel={onWheel}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={stopDragging}
+        onPointerCancel={stopDragging}
+        onClick={onSurfaceClick}
+        onDoubleClick={() => (zoom > MIN_ZOOM ? resetView() : changeZoom(1))}
+        style={{
+          flex: 1,
+          minHeight: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "56px 12px 12px",
+          overflow: "hidden",
+          cursor: zoom > MIN_ZOOM ? "grab" : "zoom-in",
+          touchAction: "none",
+        }}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          ref={imgRef}
+          src={preview.src}
+          alt={preview.alt}
+          draggable={false}
+          decoding="async"
+          style={{
+            display: "block",
+            maxWidth: "100%",
+            maxHeight: "100%",
+            width: "auto",
+            height: "auto",
+            objectFit: "contain",
+            userSelect: "none",
+            WebkitUserSelect: "none",
+            transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
+            transformOrigin: "center center",
+            transition: dragRef.current ? "none" : "transform 0.12s ease-out",
+          }}
+        />
+      </div>
+    </div>,
+    document.body,
   );
 }

@@ -12,7 +12,6 @@ import type {
   BinaryMessageInput,
   ChatInputHandle,
 } from "@/lib/types";
-import { recoverFailedSend } from "@/lib/send-failure";
 import { preserveCustomRenderedLines } from "@/lib/custom-rendered-lines";
 import type { SessionActivity } from "@/lib/session-activity";
 import { readAgentLiveFlag, sendAgentCommand } from "@/lib/agent-client";
@@ -33,7 +32,7 @@ import {
   readFollowUpQueuePreference,
 } from "@/lib/queue-merge";
 import { pendingSessionId } from "@/lib/new-session-intent";
-import type { SessionStatsInfo } from "@/lib/pi-types";
+import type { ContextUsage, SessionStatsInfo } from "@/lib/pi-types";
 import {
   applyExtensionUiRequest,
   clearAllExtensionUiBlocking,
@@ -70,9 +69,27 @@ import {
 import {
   DEFAULT_SESSION_HISTORY_PAGE,
   DEFAULT_SESSION_TAIL_LIMIT,
-  mergeTailReload,
-  prependOlderPage,
 } from "@/lib/session-context-window";
+import { submissionKey } from "@/lib/session-timeline";
+import {
+  beginSync,
+  observeQueue,
+  projection,
+  proposeQueue,
+  queueEntry,
+  settleSyncFailure,
+  settleSyncSuccess,
+  type QueueBook,
+  type QueueEntry,
+} from "@/lib/queue-state";
+import type { TimelineHydrateMode, TurnMetrics } from "@/lib/browser-session-runtime-registry";
+import {
+  closeSelectionOp,
+  hasOpenOp,
+  isLatestOp,
+  openSelectionOp,
+  type SelectionOpBook,
+} from "@/lib/selection-ops";
 
 export interface SessionData {
   sessionId: string;
@@ -96,7 +113,7 @@ interface StreamingState {
 
 type StreamAction =
   | { type: "start" }
-  | { type: "update"; message: Partial<AgentMessage> }
+  | { type: "update"; message: Partial<AgentMessage> | null }
   | { type: "end" }
   | { type: "reset" };
 
@@ -105,7 +122,8 @@ function streamReducer(state: StreamingState, action: StreamAction): StreamingSt
     case "start":
       return { isStreaming: true, streamingMessage: null };
     case "update":
-      return { isStreaming: true, streamingMessage: action.message };
+      // 只置位无正文（run 已开始、尚未收到首帧）：保持 null，避免空 live 气泡。
+      return { isStreaming: true, streamingMessage: action.message ?? null };
     case "end":
     case "reset":
       return { isStreaming: false, streamingMessage: null };
@@ -222,53 +240,15 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function extractMessageText(message: Partial<AgentMessage>): string {
-  const content = (message as { content?: unknown }).content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((block) =>
-      block && typeof block === "object"
-        && (block as { type?: string }).type === "text"
-        && typeof (block as { text?: unknown }).text === "string"
-        ? (block as { text: string }).text
-        : "")
-    .filter(Boolean)
-    .join("\n");
-}
-
-function imageSignature(block: unknown): string {
-  if (!block || typeof block !== "object" || (block as { type?: unknown }).type !== "image") return "";
-  const source = (block as { source?: unknown }).source;
-  if (source && typeof source === "object") {
-    const src = source as { type?: unknown; media_type?: unknown; data?: unknown; url?: unknown };
-    return [
-      src.type === "url" ? "url" : "base64",
-      typeof src.media_type === "string" ? src.media_type : "",
-      typeof src.data === "string" ? src.data : "",
-      typeof src.url === "string" ? src.url : "",
-    ].join(":");
-  }
-  const flat = block as { data?: unknown; mimeType?: unknown };
-  return [
-    "base64",
-    typeof flat.mimeType === "string" ? flat.mimeType : "",
-    typeof flat.data === "string" ? flat.data : "",
-    "",
-  ].join(":");
-}
-
-/** steer 乐观消息本地标记（仅前端内存，不写盘；投递时按 key 去重替换）。 */
+/** steer 乐观消息本地标记（仅前端内存，不写盘；投递时由 registry 按稳定 key 对账）。 */
 type SteerOptimisticMessage = AgentMessage & { _steerOptimistic?: boolean };
 
-function userMessageKey(message: Partial<AgentMessage>): string {
-  const content = (message as { content?: unknown }).content;
-  if (typeof content === "string") return JSON.stringify({ text: content, images: [] });
-  if (!Array.isArray(content)) return JSON.stringify({ text: "", images: [] });
-  return JSON.stringify({
-    text: extractMessageText(message),
-    images: content.map(imageSignature).filter(Boolean),
-  });
+/**
+ * 请求被取消（切换会话 / 新的加载取代了本次）—— 不是失败，不得写 error。
+ * fetch abort 会抛 DOMException(AbortError)；旧浏览器/Node 也可能是普通 Error。
+ */
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 function readCompactResult(result: unknown, reason: string): CompactResultInfo | null {
@@ -281,7 +261,7 @@ function readCompactResult(result: unknown, reason: string): CompactResultInfo |
 export type { AttachedImage, ChatInputHandle } from "@/lib/types";
 
 type SelectedModel = { provider: string; modelId: string };
-type ModelEntry = { id: string; name: string; provider: string };
+type ModelEntry = { id: string; name: string; provider: string; contextWindow?: number };
 type ModelsResponse = {
   models: Record<string, string>;
   modelList?: ModelEntry[];
@@ -324,12 +304,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [entryIds, setEntryIds] = useState<string[]>([]);
+  /** 与 messages 平行的稳定 key（React 列表用），由 registry 投影。 */
+  const [messageKeys, setMessageKeys] = useState<string[]>([]);
   /** 同一会话并发 tail/state 请求的响应代数；只允许最新请求提交 React 状态。 */
   const loadRequestSeqRef = useRef(0);
+  /**
+   * 会话加载（tail/hot state/更旧历史/分支 context）的取消句柄。
+   * 大会话的 tail 可达数百 KB；切走后若不断开，响应体会被完整下载并解析，
+   * 之后才被 sessionId 守卫丢弃——白花流量与内存。
+   */
+  const loadAbortRef = useRef<AbortController | null>(null);
+  const beginLoadRequest = useCallback((): AbortSignal => {
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
+    return controller.signal;
+  }, []);
   const historyLoadingRef = useRef(false);
   const hasMoreBeforeRef = useRef(false);
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
   const [agentRunning, setAgentRunning] = useState(false);
+  /** 最近一轮 run 的延迟/吞吐读数（由 registry snapshot 投影，算法见 TurnMetrics）。 */
+  const [turnMetrics, setTurnMetrics] = useState<TurnMetrics>({});
   const [lockedByOther, setLockedByOther] = useState(false);
   const [bashRunning, setBashRunning] = useState(false);
   const [pendingBash, setPendingBash] = useState<{ command: string; excludeFromContext: boolean; startedAt: number } | null>(null);
@@ -344,6 +340,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
   const [settingsDefaultThinking, setSettingsDefaultThinking] = useState<AgentThinkingLevel | null>(null);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption | null>(null);
+  /** thinkingLevel 的 ref 镜像：回滚与陈旧响应判定需要读到最新值。 */
+  const thinkingLevelRef = useRef<ThinkingLevelOption | null>(null);
+  thinkingLevelRef.current = thinkingLevel;
   // 当前会话的思考档是否已被权威源（loadSession context / 引导页默认）确认：
   // 确认前模型按钮不显示档位，避免切回会话瞬间残留上一会话/中间态档位。
   const [thinkingReady, setThinkingReady] = useState(false);
@@ -362,9 +361,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const [forkingEntryId, setForkingEntryId] = useState<string | null>(null);
   const [currentModelOverride, setCurrentModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
-  const [pendingModel, setPendingModel] = useState<{ provider: string; modelId: string } | null>(null);
-  /** pendingModel 的 ref 副本（handleSend 闭包读取最新值） */
-  const pendingModelRef = useRef<{ provider: string; modelId: string } | null>(null);
+  /** override 的 ref 镜像：失败回滚需要读到选择前的值。 */
+  const currentModelOverrideRef = useRef<{ provider: string; modelId: string } | null>(null);
+  currentModelOverrideRef.current = currentModelOverride;
+  /** 模型/思考写入操作的代次登记（每会话唯一在途操作）。 */
+  const selectionOpBookRef = useRef<SelectionOpBook>({});
+  const selectionOpSeqRef = useRef(0);
+  /** 每会话串行链：两次选择不得交错成「模型 B + 深度 A」。 */
+  const selectionChainRef = useRef<Record<string, Promise<unknown>>>({});
   /**
    * 每会话最近已知模型（sessionId → model）：切换会话 setData(null) 清磁盘投影后、
    * loadSession 返回前的窗口内恢复模型显示，避免输入框显示「模型」占位。
@@ -372,6 +376,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    */
   const [lastKnownModel, setLastKnownModel] = useState<{ provider: string; modelId: string } | null>(null);
   const lastKnownModelBySessionRef = useRef<Map<string, { provider: string; modelId: string }>>(new Map());
+  /**
+   * 仅由**磁盘上下文**写入的观察值（hot/live 不写）：
+   * 「磁盘相对上次读取发生了变化」才是外部写入的证据；混入 live 值会误判。
+   */
+  const lastDiskModelBySessionRef = useRef<Map<string, { provider: string; modelId: string }>>(new Map());
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactError, setCompactError] = useState<string | null>(null);
   const [compactResult, setCompactResult] = useState<CompactResultInfo | null>(null);
@@ -391,67 +400,81 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     extensionUiStateRef, commitExtensionUiState, patchExtensionUiState, dismissExtensionUiRequest,
   } = useExtensionUiState();
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
-  // 每会话本地 follow-up 队列：localFollowUpRef 始终指向当前会话条目的投影，
-  // 会话切换只换映射条目，不携带上一会话队列；每会话条目内容与 Host 持久化
-  // sessionQueue.<sid> 一致（当前会话由 Host 自动投递，非当前会话队列保留在服务端）。
-  const sessionQueuesRef = useRef<Map<string, string[]>>(new Map());
+  // 每会话本地 follow-up 队列：Host 是持久化 owner，浏览器只持「已确认基线 +
+  // 一个乐观待提交值」，按 sessionId 分账（见 lib/queue-state.ts 的不变量）。
+  const queueBookRef = useRef<QueueBook>({});
+  /** 当前显示的会话（队列投影据此取账）。 */
   const currentQueueSessionIdRef = useRef<string | null>(session?.id ?? null);
-  // 当前会话的 followUp 投影（作为最后显示的队列块来源）
-  const localFollowUpRef = useRef<string[]>([]);
-  const localQueueOwnerRef = useRef<string | null>(session?.id ?? null);
   const followUpSyncRef = useRef<Promise<void>>(Promise.resolve());
-  const applySessionLocalQueue = useCallback((sid: string | null, next: string[]) => {
-    if (!sid) return;
-    const map = new Map(sessionQueuesRef.current);
-    if (next.length === 0) map.delete(sid);
-    else map.set(sid, [...next]);
-    sessionQueuesRef.current = map;
-    if (localQueueOwnerRef.current === sid) {
-      localFollowUpRef.current = [...next];
-      setQueuedMessages({ steering: [], followUp: [...next] });
-    }
+  const queueEntryNow = useCallback((): QueueEntry => {
+    return queueEntry(queueBookRef.current, currentQueueSessionIdRef.current ?? "");
   }, []);
-  const applyLocalFollowUpQueue = useCallback((next: string[]) => {
-    applySessionLocalQueue(currentQueueSessionIdRef.current, next);
-  }, [applySessionLocalQueue]);
-  /** follow-up 同步在途标记：入队请求未确认前，服务端旧队列投影不得覆盖本地。 */
-  const followUpSyncInFlightRef = useRef(false);
+  /** 把当前会话的队列投影刷新到 UI。 */
+  const publishQueue = useCallback((steering?: string[]) => {
+    setQueuedMessages((current) => ({
+      steering: steering ?? current.steering,
+      followUp: projection(queueEntryNow()),
+    }));
+  }, [queueEntryNow]);
+  /** 接受 Host/磁盘权威队列（受代次与在途守卫）。 */
+  const observeLocalQueue = useCallback((next: string[]) => {
+    const sid = currentQueueSessionIdRef.current;
+    if (!sid) return;
+    queueBookRef.current = observeQueue(
+      queueBookRef.current,
+      sid,
+      next,
+      queueEntry(queueBookRef.current, sid).revision,
+    );
+    publishQueue();
+  }, [publishQueue]);
+  /** 热 state 投影：受在途守卫与代次约束，不得盖掉更新的本地写入。 */
   const applyProjectedQueues = useCallback((value?: AgentStateResponse["queuedMessages"]) => {
     const next = normalizeQueuedMessages(value);
-    // 同步在途：本地投影（含乐观新条目）比服务端快照新，直接采用服务端旧值
-    // 会让队列块「闪空又重现」。只采 steering，followUp 保持本地。
-    if (followUpSyncInFlightRef.current) {
-      setQueuedMessages({ steering: next.steering, followUp: [...localFollowUpRef.current] });
-      return;
+    const sid = currentQueueSessionIdRef.current;
+    if (sid) {
+      queueBookRef.current = observeQueue(
+        queueBookRef.current,
+        sid,
+        next.followUp,
+        queueEntry(queueBookRef.current, sid).revision,
+      );
     }
-    applyLocalFollowUpQueue(next.followUp);
-    setQueuedMessages({ steering: next.steering, followUp: next.followUp });
-  }, [applyLocalFollowUpQueue]);
+    setQueuedMessages({ steering: next.steering, followUp: projection(queueEntryNow()) });
+  }, [queueEntryNow]);
+  /**
+   * 写入队列并同步给 Host。成功把乐观值转成新基线；失败按 revision CAS 清掉
+   * 乐观值退回基线（而不是恢复「上一份乐观值」，那会留下从未被接受的中间态）。
+   */
   const updateLocalFollowUp = useCallback(async (next: string[]) => {
-    const previous = localFollowUpRef.current;
-    const applied = [...next];
-    applyLocalFollowUpQueue(applied);
-    const sid = sessionIdRef.current;
+    const sid = currentQueueSessionIdRef.current ?? sessionIdRef.current;
     if (!sid) return;
-    followUpSyncInFlightRef.current = true;
+    const proposal = proposeQueue(queueBookRef.current, sid, next);
+    queueBookRef.current = beginSync(proposal.book, sid);
+    if (currentQueueSessionIdRef.current === sid) publishQueue();
     const sync = followUpSyncRef.current
       .catch(() => undefined)
       .then(async () => {
         // Host 同步持久化并在 settled 后投递；浏览器不再并发写同一 queue prefs。
-        await sendAgentCommand(sid, { type: "set_follow_up_queue", items: applied });
+        await sendAgentCommand(sid, { type: "set_follow_up_queue", items: [...next] });
       });
     followUpSyncRef.current = sync.catch(() => undefined);
     try {
       await sync;
+      queueBookRef.current = settleSyncSuccess(
+        queueBookRef.current,
+        sid,
+        proposal.revision,
+        next,
+      );
+      if (currentQueueSessionIdRef.current === sid) publishQueue();
     } catch (error) {
-      if (sessionIdRef.current === sid && localFollowUpRef.current === applied) {
-        applyLocalFollowUpQueue(previous);
-      }
+      queueBookRef.current = settleSyncFailure(queueBookRef.current, sid, proposal.revision);
+      if (currentQueueSessionIdRef.current === sid) publishQueue();
       throw error;
-    } finally {
-      followUpSyncInFlightRef.current = false;
     }
-  }, [applyLocalFollowUpQueue]);
+  }, [publishQueue]);
+
   // 分支切换/总结进行中：树节点、发送与再次导航全部暂停，避免与 navigateTree 并发写。
   const [branchBusy, setBranchBusy] = useState(false);
 
@@ -482,6 +505,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, []);
   const abortRequestedRef = useRef(false);
   const bashRunningRef = useRef(false);
+  /** bash 执行代次：finally 只清理自己那次。 */
+  const bashExecSeqRef = useRef(0);
   const branchBusyRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
   const handleAgentEventRef = useRef<((event: AgentEvent, eventRunId?: number) => void) | null>(null);
@@ -506,7 +531,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   });
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
   const newSessionPromotedRef = useRef(false);
-  const optimisticUserMessageKeyRef = useRef<string | null>(null);
   /** prompt 命令已提交成功（防止切走/收尾竞态把已发送消息回滚成失败） */
   const promptSubmittedRef = useRef(false);
 
@@ -528,18 +552,52 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   // SSE 由 BrowserSessionRuntimeRegistry 唯一持有；本 hook 只 attach/订阅 snapshot。
 
-  // P1-2：显示模型按固定优先级解析——用户手动选择（override）最高，其次
-  // 新会话发送中携带的选择（pending），再其次磁盘持久化 model_change
-  // （context.model），最后才是默认配置。extension 通知/subagent 完成提示/
-  // activity/custom 消息都不会写入 override，因此不会覆盖用户选择。
-  // 全局默认模型只用于新会话引导；已有会话只读自身 override/pending/model_change。
+  // 显示模型按固定优先级解析：用户手动选择（override）最高，其次磁盘
+  // model_change（context.model），最后才是默认配置。extension 通知/subagent
+  // 完成提示/activity/custom 消息都不会写入 override，因此不会覆盖用户选择。
+  // 全局默认模型只用于新会话引导；已有会话只读自身 override/model_change。
+  // override 的唯一失效入口是 settleModelOverride（磁盘确认一致或外部改动）。
+  const persistedModel = data?.context.model ?? lastKnownModel;
   const currentModel = resolveDisplayModel(
     currentModelOverride,
-    pendingModel,
-    data?.context.model ?? lastKnownModel,
+    persistedModel,
     isNew ? newSessionDefaultModel : null,
   );
   const displayModel = isNew ? (newSessionModel ?? newSessionDefaultModel) : currentModel;
+
+  /**
+   * 上下文占用的磁盘兜底。
+   *
+   * host 空闲 dispose 后没有热 state（`getAgentState` 只返回 live/activeRun），
+   * 而 `contextUsage` 只在热 state 里；那就会让「上下文比例」在切走几分钟后
+   * 整块消失。这里从最后一条带 usage 的 assistant 消息算占用：
+   * `input + cacheRead + cacheWrite` 就是下一次请求的 prompt 大小
+   * （input 不含缓存桶，与 provider 语义一致）。
+   *
+   * 有热 state 时一律以它为准（压缩后它会显式给 `tokens: null` 表示未知，
+   * 那时也不能退回磁盘旧值，否则会把压缩前的占用显示出来）。
+   */
+  const diskContextUsage = useMemo((): ContextUsage | null => {
+    if (contextUsage) return null;
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index];
+      if (message.role !== "assistant") continue;
+      const usage = (message as import("@/lib/types").AssistantMessage).usage;
+      if (!usage) continue;
+      const tokens = (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+      if (tokens <= 0) continue;
+      const contextWindow = displayModel
+        ? modelList.find((m) => m.provider === displayModel.provider && m.id === displayModel.modelId)?.contextWindow ?? 0
+        : 0;
+      // 目录缺容量时报 0：顶栏与右栏据此只显示「未知」，不编造百分比。
+      return {
+        percent: contextWindow > 0 ? (tokens / contextWindow) * 100 : null,
+        contextWindow,
+        tokens,
+      };
+    }
+    return null;
+  }, [contextUsage, messages, displayModel, modelList]);
 
   const sessionStats = useMemo(() => {
     if (sessionStatsOverride) return sessionStatsOverride;
@@ -576,9 +634,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       totalMessages: messages.length,
       tokens,
       cost,
-      ...(contextUsage ? { contextUsage } : {}),
+      // 热 state 优先，其次磁盘兜底（非 live 会话仍能显示上下文比例）。
+      ...((contextUsage ?? diskContextUsage) ? { contextUsage: contextUsage ?? diskContextUsage ?? undefined } : {}),
     } satisfies SessionStatsInfo;
-  }, [messages, sessionStatsOverride, contextUsage, data?.filePath, session?.id, session?.name]);
+  }, [messages, sessionStatsOverride, contextUsage, diskContextUsage, data?.filePath, session?.id, session?.name]);
 
   const loadSession = useCallback(async (
     sid: string,
@@ -589,6 +648,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     onMessagesReplaced?: () => void,
   ) => {
     const loadRequestSeq = ++loadRequestSeqRef.current;
+    const signal = beginLoadRequest();
     let messagesLoaded = false;
     try {
       if (showLoading) setLoading(true);
@@ -608,7 +668,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         deferMedia: "1",
         limit: String(DEFAULT_SESSION_TAIL_LIMIT),
       });
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}?${params}`);
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}?${params}`, { signal });
       if (loadRequestSeq !== loadRequestSeqRef.current || sessionIdRef.current !== sid) return null;
       if (res.status === 404) {
         if (showLoading) {
@@ -618,6 +678,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           entryIdsRef.current = [];
           messagesSessionIdRef.current = sid;
           setEntryIds([]);
+          setMessageKeys([]);
           hasMoreBeforeRef.current = false;
           setHasMoreBefore(false);
           setError(null);
@@ -636,60 +697,41 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       const tailEntryIds = d.context.entryIds ?? [];
       const tailMessages = d.context.messages ?? [];
-      const previousEntryIds = entryIdsRef.current;
+      // 归并一律交给 registry：从 slot 自己的 timeline 算，不依赖 React updater
+      // 同步执行，也不再从 hook 回传 previous。
       const sameSession = messagesSessionIdRef.current === sid;
-      // 同会话 tail 再拉（agent_end / 内部 reload）：保留已 prepend 的更旧前缀。
+      const previousSnapshot = getOrCreateBrowserSessionRuntimeRegistry().getSnapshot(sid);
+      const previousEntriesLoaded = (previousSnapshot?.entryIds.length ?? 0) > 0;
+      const mode: TimelineHydrateMode = sameSession && previousEntriesLoaded ? "tail" : "replace";
+      // 磁盘不保存 live ANSI 行：重载前先把当前分叉的渲染覆盖层合并进去。
+      const hydratedMessages = sameSession && previousSnapshot
+        ? preserveCustomRenderedLines(
+            previousSnapshot.messages,
+            previousSnapshot.entryIds,
+            tailMessages,
+            tailEntryIds,
+          )
+        : tailMessages;
+      // 归并先执行。两种「未应用」要分开：
+      // - superseded：更新的响应已落地 → 本次整份作废（含 leaf/分页/模型）。
+      // - stale：期间有 live 事件，时间线不得被磁盘快照覆盖；但这份响应仍是
+      //   最新磁盘读取，下面照常提交 leaf/model/分页，否则外部改动（另一实例
+      //   换模型）在被打断的那次刷新里会被永久忽略。
+      const outcome = getOrCreateBrowserSessionRuntimeRegistry().hydrate(
+        sid,
+        hydratedMessages,
+        tailEntryIds,
+        { sinceSeq: hydrateSinceSeq, hydrateRequestSeq, mode },
+      );
+      if (outcome === "superseded") return null;
       // 只有分支导航成功拿到整体会话、即将应用新 context 时才重置跟随；
       // 请求失败/取消不会改变当前阅读位置。
       if (resetBranchFollow) notifyAutoFollowBranchReset();
       setData(d);
       setActiveLeafId(d.leafId);
-      let resolvedEntryIds = tailEntryIds;
-      let hydratedMessages = tailMessages;
-      setMessages((previous) => {
-        const base = sameSession && previousEntryIds.length > 0
-          ? mergeTailReload({
-              previousMessages: previous,
-              previousEntryIds,
-              nextMessages: tailMessages,
-              nextEntryIds: tailEntryIds,
-            })
-          : { messages: tailMessages, entryIds: tailEntryIds };
-        resolvedEntryIds = base.entryIds;
-        hydratedMessages = sameSession
-          ? preserveCustomRenderedLines(previous, previousEntryIds, base.messages, base.entryIds)
-          : base.messages;
-        return hydratedMessages;
-      });
-      // 整体替换完成：调用方（agent_end 收尾）可在此延长 settle 窗口 / 标记 end-pin，
-      // 覆盖异步返回晚于 settle 窗口时的高度突变（流式占位消失 → 钳位跳变）。
       onMessagesReplaced?.();
-      // entryIds 与 messages 同一 merge 规则（不依赖 setState 时序：再算一次纯函数）
-      if (sameSession && previousEntryIds.length > 0) {
-        resolvedEntryIds = mergeTailReload({
-          previousMessages: tailMessages,
-          previousEntryIds,
-          nextMessages: tailMessages,
-          nextEntryIds: tailEntryIds,
-        }).entryIds;
-      }
-      entryIdsRef.current = resolvedEntryIds;
       messagesSessionIdRef.current = sid;
-      setEntryIds(resolvedEntryIds);
-      const appliedHydrate = getOrCreateBrowserSessionRuntimeRegistry().hydrate(
-        sid,
-        hydratedMessages,
-        resolvedEntryIds,
-        { sinceSeq: hydrateSinceSeq, hydrateRequestSeq },
-      );
-      if (!appliedHydrate) {
-        const live = getOrCreateBrowserSessionRuntimeRegistry().getSnapshot(sid);
-        if (live) {
-          setMessages(live.messages);
-          setEntryIds(live.entryIds);
-          entryIdsRef.current = live.entryIds;
-        }
-      }
+      const resolvedEntryIds = entryIdsRef.current;
       const more = d.context.hasMoreBefore === true
         || (typeof d.context.totalMessageCount === "number"
           && d.context.totalMessageCount > resolvedEntryIds.length);
@@ -699,7 +741,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 用户选择一致时让磁盘权威接管（清除 override）；磁盘缺失/不一致（写盘
       // 竞态、fork 后新会话无 model_change）时保留 override，防止 run 结束 /
       // reload / subagent 完成等内部 loadSession 把用户选择覆盖回落默认。
-      setCurrentModelOverride((prev) => settleModelOverride(prev, d.context.model));
+      // 但磁盘相对上次观察发生新变化时，那是外部（另一实例/标签页）的写入，
+      // 磁盘优先：否则本页会把对方的修改覆盖回去。
+      // 有在途写入操作时不结算：此时的磁盘值可能正处于本次写入的中间态，
+      // 用它判定「外部改动」会误清掉刚提交的选择。
+      const lastDiskModel = lastDiskModelBySessionRef.current.get(sid) ?? null;
+      if (!hasOpenOp(selectionOpBookRef.current, sid)) {
+        setCurrentModelOverride((prev) => settleModelOverride({
+          override: prev,
+          persisted: d.context.model,
+          lastDiskObserved: lastDiskModel,
+        }));
+      }
       setError(null);
       if (isThinkingLevel(d.context.thinkingLevel)) {
         // off 也是会话的有效值，必须覆盖上一个会话遗留的深度。
@@ -711,6 +764,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 登记磁盘权威模型（每会话）：供后续切换时即时恢复显示。
       if (d.context.model?.provider && d.context.model?.modelId) {
         lastKnownModelBySessionRef.current.set(sid, { provider: d.context.model.provider, modelId: d.context.model.modelId });
+        lastDiskModelBySessionRef.current.set(sid, { provider: d.context.model.provider, modelId: d.context.model.modelId });
         setLastKnownModel({ provider: d.context.model.provider, modelId: d.context.model.modelId });
       }
 
@@ -757,7 +811,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
       try {
         // 热：不 wake。打开会话只读投影，不抢写锁；发送时再 ensureLive。
-        const hotRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
+        const hotRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`, { signal });
         if (hotRes.ok) {
           const hot = await hotRes.json() as {
             live?: boolean;
@@ -775,7 +829,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
           setLockedByOther(hot.lockedByOther === true);
           if (!live) {
-            setQueuedMessages({ steering: [], followUp: [...localFollowUpRef.current] });
+            setQueuedMessages({ steering: [], followUp: projection(queueEntryNow()) });
           }
           return { running: false, live: false, activeRun: false, lockedByOther: hot.lockedByOther === true };
         }
@@ -787,12 +841,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return null;
       }
     } catch (e) {
-      setError(String(e));
+      // 切走/被新加载取代导致的取消不是错误，不写 error。
+      if (!isAbortError(e)) setError(String(e));
       return null;
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [applyProjectedQueues, notifyAutoFollowBranchReset, patchExtensionUiState]);
+  }, [applyProjectedQueues, beginLoadRequest, notifyAutoFollowBranchReset, patchExtensionUiState, queueEntryNow]);
 
   /**
    * 向上滚动加载更旧历史（OpenChamber loadOlder 语义）。
@@ -815,7 +870,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         limit: String(DEFAULT_SESSION_HISTORY_PAGE),
       });
       if (activeLeafId) params.set("leafId", activeLeafId);
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`);
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`, {
+        signal: beginLoadRequest(),
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as {
         context: {
@@ -834,25 +891,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return false;
       }
       const prevIds = entryIdsRef.current;
-      let nextMessages: AgentMessage[] = [];
-      const nextEntryIds = prependOlderPage({
-        previousMessages: olderMsgs,
-        previousEntryIds: prevIds,
-        olderMessages: olderMsgs,
-        olderEntryIds: olderIds,
-      }).entryIds;
-      setMessages((previous) => {
-        nextMessages = prependOlderPage({
-          previousMessages: previous,
-          previousEntryIds: prevIds,
-          olderMessages: olderMsgs,
-          olderEntryIds: olderIds,
-        }).messages;
-        return nextMessages;
+      // 归并（去重 + prepend）由 registry 从 slot 当前 timeline 原子完成；
+      // hook 不再读 React updater 内赋值的变量，避免把空数组写进时间线。
+      const outcome = getOrCreateBrowserSessionRuntimeRegistry().hydrate(sid, olderMsgs, olderIds, {
+        hydrateRequestSeq,
+        mode: "prepend",
       });
+      const applied = outcome === "applied";
+      // 被并发 hydrate（分支切换 / 更新的尾页）取代时不能声称成功：
+      // 否则分页与「还能继续上滚」的判定会基于未应用的响应。
+      if (!applied) return false;
+      const nextEntryIds = entryIdsRef.current ?? prevIds;
       entryIdsRef.current = nextEntryIds;
-      setEntryIds(nextEntryIds);
-      registry.hydrate(sid, nextMessages, nextEntryIds, { hydrateRequestSeq });
       const more = d.context.hasMoreBefore === true
         || (typeof d.context.totalMessageCount === "number"
           && d.context.totalMessageCount > nextEntryIds.length);
@@ -860,7 +910,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setHasMoreBefore(more);
       return true;
     } catch (e) {
-      console.error("Failed to load older history:", e);
+      if (!isAbortError(e)) console.error("Failed to load older history:", e);
       return false;
     } finally {
       historyLoadingRef.current = false;
@@ -881,7 +931,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const registry = getOrCreateBrowserSessionRuntimeRegistry();
       const hydrateRequestSeq = registry.beginHydrate(sid);
       const hydrateSinceSeq = registry.getSnapshot(sid)?.timelineSeq ?? 0;
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: beginLoadRequest() });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as {
         context: {
@@ -893,43 +943,36 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       };
       if (sessionIdRef.current !== sid) return;
       const nextEntryIds = d.context.entryIds ?? [];
-      const previousEntryIds = entryIdsRef.current;
+      const previousSnapshot = getOrCreateBrowserSessionRuntimeRegistry().getSnapshot(sid);
       const shouldPreserveRenderedLines = messagesSessionIdRef.current === sid;
-      // 仅在成功拿到新 context、即将写入 state 时重置跟随；fetch 失败不遗留 pending。
-      notifyAutoFollowBranchReset();
-      let hydrated = d.context.messages;
-      setMessages((previous) => {
-        hydrated = shouldPreserveRenderedLines
-          ? preserveCustomRenderedLines(previous, previousEntryIds, d.context.messages, nextEntryIds)
-          : d.context.messages;
-        return hydrated;
+      const hydrated = shouldPreserveRenderedLines && previousSnapshot
+        ? preserveCustomRenderedLines(
+            previousSnapshot.messages,
+            previousSnapshot.entryIds,
+            d.context.messages,
+            nextEntryIds,
+          )
+        : d.context.messages;
+      const outcome = getOrCreateBrowserSessionRuntimeRegistry().hydrate(sid, hydrated, nextEntryIds, {
+        sinceSeq: hydrateSinceSeq,
+        hydrateRequestSeq,
+        mode: "replace",
       });
-      entryIdsRef.current = nextEntryIds;
+      const applied = outcome === "applied";
+      // 分支切换与 SSE 并发时旧响应作废：不重置跟随、不写过期分页。
+      if (!applied) return;
+      // 仅在成功拿到新 context 并已应用时才重置跟随；fetch 失败不遗留 pending。
+      notifyAutoFollowBranchReset();
       messagesSessionIdRef.current = sid;
-      setEntryIds(nextEntryIds);
-      const appliedHydrate = getOrCreateBrowserSessionRuntimeRegistry().hydrate(
-        sid,
-        hydrated,
-        nextEntryIds,
-        { sinceSeq: hydrateSinceSeq, hydrateRequestSeq },
-      );
-      if (!appliedHydrate) {
-        const live = getOrCreateBrowserSessionRuntimeRegistry().getSnapshot(sid);
-        if (live) {
-          setMessages(live.messages);
-          setEntryIds(live.entryIds);
-          entryIdsRef.current = live.entryIds;
-        }
-      }
       const more = d.context.hasMoreBefore === true
         || (typeof d.context.totalMessageCount === "number"
           && d.context.totalMessageCount > nextEntryIds.length);
       hasMoreBeforeRef.current = more;
       setHasMoreBefore(more);
     } catch (e) {
-      console.error("Failed to load context:", e);
+      if (!isAbortError(e)) console.error("Failed to load context:", e);
     }
-  }, [notifyAutoFollowBranchReset]);
+  }, [notifyAutoFollowBranchReset, beginLoadRequest]);
 
   const loadTools = useCallback(async (_sid: string) => {
     // 外部 Pi RPC 无 get_tools；工具由会话启动 allow-list 控制，无需探测。
@@ -1233,8 +1276,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       registry.completeRun(sid, runId);
       registry.releaseRunFinish(sid, runId);
       if (!valid) return;
-      optimisticUserMessageKeyRef.current = null;
-      setAgentRunning(false);
       setAgentPhase(null);
       setRetryInfo(null);
       {
@@ -1282,16 +1323,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     ) {
       await delay(BASH_STATE_RECONCILE_MS);
       try {
-        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
+        // light=1：轮询只看 isBashRunning，无需 systemPrompt 等大字段。
+        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}?light=1`);
         if (!res.ok) continue;
         const data = await res.json() as { state?: AgentStateResponse };
         if (data.state?.isBashRunning) continue;
 
         await loadSession(sid);
         if (bashRecoveryIdRef.current !== recoveryId || sessionIdRef.current !== sid) return;
-        bashRunningRef.current = false;
-        setBashRunning(false);
-        setPendingBash(null);
+        getOrCreateBrowserSessionRuntimeRegistry().setBashRunning(sid, false);
         return;
       } catch {
         // Keep polling while the page is mounted; network recovery is transparent.
@@ -1426,7 +1466,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "agent_start":
         // registry 在应用事件前递增当前 session 的 run id；hook 只处理视图副作用。
         commitToolExecutions(clearToolExecutions(toolExecutionBufferRef.current));
-        setAgentRunning(true);
+        // agentRunning/streamState 由 registry snapshot 投影，此处不再直写。
         setAgentPhase({ kind: "waiting_model" });
         dispatch({ type: "start" });
         break;
@@ -1445,23 +1485,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (sid && runId !== undefined) void finishAgentRun(sid, runId);
         break;
       }
-      case "prompt_error":
+      case "prompt_error": {
         if (sessionIdRef.current) setServerPref(`sessionQueueHold.${sessionIdRef.current}`, true);
-        // P0-1：prompt 异步失败且乐观 bubble 未被 message_end 消费（消息未确认
-        // 落盘）时移除假 bubble，避免永久 pending；真实消息以磁盘权威为准，
-        // finishAgentRun 的 loadSession 会重建列表。已消费（消息已确认）时 no-op。
-        if (optimisticUserMessageKeyRef.current) {
-          const promptErrorKey = optimisticUserMessageKeyRef.current;
-          optimisticUserMessageKeyRef.current = null;
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            return last?.role === "user" && userMessageKey(last) === promptErrorKey
-              ? prev.slice(0, -1)
-              : prev;
-          });
-        }
+        // 时间线清理已下沉到 registry.applyEventToSlot（视图卸载也照常执行）。
         addNotice({ type: "error", message: (event.errorMessage as string | undefined) ?? t("input_commandFailed") });
         break;
+      }
       case "extension_error":
         if (sessionIdRef.current) setServerPref(`sessionQueueHold.${sessionIdRef.current}`, true);
         addNotice({
@@ -1487,7 +1516,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "message_end": {
         if (event.message && (event.message as AgentMessage).role === "user") {
-          optimisticUserMessageKeyRef.current = null;
         }
         setAgentPhase({ kind: "waiting_model" });
         break;
@@ -1541,12 +1569,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "follow_up_flushed": {
-        // Host 已确认被投递 run 的 user 消息落盘/settled；按 remaining 清本地投影。
-        // 持久化也由 Host 同步完成，浏览器不得用旧 prefs 反向覆盖。
+        // Host 已确认被投递 run 的 user 消息落盘/settled；remaining 是权威结果，
+        // 按观察落地（不是提出新的乐观值）。持久化也由 Host 同步完成，
+        // 浏览器不得用旧 prefs 反向覆盖。
         const remaining = Array.isArray(event.remaining)
           ? (event.remaining as unknown[]).filter((item): item is string => typeof item === "string")
           : [];
-        applyLocalFollowUpQueue(remaining);
+        observeLocalQueue(remaining);
         break;
       }
       case "follow_up_flush_error":
@@ -1573,7 +1602,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // followUp 以本地队列为准（Pidance 自管）；steering 仍来自 Pi 进程队列
         setQueuedMessages({
           steering: [...((event.steering as string[] | undefined) ?? [])],
-          followUp: [...localFollowUpRef.current],
+          followUp: projection(queueEntryNow()),
         });
         break;
       case "auto_retry_start":
@@ -1617,7 +1646,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
     }
-  }, [addNotice, applyLocalFollowUpQueue, commitToolExecutions, finishAgentRun, handleExtensionUiRequest, loadSession, t]);
+  }, [addNotice, observeLocalQueue, commitToolExecutions, finishAgentRun, handleExtensionUiRequest, loadSession, queueEntryNow, t]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[], binaryBlocks?: BinaryMessageInput[]): Promise<boolean> => {
@@ -1645,23 +1674,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return await executeBashRef.current?.(bashCmd, isExcluded) ?? false;
     }
 
-    const imageBlocks = images?.map((img) => ({ type: "image" as const, source: { type: "base64" as const, media_type: img.mimeType, data: img.data } }));
-    const userMsg: AgentMessage = {
-      role: "user",
-      content: imageBlocks?.length
-        ? [...(message.trim() ? [{ type: "text" as const, text: message }] : []), ...imageBlocks]
-        : message,
-      timestamp: Date.now(),
-    };
     // 乐观气泡只来自 registry.submitPrompt 的 slot append + subscribe；
-    // 本 hook 不再复制一份 user 消息（否则 UI 双条、磁盘一条）。
-    // userMsg 仅用于 rejected 回滚的乐观 key 匹配。
-    optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
+    // 本 hook 不再复制一份 user 消息（否则 UI 双条、磁盘一条），
+    // 也不再用正文文本做回滚匹配 —— 回滚统一按 registry 的 stable key。
     promptSubmittedRef.current = false;
     abortRequestedRef.current = false;
-    setAgentRunning(true);
     setAgentPhase(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
-    dispatch({ type: "start" });
+    // 乐观 running 由 registry.submitPrompt 在首个 await 之前同步置位（下面立即调用），
+    // 视图不持有第二份运行态，也不需要独立入口——独立入口在 target 解析失败时
+    // 会留下永久 busy。
     // 发送即回到 following 并 instant 到底（pin 在 messages effect 中等 DOM 就绪执行），
     // 不再把刚发出的用户消息 smooth 推到顶部。
     notifyAutoFollowSend();
@@ -1703,15 +1724,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ? t("chat_sessionLocked")
           : (error && error !== "rejected" ? error : t("chat_sendFailed")),
       });
-      optimisticUserMessageKeyRef.current = null;
-      setAgentRunning(false);
       setAgentPhase(null);
-      dispatch({ type: "end" });
       return false;
     };
 
+    let sentSessionId: string | null = null;
     try {
-      let sentSessionId: string | null = null;
       const target = resolveSubmitTarget({
         isNew,
         intentId: intentAtSend,
@@ -1746,28 +1764,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       } else if (target.kind === "persisted") {
         sentSessionId = target.sessionId;
         if (abortRequestedRef.current) return false;
-        // 下一轮生效：应用切换前记录的 pending 模型（引导消息不经过此路径）
-        const pendingModelToApply = pendingModelRef.current;
-        if (pendingModelToApply) {
-          pendingModelRef.current = null;
-          setPendingModel(null);
-          try {
-            await sendAgentCommand(target.sessionId, {
-              type: "set_model",
-              provider: pendingModelToApply.provider,
-              modelId: pendingModelToApply.modelId,
-            });
-          } catch (e) {
-            pendingModelRef.current = pendingModelToApply;
-            setPendingModel(pendingModelToApply);
-            addNotice({
-              type: "error",
-              message: t("models_switchFailed", {
-                error: e instanceof Error ? e.message : String(e),
-              }),
-            });
-          }
-        }
         const receipt = await runtime.submitPrompt({
           target,
           submissionId,
@@ -1799,11 +1795,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const aborted = abortRequestedRef.current
         || (e instanceof Error && e.name === "AbortError");
       if (aborted) {
-        if (sendStillCurrent() && !promptSubmittedRef.current) {
-          setAgentRunning(false);
-          setAgentPhase(null);
-          dispatch({ type: "end" });
-        }
+        if (sendStillCurrent() && !promptSubmittedRef.current) setAgentPhase(null);
         return false;
       }
       console.error("Failed to send message:", e);
@@ -1814,21 +1806,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       if (!sendStillCurrent()) return false;
       // P0-1：失败 = 消息未确认进入权威视图 → 移除假 bubble + 保留 draft。
-      // 发送失败时乐观 user 消息若仍在列表末尾（未被 message_end 消费），
-      // 它是未落地的「假 bubble」；draft 由 insertIfEmpty 恢复（输入框空才写入，
-      // 不覆盖用户新输入）。
-      const optimisticKey = optimisticUserMessageKeyRef.current;
+      // 回滚走 registry 的 stable key（不再用文本猜测，也不依赖数组下标）；
+      // 只有在记录确实还被移除时才恢复 draft，draft 由 insertIfEmpty 在输入框
+      // 为空时写入，不覆盖用户新输入。
       let restoreDraft = false;
-      setMessages((prev) => {
-        const recovery = recoverFailedSend({
-          messages: prev,
-          optimisticKey,
-          isOptimisticMatch: (msg) => userMessageKey(msg) === optimisticKey,
-        });
-        restoreDraft = recovery.restoreDraft;
-        return recovery.messages;
-      });
-      optimisticUserMessageKeyRef.current = null;
+      {
+        const registry = getOrCreateBrowserSessionRuntimeRegistry();
+        const rollbackSid = sentSessionId ?? sessionIdRef.current;
+        if (rollbackSid) {
+          restoreDraft = registry.dropLocal(rollbackSid, submissionKey(submissionId));
+        }
+      }
       if (restoreDraft) {
         opts.chatInputRef?.current?.insertIfEmpty(trimmedMessage);
       }
@@ -1840,11 +1828,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           message: message.includes("locked by another") ? t("chat_sessionLocked") : message,
         });
       }
-      if (sendStillCurrent()) {
-        setAgentRunning(false);
-        setAgentPhase(null);
-        dispatch({ type: "end" });
-      }
+      if (sendStillCurrent()) setAgentPhase(null);
       return false;
     }
   }, [isNew, isReadOnly, lockedByOther, newSessionModel, newSessionDefaultModel, session, promoteNewSession, waitForPromptSettlement, addNotice, notifyAutoFollowSend, opts.chatInputRef, t, onSessionCreated]);
@@ -1858,12 +1842,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     if (getRuntimeAgentRunning() || bashRunningRef.current || branchBusyRef.current) return false;
     const inputText = `${excludeFromContext ? "!!" : "!"}${command}`;
-    bashRunningRef.current = true;
-    setPendingBash({ command, excludeFromContext, startedAt: Date.now() });
-    setBashRunning(true);
+    const bashPending = { command, excludeFromContext, startedAt: Date.now() };
+    const registry = getOrCreateBrowserSessionRuntimeRegistry();
+    // 执行代次：本次 finally 只允许清掉自己那次；同一会话里更新的 bash 不被误清。
+    const execId = ++bashExecSeqRef.current;
+    // 先门禁：新会话在 ensure 返回前就要占住运行态，否则 ensure 窗口内可重复提交。
+    let bashSid = session?.id ?? sessionIdRef.current;
+    if (!bashSid && isNew && newSessionIntentIdRef.current) {
+      bashSid = pendingSessionId(newSessionIntentIdRef.current);
+    }
+    if (bashSid) registry.setBashRunning(bashSid, true, bashPending);
     try {
       const sid = sessionIdRef.current ?? session?.id ?? await ensureNewSession();
       if (!sid) throw new Error("Unable to create a session for the shell command");
+      bashSid = sid;
+      registry.setBashRunning(sid, true, bashPending);
       // ensure 成功即 promote（写操作已创建 Pi session）。
       promoteNewSession(1, inputText);
       await sendAgentCommand(sid, {
@@ -1879,9 +1872,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       opts.chatInputRef?.current?.insertIfEmpty(inputText);
       return false;
     } finally {
-      bashRunningRef.current = false;
-      setPendingBash(null);
-      setBashRunning(false);
+      // 命令已返回：本页不再认为 bash 在跑（服务端权威以 reconcile/loadSession 为准）。
+      // 只在仍是最新一次执行时清理，避免迟到的 finally 清掉更新的 bash 运行态。
+      if (bashSid && bashExecSeqRef.current === execId) {
+        registry.setBashRunning(bashSid, false);
+      }
     }
   }, [addNotice, isReadOnly, lockedByOther, ensureNewSession, loadSession, opts.chatInputRef, promoteNewSession, session, t]);
   executeBashRef.current = executeBash;
@@ -1927,13 +1922,62 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isNew, isReadOnly]);
 
+  /**
+   * 模型 + 思考档的唯一写入入口。
+   *
+   * 两条不变量：
+   * - 顺序 set_model → set_thinking_level（Host 的 set_model 会套用模型自带档位）。
+   * - 按操作代次串行与结算：同会话的两次选择依次执行，迟到的失败不得回滚更新的选择。
+   */
+  const applySelection = useCallback(async (args: {
+    sessionId: string;
+    model?: { provider: string; modelId: string } | null;
+    thinkingLevel?: string | null;
+    onFailure?: () => void;
+  }): Promise<boolean> => {
+    const { sessionId, model, thinkingLevel, onFailure } = args;
+    const opId = ++selectionOpSeqRef.current;
+    selectionOpBookRef.current = openSelectionOp(selectionOpBookRef.current, sessionId, opId);
+    const previous = selectionChainRef.current[sessionId] ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(async () => {
+      if (model) {
+        await sendAgentCommand(sessionId, {
+          type: "set_model",
+          provider: model.provider,
+          modelId: model.modelId,
+        });
+      }
+      if (thinkingLevel && isThinkingLevel(thinkingLevel)) {
+        await sendAgentCommand(sessionId, { type: "set_thinking_level", level: thinkingLevel });
+      }
+    });
+    selectionChainRef.current[sessionId] = run;
+    try {
+      await run;
+      selectionOpBookRef.current = closeSelectionOp(selectionOpBookRef.current, sessionId, opId);
+      return true;
+    } catch (e) {
+      // 只有仍是最新操作时才回滚/报错：更新的选择已经把它顶替。
+      if (isLatestOp(selectionOpBookRef.current, sessionId, opId)) {
+        onFailure?.();
+        addNotice({
+          type: "error",
+          message: t("models_switchFailed", {
+            error: e instanceof Error ? e.message : String(e),
+          }),
+        });
+      }
+      selectionOpBookRef.current = closeSelectionOp(selectionOpBookRef.current, sessionId, opId);
+      return false;
+    }
+  }, [addNotice, t]);
+
   const handleModelChange = useCallback(async (provider: string, modelId: string, thinkingLevel?: string | null) => {
     // 只读会话：set_model 会写会话状态，拦截。
     if (isReadOnly) return;
     if (isNew) {
       // 引导页常无 live session：本地状态必须先更新（否则无 sid 时直接 return，思考/模型选不中）
       setNewSessionModel({ provider, modelId });
-      setPendingModel({ provider, modelId });
       const localThinking = guidePageThinkingUpdate(thinkingLevel);
       if (localThinking) setThinkingLevel(localThinking as ThinkingLevelOption);
       // ensure 正在跑（首次 prompt 并发）时等它；失败/超时不得吞掉本地模型选择
@@ -1946,42 +1990,31 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       }
       if (!sid) return; // 首条消息 ensureNewSession 会带上当前 model/thinkingLevel
-      try {
-        if (thinkingLevel && isThinkingLevel(thinkingLevel)) {
-          await sendAgentCommand(sid, { type: "set_thinking_level", level: thinkingLevel });
-        }
-        await sendAgentCommand(sid, { type: "set_model", provider, modelId });
-      } catch (e) {
-        console.error("Failed to set model:", e);
-      }
+      await applySelection({
+        sessionId: sid,
+        model: { provider, modelId },
+        thinkingLevel,
+        // 引导页失败：本地选择保留（用户可重选），不写 error 之外的状态。
+      });
       return;
     }
     const sid = sessionIdRef.current;
     if (!sid) return;
-    // 本地立即同步显示（选择路径不经过 handleThinkingLevelChange）
-    if (thinkingLevel) setThinkingLevel(thinkingLevel as ThinkingLevelOption);
+    // 本地立即同步显示；失败时按代次回滚到选择前的值。
+    const previousThinking = thinkingLevelRef.current;
+    const previousOverride = currentModelOverrideRef.current;
+    if (thinkingLevel && isThinkingLevel(thinkingLevel)) setThinkingLevel(thinkingLevel);
     setCurrentModelOverride({ provider, modelId });
-    setPendingModel({ provider, modelId });
-    pendingModelRef.current = { provider, modelId };
-    try {
-      // 思考深度立即应用（下次 prompt 生效）；auto 表示用配置默认，不发送
-      if (thinkingLevel && isThinkingLevel(thinkingLevel)) {
-        await sendAgentCommand(sid, { type: "set_thinking_level", level: thinkingLevel });
-      }
-      // 旧会话也立即 set_model 落盘：只记 pending 会在刷新/切走后丢失，看起来像切换失败
-      await sendAgentCommand(sid, { type: "set_model", provider, modelId });
-    } catch (e) {
-      pendingModelRef.current = null;
-      setPendingModel(null);
-      setCurrentModelOverride(null);
-      addNotice({
-        type: "error",
-        message: t("models_switchFailed", {
-          error: e instanceof Error ? e.message : String(e),
-        }),
-      });
-    }
-  }, [isNew, isReadOnly, setNewSessionModel, addNotice, t]);
+    await applySelection({
+      sessionId: sid,
+      model: { provider, modelId },
+      thinkingLevel,
+      onFailure: () => {
+        setCurrentModelOverride(previousOverride);
+        setThinkingLevel(previousThinking);
+      },
+    });
+  }, [isNew, isReadOnly, setNewSessionModel, applySelection]);
 
   const handleCompact = useCallback(async () => {
     // 只读会话：compact 会重写 session 文件，拦截。
@@ -2164,8 +2197,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       timestamp: Date.now(),
       _steerOptimistic: true,
     };
-    const optimisticKey = userMessageKey(optimistic);
-    getOrCreateBrowserSessionRuntimeRegistry().appendLocal(sid, optimistic);
+    const registry = getOrCreateBrowserSessionRuntimeRegistry();
+    // 本地 key 由 registry 生成：同文两条引导必须能各自回滚，
+    // 因此不能用正文派生 key。
+    const optimisticRecordKey = registry.appendLocal(sid, optimistic);
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     try {
       await sendAgentCommand(sid, {
@@ -2174,16 +2209,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ...(piImages?.length ? { images: piImages } : {}),
       });
     } catch (e) {
-      // 失败回滚乐观消息；hydrate 带 slot 序号，避免旧列表盖掉较新 live。
-      setMessages((prev) => {
-        const next = prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === optimisticKey));
-        const registry = getOrCreateBrowserSessionRuntimeRegistry();
-        registry.hydrate(sid, next, entryIdsRef.current, {
-          sinceSeq: registry.getSnapshot(sid)?.timelineSeq ?? 0,
-          hydrateRequestSeq: registry.beginHydrate(sid),
-        });
-        return next;
-      });
+      // 失败回滚乐观消息：按 stable key 原子移除（不重写整张时间线，
+      // 因此不会盖掉较新的 live 消息）。
+      registry.dropLocal(sid, optimisticRecordKey);
       console.error("Failed to steer:", e);
     }
   }, [ensureEventsConnected, isReadOnly, notifyAutoFollowSend]);
@@ -2253,7 +2281,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // runtime 误判空闲（agent_start 事件未到/竞态窗口）时服务器会拒绝：
         // 必须转入 follow-up 队列，否则消息静默丢失，引导看起来「失效」。
         if (receipt?.status === "rejected") {
-          await updateLocalFollowUp([...localFollowUpRef.current, text]);
+          await updateLocalFollowUp([...projection(queueEntryNow()), text]);
           ensureEventsConnected(sid);
         }
       } catch (e) {
@@ -2264,7 +2292,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 运行中入队：先乐观显示，再等待 Host 同步确认；Host 是 settled 投递 owner。
     notifyAutoFollowSend();
     try {
-      await updateLocalFollowUp([...localFollowUpRef.current, text]);
+      await updateLocalFollowUp([...projection(queueEntryNow()), text]);
       // 入队即把本会话 SSE 连上（Host 空闲时 set_follow_up_queue 已 wake host）；
       // 否则 Host 稍后自动 flush 的 agent_start/message 事件没有订阅源 → UI 不更新，
       // 直到刷新才看见队列消息真正执行。
@@ -2276,7 +2304,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         message: error instanceof Error ? error.message : String(error),
       });
     }
-  }, [addNotice, ensureEventsConnected, isCompacting, isReadOnly, notifyAutoFollowSend, opts.chatInputRef, updateLocalFollowUp]);
+  }, [addNotice, ensureEventsConnected, isCompacting, isReadOnly, notifyAutoFollowSend, opts.chatInputRef, queueEntryNow, updateLocalFollowUp]);
 
   // 供 handlePromptWithStreamingBehavior（定义在前）引用最新 handleFollowUp
   handleFollowUpRef.current = handleFollowUp;
@@ -2298,7 +2326,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleRecallQueue = useCallback(async () => {
     // 只读会话没有队列（state 从不加载），拦截。
     if (isReadOnly) return;
-    const items = localFollowUpRef.current;
+    const items = projection(queueEntryNow());
     if (items.length === 0) return;
     // 取回：Host 确认清队后再回填，避免清除失败时同一消息同时留在两处。
     try {
@@ -2307,14 +2335,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (error) {
       addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
     }
-  }, [addNotice, isReadOnly, updateLocalFollowUp, opts.chatInputRef]);
+  }, [addNotice, isReadOnly, queueEntryNow, updateLocalFollowUp, opts.chatInputRef]);
 
   /** 引导发送：本地 follow-up 队列（+ 可选 extra）合并为一条 steer 消息，成功后清空。 */
   const handleSendQueueAsSteer = useCallback(async (extraMessage?: string) => {
     if (isReadOnly) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
-    const originalQueue = [...localFollowUpRef.current];
+    const originalQueue = projection(queueEntryNow());
     const merged = mergeFollowUpForSteer(originalQueue, extraMessage);
     if (!merged) return;
     notifyAutoFollowSend();
@@ -2326,8 +2354,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       timestamp: Date.now(),
       _steerOptimistic: true,
     };
-    const optimisticKey = userMessageKey(optimistic);
-    getOrCreateBrowserSessionRuntimeRegistry().appendLocal(sid, optimistic);
+    const registry = getOrCreateBrowserSessionRuntimeRegistry();
+    const optimisticRecordKey = registry.appendLocal(sid, optimistic);
     let queueCleared = false;
     try {
       // 先让 Host 停止 settled 自动投递，再发送合并消息，避免当前 run 恰好结束时双发。
@@ -2353,33 +2381,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       }
       if (extraMessage?.trim()) opts.chatInputRef?.current?.prependText(extraMessage.trim());
-      // 失败回滚乐观消息；hydrate 带 slot 序号，避免旧列表盖掉较新 live。
-      setMessages((prev) => {
-        const next = prev.filter((m) => !((m as SteerOptimisticMessage)._steerOptimistic && userMessageKey(m) === optimisticKey));
-        const registry = getOrCreateBrowserSessionRuntimeRegistry();
-        registry.hydrate(sid, next, entryIdsRef.current, {
-          sinceSeq: registry.getSnapshot(sid)?.timelineSeq ?? 0,
-          hydrateRequestSeq: registry.beginHydrate(sid),
-        });
-        return next;
-      });
+      // 失败回滚乐观消息：按 stable key 原子移除，不重写整张时间线。
+      registry.dropLocal(sid, optimisticRecordKey);
       console.error("Failed to send queue as steer:", e);
       addNotice({ type: "error", message: String(e instanceof Error ? e.message : e) });
     }
-  }, [ensureEventsConnected, isReadOnly, notifyAutoFollowSend, updateLocalFollowUp, addNotice, isExtensionCommandQueueError, opts.chatInputRef]);
+  }, [ensureEventsConnected, isReadOnly, notifyAutoFollowSend, updateLocalFollowUp, addNotice, isExtensionCommandQueueError, opts.chatInputRef, queueEntryNow]);
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     // 只读会话：set_thinking_level 会写会话状态，拦截。
     if (isReadOnly) return;
+    // 与 handleModelChange 共用同一结算入口：串行 + 按操作代次回滚，
+    // 避免同一会话里「旧请求迟到失败抹掉更新的选择」。
+    const previous = thinkingLevelRef.current;
     setThinkingLevel(level);
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
     if (!sid) return;
-    try {
-      await sendAgentCommand(sid, { type: "set_thinking_level", level });
-    } catch (e) {
-      console.error("Failed to set thinking level:", e);
-    }
-  }, [isReadOnly]);
+    await applySelection({
+      sessionId: sid,
+      thinkingLevel: level,
+      onFailure: () => setThinkingLevel(previous),
+    });
+  }, [applySelection, isReadOnly]);
 
   /**
    * Workspace History 命令：仅通过 type:prompt 派发 slash 到扩展，
@@ -2421,6 +2444,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => {
     const sid = sessionIdRef.current;
     if (!sid) return;
+    // 请求发起时捕获代次：响应回来时账本该代次已变则丢弃。
+    const requestRevision = queueEntry(queueBookRef.current, sid).revision;
     let cancelled = false;
     void fetch("/api/preferences", { cache: "no-store" })
       .then((response) => response.ok ? response.json() : null)
@@ -2428,24 +2453,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (cancelled || sessionIdRef.current !== sid) return;
         const remote = readFollowUpQueuePreference(body?.prefs, sid);
         if (remote === null) return;
+        // 捕获发起时的代次：期间有本地写入或在途提交时丢弃该响应，
+        // 避免「请求早于写入、响应晚于归零」把新值覆盖掉。
+        queueBookRef.current = observeQueue(queueBookRef.current, sid, remote, requestRevision);
         lastRemoteQueueRef.current = remote;
-        applyLocalFollowUpQueue(remote);
+        if (currentQueueSessionIdRef.current === sid) publishQueue();
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, [applyLocalFollowUpQueue, session?.id]);
+  }, [observeLocalQueue, publishQueue, session?.id]);
 
   useEffect(() => {
     const sid = sessionIdRef.current;
     if (!sid) return;
+    const requestRevision = queueEntry(queueBookRef.current, sid).revision;
     const remote = readFollowUpQueuePreference(serverPrefs, sid);
     if (remote === null) return;
     if (JSON.stringify(remote) === JSON.stringify(lastRemoteQueueRef.current)) return;
+    // focus/visibilitychange 刷新（手机切回前台的常见路径）同样受代次与在途守卫约束。
     lastRemoteQueueRef.current = remote;
-    applyLocalFollowUpQueue(remote);
-  }, [applyLocalFollowUpQueue, serverPrefs, session?.id]);
+    queueBookRef.current = observeQueue(queueBookRef.current, sid, remote, requestRevision);
+    if (currentQueueSessionIdRef.current === sid) publishQueue();
+  }, [observeLocalQueue, publishQueue, serverPrefs, session?.id]);
 
   // 会话切换：清空阻塞队列与可见卡片；不发送 extension_ui_response。
   useEffect(() => {
@@ -2487,23 +2518,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setMessages([]);
     entryIdsRef.current = [];
     setEntryIds([]);
+    setMessageKeys([]);
     setData(null);
     setActiveLeafId(null);
     hasMoreBeforeRef.current = false;
     setHasMoreBefore(false);
     dispatch({ type: "reset" });
-    setAgentRunning(false);
+    setTurnMetrics({});
     setLockedByOther(false);
-    setBashRunning(false);
-    bashRunningRef.current = false;
-    setPendingBash(null);
     setRetryInfo(null);
     setIsCompacting(false);
     setSystemPrompt(null);
     setContextUsage(null);
     setCurrentModelOverride(null);
-    setPendingModel(null);
-    pendingModelRef.current = null;
     setNewSessionModel(null);
     // 模型即时恢复：切换后 loadSession 返回前，从上一会话记录恢复当前会话的
     // 最近已知模型，避免输入框在窗口期内显示「模型」占位。
@@ -2517,42 +2544,68 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 无需等 loadSession。
       setThinkingReady(true);
     }
-    pendingModelRef.current = null;
-    optimisticUserMessageKeyRef.current = null;
     // 会话切换：把 followUp 队列投影切到新会话（映射保留旧会话条目，切回恢复）。
+    // switchLocalQueue 推进代次，使上一会话在途的失败回滚失效。
     const queueSid = session?.id ?? null;
     currentQueueSessionIdRef.current = queueSid;
-    localQueueOwnerRef.current = queueSid;
-    const ownQueue = sessionQueuesRef.current.get(queueSid ?? "") ?? [];
-    localFollowUpRef.current = [...ownQueue];
-    setQueuedMessages({ steering: [], followUp: [...ownQueue] });
+    // 账本按 sessionId 保留（切回恢复）；投影换到新会话。
+    setQueuedMessages({
+      steering: [],
+      followUp: projection(queueEntry(queueBookRef.current, queueSid ?? "")),
+    });
     lastRemoteQueueRef.current = null;
 
     const registry = getOrCreateBrowserSessionRuntimeRegistry();
     const runtimeId = session?.id ?? (isNew && newSessionIntentId ? pendingSessionId(newSessionIntentId) : null);
     let unsubSnapshot: (() => void) | null = null;
-    if (runtimeId && session?.readOnly !== true) {
-      runtimeSubscriptionRef.current = registry.attach(runtimeId, (event) => {
-        handleAgentEventRef.current?.(event as AgentEvent);
-      });
+    if (runtimeId) {
+      // 只读会话也订阅同一投影（单一 owner），但不 attach：
+      // 打开历史不得唤醒 writer、不建 SSE。
+      if (session?.readOnly !== true) {
+        runtimeSubscriptionRef.current = registry.attach(runtimeId, (event) => {
+          handleAgentEventRef.current?.(event as AgentEvent);
+        });
+      }
       unsubSnapshot = registry.subscribe(runtimeId, (snap) => {
         if (sessionIdRef.current && snap.sessionId !== sessionIdRef.current && snap.sessionId !== runtimeId) {
           return;
         }
         setMessages(snap.messages);
         setEntryIds(snap.entryIds);
+        setMessageKeys(snap.messageKeys);
+        setTurnMetrics(snap.turnMetrics);
         entryIdsRef.current = snap.entryIds;
+        // run/stream/bash 均由本 snapshot 投影：视图不再自行置位。
+        // 只读会话不跑 agent/bash，只同步消息列表并清空运行态。
+        if (session?.readOnly === true) {
+          setAgentRunning(false);
+          setBashRunning(false);
+          bashRunningRef.current = false;
+          setPendingBash(null);
+          dispatch({ type: "end" });
+          eventSourceRef.current = null;
+          return;
+        }
         setAgentRunning(snap.agentRunning);
         if (snap.streamState.isStreaming) {
           dispatch({
             type: "update",
-            message: snap.streamState.streamingMessage ?? {},
+            message: snap.streamState.streamingMessage ?? null,
           });
         } else {
           dispatch({ type: "end" });
         }
+        setBashRunning(snap.bashRunning);
+        bashRunningRef.current = snap.bashRunning;
+        setPendingBash(snap.pendingBash);
         eventSourceRef.current = registry.getEventSource(snap.sessionId) as unknown as EventSource | null;
       });
+    } else {
+      // 无 runtimeId（无会话且非新 intent）：没有 snapshot 可投影，显式清空。
+      setAgentRunning(false);
+      setBashRunning(false);
+      bashRunningRef.current = false;
+      setPendingBash(null);
     }
 
     if (session) {
@@ -2586,7 +2639,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             registry.completeRun(session.id, runAfterLoad.promptRunId);
             setAgentPhase(null);
             setRetryInfo(null);
-            optimisticUserMessageKeyRef.current = null;
           }
           if (agentState?.running || agentState?.live) {
             loadTools(session.id);
@@ -2594,19 +2646,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               // 刷新/冷挂载后服务端已在跑的 run：先导入 registry slot，
               // 否则 reconcile 会把它当空闲收尾、输入框也会允许 prompt（被服务端拒）。
               getOrCreateBrowserSessionRuntimeRegistry().importRunningRun(session.id);
-              setAgentRunning(true);
               setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
-              dispatch({ type: "start" });
               if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
                 void waitForPromptSettlement(session.id);
               }
             }
             if (agentState.state?.isBashRunning) {
-              bashRunningRef.current = true;
-              setBashRunning(true);
-              if (agentState.state.pendingBash) {
-                setPendingBash(agentState.state.pendingBash);
-              }
+              getOrCreateBrowserSessionRuntimeRegistry().setBashRunning(
+                session.id,
+                true,
+                agentState.state.pendingBash ?? null,
+              );
               void waitForBashSettlement(session.id);
             }
           }
@@ -2640,6 +2690,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     return () => {
       bashRecoveryIdRef.current += 1;
+      // 切走/换 intent：立刻断开在途的会话加载（大会话 tail 可达数百 KB），
+      // 不要等响应下载并解析完再靠 sessionId 守卫丢弃。
+      loadAbortRef.current?.abort();
+      loadAbortRef.current = null;
       unsubSnapshot?.();
       const sid = runtimeId ?? sessionIdRef.current ?? session?.id;
       if (sid && runtimeSubscriptionRef.current) {
@@ -2701,8 +2755,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   return {
     // State
-    data, loading, historyLoading, hasMoreBefore, error, activeLeafId, messages, entryIds, streamState,
-    agentRunning, lockedByOther, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, thinkingLevel: resolvedThinking, thinkingReady, defaultThinkingLevel: isNew ? settingsDefaultThinking : null,
+    data, loading, historyLoading, hasMoreBefore, error, activeLeafId, messages, entryIds, messageKeys, streamState,
+    agentRunning, turnMetrics, lockedByOther, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, thinkingLevel: resolvedThinking, thinkingReady, defaultThinkingLevel: isNew ? settingsDefaultThinking : null,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,

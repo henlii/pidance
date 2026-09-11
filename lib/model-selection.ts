@@ -36,26 +36,37 @@ export function sameModel(
  */
 export function resolveDisplayModel(
   override: SelectedModel | null | undefined,
-  pending: SelectedModel | null | undefined,
   persisted: SelectedModel | null | undefined,
   fallback: SelectedModel | null | undefined = null,
 ): SelectedModel | null {
-  return override ?? pending ?? persisted ?? fallback ?? null;
+  return override ?? persisted ?? fallback ?? null;
 }
 
 /**
  * loadSession 后 override 的「吸附」决策：
  * - 无 override → 保持 null
+ * - 磁盘相对上次观察发生了新变化 → 这是外部（另一实例/标签页）的写入，
+ *   磁盘优先，清除 override。否则本页既会显示旧模型，又会在下次发送时
+ *   把对方的选择主动写回去。
  * - override 与磁盘 persisted 一致（set_model 已落盘）→ 清除 override，由磁盘
  *   model_change 权威接管
  * - override 存在但磁盘缺失/不一致（写盘竞态、fork 后新会话无 model_change）→
  *   保留 override，用户选择优先，防止被内部 loadSession 覆盖
  */
-export function settleModelOverride(
-  override: SelectedModel | null | undefined,
-  persisted: SelectedModel | null | undefined,
-): SelectedModel | null {
+export function settleModelOverride(input: {
+  override: SelectedModel | null | undefined;
+  persisted: SelectedModel | null | undefined;
+  /**
+   * 上一次由**磁盘上下文**观察到的值（不得混入 hot/live 投影）：
+   * 只有它变化才说明磁盘被外部改动过。null/undefined = 尚无观察基线。
+   */
+  lastDiskObserved?: SelectedModel | null | undefined;
+}): SelectedModel | null {
+  const { override, persisted, lastDiskObserved } = input;
   if (!override) return null;
+  if (persisted && lastDiskObserved && !sameModel(persisted, lastDiskObserved)) {
+    return null;
+  }
   return sameModel(override, persisted) ? null : override;
 }
 
