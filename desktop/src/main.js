@@ -203,9 +203,31 @@ function quitApplication() {
   app.quit();
 }
 
-ipcMain.handle("desktop-settings:get", () => ({ ...desktopSettings }));
-ipcMain.handle("desktop-settings:set", (_event, key, value) => updateDesktopSetting(key, value));
-ipcMain.handle("desktop-notification:show", (_event, title, body) => {
+/**
+ * IPC 调用方必须是受信任主窗口的顶层 frame，且 URL 属于本机 Pidance origin：
+ * 子 frame / 被导航到站外的窗口 / 其他 webContents 一律拒绝。
+ */
+function assertTrustedSender(event) {
+  const frame = event?.senderFrame;
+  const trusted = lifecycle.isTrustedIpcSender({
+    frameParent: frame ? frame.parent : "missing",
+    frameUrl: frame?.url,
+    senderIsMainWindow: Boolean(mainWindow) && event?.sender === mainWindow.webContents,
+    trustedOrigin: `http://${HOST}:${PORT}`,
+  });
+  if (!trusted) throw new Error("Untrusted IPC sender");
+}
+
+ipcMain.handle("desktop-settings:get", (event) => {
+  assertTrustedSender(event);
+  return { ...desktopSettings };
+});
+ipcMain.handle("desktop-settings:set", (event, key, value) => {
+  assertTrustedSender(event);
+  return updateDesktopSetting(key, value);
+});
+ipcMain.handle("desktop-notification:show", (event, title, body) => {
+  assertTrustedSender(event);
   if (!desktopSettings.notificationsEnabled || !Notification.isSupported()) return false;
   if (typeof title !== "string" || typeof body !== "string") return false;
   const notification = new Notification({
@@ -303,16 +325,19 @@ function createWindow() {
     const external = lifecycle.externalUrlFor(target);
     if (external) void shell.openExternal(external);
   };
+  // 新窗口一律拒绝（应用只用 window.open 打开站外链接）；站外链接交给系统浏览器。
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (lifecycle.isTrustedOrigin(url, trustedOrigin)) return { action: "allow" };
     openExternally(url);
     return { action: "deny" };
   });
-  mainWindow.webContents.on("will-navigate", (event, url) => {
+  const guardNavigation = (event, url) => {
     if (lifecycle.isTrustedOrigin(url, trustedOrigin)) return;
     event.preventDefault();
     openExternally(url);
-  });
+  };
+  mainWindow.webContents.on("will-navigate", guardNavigation);
+  // 服务端 302 等重定向不触发 will-navigate，必须单独拦。
+  mainWindow.webContents.on("will-redirect", guardNavigation);
   void mainWindow.loadURL(`http://${HOST}:${PORT}`);
   if (START_HIDDEN && desktopSettings.minimizeToTray) mainWindow.hide();
 }

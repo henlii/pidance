@@ -9,6 +9,7 @@ import lifecycle from "../src/server-lifecycle.js";
 const {
   buildReadyUrl,
   isTrustedOrigin,
+  isTrustedIpcSender,
   externalUrlFor,
   coordinateStartup,
   looksLikePidance,
@@ -126,6 +127,17 @@ test("Node 运行时解析：打包版缺内置 Node 必须报缺失，开发版
     resolveNodeBinary({ isPackaged: true, resourcesPath: "/res", execPath: "/usr/bin/electron", existsSync: () => false }),
     null,
   );
+});
+
+test("IPC 调用方：只接受受信任主窗口的顶层 frame", () => {
+  const trustedOrigin = "http://127.0.0.1:31415";
+  const base = { frameParent: null, frameUrl: `${trustedOrigin}/`, senderIsMainWindow: true, trustedOrigin };
+  assert.equal(isTrustedIpcSender(base), true);
+  assert.equal(isTrustedIpcSender({ ...base, frameParent: {} }), false, "子 frame 不得调用 IPC");
+  assert.equal(isTrustedIpcSender({ ...base, senderIsMainWindow: false }), false, "其他 webContents 不得调用 IPC");
+  assert.equal(isTrustedIpcSender({ ...base, frameUrl: "http://evil.example/" }), false, "站外 origin 不得调用 IPC");
+  assert.equal(isTrustedIpcSender({ ...base, frameUrl: "http://127.0.0.1:31415@evil.example/" }), false);
+  assert.equal(isTrustedIpcSender({ ...base, frameParent: "missing", frameUrl: undefined }), false, "缺 frame 信息一律拒绝");
 });
 
 test("服务参数：显式端口 + 显式回环监听 + 不自动开浏览器", () => {

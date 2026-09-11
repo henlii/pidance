@@ -72,6 +72,16 @@ function isTrustedOrigin(target, trustedOrigin) {
   }
 }
 
+/**
+ * IPC 调用方判定：必须是受信任主窗口的**顶层 frame**，且 URL 属于本机 origin。
+ * 子 frame、其他 webContents、被导航到站外的窗口一律拒绝。
+ */
+function isTrustedIpcSender({ frameParent, frameUrl, senderIsMainWindow, trustedOrigin }) {
+  if (frameParent !== null) return false;
+  if (senderIsMainWindow !== true) return false;
+  return isTrustedOrigin(frameUrl, trustedOrigin);
+}
+
 /** 交给系统浏览器打开只允许 http/https，拒绝 file:/javascript: 及任意系统协议。 */
 function externalUrlFor(target) {
   if (typeof target !== "string" || target.length === 0) return null;
@@ -140,6 +150,7 @@ module.exports = {
   PIDANCE_BRAND,
   buildReadyUrl,
   isTrustedOrigin,
+  isTrustedIpcSender,
   externalUrlFor,
   coordinateStartup,
   looksLikePidance,
