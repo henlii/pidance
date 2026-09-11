@@ -29,6 +29,7 @@ import { promisify } from "node:util";
 const exec = promisify(execFile);
 const URL_BASE = process.env.PIDANCE_TEST_URL ?? "http://127.0.0.1:31416";
 const PASSWORD = process.env.PIDANCE_TEST_PASSWORD ?? "";
+const AUTH_HEADER = PASSWORD ? { Authorization: `Basic ${Buffer.from(`pi:${PASSWORD}`).toString("base64")}` } : {};
 const SESSION = "pidance-regression";
 
 /** 运行 agent-browser 命令并解析 JSON 输出。 */
@@ -343,6 +344,72 @@ test("A10：顶栏统计按钮只有一个 tooltip 源，且悬停期间文案�
   await new Promise((r) => setTimeout(r, 300));
   const second = await evalResult("document.querySelector('.instant-tooltip-layer')?.textContent ?? null");
   assert.equal(second, "live-update-probe", "tooltip 未跟随 data-tooltip 更新");
+});
+
+test("A12：对端 writer 租约 → 锁定条出现并在释放后消失", { timeout: 120_000 }, async (t) => {
+  // 专用会话 + 一个活着的 sleeper 进程持有 running 租约（模拟另一个 Pidance 进程
+  // 正在写同一 JSONL）。租约目录是 31415/31416 共享的 agentDir。
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const { spawn } = await import("node:child_process");
+  const agentDir = process.env.PI_CODING_AGENT_DIR || `${os.homedir()}/.pi/agent`;
+  const leaseDir = `${agentDir}/pidance-running-leases`;
+  let createdId = null;
+  let sleeper = null;
+  let leasePath = null;
+  try {
+    const createRes = await fetch(`${URL_BASE}/api/agent/new`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...AUTH_HEADER },
+      body: JSON.stringify({ cwd: process.cwd(), type: "prompt", message: "只回答 OK，不要调用工具。" }),
+    });
+    const created = await createRes.json();
+    createdId = created?.sessionId ?? null;
+    assert.ok(createdId, `测试会话创建失败: ${createRes.status} ${JSON.stringify(created)}`);
+
+    // 等 run 结束并落盘：host settled 后立即 dispose，本进程不再持有会话。
+    let idle = false;
+    for (let i = 0; i < 40 && !idle; i += 1) {
+      await new Promise((r) => setTimeout(r, 500));
+      const res = await fetch(`${URL_BASE}/api/agent/${encodeURIComponent(createdId)}?light=1`, { headers: AUTH_HEADER });
+      const body = res.ok ? await res.json() : {};
+      idle = body.live !== true && body.activeRun !== true;
+    }
+    assert.ok(idle, "测试会话未在预期时间内结束");
+
+    sleeper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], { stdio: "ignore" });
+    fs.mkdirSync(leaseDir, { recursive: true, mode: 0o700 });
+    leasePath = `${leaseDir}/${createdId}.json`;
+    fs.writeFileSync(leasePath, `${JSON.stringify({ pid: sleeper.pid, sessionId: createdId, heartbeatAt: Date.now(), startedAt: Date.now() })}\n`);
+
+    await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(createdId)}`, "--session", SESSION], { json: false });
+    let lockedText = "";
+    for (let i = 0; i < 20 && !lockedText; i += 1) {
+      await new Promise((r) => setTimeout(r, 700));
+      const status = await evalResult("document.querySelector('[role=\"status\"][aria-label=\"另一个 Pidance 实例正在使用此会话\"]') ? document.body.innerText : ''");
+      if (typeof status === "string" && status.includes("另一个 Pidance 实例正在使用此会话")) lockedText = status;
+    }
+    assert.ok(lockedText, "对端持锁时未显示锁定条");
+
+    // 释放（进程退出 + 租约文件删除）：锁定条应在短轮询窗口内消失。
+    sleeper.kill("SIGKILL");
+    sleeper = null;
+    fs.rmSync(leasePath, { force: true });
+    leasePath = null;
+    let released = false;
+    for (let i = 0; i < 15 && !released; i += 1) {
+      await new Promise((r) => setTimeout(r, 800));
+      const text = await evalResult("document.body.innerText");
+      released = typeof text === "string" && !text.includes("另一个 Pidance 实例正在使用此会话");
+    }
+    assert.ok(released, "租约释放后锁定条未消失");
+  } finally {
+    sleeper?.kill("SIGKILL");
+    if (leasePath) fs.rmSync(leasePath, { force: true });
+    if (createdId) {
+      await fetch(`${URL_BASE}/api/sessions/${encodeURIComponent(createdId)}`, { method: "DELETE", headers: AUTH_HEADER }).catch(() => {});
+    }
+  }
 });
 
 test("用例11：添加空项目 → 侧栏显示并可新建会话（项目独立于会话）", async () => {
