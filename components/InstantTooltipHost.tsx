@@ -73,7 +73,7 @@ export function InstantTooltipHost() {
         measureEl = document.createElement("div");
         measureEl.setAttribute("aria-hidden", "true");
         measureEl.style.cssText =
-          "position:fixed;left:-9999px;top:0;visibility:hidden;pointer-events:none;max-width:min(280px,calc(100vw - 16px));padding:5px 8px;font-size:11px;font-weight:400;line-height:1.35;white-space:normal;overflow-wrap:anywhere;word-break:break-word;border:1px solid transparent;box-sizing:border-box;";
+          "position:fixed;left:-9999px;top:0;visibility:hidden;pointer-events:none;max-width:min(280px,calc(100vw - 16px));padding:5px 8px;font-size:11px;font-weight:400;line-height:1.35;white-space:pre-line;overflow-wrap:anywhere;word-break:break-word;border:1px solid transparent;box-sizing:border-box;";
         document.body.appendChild(measureEl);
       }
       measureEl.textContent = text;
@@ -113,7 +113,16 @@ export function InstantTooltipHost() {
     window.addEventListener("scroll", onScrollOrResize, true);
     window.addEventListener("resize", onScrollOrResize);
 
+    // data-tooltip 是活值（顶栏统计随运行更新）：悬停期间属性变化要重读，
+    // 否则气泡停在打开那一刻的旧文案。
+    const observer = new MutationObserver((mutations) => {
+      if (!activeEl || !document.contains(activeEl)) return;
+      if (mutations.some((mutation) => mutation.target === activeEl)) show(activeEl);
+    });
+    observer.observe(document.body, { attributes: true, attributeFilter: ["data-tooltip"], subtree: true });
+
     return () => {
+      observer.disconnect();
       document.removeEventListener("mouseover", onMove, true);
       document.removeEventListener("focusin", onMove, true);
       window.removeEventListener("scroll", onScrollOrResize, true);
@@ -143,7 +152,7 @@ export function InstantTooltipHost() {
         fontSize: 11,
         fontWeight: 400,
         lineHeight: 1.35,
-        whiteSpace: "normal",
+        whiteSpace: "pre-line",
         overflowWrap: "anywhere",
         wordBreak: "break-word",
         pointerEvents: "none",

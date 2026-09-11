@@ -1147,7 +1147,6 @@ function AppShellInner() {
         <div className="app-top-bar">
           <button
             onClick={handleSidebarToggle}
-            title={sidebarOpen ? t("app_hideSidebar") : t("app_showSidebar")}
             data-tooltip={sidebarOpen ? t("app_hideSidebar") : t("app_showSidebar")}
             className="instant-tooltip"
             aria-label={sidebarOpen ? t("app_hideSidebar") : t("app_showSidebar")}
@@ -1218,7 +1217,6 @@ function AppShellInner() {
               <button
                 type="button"
                 onClick={openSessionInfoTab}
-                title={tooltip || t("app_sessionInfo")}
                 data-tooltip={tooltip || t("app_sessionInfo")}
                 className="instant-tooltip app-top-bar-stats"
                 aria-label={t("app_sessionInfo")}
@@ -1274,7 +1272,6 @@ function AppShellInner() {
           {isMobile && <button
             type="button"
             onClick={handleRightPanelToggle}
-            title={rightPanelOpen ? t("app_hidePanel") : t("app_showPanel")}
             data-tooltip={rightPanelOpen ? t("app_hidePanel") : t("app_showPanel")}
             className="instant-tooltip"
             aria-label={rightPanelOpen ? t("app_hidePanel") : t("app_showPanel")}

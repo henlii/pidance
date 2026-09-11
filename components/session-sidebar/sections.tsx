@@ -949,7 +949,6 @@ const handleDeleteConfirm = useCallback(async () => {
               type="button"
               className="sidebar-chevron-btn sidebar-indent-indicator sidebar-chevron-always"
               onClick={(e) => { e.stopPropagation(); onToggleCollapse?.(); }}
-              title={collapsed ? t("sidebar_expandChild") : t("sidebar_collapseChild")}
               data-tooltip={collapsed ? t("sidebar_expandChild") : t("sidebar_collapseChild")}
               aria-label={collapsed ? t("sidebar_expandChild") : t("sidebar_collapseChild")}
               style={{

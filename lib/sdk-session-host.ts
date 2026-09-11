@@ -751,34 +751,39 @@ export class SdkSessionHost {
         break;
     }
     let eventToEmit = event;
-    if (event.type === "agent_end") {
-      // agent_end 已包含本轮最终 assistant；若该轮发生过压缩，此时 SDK
-      // getContextUsage() 才能给出压缩后的有效估算。随边界事件下发，避免
-      // settled 后立即 dispose 使浏览器错过最后一次热 state。
-      try {
-        const stats = this.session.getSessionStats() as {
-          contextUsage?: {
-            percent?: number;
-            contextWindow?: number;
-            tokens?: number;
-          };
-        };
-        const usage = stats.contextUsage;
-        if (usage && typeof usage.contextWindow === "number" && usage.contextWindow > 0) {
-          eventToEmit = {
-            ...event,
-            contextUsage: {
-              contextWindow: usage.contextWindow,
-              percent: typeof usage.percent === "number" ? usage.percent : null,
-              tokens: typeof usage.tokens === "number" ? usage.tokens : null,
-            },
-          };
-        }
-      } catch {
-        /* stats 可选；不阻断 agent_end */
-      }
+    // 上下文占用随每条 assistant 消息（每个工具轮次）变化：message_end 时 SDK
+    // 权威 messages 已含刚结束的这条，getContextUsage() 即最新值；只在 agent_end
+    // 下发会让顶栏在整个 run 期间停在上一轮读数。agent_end 保留同字段，避免
+    // settled 后立即 dispose 使浏览器错过最后一次热 state。
+    const isAssistantMessageEnd =
+      event.type === "message_end"
+      && (event as { message?: { role?: string } }).message?.role === "assistant";
+    if (event.type === "agent_end" || isAssistantMessageEnd) {
+      const usage = this.contextUsageSnapshot();
+      if (usage) eventToEmit = { ...event, contextUsage: usage };
     }
     this.emit(this.withRenderedToolLines(eventToEmit));
+  }
+
+  /**
+   * 上下文占用快照：SDK `getContextUsage()` 是唯一来源（无模型/无窗口时 undefined）。
+   * 压缩后未重新生成 usage 时 SDK 返回 `{ tokens: null, percent: null }`，原样透传。
+   */
+  private contextUsageSnapshot():
+    { contextWindow: number; percent: number | null; tokens: number | null } | undefined {
+    try {
+      const usage = this.session.getContextUsage();
+      if (usage && typeof usage.contextWindow === "number" && usage.contextWindow > 0) {
+        return {
+          contextWindow: usage.contextWindow,
+          percent: typeof usage.percent === "number" ? usage.percent : null,
+          tokens: typeof usage.tokens === "number" ? usage.tokens : null,
+        };
+      }
+    } catch {
+      /* stats 可选；不阻断事件 */
+    }
+    return undefined;
   }
 
   /**
@@ -1131,19 +1136,12 @@ export class SdkSessionHost {
       followUp: [...this.followUpQueue],
     };
     try {
-      const stats = session.getSessionStats() as {
-        contextUsage?: {
-          percent?: number;
-          contextWindow?: number;
-          tokens?: number;
-        };
-      };
-      const u = stats?.contextUsage;
-      if (u && typeof u.contextWindow === "number" && u.contextWindow > 0) {
+      const usage = session.getContextUsage();
+      if (usage && typeof usage.contextWindow === "number" && usage.contextWindow > 0) {
         projected.contextUsage = {
-          contextWindow: u.contextWindow,
-          percent: typeof u.percent === "number" ? u.percent : null,
-          tokens: typeof u.tokens === "number" ? u.tokens : null,
+          contextWindow: usage.contextWindow,
+          percent: typeof usage.percent === "number" ? usage.percent : null,
+          tokens: typeof usage.tokens === "number" ? usage.tokens : null,
         };
       }
     } catch {

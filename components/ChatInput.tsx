@@ -2077,7 +2077,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   else void handleSend();
                 }}
                 disabled={!canSend}
-                title={sendTooltip}
                 data-tooltip={sendTooltip}
                 className={sendTooltip ? "instant-tooltip tooltip-up" : undefined}
                 style={{

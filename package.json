@@ -51,6 +51,7 @@
     "verify:render-bridge": "node scripts/verify-subagent-render-bridge.mjs",
     "verify:render-bridge:installed": "node scripts/verify-installed-render-bridge.mjs",
     "test:browser": "node --test scripts/browser-regression.test.mjs",
+    "test:browser:context": "node --test scripts/context-live-regression.test.mjs",
     "check": "npm run typecheck && npm run lint && npm run test",
     "release:audit": "node scripts/audit-release-package.mjs --pre",
     "release:audit:tgz": "node scripts/audit-release-package.mjs --tgz",

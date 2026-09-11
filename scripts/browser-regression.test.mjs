@@ -29,7 +29,6 @@ import { promisify } from "node:util";
 const exec = promisify(execFile);
 const URL_BASE = process.env.PIDANCE_TEST_URL ?? "http://127.0.0.1:31416";
 const PASSWORD = process.env.PIDANCE_TEST_PASSWORD ?? "";
-const AUTH_HEADER = PASSWORD ? { Authorization: `Basic ${Buffer.from(`pi:${PASSWORD}`).toString("base64")}` } : {};
 const SESSION = "pidance-regression";
 
 /** 运行 agent-browser 命令并解析 JSON 输出。 */
@@ -302,6 +301,48 @@ test("A9：同一 ChatWindow 在真实 390px viewport 保持桌面最终 timelin
   assert.equal(mobile.error, false);
   assert.equal(mobile.messageCount, desktop.messageCount, '移动 viewport 不得改变最终 message timeline');
   assert.equal(mobile.entryCount, desktop.entryCount, '移动 viewport 不得改变 entryId 对齐');
+  // 恢复桌面视口：移动视口下侧栏是覆盖式抽屉，后续用例（顶栏统计）会拿不到聊天区。
+  await ab(["set", "viewport", "1280", "720", "--session", SESSION], { json: false });
+});
+
+test("A10：顶栏统计按钮只有一个 tooltip 源，且悬停期间文案跟随更新", async () => {
+  await ab(["open", URL_BASE, "--session", SESSION], { json: false }).catch(() => {});
+  await ensureAuthed();
+  await new Promise((r) => setTimeout(r, 1800));
+  const sessionId = await evalResult("document.querySelector('[data-session-id]')?.getAttribute('data-session-id')");
+  assert.ok(typeof sessionId === "string" && sessionId.length > 0, "A10 需要一个已有会话作为打开目标");
+  await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(sessionId)}`, "--session", SESSION], { json: false });
+  await new Promise((r) => setTimeout(r, 2200));
+
+  // 原生 title 与 data-tooltip 同时存在 → 悬停出现两个气泡（回归：顶栏/侧栏/右栏 4 处）。
+  const duplicates = await evalResult(
+    "(() => Array.from(document.querySelectorAll('[data-tooltip]')).filter((el) => el.hasAttribute('title')).length)()",
+  );
+  assert.equal(duplicates, 0, "存在同时设置 title 与 data-tooltip 的元素（会显示两个 tooltip）");
+
+  const attrs = await evalResult(`(() => {
+    const btn = document.querySelector('.app-top-bar-stats');
+    if (!btn) return null;
+    return { tooltip: btn.getAttribute('data-tooltip'), aria: btn.getAttribute('aria-label') };
+  })()`);
+  if (!attrs) return; // 无消息的空会话不渲染统计按钮（空环境合法）
+  assert.ok(attrs.tooltip && attrs.tooltip.trim().length > 0, "顶栏统计缺少 data-tooltip 文案");
+  assert.ok(attrs.aria, "顶栏统计缺少 aria-label");
+
+  await evalResult("(() => { const btn = document.querySelector('.app-top-bar-stats'); btn.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); return true; })()");
+  await new Promise((r) => setTimeout(r, 300));
+  const first = await evalResult(`(() => {
+    const el = document.querySelector('.instant-tooltip-layer');
+    return el ? { text: el.textContent, whiteSpace: getComputedStyle(el).whiteSpace } : null;
+  })()`);
+  assert.ok(first && first.text && first.text.length > 0, "悬停未显示自定义 tooltip");
+  assert.equal(first.whiteSpace, "pre-line", "多段 tooltip 需保留换行");
+
+  // 悬停期间属性变化（上下文读数随运行更新）必须重读，不能停在打开时的旧文案。
+  await evalResult("(() => { document.querySelector('.app-top-bar-stats').setAttribute('data-tooltip', 'live-update-probe'); return true; })()");
+  await new Promise((r) => setTimeout(r, 300));
+  const second = await evalResult("document.querySelector('.instant-tooltip-layer')?.textContent ?? null");
+  assert.equal(second, "live-update-probe", "tooltip 未跟随 data-tooltip 更新");
 });
 
 test("用例11：添加空项目 → 侧栏显示并可新建会话（项目独立于会话）", async () => {

@@ -462,7 +462,6 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onBranchHere, onNe
                 <button
                   onClick={() => { onNewSessionFromHere!(entryId!, content); }}
                   disabled={forking}
-                  title={forking ? t("message_creating") : t("message_newSessionFromHereTooltip")}
                   data-tooltip={forking ? t("message_creating") : t("message_newSessionFromHereTooltip")}
                   className="instant-tooltip"
                   aria-label={t("message_newSessionFromHere")}

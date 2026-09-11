@@ -1355,6 +1355,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Mirror compaction state unconditionally: a missed compaction_end
       // would otherwise leave the Stop UI stuck.
       setIsCompacting(state?.isCompacting ?? false);
+      // 迟到的响应不得覆盖已切走会话的上下文；本会话的运行中读数与 SSE 同源，
+      // 这里只是漏事件时的兜底。
+      if (state?.contextUsage !== undefined && sessionIdRef.current === sid) {
+        setContextUsage(state.contextUsage ?? null);
+      }
       if (state?.queuedMessages !== undefined) {
         applyProjectedQueues(state.queuedMessages);
       }
@@ -1515,7 +1520,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "message_end": {
-        if (event.message && (event.message as AgentMessage).role === "user") {
+        // Host 随每条 assistant 消息结束下发上下文占用：run 期间顶栏随工具轮次推进，
+        // 不再等 agent_end 才跳一次（SDK 的 usage 只在消息结束时才有读数）。
+        const usage = event.contextUsage as AgentStateResponse["contextUsage"] | undefined;
+        if (usage && typeof usage.contextWindow === "number" && usage.contextWindow > 0) {
+          setContextUsage(usage);
         }
         setAgentPhase({ kind: "waiting_model" });
         break;
