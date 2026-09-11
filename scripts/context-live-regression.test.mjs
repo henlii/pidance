@@ -129,6 +129,17 @@ test("顶栏上下文读数在 run 结束前就已更新", { timeout: 150_000 },
     }
     assert.ok(mounted, "测试会话聊天区未挂载（导航/恢复失败，不是验收通过）");
 
+    // #28：用户上滚意图（wheel 向上）后，自动跟随必须释放，不得把视图抢回底部。
+    // 用真实 wheel 事件走 useChatAutoFollow 的释放路径；随后继续流式，检查滚动位置。
+    const scrollIntent = await evalResult(`(() => {
+      const scroller = document.querySelector('[data-pidance-chat="true"]')?.querySelector('[data-chat-scroller="true"]');
+      if (!scroller) return null;
+      scroller.scrollTop = 0;
+      scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: -240, bubbles: true }));
+      return { overflow: scroller.scrollHeight - scroller.clientHeight };
+    })()`);
+    assert.ok(scrollIntent, "未找到聊天滚动容器，无法验证上滚意图");
+
     const samples = [];
     let seenStreaming = false;
     const deadline = Date.now() + 45_000;
@@ -155,6 +166,23 @@ test("顶栏上下文读数在 run 结束前就已更新", { timeout: 150_000 },
     assert.ok(
       Math.max(...finite) > Math.min(...finite),
       `运行中上下文读数未更新（samples=${JSON.stringify(finite)}）`,
+    );
+
+    // 流式继续输出后，用户上滚的位置必须保持（未被自动跟随抢回底部）。
+    const released = await evalResult(`(() => {
+      const scroller = document.querySelector('[data-pidance-chat="true"]')?.querySelector('[data-chat-scroller="true"]');
+      if (!scroller) return null;
+      return {
+        distance: scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight,
+        overflow: scroller.scrollHeight - scroller.clientHeight,
+        jumpVisible: !!document.querySelector('.chat-jump-bottom.is-visible'),
+      };
+    })()`);
+    assert.ok(released, "未找到聊天滚动容器");
+    assert.ok(released.overflow > 80, `流式输出未产生可滚动内容（overflow=${released.overflow}）`);
+    assert.ok(
+      released.distance > 40,
+      `用户上滚后被自动跟随抢回底部（距底 ${released.distance}px）`,
     );
   } finally {
     if (createdId) {
