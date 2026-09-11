@@ -358,6 +358,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     : thinkingLevel ?? "off";
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
+  /**
+   * 上下文读数的写入代次：SSE（message_end/agent_end）每写一次就 +1。
+   * reconcile 是异步兜底，回来后必须确认期间没有更新的权威读数，否则旧响应会
+   * 覆盖较新的用量，或把压缩后的「未知」态顶回压缩前的数字。
+   */
+  const contextUsageGenerationRef = useRef(0);
+  const applyLiveContextUsage = useCallback((usage: { percent: number | null; contextWindow: number; tokens: number | null }) => {
+    contextUsageGenerationRef.current += 1;
+    setContextUsage(usage);
+  }, []);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const [forkingEntryId, setForkingEntryId] = useState<string | null>(null);
   const [currentModelOverride, setCurrentModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
@@ -1348,6 +1358,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const registry = getOrCreateBrowserSessionRuntimeRegistry();
     const current = registry.getRunState(sid);
     if (!current?.agentRunning) return;
+    const contextGenerationAtRequest = contextUsageGenerationRef.current;
     try {
       const result = await registry.reconcile(sid);
       if (!result || result.stale) return;
@@ -1355,9 +1366,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Mirror compaction state unconditionally: a missed compaction_end
       // would otherwise leave the Stop UI stuck.
       setIsCompacting(state?.isCompacting ?? false);
-      // 迟到的响应不得覆盖已切走会话的上下文；本会话的运行中读数与 SSE 同源，
-      // 这里只是漏事件时的兜底。
-      if (state?.contextUsage !== undefined && sessionIdRef.current === sid) {
+      // 迟到的响应不得覆盖已切走会话的上下文，也不得覆盖请求期间到达的更新读数
+      // （压缩后的 {tokens:null} 合法，不能用「更大」判新旧）。
+      if (
+        state?.contextUsage !== undefined
+        && sessionIdRef.current === sid
+        && contextUsageGenerationRef.current === contextGenerationAtRequest
+      ) {
         setContextUsage(state.contextUsage ?? null);
       }
       if (state?.queuedMessages !== undefined) {
@@ -1480,7 +1495,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (event.type === "agent_end") {
           const usage = event.contextUsage as AgentStateResponse["contextUsage"] | undefined;
           if (usage && typeof usage.contextWindow === "number" && usage.contextWindow > 0) {
-            setContextUsage(usage);
+            applyLiveContextUsage(usage);
           }
         }
         const sid = sessionIdRef.current;
@@ -1524,7 +1539,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // 不再等 agent_end 才跳一次（SDK 的 usage 只在消息结束时才有读数）。
         const usage = event.contextUsage as AgentStateResponse["contextUsage"] | undefined;
         if (usage && typeof usage.contextWindow === "number" && usage.contextWindow > 0) {
-          setContextUsage(usage);
+          applyLiveContextUsage(usage);
         }
         setAgentPhase({ kind: "waiting_model" });
         break;

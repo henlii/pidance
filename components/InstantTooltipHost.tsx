@@ -98,18 +98,21 @@ export function InstantTooltipHost() {
     };
 
     // pointer 设备：mouseover 冒泡覆盖子节点；键盘：focusin
-    document.addEventListener("mouseover", onMove, true);
-    document.addEventListener("focusin", onMove, true);
-    document.addEventListener("mouseout", (e) => {
+    // 具名处理器：cleanup 必须能原样移除（匿名监听会残留，重复挂载后越积越多）。
+    const onPointerOut = (e: Event) => {
       const related = (e as MouseEvent).relatedTarget as Node | null;
       if (activeEl && related && activeEl.contains(related)) return;
       if (activeEl && !findTooltipEl(related)) hide();
-    }, true);
-    document.addEventListener("focusout", (e) => {
+    };
+    const onFocusOut = (e: Event) => {
       const related = (e as FocusEvent).relatedTarget as Node | null;
       if (activeEl && related && findTooltipEl(related)) return;
       hide();
-    }, true);
+    };
+    document.addEventListener("mouseover", onMove, true);
+    document.addEventListener("focusin", onMove, true);
+    document.addEventListener("mouseout", onPointerOut, true);
+    document.addEventListener("focusout", onFocusOut, true);
     window.addEventListener("scroll", onScrollOrResize, true);
     window.addEventListener("resize", onScrollOrResize);
 
@@ -125,6 +128,8 @@ export function InstantTooltipHost() {
       observer.disconnect();
       document.removeEventListener("mouseover", onMove, true);
       document.removeEventListener("focusin", onMove, true);
+      document.removeEventListener("mouseout", onPointerOut, true);
+      document.removeEventListener("focusout", onFocusOut, true);
       window.removeEventListener("scroll", onScrollOrResize, true);
       window.removeEventListener("resize", onScrollOrResize);
       measureEl?.remove();
