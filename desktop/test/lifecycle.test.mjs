@@ -1,0 +1,170 @@
+/**
+ * 桌面壳生命周期纯逻辑测试（不需要 Electron / Windows）：
+ * 首次启动、复用已有服务、端口被非 Pidance 占用、关闭只停自己拉起的服务。
+ */
+import assert from "node:assert/strict";
+import test from "node:test";
+import lifecycle from "../src/server-lifecycle.js";
+
+const {
+  buildReadyUrl,
+  looksLikePidance,
+  probeService,
+  resolveServerDir,
+  resolveNodeBinary,
+  buildServerArgs,
+  stopServerProcess,
+  checkServerInputs,
+  isPortOpen,
+} = lifecycle;
+
+test("复用判定：只有响应体是 Pidance 才复用", () => {
+  assert.equal(looksLikePidance("<!DOCTYPE html><title>Pidance</title>"), true);
+  assert.equal(looksLikePidance("欢迎使用 Pidance"), true);
+  assert.equal(looksLikePidance("<title>Some other app</title>"), false);
+  assert.equal(looksLikePidance(""), false);
+  assert.equal(looksLikePidance(undefined), false);
+});
+
+test("探测：已有 Pidance → 复用；别的程序应答 → other；无人监听 → none", async () => {
+  const pidance = await probeService({ url: "http://127.0.0.1:1/", timeoutMs: 200, request: async () => "pidance" });
+  assert.equal(pidance, "pidance");
+
+  const foreign = await probeService({ url: "http://127.0.0.1:1/", timeoutMs: 200, request: async () => "other" });
+  assert.equal(foreign, "other");
+
+  let calls = 0;
+  const none = await probeService({
+    url: "http://127.0.0.1:1/",
+    timeoutMs: 300,
+    request: async () => {
+      calls += 1;
+      return "none";
+    },
+  });
+  assert.equal(none, "none");
+  assert.ok(calls > 1, "未就绪时必须重试探测，而不是一次定论");
+});
+
+test("探测：先失败后成功（服务正在启动）会继续等到就绪", async () => {
+  let attempt = 0;
+  const verdict = await probeService({
+    url: "http://127.0.0.1:1/",
+    timeoutMs: 2_000,
+    request: async () => (++attempt < 3 ? "none" : "pidance"),
+  });
+  assert.equal(verdict, "pidance");
+  assert.equal(attempt, 3);
+});
+
+test("端口占用探测：连上为真、拒绝为假", async () => {
+  const open = await isPortOpen({
+    host: "127.0.0.1",
+    port: 1,
+    connect: () => ({ setTimeout() {}, once(event, handler) { if (event === "connect") handler(); }, removeAllListeners() {}, destroy() {} }),
+  });
+  assert.equal(open, true);
+
+  const closed = await isPortOpen({
+    host: "127.0.0.1",
+    port: 1,
+    connect: () => ({ setTimeout() {}, once(event, handler) { if (event === "error") handler(); }, removeAllListeners() {}, destroy() {} }),
+  });
+  assert.equal(closed, false);
+});
+
+test("服务目录解析：打包版固定用随包服务，开发版可用 PIDANCE_SERVER_DIR 覆盖", () => {
+  assert.equal(
+    resolveServerDir({ isPackaged: true, resourcesPath: "/res", serverDirEnv: "/tmp/ignored", srcDir: "/app/desktop/src" }),
+    "/res/app/node_modules/@henlii/pidance",
+  );
+  assert.equal(
+    resolveServerDir({ isPackaged: false, resourcesPath: "/res", serverDirEnv: "/repo", srcDir: "/repo/desktop/src" }),
+    "/repo",
+  );
+  assert.equal(
+    resolveServerDir({ isPackaged: false, resourcesPath: "/res", serverDirEnv: undefined, srcDir: "/repo/desktop/src" }),
+    "/repo/desktop/src/../..",
+  );
+});
+
+test("Node 运行时解析：打包版缺内置 Node 必须报缺失，开发版用自身", () => {
+  assert.equal(
+    resolveNodeBinary({ isPackaged: false, resourcesPath: "/res", execPath: "/usr/bin/electron", existsSync: () => false }),
+    "/usr/bin/electron",
+  );
+  assert.equal(
+    resolveNodeBinary({ isPackaged: true, resourcesPath: "/res", execPath: "/usr/bin/electron", existsSync: () => true }),
+    "/res/node/node.exe",
+  );
+  assert.equal(
+    resolveNodeBinary({ isPackaged: true, resourcesPath: "/res", execPath: "/usr/bin/electron", existsSync: () => false }),
+    null,
+  );
+});
+
+test("服务参数：显式端口 + 不自动开浏览器", () => {
+  assert.deepEqual(buildServerArgs("C:/app/bin/pidance.js", "31415"), [
+    "C:/app/bin/pidance.js",
+    "--port",
+    "31415",
+    "--no-open",
+  ]);
+});
+
+test("关闭清理：复用外部服务（child=null）绝不停任何进程", () => {
+  const killed = [];
+  const stopped = stopServerProcess({
+    child: null,
+    platform: "win32",
+    spawnSync: (...args) => killed.push(args),
+  });
+  assert.equal(stopped, false);
+  assert.deepEqual(killed, []);
+});
+
+test("关闭清理：win32 停整棵进程树（PTY worker 一起收）", () => {
+  const calls = [];
+  const stopped = stopServerProcess({
+    child: { pid: 4321, killed: false },
+    platform: "win32",
+    spawnSync: (command, args, options) => calls.push({ command, args, options }),
+  });
+  assert.equal(stopped, true);
+  assert.deepEqual(calls, [{ command: "taskkill", args: ["/pid", "4321", "/T", "/F"], options: { stdio: "ignore" } }]);
+});
+
+test("关闭清理：非 win32 用信号终止；已退出的 child 不重复处理", () => {
+  const killed = [];
+  const stopped = stopServerProcess({
+    child: { pid: 99, killed: false, kill: () => killed.push("kill") },
+    platform: "linux",
+    spawnSync: () => assert.fail("非 win32 不应调用 taskkill"),
+  });
+  assert.equal(stopped, true);
+  assert.deepEqual(killed, ["kill"]);
+
+  assert.equal(
+    stopServerProcess({ child: { pid: 99, killed: true }, platform: "win32", spawnSync: () => assert.fail("不应再杀") }),
+    false,
+  );
+});
+
+test("启动失败：缺 Node 运行时或服务入口都要给出明确原因", () => {
+  assert.match(
+    checkServerInputs({ serverBin: "/app/bin/pidance.js", nodeBin: null, existsSync: () => true }),
+    /内置 Node/,
+  );
+  assert.match(
+    checkServerInputs({ serverBin: "/app/bin/pidance.js", nodeBin: "/res/node/node.exe", existsSync: () => false }),
+    /未找到 pidance 服务入口/,
+  );
+  assert.equal(
+    checkServerInputs({ serverBin: "/app/bin/pidance.js", nodeBin: "/res/node/node.exe", existsSync: () => true }),
+    null,
+  );
+});
+
+test("就绪地址是回环根路径", () => {
+  assert.equal(buildReadyUrl("127.0.0.1", "31415"), "http://127.0.0.1:31415/");
+});

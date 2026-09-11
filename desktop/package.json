@@ -1,0 +1,72 @@
+{
+  "name": "@henlii/pidance-desktop",
+  "version": "0.2.26",
+  "description": "Pidance Desktop（Windows 桌面壳）：内置 pidance 服务与窗口",
+  "private": true,
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "main": "src/main.js",
+  "bin": {},
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "dev": "electron .",
+    "fetch-node": "node scripts/fetch-node-win.mjs",
+    "prebuild:win:installer": "npm run fetch-node",
+    "build:win:installer": "electron-builder --win nsis --x64 --publish never",
+    "build:win:zip": "electron-builder --win zip --x64"
+  },
+  "dependencies": {
+    "@henlii/pidance": "0.2.26"
+  },
+  "devDependencies": {
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "cn.namixinxi.pidance",
+    "productName": "Pidance Desktop",
+    "asar": false,
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json",
+      "node_modules/@henlii/**"
+    ],
+    "extraResources": [
+      {
+        "from": "node",
+        "to": "node"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/pidance-logo.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Pidance Desktop",
+      "installerIcon": "assets/pidance-logo.ico",
+      "installerHeaderIcon": "assets/pidance-logo.ico"
+    },
+    "directories": {
+      "output": "dist"
+    },
+    "compression": "maximum",
+    "electronLanguages": [
+      "en-US",
+      "zh-CN"
+    ],
+    "npmRebuild": false
+  }
+}
