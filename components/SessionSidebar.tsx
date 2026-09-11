@@ -384,18 +384,23 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       // 否则 URL 恢复会永远停留在等待态，聊天区既不恢复也不显示占位。
     }
   }, [catalogStore, serverListLoaded, serverSessionsRef]);
+  // loadSessions 的身份会随 catalog 状态（serverListLoaded）变化，若把它列为依赖，
+  // 首次加载完成会再次触发本 effect → 每次进入都重复拉一遍整份列表（实测 2 次）。
+  // 只应由 mount 与 refreshKey 驱动，通过 ref 取最新实现。
+  const loadSessionsRef = useRef(loadSessions);
+  loadSessionsRef.current = loadSessions;
   const initialLoadDone = useRef(false);
   useEffect(() => {
     const isFirst = !initialLoadDone.current;
     initialLoadDone.current = true;
-    loadSessions(isFirst);
-  }, [loadSessions, refreshKey]);
+    loadSessionsRef.current(isFirst);
+  }, [refreshKey]);
 
   // 会话列表刷新为事件驱动（新会话/agent_end/删除/fork 经 refreshKey 触发；
   // 窗口重新聚焦时补一次），不做定时轮询（openchamber 同语义）。
   useEffect(() => {
     const onVisible = () => {
-      if (document.visibilityState === "visible") loadSessions(false);
+      if (document.visibilityState === "visible") loadSessionsRef.current(false);
     };
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", onVisible);
@@ -403,7 +408,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
     };
-  }, [loadSessions]);
+  }, []);
 
   const allSessions = serverSessions;
 

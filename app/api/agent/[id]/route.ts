@@ -40,13 +40,16 @@ export async function POST(
 }
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  // light=1：轮询用。省略 systemPrompt（数十 KB 且几乎不变）；
+  // 消费方按「键缺失 = 本次不更新」处理，语义不变。
+  const light = new URL(req.url).searchParams.get("light") === "1";
 
   try {
-    const result = await sessionService.getAgentState(id);
+    const result = await sessionService.getAgentState(id, { light });
     return NextResponse.json(result);
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: httpStatusForSessionError(error) });

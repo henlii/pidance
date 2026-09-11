@@ -7,6 +7,8 @@
 const http = require("http");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const next = require("next");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { installResponseCompression } = require("./pidance-compression");
 
 function loadPtyUpgrade() {
   try {
@@ -56,6 +58,10 @@ async function startPidanceHttpServer(options) {
   const handle = app.getRequestHandler();
   const server = createHttpServer((req, res) => {
     installUpgradeHandler();
+    // Next 的 compress 只在它自己的内置服务器（router-server）里生效；
+    // 自管 server 必须自己压缩，否则 JSON/HTML 明文下发。
+    // 见 bin/pidance-compression.js。
+    installResponseCompression(req, res);
     void handle(req, res);
   });
 

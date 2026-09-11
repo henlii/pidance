@@ -230,7 +230,11 @@ export type SessionService = {
     sessionId: string,
     command: PromptCommand,
   ): Promise<PromptReceipt>;
-  getAgentState(sessionId: string): Promise<{
+  /**
+   * `light` 省略体积大且很少变化的字段（systemPrompt）。轮询（run/bash 对账）
+   * 只需要运行标志；systemPrompt 由 loadSession 的 includeState 路径权威提供。
+   */
+  getAgentState(sessionId: string, options?: { light?: boolean }): Promise<{
     live: boolean;
     activeRun: boolean;
     lockedByOther?: boolean;
@@ -311,6 +315,23 @@ export type SessionService = {
   /** through-entry 线性新会话（assistant 锚点先 resolve 到 turnEnd） */
   createSessionFromLeaf(sessionId: string, entryId: string): Promise<{ cancelled: boolean; newSessionId: string }>;
 };
+
+/**
+ * 轻量投影：剥离体积大、变化少的字段。
+ * 只删键不改语义——消费方一律按 `field !== undefined` 判断「有无更新」，
+ * 省略即表示本次不更新，不会把已有值清掉。
+ */
+const LIGHT_STATE_OMIT = ["systemPrompt"] as const;
+
+export function projectAgentState(
+  state: unknown,
+  options?: { light?: boolean },
+): unknown {
+  if (!options?.light || !state || typeof state !== "object" || Array.isArray(state)) return state;
+  const projected = { ...(state as Record<string, unknown>) };
+  for (const key of LIGHT_STATE_OMIT) delete projected[key];
+  return projected;
+}
 
 export function createSessionService(overrides: Partial<SessionServiceDeps> = {}): SessionService {
   const deps: SessionServiceDeps = { ...defaultDeps, ...overrides };
@@ -645,7 +666,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       }
     },
 
-    async getAgentState(sessionId) {
+    async getAgentState(sessionId, options) {
       if (await service.isReadOnly(sessionId)) {
         return { live: false, activeRun: false, readOnly: true };
       }
@@ -669,7 +690,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
               || (state as { isBashRunning?: boolean }).isBashRunning
             ),
         );
-      return { live: true, activeRun, lockedByOther: false, state };
+      return { live: true, activeRun, lockedByOther: false, state: projectAgentState(state, options) };
     },
 
     async renameSession(sessionId, name) {
