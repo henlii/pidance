@@ -38,6 +38,7 @@ import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list
 import type { BranchActions } from "@/lib/branch-bookmarks";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import type { TurnMetrics } from "@/lib/browser-session-runtime-registry";
 import { ProjectProvider, useProjectActions, useProjectIdentity } from "./ProjectProvider";
 import {
   CHANGES_PANEL_WIDTH_DEFAULT,
@@ -310,6 +311,12 @@ function AppShellInner() {
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
   const handleContextUsageChange = useCallback((usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => {
     setContextUsage(usage);
+  }, []);
+
+  // 最近一轮的解码吞吐（tok/s）与首字延迟（TTFT），由 ChatWindow 推送。
+  const [turnMetrics, setTurnMetrics] = useState<TurnMetrics>({});
+  const handleTurnMetricsChange = useCallback((metrics: TurnMetrics) => {
+    setTurnMetrics(metrics);
   }, []);
 
   const handleSidebarToggle = useCallback(() => {
@@ -1164,7 +1171,7 @@ function AppShellInner() {
             )}
           </button>
           {/* Session stats — right-aligned in top bar */}
-          {showChat && (sessionStats || contextUsage) && (() => {
+          {showChat && (sessionStats || contextUsage || turnMetrics.tokensPerSecond !== undefined) && (() => {
             const fmt = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
 
             // 上下文占用：优先热 state（含压缩后 {tokens:null} 的“?”态）；
@@ -1185,13 +1192,26 @@ function AppShellInner() {
                 : (isMobile ? "?" : `? / ${fmt(ctxUsage.contextWindow)}`);
             }
 
-            // 用量统计（词元/费用）已移除；顶栏只保留上下文信息
-            const tooltip = ctxUsage?.contextWindow
-              ? (() => {
-                  const pct = ctxUsage.percent;
-                  return t("app_contextTooltip", { pct: pct !== null ? pct.toFixed(1) + "%" : t("app_unknown"), total: ctxUsage.contextWindow.toLocaleString() });
-                })()
+            // 解码吞吐：对齐 dsh 的显示习惯——≥10 取整，<10 保留一位小数。
+            const tps = turnMetrics.tokensPerSecond;
+            const tpsStr = typeof tps === "number" && Number.isFinite(tps) && tps > 0
+              ? (tps >= 10 ? String(Math.round(tps)) : String(Math.round(tps * 10) / 10))
               : null;
+            const ttftStr = typeof turnMetrics.ttftMs === "number" && turnMetrics.ttftMs >= 0
+              ? (turnMetrics.ttftMs >= 1000
+                ? `${(turnMetrics.ttftMs / 1000).toFixed(1)}s`
+                : `${Math.round(turnMetrics.ttftMs)}ms`)
+              : null;
+
+            // 用量统计（词元/费用）已移除；顶栏只保留上下文信息
+            const tooltipParts: string[] = [];
+            if (ctxUsage?.contextWindow) {
+              const pct = ctxUsage.percent;
+              tooltipParts.push(t("app_contextTooltip", { pct: pct !== null ? pct.toFixed(1) + "%" : t("app_unknown"), total: ctxUsage.contextWindow.toLocaleString() }));
+            }
+            if (tpsStr) tooltipParts.push(t("app_throughputTooltip", { tps: tpsStr }));
+            if (ttftStr) tooltipParts.push(t("app_ttftTooltip", { ttft: ttftStr }));
+            const tooltip = tooltipParts.length > 0 ? tooltipParts.join("\n") : null;
 
             const infoTabActive = rightPanelOpen && activeRightTabId === "info";
             return (
@@ -1234,6 +1254,17 @@ function AppShellInner() {
                       <path d="M1 9 L1 5 Q1 1 5 1 Q9 1 9 5 L9 9" /><line x1="1" y1="9" x2="9" y2="9" />
                     </svg>
                     {ctxStr}
+                  </span>
+                )}
+                {/* 解码吞吐：只在有读数时显示，run 结束后保留最近一轮。
+                    手机顶栏空间紧，速率始终显示（它就是用户扫一眼的指标）。 */}
+                {tpsStr && (
+                  <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text-muted)" }}>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                    </svg>
+                    {tpsStr}
+                    <span style={{ opacity: 0.7 }}>{t("app_tokensPerSecondUnit")}</span>
                   </span>
                 )}
               </button>
@@ -1289,6 +1320,7 @@ function AppShellInner() {
                 onSessionStatsChange={handleSessionStatsChange}
                 onSessionStatsPanelOpen={openSessionInfoTab}
                 onContextUsageChange={handleContextUsageChange}
+                onTurnMetricsChange={handleTurnMetricsChange}
                 onOpenFile={handleOpenLinkedFile}
               />
             ) : initialCwdStatus === "validating" ? (
