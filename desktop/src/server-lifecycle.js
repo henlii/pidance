@@ -8,6 +8,8 @@
  */
 
 const PIDANCE_BRAND = "Pidance";
+/** 服务身份指纹：页面 <title> 精确匹配，而不是「响应里出现过 Pidance」。 */
+const PIDANCE_TITLE_PATTERN = /<title>\s*Pidance\s*<\/title>/i;
 
 /** 服务就绪探测地址：回环根路径（页面未认证也放行，由页内登录处理）。 */
 function buildReadyUrl(host, port) {
@@ -16,10 +18,11 @@ function buildReadyUrl(host, port) {
 
 /**
  * 响应体是否是 Pidance 服务。
- * 端口被别的程序占用时也会应答，必须校验品牌标识，不能只看"端口开着"。
+ * 端口被别的程序占用时也会应答，必须校验结构化指纹：页面 <title>Pidance</title>。
+ * 「包含 Pidance 字样」不算（"Not Pidance" 也会命中）。
  */
 function looksLikePidance(body) {
-  return typeof body === "string" && body.includes(PIDANCE_BRAND);
+  return typeof body === "string" && PIDANCE_TITLE_PATTERN.test(body);
 }
 
 /**
@@ -50,9 +53,50 @@ function resolveNodeBinary({ isPackaged, resourcesPath, execPath, existsSync }) 
   return existsSync(bundled) ? bundled : null;
 }
 
-/** 服务进程参数：显式端口 + 不自动开浏览器；监听地址交给 pidance-server.json。 */
-function buildServerArgs(serverBin, port) {
-  return [serverBin, "--port", String(port), "--no-open"];
+/**
+ * 服务进程参数：显式端口 + 显式回环监听 + 不自动开浏览器。
+ * 桌面壳按 #25 的范围只服务本机（不跟随 pidance-server.json 的远程访问开关）；
+ * 需要远程访问请使用安装版服务。
+ */
+function buildServerArgs(serverBin, port, host) {
+  return [serverBin, "--port", String(port), "--hostname", String(host), "--no-open"];
+}
+
+/** 窗口内只允许受信任 origin；用 URL 解析，避免 "http://127.0.0.1:31415@evil.example" 绕过。 */
+function isTrustedOrigin(target, trustedOrigin) {
+  if (typeof target !== "string" || target.length === 0) return false;
+  try {
+    return new URL(target).origin === trustedOrigin;
+  } catch {
+    return false;
+  }
+}
+
+/** 交给系统浏览器打开只允许 http/https，拒绝 file:/javascript: 及任意系统协议。 */
+function externalUrlFor(target) {
+  if (typeof target !== "string" || target.length === 0) return null;
+  try {
+    const url = new URL(target);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 启动决策：先看端口上是不是可复用的 Pidance，再决定复用 / 报错 / 拉起服务。
+ * 返回状态而不是直接弹框，便于测试与在主进程里映射文案。
+ * @returns {"reused"|"foreign-port"|"port-busy"|"started"|"start-failed"|"not-ready"}
+ */
+async function coordinateStartup({ probe, isPortBusy, startServer, waitReady }) {
+  const verdict = await probe();
+  if (verdict === "pidance") return "reused";
+  if (verdict === "other") return "foreign-port";
+  if (await isPortBusy()) return "port-busy";
+  if (!(await startServer())) return "start-failed";
+  const started = await waitReady();
+  if (started === "pidance") return "started";
+  return started === "other" ? "foreign-port" : "not-ready";
 }
 
 /**
@@ -95,6 +139,9 @@ function checkServerInputs({ serverBin, nodeBin, existsSync }) {
 module.exports = {
   PIDANCE_BRAND,
   buildReadyUrl,
+  isTrustedOrigin,
+  externalUrlFor,
+  coordinateStartup,
   looksLikePidance,
   probeService,
   resolveServerDir,

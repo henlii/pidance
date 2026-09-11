@@ -8,6 +8,9 @@ import lifecycle from "../src/server-lifecycle.js";
 
 const {
   buildReadyUrl,
+  isTrustedOrigin,
+  externalUrlFor,
+  coordinateStartup,
   looksLikePidance,
   probeService,
   resolveServerDir,
@@ -18,12 +21,34 @@ const {
   isPortOpen,
 } = lifecycle;
 
-test("复用判定：只有响应体是 Pidance 才复用", () => {
-  assert.equal(looksLikePidance("<!DOCTYPE html><title>Pidance</title>"), true);
-  assert.equal(looksLikePidance("欢迎使用 Pidance"), true);
+test("复用判定：结构化指纹（<title>Pidance</title>），不是「包含 Pidance 字样」", () => {
+  assert.equal(looksLikePidance("<!DOCTYPE html><head><title>Pidance</title></head>"), true);
+  assert.equal(looksLikePidance("<title>  Pidance </title>"), true);
+  assert.equal(looksLikePidance("<title>PIDANCE</title>"), true);
+  assert.equal(looksLikePidance("<title>Not Pidance</title>"), false, "『Not Pidance』不得被当作 Pidance");
+  assert.equal(looksLikePidance("<p>欢迎使用 Pidance</p>"), false, "正文出现品牌不算身份");
   assert.equal(looksLikePidance("<title>Some other app</title>"), false);
   assert.equal(looksLikePidance(""), false);
   assert.equal(looksLikePidance(undefined), false);
+});
+
+test("导航边界：origin 严格比对，协议白名单", () => {
+  const trusted = "http://127.0.0.1:31415";
+  assert.equal(isTrustedOrigin("http://127.0.0.1:31415/", trusted), true);
+  assert.equal(isTrustedOrigin("http://127.0.0.1:31415/?session=x", trusted), true);
+  assert.equal(isTrustedOrigin("http://127.0.0.1:31415@evil.example/", trusted), false, "userinfo 绕过");
+  assert.equal(isTrustedOrigin("http://127.0.0.1:31415.evil.example/", trusted), false);
+  assert.equal(isTrustedOrigin("http://evil.example/127.0.0.1:31415", trusted), false);
+  assert.equal(isTrustedOrigin("https://127.0.0.1:31415/", trusted), false, "协议不同即不同 origin");
+  assert.equal(isTrustedOrigin("javascript:alert(1)", trusted), false);
+  assert.equal(isTrustedOrigin("not a url", trusted), false);
+
+  assert.equal(externalUrlFor("https://github.com/henlii/pidance"), "https://github.com/henlii/pidance");
+  assert.equal(externalUrlFor("http://example.com/x"), "http://example.com/x");
+  assert.equal(externalUrlFor("file:///etc/passwd"), null);
+  assert.equal(externalUrlFor("javascript:alert(1)"), null);
+  assert.equal(externalUrlFor("ms-settings:"), null);
+  assert.equal(externalUrlFor(""), null);
 });
 
 test("探测：已有 Pidance → 复用；别的程序应答 → other；无人监听 → none", async () => {
@@ -103,13 +128,112 @@ test("Node 运行时解析：打包版缺内置 Node 必须报缺失，开发版
   );
 });
 
-test("服务参数：显式端口 + 不自动开浏览器", () => {
-  assert.deepEqual(buildServerArgs("C:/app/bin/pidance.js", "31415"), [
+test("服务参数：显式端口 + 显式回环监听 + 不自动开浏览器", () => {
+  assert.deepEqual(buildServerArgs("C:/app/bin/pidance.js", "31415", "127.0.0.1"), [
     "C:/app/bin/pidance.js",
     "--port",
     "31415",
+    "--hostname",
+    "127.0.0.1",
     "--no-open",
   ]);
+});
+
+test("启动协调：复用已有 Pidance 时不 spawn", async () => {
+  const calls = [];
+  const outcome = await coordinateStartup({
+    probe: async () => "pidance",
+    isPortBusy: async () => {
+      calls.push("portCheck");
+      return true;
+    },
+    startServer: async () => {
+      calls.push("spawn");
+      return true;
+    },
+    waitReady: async () => {
+      calls.push("wait");
+      return "pidance";
+    },
+  });
+  assert.equal(outcome, "reused");
+  assert.deepEqual(calls, [], "复用路径不得 spawn、也不应再探端口");
+});
+
+test("启动协调：端口被别的程序占用时报错且不 spawn", async () => {
+  const calls = [];
+  const foreign = await coordinateStartup({
+    probe: async () => "other",
+    isPortBusy: async () => true,
+    startServer: async () => {
+      calls.push("spawn");
+      return true;
+    },
+    waitReady: async () => "pidance",
+  });
+  assert.equal(foreign, "foreign-port");
+  assert.deepEqual(calls, []);
+
+  const busy = await coordinateStartup({
+    probe: async () => "none",
+    isPortBusy: async () => true,
+    startServer: async () => {
+      calls.push("spawn");
+      return true;
+    },
+    waitReady: async () => "pidance",
+  });
+  assert.equal(busy, "port-busy");
+  assert.deepEqual(calls, [], "端口被占时不得尝试 spawn");
+});
+
+test("启动协调：首次启动 spawn 并等就绪；spawn 失败或未就绪各有明确结果", async () => {
+  const calls = [];
+  const started = await coordinateStartup({
+    probe: async () => "none",
+    isPortBusy: async () => false,
+    startServer: async () => {
+      calls.push("spawn");
+      return true;
+    },
+    waitReady: async () => {
+      calls.push("wait");
+      return "pidance";
+    },
+  });
+  assert.equal(started, "started");
+  assert.deepEqual(calls, ["spawn", "wait"]);
+
+  assert.equal(
+    await coordinateStartup({
+      probe: async () => "none",
+      isPortBusy: async () => false,
+      startServer: async () => false,
+      waitReady: async () => "pidance",
+    }),
+    "start-failed",
+  );
+
+  assert.equal(
+    await coordinateStartup({
+      probe: async () => "none",
+      isPortBusy: async () => false,
+      startServer: async () => true,
+      waitReady: async () => "none",
+    }),
+    "not-ready",
+  );
+
+  assert.equal(
+    await coordinateStartup({
+      probe: async () => "none",
+      isPortBusy: async () => false,
+      startServer: async () => true,
+      waitReady: async () => "other",
+    }),
+    "foreign-port",
+    "spawn 后发现端口上不是 Pidance 也要按占用处理",
+  );
 });
 
 test("关闭清理：复用外部服务（child=null）绝不停任何进程", () => {

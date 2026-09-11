@@ -241,7 +241,7 @@ function startServer() {
   // 开发模式：nodeBin 就是 Electron 自身，必须以 Node 方式运行子进程，否则会再开一个
   // Electron 应用而不是 pidance 服务。打包版用内置 node.exe，不受影响。
   const runAsNode = !app.isPackaged && nodeBin === process.execPath ? { ELECTRON_RUN_AS_NODE: "1" } : {};
-  child = spawn(nodeBin, lifecycle.buildServerArgs(serverBin, PORT), {
+  child = spawn(nodeBin, lifecycle.buildServerArgs(serverBin, PORT, HOST), {
     cwd: serverDir,
     env: { ...process.env, ...runAsNode, PIDANCE_DIST_DIR: distDir },
     windowsHide: true,
@@ -295,17 +295,23 @@ function createWindow() {
       app.quit();
     }
   });
-  // 导航边界：窗口只加载本机 Pidance；站外链接交给系统浏览器，不在壳内开新窗口。
-  const isLocalUrl = (target) => typeof target === "string" && target.startsWith(`http://${HOST}:${PORT}`);
+  // 导航边界：窗口只加载本机 Pidance 的 origin（URL 解析比对，不用前缀匹配——
+  // "http://127.0.0.1:31415@evil.example" 前缀相同但 origin 不同）。
+  // 站外链接交给系统浏览器，且只放行 http/https。
+  const trustedOrigin = `http://${HOST}:${PORT}`;
+  const openExternally = (target) => {
+    const external = lifecycle.externalUrlFor(target);
+    if (external) void shell.openExternal(external);
+  };
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (isLocalUrl(url)) return { action: "allow" };
-    void shell.openExternal(url);
+    if (lifecycle.isTrustedOrigin(url, trustedOrigin)) return { action: "allow" };
+    openExternally(url);
     return { action: "deny" };
   });
   mainWindow.webContents.on("will-navigate", (event, url) => {
-    if (isLocalUrl(url)) return;
+    if (lifecycle.isTrustedOrigin(url, trustedOrigin)) return;
     event.preventDefault();
-    void shell.openExternal(url);
+    openExternally(url);
   });
   void mainWindow.loadURL(`http://${HOST}:${PORT}`);
   if (START_HIDDEN && desktopSettings.minimizeToTray) mainWindow.hide();
@@ -327,40 +333,41 @@ if (!gotLock) {
     applyLoginItemSettings();
     createTray();
     const readyUrl = lifecycle.buildReadyUrl(HOST, PORT);
-    const verdict = await waitForPidance(readyUrl, 1_500);
-    if (verdict === "pidance") {
-      // 端口上确实是 Pidance（如之前启动的正式版）：复用，不重复 spawn，也不停它。
-      console.log("[pidance] 检测到已运行的 Pidance 服务，直接打开窗口。");
-    } else if (verdict === "other") {
-      // 端口被别的程序占用：既不能复用也不能杀，明确报错退出。
-      dialog.showErrorBox(
-        "Pidance 启动失败",
-        `端口 ${PORT} 已被其他程序占用（响应不是 Pidance）。\n\n请先关闭占用该端口的程序，或改用其他端口。`,
-      );
-      app.quit();
-      return;
-    } else {
-      const portBusy = await lifecycle.isPortOpen({ host: HOST, port: Number(PORT), connect: net.connect });
-      if (portBusy) {
+    const outcome = await lifecycle.coordinateStartup({
+      probe: () => waitForPidance(readyUrl, 1_500),
+      isPortBusy: () => lifecycle.isPortOpen({ host: HOST, port: Number(PORT), connect: net.connect }),
+      startServer,
+      waitReady: () => waitForPidance(readyUrl, START_TIMEOUT_MS),
+    });
+    switch (outcome) {
+      case "reused":
+        // 端口上确实是 Pidance（如之前启动的正式版）：复用，不重复 spawn，也不停它。
+        console.log("[pidance] 检测到已运行的 Pidance 服务，直接打开窗口。");
+        break;
+      case "foreign-port":
+        dialog.showErrorBox(
+          "Pidance 启动失败",
+          `端口 ${PORT} 上运行的不是 Pidance 服务。\n\n请先关闭占用该端口的程序，或改用其他端口。`,
+        );
+        app.quit();
+        return;
+      case "port-busy":
         dialog.showErrorBox(
           "Pidance 启动失败",
           `端口 ${PORT} 已被占用且未响应 HTTP。\n\n请先关闭占用该端口的程序，或改用其他端口。`,
         );
         app.quit();
         return;
-      }
-      if (!startServer()) return;
-      const started = await waitForPidance(readyUrl, START_TIMEOUT_MS);
-      if (started !== "pidance") {
-        const message = started === "other"
-          ? `端口 ${PORT} 上运行的不是 Pidance 服务。`
-          : `服务在 ${START_TIMEOUT_MS}ms 内未就绪：${readyUrl}`;
-        console.error("[pidance]", message);
+      case "start-failed":
+        return;
+      case "not-ready":
+        console.error("[pidance]", `服务在 ${START_TIMEOUT_MS}ms 内未就绪：${readyUrl}`);
         if (mainWindow) mainWindow.close();
-        dialog.showErrorBox("Pidance 启动失败", message);
+        dialog.showErrorBox("Pidance 启动失败", `服务在 ${START_TIMEOUT_MS}ms 内未就绪：${readyUrl}`);
         app.quit();
         return;
-      }
+      default:
+        break;
     }
     createWindow();
   });

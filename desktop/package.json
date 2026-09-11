@@ -12,9 +12,10 @@
     "test": "node --test test/*.test.mjs",
     "dev": "electron .",
     "fetch-node": "node scripts/fetch-node-win.mjs",
+    "prebuild:win:zip": "npm run fetch-node",
     "prebuild:win:installer": "npm run fetch-node",
-    "build:win:installer": "electron-builder --win nsis --x64 --publish never",
-    "build:win:zip": "electron-builder --win zip --x64"
+    "build:win:zip": "electron-builder --win zip --x64 --publish never",
+    "build:win:installer": "electron-builder --win nsis --x64 --publish never"
   },
   "dependencies": {
     "@henlii/pidance": "0.2.26"
