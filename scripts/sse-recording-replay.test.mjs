@@ -289,7 +289,8 @@ async function replayAt(width, height) {
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 500));
     snapshot = await evalResult(chatSnapshotScript());
-    if (snapshot?.probe?.finalSeen !== null && snapshot?.probe?.finalSeen !== undefined) break;
+    // 等到「投递完毕」且「最终正文可见」：done 在最后一个事件后一拍才置位。
+    if (snapshot?.probe?.done === true && snapshot?.probe?.finalSeen !== null && snapshot?.probe?.finalSeen !== undefined) break;
   }
   assert.ok(snapshot, `视口 ${width}×${height}：无法读取聊天区快照`);
   if (snapshot.messageCount < 0) {

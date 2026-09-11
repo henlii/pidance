@@ -61,7 +61,7 @@ const events = [];
 let startedAt = null;
 let queued = false;
 let finished = false;
-let assistantEnds = 0;
+let boundaryEnds = 0;
 
 function snapshotText(message, blockType) {
   const blocks = Array.isArray(message?.content) ? message.content : [];
@@ -113,13 +113,11 @@ function record(event, atMs) {
   }
   if (event.type === "message_end") {
     events.push({ atMs, type: "message_end", message: event.message ?? {} });
-    if ((event.message ?? {}).role === "assistant") assistantEnds += 1;
     current = null;
     return;
   }
-  // 运行边界（agent_end / agent_settled / prompt_done）会让应用按磁盘权威重载
-  // timeline，属于服务端回放范围：fixture 不收录，回放也就不会中途结束。
-  if (event.type === "agent_end" || event.type === "agent_settled" || event.type === "prompt_done") return;
+  // 运行边界事件（agent_end / agent_settled / prompt_done）也照录：回放要跑完
+  // 应用的真实收尾路径（finish → loadSession → hydrate），而不是绕开它。
   events.push({ atMs, ...event });
 }
 
@@ -168,7 +166,10 @@ try {
           items: [QUEUED_PROMPT],
         });
       }
-      if (assistantEnds >= 2) finished = true;
+      // 第二轮 agent_end 后再收一拍（等 agent_settled/prompt_done 落进 fixture）：
+      // host 随后 dispose 会关闭 SSE，录制自然结束。
+      if (event.type === "agent_end") boundaryEnds += 1;
+      if (boundaryEnds >= 2) finished = true;
     }
   }
   await reader.cancel().catch(() => {});
@@ -184,9 +185,8 @@ const fixture = {
   version: 1,
   note:
     "真实 run 捕获（#26 D1）。协议里 message_update 是完整 message 快照，这里只存增量文本"
-    + "（thinking/text），回放脚本按快照语义重建。运行边界事件（agent_end/agent_settled/"
-    + "prompt_done）不收录：它们会让应用按磁盘权威重载 timeline，属于服务端回放范围。"
-    + "录制终点是第二轮 assistant message_end。",
+    + "（thinking/text），回放脚本按快照语义重建。包含运行边界事件（agent_end/"
+    + "agent_settled/prompt_done）：回放会跑完应用的真实收尾路径。",
   capturedFrom: "pidance 31416 / scripts/record-sse-fixture.mjs",
   events,
 };

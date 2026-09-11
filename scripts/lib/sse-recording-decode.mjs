@@ -99,7 +99,7 @@ export function decodeRecording(fixture) {
         .filter((block) => block.type === "text")
         .map((block) => block.text ?? "")
         .join("");
-      messageEnds.push({ role: message.role, atMs: item.atMs, text });
+      messageEnds.push({ role: message.role, atMs: item.atMs, text, message });
       if (message.role === "assistant") assistantTexts.push(text);
       current = null;
       endIndex += 1;
