@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { clampSchedule, decodeRecording } from "./lib/sse-recording-decode.mjs";
 
 const exec = promisify(execFile);
 const URL_BASE = process.env.PIDANCE_TEST_URL ?? "http://127.0.0.1:31416";
@@ -66,49 +67,16 @@ async function ensureAuthed() {
   await new Promise((r) => setTimeout(r, 2500));
 }
 
-/** 把 fixture 还原成回放事件序列（message_update 重建完整快照）。 */
-function buildReplayEvents() {
-  const out = [];
-  let elapsed = 0;
-  let previousAt = 0;
-  let message = null;
-  for (const item of fixture.events) {
-    const gap = Math.min(item.atMs - previousAt, MAX_GAP_MS);
-    previousAt = item.atMs;
-    elapsed += Math.max(gap, 0);
-    if (item.type === "message_start") {
-      const blocks = (item.message.content ?? []).map((block) => ({ ...block }));
-      message = { base: { ...item.message, content: undefined }, blocks };
-      out.push({ atMs: elapsed, event: { type: "message_start", message: item.message } });
-      continue;
-    }
-    if (item.type === "message_update") {
-      if (!message) continue;
-      const block = [...message.blocks].reverse().find((b) => b.type === (item.delta.thinking ? "thinking" : "text"));
-      if (!block) continue;
-      if (item.delta.thinking) block.thinking = `${block.thinking ?? ""}${item.delta.thinking}`;
-      if (item.delta.text) block.text = `${block.text ?? ""}${item.delta.text}`;
-      out.push({
-        atMs: elapsed,
-        kind: item.delta.text ? "text" : "thinking",
-        event: { type: "message_update", message: { ...message.base, content: message.blocks.map((b) => ({ ...b })) } },
-      });
-      continue;
-    }
-    if (item.type === "message_end") {
-      message = null;
-      out.push({ atMs: elapsed, event: { type: "message_end", message: item.message } });
-      continue;
-    }
-    out.push({ atMs: elapsed, event: { ...item, atMs: undefined } });
-  }
-  return out;
-}
-
-const REPLAY_EVENTS = buildReplayEvents();
-const assistantTexts = fixture.events
-  .filter((e) => e.type === "message_end" && e.message?.role === "assistant")
-  .map((e) => (e.message.content ?? []).filter((b) => b.type === "text").map((b) => b.text).join(""));
+// 录制解码（无损重建，单测见 scripts/lib/sse-recording-decode.test.mjs）：
+// 间隔压到 ≤250ms（两端一致），避免模型等待时间拖长验收。
+const DECODED = decodeRecording(fixture);
+const REPLAY_EVENTS = clampSchedule(DECODED.events, MAX_GAP_MS).map((item) => (
+  item.event.type === "message_end"
+    ? { ...item, kind: `message_end:${item.event.message?.role ?? "unknown"}` }
+    : item
+));
+const assistantTexts = DECODED.assistantTexts;
+const EXPECTED_UPDATES = DECODED.updateCount;
 /**
  * 从渲染后的可见文本里挑标记：markdown 渲染会吃掉 `##`/`**` 等记号，标题行在 DOM
  * 里只剩正文，所以只取「纯散文行」的一段，避免与 markdown 语法错位。
@@ -123,9 +91,27 @@ function pickMarker(text, fromEnd) {
   return fromEnd ? line.slice(-24) : line.slice(0, 24);
 }
 
-// 只度量最终 delta 的可见时间（#26 A3）：首个 delta 的「可见」会被思考块提前命中，
-// 不是一个可靠的客户端延迟指标。
+// 最终 delta 的可见时间（#26 A3）用正文尾部标记。
 const FINAL_MARKER = pickMarker(assistantTexts.at(-1) ?? "", true);
+
+/** 取正文中段的一段散文（避开思考块常出现的开头草稿），用于「流式可见早于边界」断言。 */
+function pickMiddleMarker(text) {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length >= 40 && !/^[#>*\-|`]/.test(line) && !/[`*_\[\]()]/.test(line));
+  if (lines.length === 0) return "";
+  const line = lines[Math.floor(lines.length / 2)];
+  const start = Math.floor((line.length - 24) / 2);
+  return line.slice(start, start + 24);
+}
+
+const STREAM_MARKER = pickMiddleMarker(assistantTexts[0] ?? "");
+const FIRST_USER_TEXT = (DECODED.messageEnds.find((item) => item.role === "user") ?? {}).text ?? "";
+const FLUSHED_USER_TEXT = (() => {
+  const users = DECODED.messageEnds.filter((item) => item.role === "user");
+  return users.length > 1 ? users[1].text : "";
+})();
 
 /** 生成注入脚本：只替换本测试会话的 EventSource，并记录可见时间。 */
 function buildInitScript(sessionId) {
@@ -133,15 +119,18 @@ function buildInitScript(sessionId) {
   const SESSION_ID = ${JSON.stringify(sessionId)};
   const SCHEDULE = ${JSON.stringify(REPLAY_EVENTS)};
   const FINAL_MARKER = ${JSON.stringify(FINAL_MARKER)};
-  const probe = { dispatched: [], finalSeen: null, done: false, errors: [] };
+  const STREAM_MARKER = ${JSON.stringify(STREAM_MARKER)};
+  const probe = { dispatched: [], streamSeen: null, finalSeen: null, done: false, errors: [] };
   window.__sseReplay = probe;
 
   // 标记比较前去掉所有空白：innerText 与协议文本的换行/缩进不一定逐字相同。
   const normalize = (value) => value.replace(/\s+/g, "");
   const FINAL = normalize(FINAL_MARKER);
+  const STREAM = normalize(STREAM_MARKER);
   const chatText = () => normalize(document.querySelector('[data-pidance-chat="true"]')?.innerText ?? "");
   const tick = () => {
     const text = chatText();
+    if (probe.streamSeen === null && STREAM && text.includes(STREAM)) probe.streamSeen = performance.now();
     if (probe.finalSeen === null && FINAL && text.includes(FINAL)) probe.finalSeen = performance.now();
     if (probe.finalSeen === null && !probe.stopped) requestAnimationFrame(tick);
   };
@@ -201,6 +190,10 @@ function chatSnapshotScript() {
           // 其后的 message_end 只是边界事件。
           lastDeltaAt: updates.at(-1)?.at ?? null,
           updateCount: updates.length,
+          streamSeen: window.__sseReplay?.streamSeen ?? null,
+          messageEnds: dispatched
+            .filter((item) => typeof item.kind === 'string' && item.kind.startsWith('message_end:'))
+            .map((item) => ({ role: item.kind.slice('message_end:'.length), at: item.at })),
           errors: window.__sseReplay?.errors ?? [],
         };
       })(),
@@ -254,7 +247,7 @@ before(async () => {
 });
 
 after(async () => {
-  await ab(["close", "--all"], { json: false }).catch(() => {});
+  await ab(["close", "--session", SESSION], { json: false }).catch(() => {});
   if (sessionId) {
     await fetch(`${URL_BASE}/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE", headers: AUTH_HEADER }).catch(() => {});
   }
@@ -266,7 +259,7 @@ async function replayAt(width, height) {
   // 顺序敏感：--init-script 只在浏览器启动时注册，所以先关掉旧浏览器（否则复用
   // 已运行的实例、注入脚本不生效），再带脚本启动 → 注入 UI 会话 cookie → 导航到
   // 会话 URL。页面首次加载即「已认证 + 已挂载注入脚本」。
-  await ab(["close", "--all"], { json: false }).catch(() => {});
+  await ab(["close", "--session", SESSION], { json: false }).catch(() => {});
   await new Promise((r) => setTimeout(r, 500));
   try {
     await ab(["open", "--init-script", initScriptPath, "--session", SESSION], { json: false });
@@ -318,23 +311,43 @@ async function replayAt(width, height) {
   };
 }
 
-test("固定 recording 在桌面与 390px 回放出同一 timeline，且移动端额外延迟 ≤250ms", { timeout: 240_000 }, async (t) => {
-  let desktop;
-  let mobile;
-  try {
-    desktop = await replayAt(1280, 720);
-    mobile = await replayAt(390, 844);
-  } catch (error) {
-    if (String(error?.message ?? error).includes("未挂载")) {
-      t.skip(`聊天区未挂载（导航恢复竞态），跳过回放验收: ${error.message}`);
-      return;
-    }
-    throw error;
-  }
+test("固定 recording 在桌面与 390px 回放出同一 timeline，且移动端额外延迟 ≤250ms", { timeout: 240_000 }, async () => {
+  // 挂载失败是硬失败：本脚本用独立浏览器会话 + 显式注入 UI 会话 cookie，
+  // 导航/挂载必须确定性成功，不允许把「没跑起来」记成验收通过。
+  const desktop = await replayAt(1280, 720);
+  const mobile = await replayAt(390, 844);
 
   console.log(
     `[sse-replay] desktop ${JSON.stringify(desktop.probe)} mobile ${JSON.stringify(mobile.probe)}`,
   );
+
+  // D1/D2 前提：录制里的每条 delta 都必须真的投递过（此前 text 块首批 delta 被静默丢弃，
+  // 两端同样丢数据也会「彼此相等」而通过）。
+  assert.equal(desktop.probe.updateCount, EXPECTED_UPDATES, "桌面端投递的 delta 数与录制不一致");
+  assert.equal(mobile.probe.updateCount, EXPECTED_UPDATES, "移动端投递的 delta 数与录制不一致");
+
+  // 流式可见必须早于该消息的 message_end 边界（整块在边界才出现＝回放丢帧）。
+  const desktopAssistantEnds = desktop.probe.messageEnds.filter((item) => item.role === "assistant");
+  assert.ok(desktopAssistantEnds.length >= 2, "录制应包含两轮 assistant 边界");
+  assert.ok(
+    desktop.probe.streamSeen !== null,
+    `第一轮正文在回放结束前不可见（marker=${JSON.stringify(STREAM_MARKER)}）`,
+  );
+  assert.ok(
+    desktop.probe.streamSeen < desktopAssistantEnds[0].at,
+    `第一轮正文在该轮 message_end 之后才可见（seen=${desktop.probe.streamSeen} end=${desktopAssistantEnds[0].at}）`,
+  );
+  assert.ok(
+    desktop.probe.finalSeen < desktopAssistantEnds.at(-1).at,
+    `最终正文在最后一轮 message_end 之后才可见（seen=${desktop.probe.finalSeen} end=${desktopAssistantEnds.at(-1).at}）`,
+  );
+
+  // 队列投递（follow_up_flushed）后的第二轮用户消息必须渲染出来。
+  assert.ok(
+    desktop.text.includes(FLUSHED_USER_TEXT.slice(0, 12)),
+    "队列投递后的用户消息未出现在 timeline",
+  );
+  assert.ok(desktop.text.includes(FIRST_USER_TEXT.slice(0, 12)), "第一轮用户消息未出现在 timeline");
   // D2：同一 recording → 最终 timeline 投影一致。
   assert.equal(mobile.messageCount, desktop.messageCount, "移动视口改变了 message 数量");
   assert.equal(mobile.entryCount, desktop.entryCount, "移动视口改变了 entryId 数量");

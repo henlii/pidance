@@ -47,7 +47,7 @@
     "start": "node bin/pidance.js",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "node --test lib/*.test.mjs components/*.test.mjs hooks/*.test.mjs bin/*.test.mjs",
+    "test": "node --test lib/*.test.mjs components/*.test.mjs hooks/*.test.mjs bin/*.test.mjs scripts/lib/*.test.mjs",
     "verify:render-bridge": "node scripts/verify-subagent-render-bridge.mjs",
     "verify:render-bridge:installed": "node scripts/verify-installed-render-bridge.mjs",
     "test:browser": "node --test scripts/browser-regression.test.mjs",

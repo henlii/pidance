@@ -58,7 +58,7 @@ before(async () => {
 });
 
 after(async () => {
-  await ab(["close", "--all"], { json: false }).catch(() => {});
+  await ab(["close", "--session", SESSION], { json: false }).catch(() => {});
 });
 
 test("顶栏上下文读数在 run 结束前就已更新", { timeout: 150_000 }, async (t) => {
@@ -127,10 +127,7 @@ test("顶栏上下文读数在 run 结束前就已更新", { timeout: 150_000 },
         await evalResult(`(() => { const row = document.querySelector('[data-session-id="${createdId}"]'); if (row) row.click(); return true; })()`);
       }
     }
-    if (!mounted) {
-      t.skip("测试会话聊天区未挂载（导航恢复竞态），跳过实时上下文验收");
-      return;
-    }
+    assert.ok(mounted, "测试会话聊天区未挂载（导航/恢复失败，不是验收通过）");
 
     const samples = [];
     let seenStreaming = false;
