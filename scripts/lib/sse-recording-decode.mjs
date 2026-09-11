@@ -50,9 +50,8 @@ export function decodeRecording(fixture) {
   const messageEnds = [];
 
   // 预扫：每条消息的 message_start / message_end 配对（按顺序）。
-  const starts = raw.filter((item) => item.type === "message_start");
   const ends = raw.filter((item) => item.type === "message_end");
-  let startIndex = 0;
+  let startCount = 0;
   let endIndex = 0;
 
   let current = null;
@@ -64,7 +63,7 @@ export function decodeRecording(fixture) {
         blocks: initialBlocks(item.message, endMessage),
         endAtMs: ends[endIndex]?.atMs ?? null,
       };
-      startIndex += 1;
+      startCount += 1;
       events.push({ atMs: item.atMs, event: { type: "message_start", message: item.message } });
       continue;
     }
@@ -110,8 +109,8 @@ export function decodeRecording(fixture) {
     events.push({ atMs: item.atMs, event: { ...item, atMs: undefined } });
   }
 
-  if (startIndex !== ends.length) {
-    throw new Error(`录制消息不配对：message_start ${startIndex} 条 / message_end ${ends.length} 条`);
+  if (startCount !== ends.length) {
+    throw new Error(`录制消息不配对：message_start ${startCount} 条 / message_end ${ends.length} 条`);
   }
 
   return {
