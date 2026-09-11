@@ -544,10 +544,12 @@ const chatPlan = composeChatPlan({
   }
 
   return (
+    // data-chat-entry-ids：回放验收用（#26 D2），跨视口比对 entryId 投影与顺序。
     <div
       data-pidance-chat="true"
       data-chat-message-count={messages.length}
       data-chat-entry-count={entryIds.length}
+      data-chat-entry-ids={entryIds.join(",")}
       className="relative flex h-full min-h-0 flex-col overflow-hidden"
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
@@ -647,6 +649,7 @@ const chatPlan = composeChatPlan({
         </div>
         <div
           ref={scrollContainerRef}
+          data-chat-scroller="true"
           className="min-h-0 flex-1 overflow-y-auto pt-4 [scrollbar-width:none]"
           // overflow-anchor:none：钉底由自动跟随显式负责，浏览器不再自行锚定；
           // 内嵌消息块滚到边界后允许滚轮/触屏继续传给会话容器。

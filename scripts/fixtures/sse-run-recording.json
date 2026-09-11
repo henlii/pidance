@@ -1,0 +1,2938 @@
+{
+  "version": 1,
+  "note": "真实 run 捕获（#26 D1）。协议里 message_update 是完整 message 快照，这里只存增量文本（thinking/text），回放脚本按快照语义重建。运行边界事件（agent_end/agent_settled/prompt_done）不收录：它们会让应用按磁盘权威重载 timeline，属于服务端回放范围。录制终点是第二轮 assistant message_end。",
+  "capturedFrom": "pidance 31416 / scripts/record-sse-fixture.mjs",
+  "events": [
+    {
+      "atMs": 0,
+      "type": "agent_start"
+    },
+    {
+      "atMs": 1,
+      "type": "message_start",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "不要使用任何工具。请用大约 600 字的中文说明「流式渲染的帧调度」，分段输出，只输出正文。"
+          }
+        ],
+        "timestamp": 1789126196366
+      }
+    },
+    {
+      "atMs": 1,
+      "type": "message_end",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "不要使用任何工具。请用大约 600 字的中文说明「流式渲染的帧调度」，分段输出，只输出正文。"
+          }
+        ],
+        "timestamp": 1789126196366
+      }
+    },
+    {
+      "atMs": 11489,
+      "type": "message_start",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The",
+            "thinkingSignature": "reasoning"
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "cpa",
+        "model": "deepseek-v4.1-flash",
+        "usage": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 0,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "pending",
+        "timestamp": 1789126196371,
+        "responseId": "chatcmpl-915"
+      }
+    },
+    {
+      "atMs": 11526,
+      "type": "message_update",
+      "delta": {
+        "thinking": " user wants ~600 Chinese characters on \"流式渲染的帧调度\" (frame scheduling for streaming rendering), segmented, body only, no tools. Let me write a solid technical explanation.\n\nLet me think about content"
+      }
+    },
+    {
+      "atMs": 11526,
+      "type": "message_update",
+      "delta": {
+        "thinking": ": streaming rendering frame"
+      }
+    },
+    {
+      "atMs": 11528,
+      "type": "message_update",
+      "delta": {
+        "thinking": " scheduling — buff"
+      }
+    },
+    {
+      "atMs": 11539,
+      "type": "message_update",
+      "delta": {
+        "thinking": "ering tokens"
+      }
+    },
+    {
+      "atMs": 11552,
+      "type": "message_update",
+      "delta": {
+        "thinking": ", coalescing updates"
+      }
+    },
+    {
+      "atMs": 11568,
+      "type": "message_update",
+      "delta": {
+        "thinking": ","
+      }
+    },
+    {
+      "atMs": 11579,
+      "type": "message_update",
+      "delta": {
+        "thinking": " rAF,"
+      }
+    },
+    {
+      "atMs": 11595,
+      "type": "message_update",
+      "delta": {
+        "thinking": " back"
+      }
+    },
+    {
+      "atMs": 11608,
+      "type": "message_update",
+      "delta": {
+        "thinking": "pressure, b"
+      }
+    },
+    {
+      "atMs": 11621,
+      "type": "message_update",
+      "delta": {
+        "thinking": "atching, incremental layout"
+      }
+    },
+    {
+      "atMs": 11637,
+      "type": "message_update",
+      "delta": {
+        "thinking": ", virtualization"
+      }
+    },
+    {
+      "atMs": 11647,
+      "type": "message_update",
+      "delta": {
+        "thinking": ", priority"
+      }
+    },
+    {
+      "atMs": 11665,
+      "type": "message_update",
+      "delta": {
+        "thinking": ","
+      }
+    },
+    {
+      "atMs": 11679,
+      "type": "message_update",
+      "delta": {
+        "thinking": " idle"
+      }
+    },
+    {
+      "atMs": 11692,
+      "type": "message_update",
+      "delta": {
+        "thinking": " time"
+      }
+    },
+    {
+      "atMs": 11701,
+      "type": "message_update",
+      "delta": {
+        "thinking": ", frame"
+      }
+    },
+    {
+      "atMs": 11724,
+      "type": "message_update",
+      "delta": {
+        "thinking": " budget"
+      }
+    },
+    {
+      "atMs": 11750,
+      "type": "message_update",
+      "delta": {
+        "thinking": " 16."
+      }
+    },
+    {
+      "atMs": 11760,
+      "type": "message_update",
+      "delta": {
+        "thinking": "7ms/"
+      }
+    },
+    {
+      "atMs": 11780,
+      "type": "message_update",
+      "delta": {
+        "thinking": "8"
+      }
+    },
+    {
+      "atMs": 11798,
+      "type": "message_update",
+      "delta": {
+        "thinking": ".3"
+      }
+    },
+    {
+      "atMs": 11809,
+      "type": "message_update",
+      "delta": {
+        "thinking": "ms,"
+      }
+    },
+    {
+      "atMs": 11831,
+      "type": "message_update",
+      "delta": {
+        "thinking": " React"
+      }
+    },
+    {
+      "atMs": 11836,
+      "type": "message_update",
+      "delta": {
+        "thinking": " concurrent"
+      }
+    },
+    {
+      "atMs": 11853,
+      "type": "message_update",
+      "delta": {
+        "thinking": ","
+      }
+    },
+    {
+      "atMs": 11861,
+      "type": "message_update",
+      "delta": {
+        "thinking": " marking"
+      }
+    },
+    {
+      "atMs": 11875,
+      "type": "message_update",
+      "delta": {
+        "thinking": " dirty, avoiding"
+      }
+    },
+    {
+      "atMs": 11891,
+      "type": "message_update",
+      "delta": {
+        "thinking": " layout thr"
+      }
+    },
+    {
+      "atMs": 11903,
+      "type": "message_update",
+      "delta": {
+        "thinking": "ash, delta"
+      }
+    },
+    {
+      "atMs": 11918,
+      "type": "message_update",
+      "delta": {
+        "thinking": " vs"
+      }
+    },
+    {
+      "atMs": 11932,
+      "type": "message_update",
+      "delta": {
+        "thinking": " full re"
+      }
+    },
+    {
+      "atMs": 11940,
+      "type": "message_update",
+      "delta": {
+        "thinking": "-render, markdown incremental"
+      }
+    },
+    {
+      "atMs": 11955,
+      "type": "message_update",
+      "delta": {
+        "thinking": " parsing, auto"
+      }
+    },
+    {
+      "atMs": 11965,
+      "type": "message_update",
+      "delta": {
+        "thinking": "-scroll anchoring"
+      }
+    },
+    {
+      "atMs": 11978,
+      "type": "message_update",
+      "delta": {
+        "thinking": ", throttling, j"
+      }
+    },
+    {
+      "atMs": 11996,
+      "type": "message_update",
+      "delta": {
+        "thinking": "itter.\n\nWrite ~"
+      }
+    },
+    {
+      "atMs": 12005,
+      "type": "message_update",
+      "delta": {
+        "thinking": "600 characters"
+      }
+    },
+    {
+      "atMs": 12021,
+      "type": "message_update",
+      "delta": {
+        "thinking": " in"
+      }
+    },
+    {
+      "atMs": 12031,
+      "type": "message_update",
+      "delta": {
+        "thinking": " Chinese, with"
+      }
+    },
+    {
+      "atMs": 12044,
+      "type": "message_update",
+      "delta": {
+        "thinking": " paragraphs. Only body"
+      }
+    },
+    {
+      "atMs": 12058,
+      "type": "message_update",
+      "delta": {
+        "thinking": "text."
+      }
+    },
+    {
+      "atMs": 12072,
+      "type": "message_update",
+      "delta": {
+        "text": "## 一、"
+      }
+    },
+    {
+      "atMs": 12086,
+      "type": "message_update",
+      "delta": {
+        "text": "问题的来源"
+      }
+    },
+    {
+      "atMs": 12097,
+      "type": "message_update",
+      "delta": {
+        "text": "\n\n流式渲染"
+      }
+    },
+    {
+      "atMs": 12113,
+      "type": "message_update",
+      "delta": {
+        "text": "指"
+      }
+    },
+    {
+      "atMs": 12123,
+      "type": "message_update",
+      "delta": {
+        "text": "数据"
+      }
+    },
+    {
+      "atMs": 12140,
+      "type": "message_update",
+      "delta": {
+        "text": "尚未"
+      }
+    },
+    {
+      "atMs": 12151,
+      "type": "message_update",
+      "delta": {
+        "text": "完整"
+      }
+    },
+    {
+      "atMs": 12162,
+      "type": "message_update",
+      "delta": {
+        "text": "到达时"
+      }
+    },
+    {
+      "atMs": 12176,
+      "type": "message_update",
+      "delta": {
+        "text": "就开始呈现"
+      }
+    },
+    {
+      "atMs": 12188,
+      "type": "message_update",
+      "delta": {
+        "text": "，典型"
+      }
+    },
+    {
+      "atMs": 12201,
+      "type": "message_update",
+      "delta": {
+        "text": "场景是大"
+      }
+    },
+    {
+      "atMs": 12216,
+      "type": "message_update",
+      "delta": {
+        "text": "模型逐"
+      }
+    },
+    {
+      "atMs": 12230,
+      "type": "message_update",
+      "delta": {
+        "text": " token 输出"
+      }
+    },
+    {
+      "atMs": 12242,
+      "type": "message_update",
+      "delta": {
+        "text": "、SS"
+      }
+    },
+    {
+      "atMs": 12267,
+      "type": "message_update",
+      "delta": {
+        "text": "E 日志"
+      }
+    },
+    {
+      "atMs": 12275,
+      "type": "message_update",
+      "delta": {
+        "text": "、长列表"
+      }
+    },
+    {
+      "atMs": 12302,
+      "type": "message_update",
+      "delta": {
+        "text": "增量"
+      }
+    },
+    {
+      "atMs": 12311,
+      "type": "message_update",
+      "delta": {
+        "text": "加载"
+      }
+    },
+    {
+      "atMs": 12323,
+      "type": "message_update",
+      "delta": {
+        "text": "。此时"
+      }
+    },
+    {
+      "atMs": 12340,
+      "type": "message_update",
+      "delta": {
+        "text": "渲染"
+      }
+    },
+    {
+      "atMs": 12361,
+      "type": "message_update",
+      "delta": {
+        "text": "速度与数据"
+      }
+    },
+    {
+      "atMs": 12372,
+      "type": "message_update",
+      "delta": {
+        "text": "到达速度"
+      }
+    },
+    {
+      "atMs": 12382,
+      "type": "message_update",
+      "delta": {
+        "text": "解耦：数据"
+      }
+    },
+    {
+      "atMs": 12401,
+      "type": "message_update",
+      "delta": {
+        "text": "可能每"
+      }
+    },
+    {
+      "atMs": 12419,
+      "type": "message_update",
+      "delta": {
+        "text": "几"
+      }
+    },
+    {
+      "atMs": 12432,
+      "type": "message_update",
+      "delta": {
+        "text": "毫秒来一小"
+      }
+    },
+    {
+      "atMs": 12442,
+      "type": "message_update",
+      "delta": {
+        "text": "片"
+      }
+    },
+    {
+      "atMs": 12455,
+      "type": "message_update",
+      "delta": {
+        "text": "，也可能"
+      }
+    },
+    {
+      "atMs": 12467,
+      "type": "message_update",
+      "delta": {
+        "text": "突发"
+      }
+    },
+    {
+      "atMs": 12484,
+      "type": "message_update",
+      "delta": {
+        "text": "涌入"
+      }
+    },
+    {
+      "atMs": 12499,
+      "type": "message_update",
+      "delta": {
+        "text": "几千"
+      }
+    },
+    {
+      "atMs": 12512,
+      "type": "message_update",
+      "delta": {
+        "text": "条"
+      }
+    },
+    {
+      "atMs": 12538,
+      "type": "message_update",
+      "delta": {
+        "text": "。若不"
+      }
+    },
+    {
+      "atMs": 12546,
+      "type": "message_update",
+      "delta": {
+        "text": "调度"
+      }
+    },
+    {
+      "atMs": 12559,
+      "type": "message_update",
+      "delta": {
+        "text": "，直接"
+      }
+    },
+    {
+      "atMs": 12570,
+      "type": "message_update",
+      "delta": {
+        "text": "「"
+      }
+    },
+    {
+      "atMs": 12584,
+      "type": "message_update",
+      "delta": {
+        "text": "来"
+      }
+    },
+    {
+      "atMs": 12604,
+      "type": "message_update",
+      "delta": {
+        "text": "一片"
+      }
+    },
+    {
+      "atMs": 12613,
+      "type": "message_update",
+      "delta": {
+        "text": "、"
+      }
+    },
+    {
+      "atMs": 12627,
+      "type": "message_update",
+      "delta": {
+        "text": "渲染"
+      }
+    },
+    {
+      "atMs": 12639,
+      "type": "message_update",
+      "delta": {
+        "text": "一次」，"
+      }
+    },
+    {
+      "atMs": 12657,
+      "type": "message_update",
+      "delta": {
+        "text": "浏览器"
+      }
+    },
+    {
+      "atMs": 12668,
+      "type": "message_update",
+      "delta": {
+        "text": "会被"
+      }
+    },
+    {
+      "atMs": 12685,
+      "type": "message_update",
+      "delta": {
+        "text": "迫在同一"
+      }
+    },
+    {
+      "atMs": 12696,
+      "type": "message_update",
+      "delta": {
+        "text": "帧内反复"
+      }
+    },
+    {
+      "atMs": 12708,
+      "type": "message_update",
+      "delta": {
+        "text": "重排，"
+      }
+    },
+    {
+      "atMs": 12721,
+      "type": "message_update",
+      "delta": {
+        "text": "主"
+      }
+    },
+    {
+      "atMs": 12735,
+      "type": "message_update",
+      "delta": {
+        "text": "线程被切"
+      }
+    },
+    {
+      "atMs": 12748,
+      "type": "message_update",
+      "delta": {
+        "text": "碎，用户看到"
+      }
+    },
+    {
+      "atMs": 12762,
+      "type": "message_update",
+      "delta": {
+        "text": "的是抖动"
+      }
+    },
+    {
+      "atMs": 12778,
+      "type": "message_update",
+      "delta": {
+        "text": "、"
+      }
+    },
+    {
+      "atMs": 12789,
+      "type": "message_update",
+      "delta": {
+        "text": "卡"
+      }
+    },
+    {
+      "atMs": 12807,
+      "type": "message_update",
+      "delta": {
+        "text": "顿与滚动"
+      }
+    },
+    {
+      "atMs": 12818,
+      "type": "message_update",
+      "delta": {
+        "text": "跳动"
+      }
+    },
+    {
+      "atMs": 12832,
+      "type": "message_update",
+      "delta": {
+        "text": "。"
+      }
+    },
+    {
+      "atMs": 12848,
+      "type": "message_update",
+      "delta": {
+        "text": "帧调"
+      }
+    },
+    {
+      "atMs": 12862,
+      "type": "message_update",
+      "delta": {
+        "text": "度的目标"
+      }
+    },
+    {
+      "atMs": 12875,
+      "type": "message_update",
+      "delta": {
+        "text": "就是"
+      }
+    },
+    {
+      "atMs": 12886,
+      "type": "message_update",
+      "delta": {
+        "text": "把这些"
+      }
+    },
+    {
+      "atMs": 12898,
+      "type": "message_update",
+      "delta": {
+        "text": "零"
+      }
+    },
+    {
+      "atMs": 12918,
+      "type": "message_update",
+      "delta": {
+        "text": "散更新"
+      }
+    },
+    {
+      "atMs": 12929,
+      "type": "message_update",
+      "delta": {
+        "text": "合并"
+      }
+    },
+    {
+      "atMs": 12944,
+      "type": "message_update",
+      "delta": {
+        "text": "到有限的"
+      }
+    },
+    {
+      "atMs": 12957,
+      "type": "message_update",
+      "delta": {
+        "text": "帧"
+      }
+    },
+    {
+      "atMs": 12967,
+      "type": "message_update",
+      "delta": {
+        "text": "预算内，用"
+      }
+    },
+    {
+      "atMs": 12983,
+      "type": "message_update",
+      "delta": {
+        "text": "最少的绘制"
+      }
+    },
+    {
+      "atMs": 13005,
+      "type": "message_update",
+      "delta": {
+        "text": "次数表达"
+      }
+    },
+    {
+      "atMs": 13025,
+      "type": "message_update",
+      "delta": {
+        "text": "最新的状态"
+      }
+    },
+    {
+      "atMs": 13037,
+      "type": "message_update",
+      "delta": {
+        "text": "。\n\n## 二、合并"
+      }
+    },
+    {
+      "atMs": 13048,
+      "type": "message_update",
+      "delta": {
+        "text": "与节"
+      }
+    },
+    {
+      "atMs": 13062,
+      "type": "message_update",
+      "delta": {
+        "text": "流\n\n第一"
+      }
+    },
+    {
+      "atMs": 13077,
+      "type": "message_update",
+      "delta": {
+        "text": "层"
+      }
+    },
+    {
+      "atMs": 13090,
+      "type": "message_update",
+      "delta": {
+        "text": "是时间"
+      }
+    },
+    {
+      "atMs": 13101,
+      "type": "message_update",
+      "delta": {
+        "text": "维"
+      }
+    },
+    {
+      "atMs": 13118,
+      "type": "message_update",
+      "delta": {
+        "text": "度的合并。把到达的数据"
+      }
+    },
+    {
+      "atMs": 13133,
+      "type": "message_update",
+      "delta": {
+        "text": "先写入缓冲区"
+      }
+    },
+    {
+      "atMs": 13151,
+      "type": "message_update",
+      "delta": {
+        "text": "，标记"
+      }
+    },
+    {
+      "atMs": 13171,
+      "type": "message_update",
+      "delta": {
+        "text": "「脏"
+      }
+    },
+    {
+      "atMs": 13182,
+      "type": "message_update",
+      "delta": {
+        "text": "」，然后在"
+      }
+    },
+    {
+      "atMs": 13191,
+      "type": "message_update",
+      "delta": {
+        "text": "下一个"
+      }
+    },
+    {
+      "atMs": 13211,
+      "type": "message_update",
+      "delta": {
+        "text": "动画帧（requestAnimationFrame"
+      }
+    },
+    {
+      "atMs": 13221,
+      "type": "message_update",
+      "delta": {
+        "text": "）或"
+      }
+    },
+    {
+      "atMs": 13239,
+      "type": "message_update",
+      "delta": {
+        "text": "固定"
+      }
+    },
+    {
+      "atMs": 13256,
+      "type": "message_update",
+      "delta": {
+        "text": "间隔的定时"
+      }
+    },
+    {
+      "atMs": 13280,
+      "type": "message_update",
+      "delta": {
+        "text": "器里统一读取并"
+      }
+    },
+    {
+      "atMs": 13300,
+      "type": "message_update",
+      "delta": {
+        "text": "渲染。这样一"
+      }
+    },
+    {
+      "atMs": 13303,
+      "type": "message_update",
+      "delta": {
+        "text": "帧内的 N 次"
+      }
+    },
+    {
+      "atMs": 13315,
+      "type": "message_update",
+      "delta": {
+        "text": "到达"
+      }
+    },
+    {
+      "atMs": 13327,
+      "type": "message_update",
+      "delta": {
+        "text": "只触发"
+      }
+    },
+    {
+      "atMs": 13335,
+      "type": "message_update",
+      "delta": {
+        "text": "一次 DOM"
+      }
+    },
+    {
+      "atMs": 13348,
+      "type": "message_update",
+      "delta": {
+        "text": " 更新。节"
+      }
+    },
+    {
+      "atMs": 13357,
+      "type": "message_update",
+      "delta": {
+        "text": "流阈值"
+      }
+    },
+    {
+      "atMs": 13371,
+      "type": "message_update",
+      "delta": {
+        "text": "通常取 16"
+      }
+    },
+    {
+      "atMs": 13380,
+      "type": "message_update",
+      "delta": {
+        "text": "."
+      }
+    },
+    {
+      "atMs": 13390,
+      "type": "message_update",
+      "delta": {
+        "text": "7ms（60"
+      }
+    },
+    {
+      "atMs": 13404,
+      "type": "message_update",
+      "delta": {
+        "text": "Hz）或"
+      }
+    },
+    {
+      "atMs": 13417,
+      "type": "message_update",
+      "delta": {
+        "text": " 8.3ms（120"
+      }
+    },
+    {
+      "atMs": 13426,
+      "type": "message_update",
+      "delta": {
+        "text": "Hz）；对纯"
+      }
+    },
+    {
+      "atMs": 13437,
+      "type": "message_update",
+      "delta": {
+        "text": "文本追加"
+      }
+    },
+    {
+      "atMs": 13448,
+      "type": "message_update",
+      "delta": {
+        "text": "可放宽"
+      }
+    },
+    {
+      "atMs": 13455,
+      "type": "message_update",
+      "delta": {
+        "text": "到 30~"
+      }
+    },
+    {
+      "atMs": 13466,
+      "type": "message_update",
+      "delta": {
+        "text": "50ms，肉眼"
+      }
+    },
+    {
+      "atMs": 13480,
+      "type": "message_update",
+      "delta": {
+        "text": "几乎无差别，却能"
+      }
+    },
+    {
+      "atMs": 13488,
+      "type": "message_update",
+      "delta": {
+        "text": "显著降低重"
+      }
+    },
+    {
+      "atMs": 13502,
+      "type": "message_update",
+      "delta": {
+        "text": "排频率"
+      }
+    },
+    {
+      "atMs": 13511,
+      "type": "message_update",
+      "delta": {
+        "text": "。"
+      }
+    },
+    {
+      "atMs": 13528,
+      "type": "message_update",
+      "delta": {
+        "text": "\n\n## 三、帧"
+      }
+    },
+    {
+      "atMs": 13961,
+      "type": "message_update",
+      "delta": {
+        "text": "预算与优先级\n\n一帧的"
+      }
+    },
+    {
+      "atMs": 13962,
+      "type": "message_update",
+      "delta": {
+        "text": "预算很紧"
+      }
+    },
+    {
+      "atMs": 13962,
+      "type": "message_update",
+      "delta": {
+        "text": "："
+      }
+    },
+    {
+      "atMs": 13962,
+      "type": "message_update",
+      "delta": {
+        "text": "脚本"
+      }
+    },
+    {
+      "atMs": 13963,
+      "type": "message_update",
+      "delta": {
+        "text": "、样式、布局、绘制共享"
+      }
+    },
+    {
+      "atMs": 13964,
+      "type": "message_update",
+      "delta": {
+        "text": "这段时间。调度"
+      }
+    },
+    {
+      "atMs": 13964,
+      "type": "message_update",
+      "delta": {
+        "text": "器"
+      }
+    },
+    {
+      "atMs": 14023,
+      "type": "message_update",
+      "delta": {
+        "text": "应当把工作"
+      }
+    },
+    {
+      "atMs": 14025,
+      "type": "message_update",
+      "delta": {
+        "text": "拆成小块，按"
+      }
+    },
+    {
+      "atMs": 14025,
+      "type": "message_update",
+      "delta": {
+        "text": "优先级"
+      }
+    },
+    {
+      "atMs": 14025,
+      "type": "message_update",
+      "delta": {
+        "text": "排队"
+      }
+    },
+    {
+      "atMs": 14025,
+      "type": "message_update",
+      "delta": {
+        "text": "：视"
+      }
+    },
+    {
+      "atMs": 14025,
+      "type": "message_update",
+      "delta": {
+        "text": "口内的"
+      }
+    },
+    {
+      "atMs": 14025,
+      "type": "message_update",
+      "delta": {
+        "text": "可见内容"
+      }
+    },
+    {
+      "atMs": 14029,
+      "type": "message_update",
+      "delta": {
+        "text": "优先，屏幕外的延后；用户"
+      }
+    },
+    {
+      "atMs": 14032,
+      "type": "message_update",
+      "delta": {
+        "text": "交互（输入、滚动）"
+      }
+    },
+    {
+      "atMs": 14032,
+      "type": "message_update",
+      "delta": {
+        "text": "最高"
+      }
+    },
+    {
+      "atMs": 14032,
+      "type": "message_update",
+      "delta": {
+        "text": "优先级，可"
+      }
+    },
+    {
+      "atMs": 14032,
+      "type": "message_update",
+      "delta": {
+        "text": "抢占"
+      }
+    },
+    {
+      "atMs": 14032,
+      "type": "message_update",
+      "delta": {
+        "text": "流"
+      }
+    },
+    {
+      "atMs": 14032,
+      "type": "message_update",
+      "delta": {
+        "text": "式更新。"
+      }
+    },
+    {
+      "atMs": 14032,
+      "type": "message_update",
+      "delta": {
+        "text": "React"
+      }
+    },
+    {
+      "atMs": 14032,
+      "type": "message_update",
+      "delta": {
+        "text": " 的并发"
+      }
+    },
+    {
+      "atMs": 14032,
+      "type": "message_update",
+      "delta": {
+        "text": "渲染、"
+      }
+    },
+    {
+      "atMs": 14032,
+      "type": "message_update",
+      "delta": {
+        "text": "start"
+      }
+    },
+    {
+      "atMs": 14032,
+      "type": "message_update",
+      "delta": {
+        "text": "Transition 与时间"
+      }
+    },
+    {
+      "atMs": 14032,
+      "type": "message_update",
+      "delta": {
+        "text": "切片"
+      }
+    },
+    {
+      "atMs": 14033,
+      "type": "message_update",
+      "delta": {
+        "text": "本质上"
+      }
+    },
+    {
+      "atMs": 14033,
+      "type": "message_update",
+      "delta": {
+        "text": "就是这个"
+      }
+    },
+    {
+      "atMs": 14033,
+      "type": "message_update",
+      "delta": {
+        "text": "思路——"
+      }
+    },
+    {
+      "atMs": 14033,
+      "type": "message_update",
+      "delta": {
+        "text": "把非"
+      }
+    },
+    {
+      "atMs": 14033,
+      "type": "message_update",
+      "delta": {
+        "text": "紧急的"
+      }
+    },
+    {
+      "atMs": 14033,
+      "type": "message_update",
+      "delta": {
+        "text": "流式更新标记"
+      }
+    },
+    {
+      "atMs": 14033,
+      "type": "message_update",
+      "delta": {
+        "text": "为可"
+      }
+    },
+    {
+      "atMs": 14033,
+      "type": "message_update",
+      "delta": {
+        "text": "中断，让浏览器"
+      }
+    },
+    {
+      "atMs": 14042,
+      "type": "message_update",
+      "delta": {
+        "text": "有机会"
+      }
+    },
+    {
+      "atMs": 14052,
+      "type": "message_update",
+      "delta": {
+        "text": "先响"
+      }
+    },
+    {
+      "atMs": 14069,
+      "type": "message_update",
+      "delta": {
+        "text": "应用户。"
+      }
+    },
+    {
+      "atMs": 14084,
+      "type": "message_update",
+      "delta": {
+        "text": "\n\n## 四、增量"
+      }
+    },
+    {
+      "atMs": 14094,
+      "type": "message_update",
+      "delta": {
+        "text": "与锚"
+      }
+    },
+    {
+      "atMs": 14113,
+      "type": "message_update",
+      "delta": {
+        "text": "定\n\n第二"
+      }
+    },
+    {
+      "atMs": 14129,
+      "type": "message_update",
+      "delta": {
+        "text": "层是"
+      }
+    },
+    {
+      "atMs": 14141,
+      "type": "message_update",
+      "delta": {
+        "text": "空间维度的增量"
+      }
+    },
+    {
+      "atMs": 14156,
+      "type": "message_update",
+      "delta": {
+        "text": "。不要"
+      }
+    },
+    {
+      "atMs": 14167,
+      "type": "message_update",
+      "delta": {
+        "text": "每次"
+      }
+    },
+    {
+      "atMs": 14178,
+      "type": "message_update",
+      "delta": {
+        "text": "全量重建"
+      }
+    },
+    {
+      "atMs": 14188,
+      "type": "message_update",
+      "delta": {
+        "text": " DOM，而是"
+      }
+    },
+    {
+      "atMs": 14201,
+      "type": "message_update",
+      "delta": {
+        "text": "追加"
+      }
+    },
+    {
+      "atMs": 14211,
+      "type": "message_update",
+      "delta": {
+        "text": "节点"
+      }
+    },
+    {
+      "atMs": 14222,
+      "type": "message_update",
+      "delta": {
+        "text": "或只修改"
+      }
+    },
+    {
+      "atMs": 14231,
+      "type": "message_update",
+      "delta": {
+        "text": "变化的最小"
+      }
+    },
+    {
+      "atMs": 14245,
+      "type": "message_update",
+      "delta": {
+        "text": "文本"
+      }
+    },
+    {
+      "atMs": 14257,
+      "type": "message_update",
+      "delta": {
+        "text": "节点"
+      }
+    },
+    {
+      "atMs": 14262,
+      "type": "message_update",
+      "delta": {
+        "text": "，"
+      }
+    },
+    {
+      "atMs": 14272,
+      "type": "message_update",
+      "delta": {
+        "text": "避免整"
+      }
+    },
+    {
+      "atMs": 14292,
+      "type": "message_update",
+      "delta": {
+        "text": "块"
+      }
+    },
+    {
+      "atMs": 14294,
+      "type": "message_update",
+      "delta": {
+        "text": "替换"
+      }
+    },
+    {
+      "atMs": 14305,
+      "type": "message_update",
+      "delta": {
+        "text": "导致的"
+      }
+    },
+    {
+      "atMs": 14322,
+      "type": "message_update",
+      "delta": {
+        "text": "选中"
+      }
+    },
+    {
+      "atMs": 14332,
+      "type": "message_update",
+      "delta": {
+        "text": "丢失"
+      }
+    },
+    {
+      "atMs": 14336,
+      "type": "message_update",
+      "delta": {
+        "text": "与"
+      }
+    },
+    {
+      "atMs": 14348,
+      "type": "message_update",
+      "delta": {
+        "text": "滚动"
+      }
+    },
+    {
+      "atMs": 14358,
+      "type": "message_update",
+      "delta": {
+        "text": "重置"
+      }
+    },
+    {
+      "atMs": 14370,
+      "type": "message_update",
+      "delta": {
+        "text": "。滚动位置需要"
+      }
+    },
+    {
+      "atMs": 14385,
+      "type": "message_update",
+      "delta": {
+        "text": "锚定：若"
+      }
+    },
+    {
+      "atMs": 14400,
+      "type": "message_update",
+      "delta": {
+        "text": "用户未"
+      }
+    },
+    {
+      "atMs": 14406,
+      "type": "message_update",
+      "delta": {
+        "text": "主动"
+      }
+    },
+    {
+      "atMs": 14420,
+      "type": "message_update",
+      "delta": {
+        "text": "滚动，则保持「"
+      }
+    },
+    {
+      "atMs": 14428,
+      "type": "message_update",
+      "delta": {
+        "text": "粘底"
+      }
+    },
+    {
+      "atMs": 14441,
+      "type": "message_update",
+      "delta": {
+        "text": "」；一旦"
+      }
+    },
+    {
+      "atMs": 14447,
+      "type": "message_update",
+      "delta": {
+        "text": "用户上"
+      }
+    },
+    {
+      "atMs": 14458,
+      "type": "message_update",
+      "delta": {
+        "text": "滚，就冻结视"
+      }
+    },
+    {
+      "atMs": 14472,
+      "type": "message_update",
+      "delta": {
+        "text": "口，只"
+      }
+    },
+    {
+      "atMs": 14478,
+      "type": "message_update",
+      "delta": {
+        "text": "累"
+      }
+    },
+    {
+      "atMs": 14489,
+      "type": "message_update",
+      "delta": {
+        "text": "加未"
+      }
+    },
+    {
+      "atMs": 14508,
+      "type": "message_update",
+      "delta": {
+        "text": "读标记"
+      }
+    },
+    {
+      "atMs": 14514,
+      "type": "message_update",
+      "delta": {
+        "text": "，"
+      }
+    },
+    {
+      "atMs": 14524,
+      "type": "message_update",
+      "delta": {
+        "text": "否则内容"
+      }
+    },
+    {
+      "atMs": 14533,
+      "type": "message_update",
+      "delta": {
+        "text": "会"
+      }
+    },
+    {
+      "atMs": 14546,
+      "type": "message_update",
+      "delta": {
+        "text": "不断把"
+      }
+    },
+    {
+      "atMs": 14554,
+      "type": "message_update",
+      "delta": {
+        "text": "阅读"
+      }
+    },
+    {
+      "atMs": 14567,
+      "type": "message_update",
+      "delta": {
+        "text": "位置顶"
+      }
+    },
+    {
+      "atMs": 14577,
+      "type": "message_update",
+      "delta": {
+        "text": "走。\n\n## 五、"
+      }
+    },
+    {
+      "atMs": 14587,
+      "type": "message_update",
+      "delta": {
+        "text": "背"
+      }
+    },
+    {
+      "atMs": 14599,
+      "type": "message_update",
+      "delta": {
+        "text": "压与收"
+      }
+    },
+    {
+      "atMs": 14610,
+      "type": "message_update",
+      "delta": {
+        "text": "尾\n\n第三"
+      }
+    },
+    {
+      "atMs": 14624,
+      "type": "message_update",
+      "delta": {
+        "text": "层是背"
+      }
+    },
+    {
+      "atMs": 14632,
+      "type": "message_update",
+      "delta": {
+        "text": "压。当"
+      }
+    },
+    {
+      "atMs": 14645,
+      "type": "message_update",
+      "delta": {
+        "text": "渲染"
+      }
+    },
+    {
+      "atMs": 14651,
+      "type": "message_update",
+      "delta": {
+        "text": "跟不上"
+      }
+    },
+    {
+      "atMs": 14662,
+      "type": "message_update",
+      "delta": {
+        "text": "到达"
+      }
+    },
+    {
+      "atMs": 14676,
+      "type": "message_update",
+      "delta": {
+        "text": "速度"
+      }
+    },
+    {
+      "atMs": 14685,
+      "type": "message_update",
+      "delta": {
+        "text": "时，应丢弃中间"
+      }
+    },
+    {
+      "atMs": 14694,
+      "type": "message_update",
+      "delta": {
+        "text": "态或降"
+      }
+    },
+    {
+      "atMs": 14705,
+      "type": "message_update",
+      "delta": {
+        "text": "采样，只保证"
+      }
+    },
+    {
+      "atMs": 14717,
+      "type": "message_update",
+      "delta": {
+        "text": "最终一致"
+      }
+    },
+    {
+      "atMs": 14732,
+      "type": "message_update",
+      "delta": {
+        "text": "，"
+      }
+    },
+    {
+      "atMs": 14747,
+      "type": "message_update",
+      "delta": {
+        "text": "而不是无界"
+      }
+    },
+    {
+      "atMs": 14749,
+      "type": "message_update",
+      "delta": {
+        "text": "堆积缓冲"
+      }
+    },
+    {
+      "atMs": 14761,
+      "type": "message_update",
+      "delta": {
+        "text": "导致内存膨胀"
+      }
+    },
+    {
+      "atMs": 14772,
+      "type": "message_update",
+      "delta": {
+        "text": "。流"
+      }
+    },
+    {
+      "atMs": 14782,
+      "type": "message_update",
+      "delta": {
+        "text": "结束时执行"
+      }
+    },
+    {
+      "atMs": 14792,
+      "type": "message_update",
+      "delta": {
+        "text": "一次强制"
+      }
+    },
+    {
+      "atMs": 14804,
+      "type": "message_update",
+      "delta": {
+        "text": "冲刷"
+      }
+    },
+    {
+      "atMs": 14816,
+      "type": "message_update",
+      "delta": {
+        "text": "，"
+      }
+    },
+    {
+      "atMs": 14823,
+      "type": "message_update",
+      "delta": {
+        "text": "确保最后"
+      }
+    },
+    {
+      "atMs": 14839,
+      "type": "message_update",
+      "delta": {
+        "text": "一片"
+      }
+    },
+    {
+      "atMs": 14843,
+      "type": "message_update",
+      "delta": {
+        "text": "数据不被"
+      }
+    },
+    {
+      "atMs": 14858,
+      "type": "message_update",
+      "delta": {
+        "text": "节"
+      }
+    },
+    {
+      "atMs": 14869,
+      "type": "message_update",
+      "delta": {
+        "text": "流吞掉，并把"
+      }
+    },
+    {
+      "atMs": 14879,
+      "type": "message_update",
+      "delta": {
+        "text": "状态"
+      }
+    },
+    {
+      "atMs": 14896,
+      "type": "message_update",
+      "delta": {
+        "text": "从"
+      }
+    },
+    {
+      "atMs": 14902,
+      "type": "message_update",
+      "delta": {
+        "text": "「进行"
+      }
+    },
+    {
+      "atMs": 14910,
+      "type": "message_update",
+      "delta": {
+        "text": "中」切到"
+      }
+    },
+    {
+      "atMs": 14923,
+      "type": "message_update",
+      "delta": {
+        "text": "「已完成」。\n\n## 六"
+      }
+    },
+    {
+      "atMs": 14934,
+      "type": "message_update",
+      "delta": {
+        "text": "、一句话总结"
+      }
+    },
+    {
+      "atMs": 14947,
+      "type": "message_update",
+      "delta": {
+        "text": "\n\n帧调度不是"
+      }
+    },
+    {
+      "atMs": 14955,
+      "type": "message_update",
+      "delta": {
+        "text": "让"
+      }
+    },
+    {
+      "atMs": 14967,
+      "type": "message_update",
+      "delta": {
+        "text": "渲染"
+      }
+    },
+    {
+      "atMs": 14976,
+      "type": "message_update",
+      "delta": {
+        "text": "更快"
+      }
+    },
+    {
+      "atMs": 14993,
+      "type": "message_update",
+      "delta": {
+        "text": "，而是让渲染更"
+      }
+    },
+    {
+      "atMs": 14996,
+      "type": "message_update",
+      "delta": {
+        "text": "少、更准"
+      }
+    },
+    {
+      "atMs": 15006,
+      "type": "message_update",
+      "delta": {
+        "text": "、更"
+      }
+    },
+    {
+      "atMs": 15019,
+      "type": "message_update",
+      "delta": {
+        "text": "可预期"
+      }
+    },
+    {
+      "atMs": 15029,
+      "type": "message_update",
+      "delta": {
+        "text": "：合并"
+      }
+    },
+    {
+      "atMs": 15039,
+      "type": "message_update",
+      "delta": {
+        "text": "高频"
+      }
+    },
+    {
+      "atMs": 15050,
+      "type": "message_update",
+      "delta": {
+        "text": "更新、遵守"
+      }
+    },
+    {
+      "atMs": 15060,
+      "type": "message_update",
+      "delta": {
+        "text": "帧"
+      }
+    },
+    {
+      "atMs": 15076,
+      "type": "message_update",
+      "delta": {
+        "text": "预算、按优先级抢占"
+      }
+    },
+    {
+      "atMs": 15082,
+      "type": "message_update",
+      "delta": {
+        "text": "、增量修改"
+      }
+    },
+    {
+      "atMs": 15097,
+      "type": "message_update",
+      "delta": {
+        "text": "并锚"
+      }
+    },
+    {
+      "atMs": 15106,
+      "type": "message_update",
+      "delta": {
+        "text": "定视口，"
+      }
+    },
+    {
+      "atMs": 15115,
+      "type": "message_update",
+      "delta": {
+        "text": "最后在流"
+      }
+    },
+    {
+      "atMs": 15127,
+      "type": "message_update",
+      "delta": {
+        "text": "结束时收"
+      }
+    },
+    {
+      "atMs": 15136,
+      "type": "message_update",
+      "delta": {
+        "text": "口"
+      }
+    },
+    {
+      "atMs": 15150,
+      "type": "message_update",
+      "delta": {
+        "text": "。"
+      }
+    },
+    {
+      "atMs": 15275,
+      "type": "extension_ui_request",
+      "id": "8647164a-0ecf-42b2-a8f3-aaefe04f8bd8",
+      "method": "setStatus",
+      "statusKey": "pi-cache-stats",
+      "statusText": "· DS cache 707/714·223.1M/228.8M 97.5%"
+    },
+    {
+      "atMs": 15275,
+      "type": "message_end",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The user wants ~600 Chinese characters on \"流式渲染的帧调度\" (frame scheduling for streaming rendering), segmented, body only, no tools. Let me write a solid technical explanation.\n\nLet me think about content: streaming rendering frame scheduling — buffering tokens, coalescing updates, rAF, backpressure, batching, incremental layout, virtualization, priority, idle time, frame budget 16.7ms/8.3ms, React concurrent, marking dirty, avoiding layout thrash, delta vs full re-render, markdown incremental parsing, auto-scroll anchoring, throttling, jitter.\n\nWrite ~600 characters in Chinese, with paragraphs. Only bodytext.",
+            "thinkingSignature": "reasoning"
+          },
+          {
+            "type": "text",
+            "text": "## 一、问题的来源\n\n流式渲染指数据尚未完整到达时就开始呈现，典型场景是大模型逐 token 输出、SSE 日志、长列表增量加载。此时渲染速度与数据到达速度解耦：数据可能每几毫秒来一小片，也可能突发涌入几千条。若不调度，直接「来一片、渲染一次」，浏览器会被迫在同一帧内反复重排，主线程被切碎，用户看到的是抖动、卡顿与滚动跳动。帧调度的目标就是把这些零散更新合并到有限的帧预算内，用最少的绘制次数表达最新的状态。\n\n## 二、合并与节流\n\n第一层是时间维度的合并。把到达的数据先写入缓冲区，标记「脏」，然后在下一个动画帧（requestAnimationFrame）或固定间隔的定时器里统一读取并渲染。这样一帧内的 N 次到达只触发一次 DOM 更新。节流阈值通常取 16.7ms（60Hz）或 8.3ms（120Hz）；对纯文本追加可放宽到 30~50ms，肉眼几乎无差别，却能显著降低重排频率。\n\n## 三、帧预算与优先级\n\n一帧的预算很紧：脚本、样式、布局、绘制共享这段时间。调度器应当把工作拆成小块，按优先级排队：视口内的可见内容优先，屏幕外的延后；用户交互（输入、滚动）最高优先级，可抢占流式更新。React 的并发渲染、startTransition 与时间切片本质上就是这个思路——把非紧急的流式更新标记为可中断，让浏览器有机会先响应用户。\n\n## 四、增量与锚定\n\n第二层是空间维度的增量。不要每次全量重建 DOM，而是追加节点或只修改变化的最小文本节点，避免整块替换导致的选中丢失与滚动重置。滚动位置需要锚定：若用户未主动滚动，则保持「粘底」；一旦用户上滚，就冻结视口，只累加未读标记，否则内容会不断把阅读位置顶走。\n\n## 五、背压与收尾\n\n第三层是背压。当渲染跟不上到达速度时，应丢弃中间态或降采样，只保证最终一致，而不是无界堆积缓冲导致内存膨胀。流结束时执行一次强制冲刷，确保最后一片数据不被节流吞掉，并把状态从「进行中」切到「已完成」。\n\n## 六、一句话总结\n\n帧调度不是让渲染更快，而是让渲染更少、更准、更可预期：合并高频更新、遵守帧预算、按优先级抢占、增量修改并锚定视口，最后在流结束时收口。"
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "cpa",
+        "model": "deepseek-v4.1-flash",
+        "usage": {
+          "input": 131,
+          "output": 703,
+          "cacheRead": 10880,
+          "cacheWrite": 0,
+          "reasoning": 0,
+          "totalTokens": 11714,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 1789126196371,
+        "responseId": "chatcmpl-915",
+        "rawStopReason": "stop"
+      }
+    },
+    {
+      "atMs": 15275,
+      "type": "agent_start"
+    },
+    {
+      "atMs": 15275,
+      "type": "message_start",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "不要使用任何工具。再用大约 200 字补充说明「为什么低性能设备需要合帧」，只输出正文。"
+          }
+        ],
+        "timestamp": 1789126211639
+      }
+    },
+    {
+      "atMs": 15275,
+      "type": "follow_up_flushed",
+      "sessionId": "01a0903b-35b6-711b-a58a-00e5e070819e",
+      "item": "不要使用任何工具。再用大约 200 字补充说明「为什么低性能设备需要合帧」，只输出正文。",
+      "remaining": []
+    },
+    {
+      "atMs": 15275,
+      "type": "message_end",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "不要使用任何工具。再用大约 200 字补充说明「为什么低性能设备需要合帧」，只输出正文。"
+          }
+        ],
+        "timestamp": 1789126211639
+      }
+    },
+    {
+      "atMs": 16361,
+      "type": "message_start",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "低"
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "cpa",
+        "model": "deepseek-v4.1-flash",
+        "usage": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 0,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "pending",
+        "timestamp": 1789126211646,
+        "responseId": "chatcmpl-329"
+      }
+    },
+    {
+      "atMs": 16370,
+      "type": "message_update",
+      "delta": {
+        "text": "性能设备的核心"
+      }
+    },
+    {
+      "atMs": 16376,
+      "type": "message_update",
+      "delta": {
+        "text": "瓶颈"
+      }
+    },
+    {
+      "atMs": 16387,
+      "type": "message_update",
+      "delta": {
+        "text": "是主"
+      }
+    },
+    {
+      "atMs": 16400,
+      "type": "message_update",
+      "delta": {
+        "text": "线程余"
+      }
+    },
+    {
+      "atMs": 16409,
+      "type": "message_update",
+      "delta": {
+        "text": "量"
+      }
+    },
+    {
+      "atMs": 16423,
+      "type": "message_update",
+      "delta": {
+        "text": "极小"
+      }
+    },
+    {
+      "atMs": 16432,
+      "type": "message_update",
+      "delta": {
+        "text": "："
+      }
+    },
+    {
+      "atMs": 16440,
+      "type": "message_update",
+      "delta": {
+        "text": "CPU"
+      }
+    },
+    {
+      "atMs": 16451,
+      "type": "message_update",
+      "delta": {
+        "text": " 主"
+      }
+    },
+    {
+      "atMs": 16466,
+      "type": "message_update",
+      "delta": {
+        "text": "频低"
+      }
+    },
+    {
+      "atMs": 16472,
+      "type": "message_update",
+      "delta": {
+        "text": "、GPU 合成"
+      }
+    },
+    {
+      "atMs": 16487,
+      "type": "message_update",
+      "delta": {
+        "text": "能力"
+      }
+    },
+    {
+      "atMs": 16493,
+      "type": "message_update",
+      "delta": {
+        "text": "弱，一"
+      }
+    },
+    {
+      "atMs": 16506,
+      "type": "message_update",
+      "delta": {
+        "text": "帧里"
+      }
+    },
+    {
+      "atMs": 16516,
+      "type": "message_update",
+      "delta": {
+        "text": "脚本"
+      }
+    },
+    {
+      "atMs": 16525,
+      "type": "message_update",
+      "delta": {
+        "text": "加"
+      }
+    },
+    {
+      "atMs": 16536,
+      "type": "message_update",
+      "delta": {
+        "text": "布局加"
+      }
+    },
+    {
+      "atMs": 16556,
+      "type": "message_update",
+      "delta": {
+        "text": "绘制很容易"
+      }
+    },
+    {
+      "atMs": 16559,
+      "type": "message_update",
+      "delta": {
+        "text": "就"
+      }
+    },
+    {
+      "atMs": 16570,
+      "type": "message_update",
+      "delta": {
+        "text": "吃"
+      }
+    },
+    {
+      "atMs": 16578,
+      "type": "message_update",
+      "delta": {
+        "text": "满预算。此时"
+      }
+    },
+    {
+      "atMs": 16589,
+      "type": "message_update",
+      "delta": {
+        "text": "若"
+      }
+    },
+    {
+      "atMs": 16599,
+      "type": "message_update",
+      "delta": {
+        "text": "按"
+      }
+    },
+    {
+      "atMs": 16623,
+      "type": "message_update",
+      "delta": {
+        "text": "数据到达节奏"
+      }
+    },
+    {
+      "atMs": 16636,
+      "type": "message_update",
+      "delta": {
+        "text": "逐片"
+      }
+    },
+    {
+      "atMs": 16641,
+      "type": "message_update",
+      "delta": {
+        "text": "渲染，每次"
+      }
+    },
+    {
+      "atMs": 16656,
+      "type": "message_update",
+      "delta": {
+        "text": "更新都要"
+      }
+    },
+    {
+      "atMs": 16671,
+      "type": "message_update",
+      "delta": {
+        "text": "走"
+      }
+    },
+    {
+      "atMs": 16675,
+      "type": "message_update",
+      "delta": {
+        "text": "一遍样式"
+      }
+    },
+    {
+      "atMs": 16688,
+      "type": "message_update",
+      "delta": {
+        "text": "计算、"
+      }
+    },
+    {
+      "atMs": 16698,
+      "type": "message_update",
+      "delta": {
+        "text": "布局"
+      }
+    },
+    {
+      "atMs": 16708,
+      "type": "message_update",
+      "delta": {
+        "text": "、绘制与"
+      }
+    },
+    {
+      "atMs": 16719,
+      "type": "message_update",
+      "delta": {
+        "text": "合成，帧"
+      }
+    },
+    {
+      "atMs": 16731,
+      "type": "message_update",
+      "delta": {
+        "text": "时间"
+      }
+    },
+    {
+      "atMs": 16743,
+      "type": "message_update",
+      "delta": {
+        "text": "被反复"
+      }
+    },
+    {
+      "atMs": 16753,
+      "type": "message_update",
+      "delta": {
+        "text": "撑爆，掉"
+      }
+    },
+    {
+      "atMs": 16761,
+      "type": "message_update",
+      "delta": {
+        "text": "帧变成"
+      }
+    },
+    {
+      "atMs": 16773,
+      "type": "message_update",
+      "delta": {
+        "text": "常态"
+      }
+    },
+    {
+      "atMs": 16783,
+      "type": "message_update",
+      "delta": {
+        "text": "；更糟的是渲染"
+      }
+    },
+    {
+      "atMs": 16802,
+      "type": "message_update",
+      "delta": {
+        "text": "任务"
+      }
+    },
+    {
+      "atMs": 16809,
+      "type": "message_update",
+      "delta": {
+        "text": "与"
+      }
+    },
+    {
+      "atMs": 16818,
+      "type": "message_update",
+      "delta": {
+        "text": "用户"
+      }
+    },
+    {
+      "atMs": 16830,
+      "type": "message_update",
+      "delta": {
+        "text": "输入抢占"
+      }
+    },
+    {
+      "atMs": 16841,
+      "type": "message_update",
+      "delta": {
+        "text": "同一线程，输入延迟"
+      }
+    },
+    {
+      "atMs": 16853,
+      "type": "message_update",
+      "delta": {
+        "text": "被放大，手感"
+      }
+    },
+    {
+      "atMs": 16866,
+      "type": "message_update",
+      "delta": {
+        "text": "发"
+      }
+    },
+    {
+      "atMs": 16874,
+      "type": "message_update",
+      "delta": {
+        "text": "黏。\n\n合"
+      }
+    },
+    {
+      "atMs": 16887,
+      "type": "message_update",
+      "delta": {
+        "text": "帧把一"
+      }
+    },
+    {
+      "atMs": 16895,
+      "type": "message_update",
+      "delta": {
+        "text": "帧内的"
+      }
+    },
+    {
+      "atMs": 16905,
+      "type": "message_update",
+      "delta": {
+        "text": "多次更新折叠"
+      }
+    },
+    {
+      "atMs": 16914,
+      "type": "message_update",
+      "delta": {
+        "text": "成一次提交"
+      }
+    },
+    {
+      "atMs": 16928,
+      "type": "message_update",
+      "delta": {
+        "text": "，直接"
+      }
+    },
+    {
+      "atMs": 16937,
+      "type": "message_update",
+      "delta": {
+        "text": "减少了"
+      }
+    },
+    {
+      "atMs": 16952,
+      "type": "message_update",
+      "delta": {
+        "text": "样式计算"
+      }
+    },
+    {
+      "atMs": 16960,
+      "type": "message_update",
+      "delta": {
+        "text": "、布局与"
+      }
+    },
+    {
+      "atMs": 16980,
+      "type": "message_update",
+      "delta": {
+        "text": "绘制的调用"
+      }
+    },
+    {
+      "atMs": 16984,
+      "type": "message_update",
+      "delta": {
+        "text": "次数——"
+      }
+    },
+    {
+      "atMs": 16993,
+      "type": "message_update",
+      "delta": {
+        "text": "这几"
+      }
+    },
+    {
+      "atMs": 17002,
+      "type": "message_update",
+      "delta": {
+        "text": "步"
+      }
+    },
+    {
+      "atMs": 17015,
+      "type": "message_update",
+      "delta": {
+        "text": "的开"
+      }
+    },
+    {
+      "atMs": 17025,
+      "type": "message_update",
+      "delta": {
+        "text": "销与「"
+      }
+    },
+    {
+      "atMs": 17035,
+      "type": "message_update",
+      "delta": {
+        "text": "更新了几"
+      }
+    },
+    {
+      "atMs": 17046,
+      "type": "message_update",
+      "delta": {
+        "text": "次」强"
+      }
+    },
+    {
+      "atMs": 17059,
+      "type": "message_update",
+      "delta": {
+        "text": "相关，而与"
+      }
+    },
+    {
+      "atMs": 17071,
+      "type": "message_update",
+      "delta": {
+        "text": "「合并"
+      }
+    },
+    {
+      "atMs": 17079,
+      "type": "message_update",
+      "delta": {
+        "text": "后数据"
+      }
+    },
+    {
+      "atMs": 17093,
+      "type": "message_update",
+      "delta": {
+        "text": "量大小"
+      }
+    },
+    {
+      "atMs": 17102,
+      "type": "message_update",
+      "delta": {
+        "text": "」关系"
+      }
+    },
+    {
+      "atMs": 17112,
+      "type": "message_update",
+      "delta": {
+        "text": "弱得多"
+      }
+    },
+    {
+      "atMs": 17123,
+      "type": "message_update",
+      "delta": {
+        "text": "。对"
+      }
+    },
+    {
+      "atMs": 17136,
+      "type": "message_update",
+      "delta": {
+        "text": "低端"
+      }
+    },
+    {
+      "atMs": 17145,
+      "type": "message_update",
+      "delta": {
+        "text": "机"
+      }
+    },
+    {
+      "atMs": 17156,
+      "type": "message_update",
+      "delta": {
+        "text": "来说，省"
+      }
+    },
+    {
+      "atMs": 17165,
+      "type": "message_update",
+      "delta": {
+        "text": "下的不是"
+      }
+    },
+    {
+      "atMs": 17175,
+      "type": "message_update",
+      "delta": {
+        "text": "带宽"
+      }
+    },
+    {
+      "atMs": 17186,
+      "type": "message_update",
+      "delta": {
+        "text": "也不是"
+      }
+    },
+    {
+      "atMs": 17199,
+      "type": "message_update",
+      "delta": {
+        "text": "解析"
+      }
+    },
+    {
+      "atMs": 17215,
+      "type": "message_update",
+      "delta": {
+        "text": "时间"
+      }
+    },
+    {
+      "atMs": 17232,
+      "type": "message_update",
+      "delta": {
+        "text": "，而是最"
+      }
+    },
+    {
+      "atMs": 17242,
+      "type": "message_update",
+      "delta": {
+        "text": "稀缺"
+      }
+    },
+    {
+      "atMs": 17261,
+      "type": "message_update",
+      "delta": {
+        "text": "的重"
+      }
+    },
+    {
+      "atMs": 17264,
+      "type": "message_update",
+      "delta": {
+        "text": "排次数"
+      }
+    },
+    {
+      "atMs": 17273,
+      "type": "message_update",
+      "delta": {
+        "text": "。同时"
+      }
+    },
+    {
+      "atMs": 17285,
+      "type": "message_update",
+      "delta": {
+        "text": "合帧天然"
+      }
+    },
+    {
+      "atMs": 17294,
+      "type": "message_update",
+      "delta": {
+        "text": "形成"
+      }
+    },
+    {
+      "atMs": 17304,
+      "type": "message_update",
+      "delta": {
+        "text": "背"
+      }
+    },
+    {
+      "atMs": 17314,
+      "type": "message_update",
+      "delta": {
+        "text": "压："
+      }
+    },
+    {
+      "atMs": 17327,
+      "type": "message_update",
+      "delta": {
+        "text": "缓冲区"
+      }
+    },
+    {
+      "atMs": 17336,
+      "type": "message_update",
+      "delta": {
+        "text": "来不及"
+      }
+    },
+    {
+      "atMs": 17346,
+      "type": "message_update",
+      "delta": {
+        "text": "渲染"
+      }
+    },
+    {
+      "atMs": 17356,
+      "type": "message_update",
+      "delta": {
+        "text": "就"
+      }
+    },
+    {
+      "atMs": 17366,
+      "type": "message_update",
+      "delta": {
+        "text": "丢弃中间态"
+      }
+    },
+    {
+      "atMs": 17380,
+      "type": "message_update",
+      "delta": {
+        "text": "，避免内存"
+      }
+    },
+    {
+      "atMs": 17393,
+      "type": "message_update",
+      "delta": {
+        "text": "与 GC"
+      }
+    },
+    {
+      "atMs": 17401,
+      "type": "message_update",
+      "delta": {
+        "text": " 压力在高"
+      }
+    },
+    {
+      "atMs": 17411,
+      "type": "message_update",
+      "delta": {
+        "text": "频"
+      }
+    },
+    {
+      "atMs": 17423,
+      "type": "message_update",
+      "delta": {
+        "text": "小"
+      }
+    },
+    {
+      "atMs": 17441,
+      "type": "message_update",
+      "delta": {
+        "text": "内存"
+      }
+    },
+    {
+      "atMs": 17442,
+      "type": "message_update",
+      "delta": {
+        "text": "设备"
+      }
+    },
+    {
+      "atMs": 17460,
+      "type": "message_update",
+      "delta": {
+        "text": "上雪"
+      }
+    },
+    {
+      "atMs": 17464,
+      "type": "message_update",
+      "delta": {
+        "text": "上加"
+      }
+    },
+    {
+      "atMs": 17483,
+      "type": "message_update",
+      "delta": {
+        "text": "霜。"
+      }
+    },
+    {
+      "atMs": 17594,
+      "type": "extension_ui_request",
+      "id": "5f68b0ef-0131-48aa-a92f-f3d44b47793a",
+      "method": "setStatus",
+      "statusKey": "pi-cache-stats",
+      "statusText": "· DS cache 708/715·223.1M/228.9M 97.5%"
+    },
+    {
+      "atMs": 17594,
+      "type": "message_end",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "低性能设备的核心瓶颈是主线程余量极小：CPU 主频低、GPU 合成能力弱，一帧里脚本加布局加绘制很容易就吃满预算。此时若按数据到达节奏逐片渲染，每次更新都要走一遍样式计算、布局、绘制与合成，帧时间被反复撑爆，掉帧变成常态；更糟的是渲染任务与用户输入抢占同一线程，输入延迟被放大，手感发黏。\n\n合帧把一帧内的多次更新折叠成一次提交，直接减少了样式计算、布局与绘制的调用次数——这几步的开销与「更新了几次」强相关，而与「合并后数据量大小」关系弱得多。对低端机来说，省下的不是带宽也不是解析时间，而是最稀缺的重排次数。同时合帧天然形成背压：缓冲区来不及渲染就丢弃中间态，避免内存与 GC 压力在高频小内存设备上雪上加霜。"
+          }
+        ],
+        "api": "openai-completions",
+        "provider": "cpa",
+        "model": "deepseek-v4.1-flash",
+        "usage": {
+          "input": 735,
+          "output": 200,
+          "cacheRead": 11008,
+          "cacheWrite": 0,
+          "reasoning": 0,
+          "totalTokens": 11943,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 1789126211646,
+        "responseId": "chatcmpl-329",
+        "rawStopReason": "stop"
+      }
+    }
+  ]
+}

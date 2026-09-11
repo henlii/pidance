@@ -56,7 +56,8 @@
     "release:audit": "node scripts/audit-release-package.mjs --pre",
     "release:audit:tgz": "node scripts/audit-release-package.mjs --tgz",
     "package:candidate": "node scripts/make-candidate-package.mjs",
-    "release:check": "npm run check && npm run build && npm run release:audit"
+    "release:check": "npm run check && npm run build && npm run release:audit",
+    "test:browser:sse": "node --test scripts/sse-recording-replay.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.85.1",
