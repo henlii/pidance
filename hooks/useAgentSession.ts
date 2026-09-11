@@ -163,6 +163,8 @@ type AgentStateResponse = {
   extensionWidgets?: ExtensionWidgetItem[];
   queuedMessages?: { steering?: string[]; followUp?: string[] } | null;
   pendingExtensionRequests?: AgentEvent[];
+  /** host 侧本 run 的吞吐读数（冷挂载/刷新时 seed；本地采样后失效）。 */
+  turnMetrics?: { tokensPerSecond?: number; ttftMs?: number } | null;
 };
 
 export interface QueuedMessages {
@@ -1227,12 +1229,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [addNotice, addLiveActivity, commitExtensionUiState, opts.chatInputRef, extensionUiStateRef]);
 
   /**
+   * 用 host 下发的本 run 吞吐读数兜底（冷挂载/刷新看不到 step 开始）。
+   * 空对象（服务端也没有读数）等于清掉 seed，避免显示上一轮的旧值。
+   */
+  const seedTurnMetricsFromState = useCallback((state?: AgentStateResponse | null) => {
+    const sid = sessionIdRef.current;
+    if (!sid || !state) return;
+    const metrics = state.turnMetrics ?? null;
+    const usable = metrics && (metrics.tokensPerSecond !== undefined || metrics.ttftMs !== undefined)
+      ? metrics
+      : null;
+    getOrCreateBrowserSessionRuntimeRegistry().seedTurnMetrics(sid, usable);
+  }, []);
+
+  /**
    * 将 /api/agent 状态快照的附属字段应用到本地 state（散落重复点的统一收口）。
    * 只覆盖显式提供的字段；running/streaming 等执行态由调用方负责。
    */
   const applyAgentStateSnapshot = useCallback((state?: AgentStateResponse | null) => {
     if (!state) return;
     if (state.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
+    seedTurnMetricsFromState(state);
     if (state.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt ?? null);
     if (isThinkingLevel(state.thinkingLevel)) setThinkingLevel(state.thinkingLevel);
     // host 热投影的模型：磁盘 loadSession 未返回前恢复模型显示，避免切换窗口
@@ -1246,7 +1263,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (state.queuedMessages !== undefined) {
       applyProjectedQueues(state.queuedMessages);
     }
-  }, [applyProjectedQueues, patchExtensionUiState, setLastKnownModel]);
+  }, [applyProjectedQueues, patchExtensionUiState, seedTurnMetricsFromState, setLastKnownModel]);
 
   /**
    * 统一 agent run 结束路径（P2）：agent_end / prompt_done / reconcile idle 三路合一。
@@ -1366,6 +1383,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Mirror compaction state unconditionally: a missed compaction_end
       // would otherwise leave the Stop UI stuck.
       setIsCompacting(state?.isCompacting ?? false);
+      // 刷新/后台回收回来后，本 run 的完整读数只有服务端有：接上它（本地跑完一个
+      // 完整 step 后 registry 会自动忽略 seed，不会用旧值覆盖更新的本地读数）。
+      seedTurnMetricsFromState(state);
       // 迟到的响应不得覆盖已切走会话的上下文，也不得覆盖请求期间到达的更新读数
       // （压缩后的 {tokens:null} 合法，不能用「更大」判新旧）。
       if (
@@ -2688,6 +2708,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (agentState?.state) {
             if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
             if (agentState.state.contextUsage !== undefined) setContextUsage(agentState.state.contextUsage ?? null);
+            seedTurnMetricsFromState(agentState.state);
             if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt ?? null);
             if (isThinkingLevel(agentState.state.thinkingLevel)) setThinkingLevel(agentState.state.thinkingLevel);
             if (agentState.state.extensionStatuses !== undefined) patchExtensionUiState({ statuses: agentState.state.extensionStatuses ?? [] });

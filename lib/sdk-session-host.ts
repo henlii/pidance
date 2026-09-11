@@ -178,6 +178,20 @@ export class SdkSessionHost {
     steering: [],
     followUp: [],
   };
+  /**
+   * 本 run 的吞吐读数（与浏览器侧 turn-metrics 同算法：每个 assistant step 的
+   * 「首个可见 token → 消息结束」时长 + provider 上报 output tokens，按解码时长加权）。
+   * 放在 host 是因为刷新/冷挂载的页面看不到 step 的开始，只有服务端能给出完整读数；
+   * 客户端冷挂载时用这份值 seed，自己观察到完整 step 后再以本地为准。
+   */
+  private turnMetrics: {
+    startedAt: number;
+    firstTokenAt: number | null;
+    ttftMs: number | null;
+    decodeMs: number;
+    outputTokens: number;
+    sampled: boolean;
+  } = { startedAt: 0, firstTokenAt: null, ttftMs: null, decodeMs: 0, outputTokens: 0, sampled: false };
   /** Live-host prompt receipts; same submissionId does not call Pi twice. */
   private promptReceipts = new Map<string, PromptReceipt>();
   /** submissionId → in-flight prompt promise（单飞；结算后删除） */
@@ -652,7 +666,64 @@ export class SdkSessionHost {
     }
   }
 
+  /** 首个可见内容（空壳帧不算）。 */
+  private static hasRenderableContent(message: { content?: unknown } | undefined): boolean {
+    if (!message) return false;
+    const content = message.content;
+    if (typeof content === "string") return content.length > 0;
+    return Array.isArray(content) && content.length > 0;
+  }
+
+  /** provider 上报的 output tokens（不做字符估算）。 */
+  private static outputTokensOf(message: { usage?: { output?: unknown } } | undefined): number | null {
+    const value = message?.usage?.output;
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+  }
+
+  /** 吞吐累加：与浏览器侧 projectTurnMetrics 同一套条件（时长与 tokens 都拿到才计入）。 */
+  private accumulateTurnMetrics(event: SdkAgentEvent): void {
+    const now = Date.now();
+    if (event.type === "agent_start") {
+      this.turnMetrics = { startedAt: now, firstTokenAt: null, ttftMs: null, decodeMs: 0, outputTokens: 0, sampled: false };
+      return;
+    }
+    if (event.type === "message_start" || event.type === "message_update") {
+      const message = event.message as { role?: string; content?: unknown } | undefined;
+      if (message?.role === "user") return;
+      if (this.turnMetrics.firstTokenAt === null && SdkSessionHost.hasRenderableContent(message)) {
+        this.turnMetrics.firstTokenAt = now;
+        if (this.turnMetrics.ttftMs === null && this.turnMetrics.startedAt > 0 && now >= this.turnMetrics.startedAt) {
+          this.turnMetrics.ttftMs = now - this.turnMetrics.startedAt;
+        }
+      }
+      return;
+    }
+    if (event.type === "message_end") {
+      const message = event.message as { role?: string; usage?: { output?: unknown } } | undefined;
+      if (message?.role !== "assistant") return;
+      const decodeMs = this.turnMetrics.firstTokenAt === null ? null : Math.max(0, now - this.turnMetrics.firstTokenAt);
+      this.turnMetrics.firstTokenAt = null;
+      const outputTokens = SdkSessionHost.outputTokensOf(message);
+      if (decodeMs !== null && outputTokens !== null) {
+        this.turnMetrics.decodeMs += decodeMs;
+        this.turnMetrics.outputTokens += outputTokens;
+        this.turnMetrics.sampled = true;
+      }
+    }
+  }
+
+  /** 投影给客户端的读数；起点未知时不编造 TTFT。 */
+  private projectTurnMetrics(): { tokensPerSecond?: number; ttftMs?: number } {
+    const metrics: { tokensPerSecond?: number; ttftMs?: number } = {};
+    if (this.turnMetrics.ttftMs !== null && this.turnMetrics.startedAt > 0) metrics.ttftMs = this.turnMetrics.ttftMs;
+    if (this.turnMetrics.sampled && this.turnMetrics.decodeMs > 0) {
+      metrics.tokensPerSecond = this.turnMetrics.outputTokens / (this.turnMetrics.decodeMs / 1e3);
+    }
+    return metrics;
+  }
+
   private handleSessionEvent(event: SdkAgentEvent): void {
+    this.accumulateTurnMetrics(event);
     switch (event.type) {
       case "agent_start":
         this.promptRunning = true;
@@ -1098,6 +1169,7 @@ export class SdkSessionHost {
       isPromptRunning: this.promptRunning,
       lastStopReason: this.lastStopReason,
       isBashRunning: this.bashRunning,
+      turnMetrics: this.projectTurnMetrics(),
       pendingBash: this.bashCommand,
       autoCompactionEnabled: session.autoCompactionEnabled,
       steeringMode: session.steeringMode,

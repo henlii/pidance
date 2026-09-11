@@ -81,7 +81,9 @@ test("顶栏上下文读数在 run 结束前就已更新", { timeout: 150_000 },
         type: "prompt",
         // sleep 20 保证 run 足够长（页面打开前不会结束）；seq 的大输出把上下文
         // 推高约 0.6%，跨过顶栏 0.1% 的显示精度。
-        message: "请用 bash 工具执行 sleep 20（一次调用），然后执行 seq 1 4000（一次调用），最后一句话总结。",
+        // 时长要覆盖「上滚释放 + 冷挂载读数」两个阶段：先跑一次长 sleep（首个 step
+        // 立刻结束，服务端随即有吞吐读数），再补几轮短命令把 run 拉长。
+        message: "请用 bash 工具执行 seq 1 4000（一次调用），然后用 bash 工具执行 sleep 40（一次调用），最后依次用 bash 工具执行 echo a、echo b（每次单独调用），最后一句话总结。",
       }),
     });
     const created = await createRes.json();
@@ -184,6 +186,20 @@ test("顶栏上下文读数在 run 结束前就已更新", { timeout: 150_000 },
       released.distance > 40,
       `用户上滚后被自动跟随抢回底部（距底 ${released.distance}px）`,
     );
+
+    // 刷新/冷挂载（手机后台被回收后回来）：本 run 的完整读数只有服务端有，
+    // 顶栏必须靠服务端下发的 turn metrics 立刻给出速度，而不是等下一个完整 step。
+    const stateRes = await fetch(`${URL_BASE}/api/agent/${encodeURIComponent(createdId)}?light=1`, { headers: AUTH_HEADER });
+    const stateJson = stateRes.ok ? await stateRes.json() : {};
+    assert.equal(stateJson?.live, true, "重新加载前 run 已结束，无法验证冷挂载读数（请放宽 prompt 时长）");
+    await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(createdId)}`, "--session", SESSION], { json: false });
+    let seeded = null;
+    for (let i = 0; i < 20 && !seeded; i += 1) {
+      await new Promise((r) => setTimeout(r, 700));
+      const tip = await evalResult("document.querySelector('.app-top-bar-stats')?.getAttribute('data-tooltip') ?? null");
+      if (typeof tip === "string" && tip.includes("词元/秒")) seeded = tip;
+    }
+    assert.ok(seeded, "冷挂载后顶栏没有恢复本 run 的速度读数（服务端 turn metrics 未接上）");
   } finally {
     if (createdId) {
       await fetch(`${URL_BASE}/api/sessions/${encodeURIComponent(createdId)}`, { method: "DELETE", headers: AUTH_HEADER }).catch(() => {});

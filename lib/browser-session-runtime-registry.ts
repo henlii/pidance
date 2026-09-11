@@ -91,13 +91,30 @@ type TurnMetricsAccumulator = {
   decodeMs: number;
   outputTokens: number;
   sampled: boolean;
+  /**
+   * 本 step 是否从它的 message_start 就观测到。冷挂载（刷新/后台回收回来）时
+   * 只能看到 step 的尾部：此时 output tokens 是整段而解码时长只有尾巴，
+   * 计进去会得到虚高读数，所以这类 step 不参与累计。
+   */
+  stepObservedFromStart: boolean;
 };
 
 function emptyTurnMetrics(startedAt: number): TurnMetricsAccumulator {
-  return { startedAt, firstTokenAt: null, ttftMs: null, decodeMs: 0, outputTokens: 0, sampled: false };
+  return {
+    startedAt,
+    firstTokenAt: null,
+    ttftMs: null,
+    decodeMs: 0,
+    outputTokens: 0,
+    sampled: false,
+    stepObservedFromStart: true,
+  };
 }
 
-function projectTurnMetrics(accumulator: TurnMetricsAccumulator): TurnMetrics {
+function projectTurnMetrics(accumulator: TurnMetricsAccumulator, seeded: TurnMetrics | null): TurnMetrics {
+  // 本地还没跑完一个完整 step 时，用服务端下发的读数兜底：刷新/冷挂载的页面看不到
+  // step 的开始，只有 host 有完整读数。本地一旦采样成功就以本地为准（更新更快）。
+  if (!accumulator.sampled && seeded) return { ...seeded };
   const metrics: TurnMetrics = {};
   // 起点未知（startedAt=0）时宁可不出 TTFT，也不显示一个荒谬的数字。
   if (accumulator.ttftMs !== null && accumulator.startedAt > 0) metrics.ttftMs = accumulator.ttftMs;
@@ -292,6 +309,8 @@ type RuntimeSlot = {
   sseRetryAttempt: number;
   /** 本轮 run 的吞吐累积（见 TurnMetrics 注释）。 */
   metrics: TurnMetricsAccumulator;
+  /** 服务端下发的本 run 读数（冷挂载兜底）；本地采样成功后置 null。 */
+  seededTurnMetrics: TurnMetrics | null;
 };
 
 /** 视图附件 token：dispose 的身份，与 sessionId 解耦。 */
@@ -348,6 +367,8 @@ export type BrowserSessionRuntimeRegistry = {
   getSubmission(sessionId: string, submissionId: string): PromptSubmission | undefined;
   /** 冷挂载/刷新时把服务端已在跑的 run 导入 slot（防止 reconcile 误收尾、发送被拒）。 */
   importRunningRun(sessionId: string, startedAt?: number): void;
+  /** 冷挂载/刷新时用服务端读数兜底本 run 的吞吐（本地采样后自动失效）。 */
+  seedTurnMetrics(sessionId: string, metrics: TurnMetrics | null): void;
   /** 测试用：重置单例 */
   resetForTests(): void;
 };
@@ -395,6 +416,7 @@ function createSlot(sessionId: string): RuntimeSlot {
     sseRetryTimer: null,
     sseRetryAttempt: 0,
     metrics: emptyTurnMetrics(0),
+    seededTurnMetrics: null,
   };
 }
 
@@ -505,7 +527,7 @@ export function createBrowserSessionRuntimeRegistry(
       messages: slot.derived.messages,
       entryIds: slot.derived.entryIds,
       messageKeys: slot.derived.messageKeys,
-      turnMetrics: projectTurnMetrics(slot.metrics),
+      turnMetrics: projectTurnMetrics(slot.metrics, slot.seededTurnMetrics),
       submissions: [...slot.submissions.values()],
       attachCount: slot.attachments.size,
     };
@@ -683,6 +705,7 @@ export function createBrowserSessionRuntimeRegistry(
       slot.snapshot.finishingRunId = null;
       slot.snapshot.streamState = { isStreaming: true, streamingMessage: null };
       slot.metrics = emptyTurnMetrics(now());
+      slot.seededTurnMetrics = null;
     } else if (type === "agent_end" || type === "prompt_done") {
       slot.snapshot.agentRunning = false;
       slot.snapshot.completedRunId = slot.snapshot.promptRunId;
@@ -691,6 +714,8 @@ export function createBrowserSessionRuntimeRegistry(
       const message = event.message as Partial<AgentMessage> | undefined;
       if (!slot.snapshot.agentRunning) return;
       if (message?.role === "user") return;
+      // step 边界：从这里开始本 step 的解码时长才是完整的。
+      if (type === "message_start") slot.metrics.stepObservedFromStart = true;
       if (message) {
         // 首个内容帧：TTFT 的终点，也是本 step 解码时长的起点。
         if (slot.metrics.firstTokenAt === null && hasRenderableContent(message)) {
@@ -798,15 +823,17 @@ export function createBrowserSessionRuntimeRegistry(
       // 计入（与 dsh 的 turn-metrics 同条件），否则该 step 不参与加权平均。
       if (completed?.role === "assistant") {
         const endedAt = now();
-        const decodeMs = slot.metrics.firstTokenAt === null
+        const decodeMs = slot.metrics.firstTokenAt === null || !slot.metrics.stepObservedFromStart
           ? null
           : Math.max(0, endedAt - slot.metrics.firstTokenAt);
         slot.metrics.firstTokenAt = null;
+        slot.metrics.stepObservedFromStart = false;
         const outputTokens = usageOutputTokens(completed);
         if (decodeMs !== null && outputTokens !== null) {
           slot.metrics.decodeMs += decodeMs;
           slot.metrics.outputTokens += outputTokens;
           slot.metrics.sampled = true;
+          slot.seededTurnMetrics = null;
         }
       }
       slot.snapshot.streamState = emptyStream();
@@ -1186,6 +1213,22 @@ export function createBrowserSessionRuntimeRegistry(
         ? startedAt
         : now();
       slot.metrics = emptyTurnMetrics(resumedFrom);
+      // 冷挂载只能看到当前 step 的尾部：不参与累计（服务端读数通过 seedTurnMetrics 兜底）。
+      slot.metrics.stepObservedFromStart = false;
+      slot.seededTurnMetrics = null;
+      publish(slot);
+    },
+    seedTurnMetrics(sessionId, metrics) {
+      const slot = getSlot(sessionId, true)!;
+      if (!metrics) {
+        if (slot.seededTurnMetrics === null) return;
+        slot.seededTurnMetrics = null;
+        publish(slot);
+        return;
+      }
+      // 本地已跑完完整 step 时以本地为准，不被服务端旧值覆盖。
+      if (slot.metrics.sampled) return;
+      slot.seededTurnMetrics = { ...metrics };
       publish(slot);
     },
     async reconcile(sessionId) {
