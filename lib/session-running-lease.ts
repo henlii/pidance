@@ -4,11 +4,11 @@
  * 不因 SSE 订阅继续占用空闲会话。
  * 不表示「智能体正在执行」——侧栏 running/计时走 isRunning，对端占用走 lockedByOther。
  */
+import { randomBytes } from "node:crypto";
 import {
-  closeSync,
   existsSync,
+  linkSync,
   mkdirSync,
-  openSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -30,45 +30,9 @@ export const RUNNING_LEASE_DIRNAME = "pidance-running-leases";
 const LEASE_LOCK_NAME = ".lease-lock";
 const LEASE_LOCK_WAIT_MS = 5;
 const LEASE_LOCK_TIMEOUT_MS = 3_000;
-const LEASE_LOCK_STALE_MS = 10_000;
-
-function sleepSync(milliseconds: number): void {
-  const buffer = new Int32Array(new SharedArrayBuffer(4));
-  Atomics.wait(buffer, 0, 0, milliseconds);
-}
-
-/** 原子独占锁（wx 创建 + 陈旧回收）；所有租约写路径共用。 */
-function withLeaseLock<T>(agentDir: string, fn: () => T): T {
-  const dir = leaseDir(agentDir);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const lockPath = join(dir, LEASE_LOCK_NAME);
-  const deadline = Date.now() + LEASE_LOCK_TIMEOUT_MS;
-  let fd: number | null = null;
-  while (fd === null) {
-    try {
-      fd = openSync(lockPath, "wx", 0o600);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      try {
-        if (Date.now() - statSync(lockPath).mtimeMs > LEASE_LOCK_STALE_MS) unlinkSync(lockPath);
-      } catch {
-        // 锁持有者可能在 stat/unlink 之间释放
-      }
-      if (Date.now() >= deadline) throw new Error("Timed out acquiring Pidance running-lease lock");
-      sleepSync(LEASE_LOCK_WAIT_MS);
-    }
-  }
-  try {
-    return fn();
-  } finally {
-    closeSync(fd);
-    try {
-      unlinkSync(lockPath);
-    } catch {
-      /* ignore lock cleanup failure */
-    }
-  }
-}
+/** 锁文件内容不可解析（写坏/残留）时的回收门槛；正常锁按持有者 pid 判活。 */
+const LEASE_LOCK_CORRUPT_STALE_MS = 10_000;
+export const LEASE_LOCK_TIMEOUT_MESSAGE = "Timed out acquiring Pidance running-lease lock";
 
 export type RunningLease = {
   pid: number;
@@ -111,6 +75,94 @@ function readLeaseFile(path: string): RunningLease | null {
   } catch {
     return null;
   }
+}
+
+function sleepSync(milliseconds: number): void {
+  const buffer = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(buffer, 0, 0, milliseconds);
+}
+
+/** 锁持有者：pid 判活 + token 判所有权（防止旧持有者删掉新持有者的锁）。 */
+function readLockOwner(lockPath: string): { pid: number; token: string } | null {
+  try {
+    const raw = JSON.parse(readFileSync(lockPath, "utf8")) as Partial<{ pid: number; token: string }>;
+    if (typeof raw.pid !== "number" || typeof raw.token !== "string") return null;
+    return { pid: raw.pid, token: raw.token };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 跨进程独占锁：内容先写好再 link 占位（link 目标已存在即 EEXIST，原子），
+ * 释放时校验 token，只删自己的锁。
+ *
+ * 陈旧回收只针对**持有者进程已死**的锁：活着的持有者（含被 SIGSTOP/长 GC 暂停的）
+ * 一律等待到超时并抛错（fail closed），绝不因为「文件旧了」抢锁 —— 否则暂停中的
+ * 持有者恢复后会把新持有者的锁删掉，两个进程同时进入临界区。
+ */
+function withLeaseLock<T>(agentDir: string, fn: () => T): T {
+  const dir = leaseDir(agentDir);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const lockPath = join(dir, LEASE_LOCK_NAME);
+  const token = randomBytes(8).toString("hex");
+  const deadline = Date.now() + LEASE_LOCK_TIMEOUT_MS;
+  let acquired = false;
+  while (!acquired) {
+    const temp = `${lockPath}.${process.pid}.${token}.tmp`;
+    try {
+      writeFileSync(temp, JSON.stringify({ pid: process.pid, token }), { mode: 0o600 });
+      linkSync(temp, lockPath);
+      acquired = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        try { unlinkSync(temp); } catch { /* ignore */ }
+        throw error;
+      }
+    }
+    try {
+      unlinkSync(temp);
+    } catch {
+      /* 临时文件可能已被 link 走 */
+    }
+    if (acquired) break;
+
+    const owner = readLockOwner(lockPath);
+    if (owner && !isPidAlive(owner.pid)) {
+      // 持有者已死：可安全回收（再校验一次 token，避免删掉刚接手的新锁）。
+      try {
+        if (readLockOwner(lockPath)?.token === owner.token) unlinkSync(lockPath);
+      } catch {
+        /* ignore */
+      }
+      continue;
+    }
+    if (!owner) {
+      // 内容不可解析：只回收确实很旧的残留，避免误删正在创建中的锁。
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > LEASE_LOCK_CORRUPT_STALE_MS) unlinkSync(lockPath);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (Date.now() >= deadline) throw new Error(LEASE_LOCK_TIMEOUT_MESSAGE);
+    sleepSync(LEASE_LOCK_WAIT_MS);
+  }
+  try {
+    return fn();
+  } finally {
+    // 只删自己的锁：被暂停后恢复的旧持有者不得删掉新持有者的锁。
+    try {
+      if (readLockOwner(lockPath)?.token === token) unlinkSync(lockPath);
+    } catch {
+      /* ignore lock cleanup failure */
+    }
+  }
+}
+
+/** 锁超时按「拿不到写权」处理（fail closed），其余错误继续抛。 */
+function isLeaseLockTimeout(error: unknown): boolean {
+  return error instanceof Error && error.message === LEASE_LOCK_TIMEOUT_MESSAGE;
 }
 
 /** 原子写：临时文件 + rename，避免读者看到写了一半的 JSON。 */
@@ -169,7 +221,8 @@ export function acquireRunningLease(
   now = Date.now(),
 ): boolean {
   if (!sessionId) return false;
-  return withLeaseLock(agentDir, () => {
+  try {
+    return withLeaseLock(agentDir, () => {
     const path = leasePath(agentDir, sessionId);
     const current = existsSync(path) ? readLeaseFile(path) : null;
     if (current && isFresh(current, now) && current.pid !== process.pid) {
@@ -182,8 +235,12 @@ export function acquireRunningLease(
       heartbeatAt: now,
       startedAt: current && current.pid === process.pid ? current.startedAt : now,
     });
-    return true;
-  });
+      return true;
+    });
+  } catch (error) {
+    if (isLeaseLockTimeout(error)) return false;
+    throw error;
+  }
 }
 
 export function heartbeatRunningLease(
@@ -192,17 +249,21 @@ export function heartbeatRunningLease(
   now = Date.now(),
 ): void {
   if (!sessionId) return;
-  withLeaseLock(agentDir, () => {
-    const path = leasePath(agentDir, sessionId);
-    const current = existsSync(path) ? readLeaseFile(path) : null;
-    if (current && current.pid !== process.pid && isFresh(current, now)) return;
-    writeLease(path, {
-      pid: process.pid,
-      sessionId,
-      heartbeatAt: now,
-      startedAt: current && current.pid === process.pid ? current.startedAt : now,
+  try {
+    withLeaseLock(agentDir, () => {
+      const path = leasePath(agentDir, sessionId);
+      const current = existsSync(path) ? readLeaseFile(path) : null;
+      if (current && current.pid !== process.pid && isFresh(current, now)) return;
+      writeLease(path, {
+        pid: process.pid,
+        sessionId,
+        heartbeatAt: now,
+        startedAt: current && current.pid === process.pid ? current.startedAt : now,
+      });
     });
-  });
+  } catch (error) {
+    if (!isLeaseLockTimeout(error)) throw error;
+  }
 }
 
 export function releaseRunningLease(
@@ -210,17 +271,21 @@ export function releaseRunningLease(
   agentDir: string = getAgentDir(),
 ): void {
   if (!sessionId) return;
-  withLeaseLock(agentDir, () => {
-    const path = leasePath(agentDir, sessionId);
-    const current = existsSync(path) ? readLeaseFile(path) : null;
-    // 旧 owner 不得删除新 owner 的租约。
-    if (current && current.pid !== process.pid) return;
-    try {
-      unlinkSync(path);
-    } catch {
-      /* ignore */
-    }
-  });
+  try {
+    withLeaseLock(agentDir, () => {
+      const path = leasePath(agentDir, sessionId);
+      const current = existsSync(path) ? readLeaseFile(path) : null;
+      // 旧 owner 不得删除新 owner 的租约。
+      if (current && current.pid !== process.pid) return;
+      try {
+        unlinkSync(path);
+      } catch {
+        /* ignore */
+      }
+    });
+  } catch (error) {
+    if (!isLeaseLockTimeout(error)) throw error;
+  }
 }
 
 export function listFreshRunningLeaseSessionIds(
