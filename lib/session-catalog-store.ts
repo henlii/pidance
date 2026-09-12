@@ -134,38 +134,46 @@ export function linkStartingMarksToRegistry(
   store: Pick<SessionCatalogStore, "getState" | "subscribe" | "clearStarting">,
   registry: Pick<BrowserSessionRuntimeRegistry, "subscribe">,
 ): () => void {
-  const watchers = new Map<string, () => void>();
+  /** 每个 id 的登记项（entry 身份用于判定占位符是否仍属于本次订阅）。 */
+  type Watcher = { unsubscribe: () => void };
+  const watchers = new Map<string, Watcher>();
+  let disposed = false;
+
   const sync = () => {
+    if (disposed) return;
     const starting = store.getState().startingIds;
-    for (const [id, unsubscribe] of [...watchers]) {
+    for (const [id, watcher] of [...watchers]) {
       if (starting.has(id)) continue;
-      unsubscribe();
       watchers.delete(id);
+      watcher.unsubscribe();
     }
     for (const id of starting) {
       if (watchers.has(id)) continue;
-      // registry.subscribe 同步回调首个快照，回调可能立即回收标记并重入 sync()：
-      // 先登记占位 token，subscribe 返回后按当前状态决定保存还是立即退订。
-      watchers.set(id, () => {});
+      // 重入（同步首个快照回收标记）可能已改变集合：每次准备订阅前重新读一遍
+      if (!store.getState().startingIds.has(id)) continue;
+      const entry: Watcher = { unsubscribe: () => {} };
+      watchers.set(id, entry);
       const unsubscribe = registry.subscribe(id, (snapshot) => {
         if (snapshot.agentRunning || snapshot.sendInFlight) return;
         store.clearStarting(id);
       });
-      const placeholder = watchers.get(id);
-      if (placeholder !== undefined && store.getState().startingIds.has(id)) {
-        watchers.set(id, unsubscribe);
+      if (!disposed && watchers.get(id) === entry && store.getState().startingIds.has(id)) {
+        entry.unsubscribe = unsubscribe;
       } else {
+        // 同步重入已回收标记（或挂钩已解除）：本次订阅立即退订，且不动别人的登记项
         unsubscribe();
-        watchers.delete(id);
       }
     }
   };
+
   const unsubscribeStore = store.subscribe(sync);
   sync();
   return () => {
+    disposed = true;
     unsubscribeStore();
-    for (const unsubscribe of watchers.values()) unsubscribe();
+    const entries = [...watchers.values()];
     watchers.clear();
+    for (const entry of entries) entry.unsubscribe();
   };
 }
 
