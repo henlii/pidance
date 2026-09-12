@@ -437,8 +437,18 @@ export class SdkSessionHost {
     this.followUpFlushConfirmed = false;
     try {
       await this.send({ type: "prompt", message: item });
-      // send() 在 preflight 后即返回；真正的确认由 message_end(user) 或
-      // agent_settled(completed) 驱动，避免在 prompt preflight 阶段清队。
+      // 投递已受理（preflight 通过）即从队列移除并持久化：只等 message_end/
+      // agent_settled 确认会让「已送达」的条目继续留在队列里，下一次 settle 再发
+      // 一遍（实测同一文本 07:49 与 09:02 两次落盘）。确认事件仍会推进游标，
+      // 此处的移除对它是幂等的。
+      if (this.removeDeliveredFollowUp()) {
+        this.emit({
+          type: "follow_up_flushed",
+          sessionId: this.realSessionId,
+          item,
+          remaining: [...this.followUpQueue],
+        });
+      }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.emit({ type: "follow_up_flush_error", errorMessage });
@@ -446,25 +456,39 @@ export class SdkSessionHost {
     }
   }
 
+  /**
+   * 从队列里移除本次已投递的条目并持久化，返回是否有变更。
+   *
+   * flushAsOne：整组作为一条 prompt 发出 → 只清空本次快照条目；快照之后新入队的
+   * 条目保留，避免 set_follow_up_queue 整组替换时丢新消息。
+   * 逐条：只移除本次投递的那一条（同文本重复入队时按出现顺序取第一条）。
+   */
+  private removeDeliveredFollowUp(): boolean {
+    if (this.followUpFlushAsOne) {
+      const original = new Set(this.followUpFlushOriginal);
+      const next = this.followUpQueue.filter((entry) => !original.has(entry));
+      if (next.length === this.followUpQueue.length) return false;
+      this.updateFollowUpQueue(next);
+      this.persistFollowUpQueue();
+      return true;
+    }
+    const item = this.followUpFlushBatch[this.followUpFlushCursor];
+    if (item === undefined) return false;
+    const idx = this.followUpQueue.indexOf(item);
+    if (idx < 0) return false;
+    const next = [...this.followUpQueue];
+    next.splice(idx, 1);
+    this.updateFollowUpQueue(next);
+    this.persistFollowUpQueue();
+    return true;
+  }
+
   private confirmFollowUpFlush(): void {
     if (!this.flushingFollowUp || this.followUpFlushConfirmed) return;
     const item = this.followUpFlushBatch[this.followUpFlushCursor];
     if (item === undefined) return;
     this.followUpFlushConfirmed = true;
-    if (this.followUpFlushAsOne) {
-      // flushAsOne：整组作为一条 prompt 发出，确认后只清空本次快照条目；
-      // 快照之后新入队的条目保留，避免 set_follow_up_queue 整组替换时丢新消息。
-      const original = new Set(this.followUpFlushOriginal);
-      this.updateFollowUpQueue(this.followUpQueue.filter((item) => !original.has(item)));
-    } else {
-      // 只移除已确认落盘/已 settled 的当前条目；未确认条目保留。
-      const idx = this.followUpQueue.indexOf(item);
-      if (idx >= 0) {
-        const next = [...this.followUpQueue];
-        next.splice(idx, 1);
-        this.updateFollowUpQueue(next);
-      }
-    }
+    this.removeDeliveredFollowUp();
     const remaining = [...this.followUpQueue];
     this.persistFollowUpQueue();
     this.emit({
