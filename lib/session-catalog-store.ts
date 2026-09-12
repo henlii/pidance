@@ -138,17 +138,26 @@ export function linkStartingMarksToRegistry(
   const sync = () => {
     const starting = store.getState().startingIds;
     for (const [id, unsubscribe] of [...watchers]) {
-      if (!starting.has(id)) {
-        unsubscribe();
-        watchers.delete(id);
-      }
+      if (starting.has(id)) continue;
+      unsubscribe();
+      watchers.delete(id);
     }
     for (const id of starting) {
       if (watchers.has(id)) continue;
-      watchers.set(id, registry.subscribe(id, (snapshot) => {
+      // registry.subscribe 同步回调首个快照，回调可能立即回收标记并重入 sync()：
+      // 先登记占位 token，subscribe 返回后按当前状态决定保存还是立即退订。
+      watchers.set(id, () => {});
+      const unsubscribe = registry.subscribe(id, (snapshot) => {
         if (snapshot.agentRunning || snapshot.sendInFlight) return;
         store.clearStarting(id);
-      }));
+      });
+      const placeholder = watchers.get(id);
+      if (placeholder !== undefined && store.getState().startingIds.has(id)) {
+        watchers.set(id, unsubscribe);
+      } else {
+        unsubscribe();
+        watchers.delete(id);
+      }
     }
   };
   const unsubscribeStore = store.subscribe(sync);
@@ -332,6 +341,13 @@ export function createSessionCatalogStore(options?: {
       const starting = new Set(state.startingIds);
       starting.delete(sessionId);
       state.startingIds = starting;
+      // 计时播种同步退出：registry 结算路径（提交被拒/失败）不会再产生全局快照，
+      // 留着旧起点会让下一次发送沿用上一轮的时间。服务端仍在跑的 id 不动。
+      if (!state.runningIds.has(sessionId) && state.runningStartedAt.has(sessionId)) {
+        const started = new Map(state.runningStartedAt);
+        started.delete(sessionId);
+        state.runningStartedAt = started;
+      }
       emit();
     },
     applyRunningSnapshot(input) {
