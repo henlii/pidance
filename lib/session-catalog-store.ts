@@ -4,6 +4,7 @@
  */
 
 import type { SessionInfo } from "./types";
+import type { BrowserSessionRuntimeRegistry } from "./browser-session-runtime-registry";
 import {
   mergeOptimisticSessions,
   reconcilePendingSessionIds,
@@ -118,6 +119,44 @@ function initialState(): SessionCatalogState {
     error: null,
     serverListLoaded: false,
     listStatus: "idle",
+  };
+}
+
+/**
+ * 乐观 starting 标记由当前 chat 上报，chat 切走后没人撤销：本地提交结算（被拒/失败）
+ * 不会再产生任何权威快照，标记会永久残留「运行中」。因此已登记的标记直接订阅 registry
+ * （run 的 owner，chat 卸载不影响它）：本地既无 run 也无在途 send → 立即回收；服务端
+ * 已确认在跑 / 仍在提交中的标记不动（后续由权威快照规则接管）。
+ *
+ * @returns 解除挂钩（同时退订所有已登记标记）
+ */
+export function linkStartingMarksToRegistry(
+  store: Pick<SessionCatalogStore, "getState" | "subscribe" | "clearStarting">,
+  registry: Pick<BrowserSessionRuntimeRegistry, "subscribe">,
+): () => void {
+  const watchers = new Map<string, () => void>();
+  const sync = () => {
+    const starting = store.getState().startingIds;
+    for (const [id, unsubscribe] of [...watchers]) {
+      if (!starting.has(id)) {
+        unsubscribe();
+        watchers.delete(id);
+      }
+    }
+    for (const id of starting) {
+      if (watchers.has(id)) continue;
+      watchers.set(id, registry.subscribe(id, (snapshot) => {
+        if (snapshot.agentRunning || snapshot.sendInFlight) return;
+        store.clearStarting(id);
+      }));
+    }
+  };
+  const unsubscribeStore = store.subscribe(sync);
+  sync();
+  return () => {
+    unsubscribeStore();
+    for (const unsubscribe of watchers.values()) unsubscribe();
+    watchers.clear();
   };
 }
 
@@ -298,7 +337,9 @@ export function createSessionCatalogStore(options?: {
     applyRunningSnapshot(input) {
       const nextRunning = new Set(input.runningIds);
       const nextStartingIds = nextStarting(nextRunning, new Set(input.localInFlightIds ?? []));
-      const previousEffective = effectiveRunning();
+      // 完成判定只看服务端确认过的在跑集：乐观 starting 标记从未被服务端确认时
+      // （发送被拒/失败），回收标记不得当成「跑完了一轮」而产生未读。
+      const previousServerRunning = state.runningIds;
       const nextStarted = new Map(state.runningStartedAt);
       const nextEpoch = new Map(state.runningEpoch);
       const now = input.now ?? nowMs();
@@ -332,7 +373,7 @@ export function createSessionCatalogStore(options?: {
       const nextEffective = unionSets(nextRunning, nextStartingIds);
       state.unread = applyRunningUnreadStateTransition(
         state.unread,
-        previousEffective,
+        previousServerRunning,
         nextEffective,
         input.selectedSessionId ?? null,
         nowIso,

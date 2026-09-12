@@ -32,13 +32,14 @@ import {
 import { buildAtMentionText, buildFileAtMentionsText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import { createSessionNavigationStore } from "@/lib/session-navigation-store";
-import { createSessionCatalogStore } from "@/lib/session-catalog-store";
+import { createSessionCatalogStore, linkStartingMarksToRegistry } from "@/lib/session-catalog-store";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
 import type { BranchActions } from "@/lib/branch-bookmarks";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { TurnMetrics } from "@/lib/browser-session-runtime-registry";
+import { getOrCreateBrowserSessionRuntimeRegistry } from "@/lib/browser-session-runtime-registry";
 import { ProjectProvider, useProjectActions, useProjectIdentity } from "./ProjectProvider";
 import {
   CHANGES_PANEL_WIDTH_DEFAULT,
@@ -87,6 +88,12 @@ function AppShellInner() {
   const [restoreNonce, setRestoreNonce] = useState(0);
   const navigationStoreRef = useRef(createSessionNavigationStore());
   const catalogStoreRef = useRef(createSessionCatalogStore());
+  // 乐观 starting 标记的兜底回收：标记由当前 chat 上报，chat 切走后没人撤销；
+  // 已登记的标记订阅 registry，本地无 run 也无在途 send 时立即回收。
+  useEffect(
+    () => linkStartingMarksToRegistry(catalogStoreRef.current, getOrCreateBrowserSessionRuntimeRegistry()),
+    [],
+  );
   const [navEpoch, setNavEpoch] = useState(0);
   useEffect(() => navigationStoreRef.current.subscribe(() => setNavEpoch((n) => n + 1)), []);
   const navState = navigationStoreRef.current.getState();

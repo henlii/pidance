@@ -592,22 +592,35 @@ test("用例13：run 结束的权威快照回收乐观运行标记（侧栏不�
     createdId = created?.sessionId ?? null;
     assert.ok(createdId, `测试会话创建失败: ${createRes.status} ${JSON.stringify(created)}`);
 
-    const rowRunning = `(() => {
+    const rowState = `(() => {
       const row = document.querySelector('[data-session-id="${createdId}"]');
-      return row ? !!row.querySelector('[aria-label="运行中"]') : null;
+      return { present: !!row, running: row ? !!row.querySelector('[aria-label="运行中"]') : false };
     })()`;
+    // chat 视图必须确实挂在该会话且正在跑：乐观标记由当前 chat 上报，
+    // 只看侧栏圆环无法区分标记还是服务端 running 集。
+    const viewRunning = `(() => ({
+      onSession: location.search.includes(${JSON.stringify(createdId)}),
+      chat: !!document.querySelector('[data-pidance-chat="true"]'),
+      stop: [...document.querySelectorAll('button')].some((b) => (b.textContent || '').trim().startsWith('停止')),
+    }))()`;
 
     await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(createdId)}`, "--session", SESSION], { json: false });
     await ensureAuthed();
     await ab(["set", "viewport", "1280", "720", "--session", SESSION], { json: false });
 
-    // 1) 前置：侧栏该行必须已显示运行中（chat 乐观标记 / 列表 running 集均可）
-    let running = false;
-    for (let i = 0; i < 40 && !running; i += 1) {
+    // 1) 前置：侧栏该行显示运行中，且该会话的 chat 视图已挂载并在跑（乐观标记已建立）
+    let ready = null;
+    for (let i = 0; i < 40; i += 1) {
       await new Promise((r) => setTimeout(r, 500));
-      running = (await evalResult(rowRunning)) === true;
+      const row = await evalResult(rowState);
+      const view = await evalResult(viewRunning);
+      ready = { row, view };
+      if (row?.present && row.running && view?.onSession && view.chat && view.stop) break;
     }
-    assert.ok(running, "测试会话未在侧栏显示运行中（前置条件不成立）");
+    assert.ok(ready?.row?.present, "测试会话未出现在侧栏");
+    assert.ok(ready.row.running, "测试会话未在侧栏显示运行中（前置条件不成立）");
+    assert.ok(ready.view?.chat && ready.view.onSession, "该会话的 chat 视图未挂载（乐观标记不可能建立）");
+    assert.ok(ready.view.stop, "chat 视图未显示运行中（停止按钮缺失）");
 
     // 2) 切走会话：当前 chat 不再上报该会话的运行态（标记无人撤销）
     const switched = await evalResult(`(() => {
@@ -634,17 +647,18 @@ test("用例13：run 结束的权威快照回收乐观运行标记（侧栏不�
     await unroute();
     await evalResult("(() => { window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')); return true; })()");
 
-    // 5) 权威快照已说不在跑：侧栏行必须退出运行中
-    let stillRunning = true;
-    for (let i = 0; i < 20 && stillRunning; i += 1) {
+    // 5) 权威快照已说不在跑：侧栏行必须仍在且退出运行中
+    let after = await evalResult(rowState);
+    for (let i = 0; i < 20 && !(after?.present && !after.running); i += 1) {
       await new Promise((r) => setTimeout(r, 500));
-      stillRunning = (await evalResult(rowRunning)) === true;
-      if (stillRunning && i === 8) {
+      after = await evalResult(rowState);
+      if (after?.present && after.running && i === 8) {
         // SSE 自动重连也可能带来同一权威快照：补一次对齐
         await evalResult("(() => { window.dispatchEvent(new Event('focus')); return true; })()");
       }
     }
-    assert.equal(stillRunning, false, "run 结束后侧栏仍显示运行中（乐观标记未回收）");
+    assert.equal(after?.present, true, "测试会话行已从侧栏消失，无法判定运行态");
+    assert.equal(after.running, false, "run 结束后侧栏仍显示运行中（乐观标记未回收）");
   } finally {
     await unroute();
     if (createdId) {
