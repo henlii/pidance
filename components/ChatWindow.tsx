@@ -12,7 +12,7 @@ import { ImagePreviewOverlay } from "./MessageImage";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { MessageNavRail } from "./MessageNavRail";
-import { CHAT_COLUMN_MAX_WIDTH, CHAT_GUTTER } from "@/lib/chat-column";
+import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE, CHAT_COLUMN_MAX_WIDTH, CHAT_GUTTER } from "@/lib/chat-column";
 
 /**
  * 输入区/面板/底栏的左右内边距：与消息列逐像素对齐。
@@ -1044,6 +1044,8 @@ function ExtensionStatusBar({ statuses }: { statuses: Array<{ key: string; text:
 
 function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: string[] }> }) {
   const { t } = useI18n();
+  // 内容限高内滚：超长 widget（如统计表）否则会把输入区整块顶出可视区
+  const bodyMaxHeight = useIsMobile() ? CHAT_BLOCK_MAX_HEIGHT_MOBILE : CHAT_BLOCK_MAX_HEIGHT;
   // 折叠状态按 widget key 记忆（localStorage，跨会话/刷新）；默认展开。
   const [collapsedKeys, setCollapsedKeys] = useState<Set<string>>(() => loadCollapsedWidgetKeys());
 
@@ -1111,7 +1113,7 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{widget.key}</span>
             </button>
             {!collapsed && (
-              <pre style={{ margin: 0, padding: "8px 9px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--font-mono)" }}>
+              <pre style={{ margin: 0, padding: "8px 9px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--font-mono)", maxHeight: bodyMaxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y" }}>
                 {(Array.isArray(widget.lines) ? widget.lines : []).map((line, index, lines) => (
                   <Fragment key={index}>
                     {renderAnsiLine(line, `widget-${widget.key}-line-${index}`)}
@@ -1394,7 +1396,8 @@ function ExtensionCustomPanel({
         }}
         style={{
           position: "relative",
-          width: "min(920px, 100%)",
+          // 与输入框同宽（面板覆盖在会话列上方，宽度不一致会显成错位的另一栏）
+          width: `min(${CHAT_COLUMN_MAX_WIDTH}px, 100%)`,
           maxHeight: "min(760px, calc(100vh - 40px))",
           border: "1px solid var(--border)",
           borderRadius: 8,

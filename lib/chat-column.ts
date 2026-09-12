@@ -14,3 +14,10 @@ export const CHAT_GUTTER = 18;
 
 /** 消息概览条宽度（与左侧导航条同宽，保持对称）。 */
 export const CHAT_MINIMAP_WIDTH = CHAT_GUTTER;
+
+/**
+ * 块内内容限高：思考块 / 工具输出 / 扩展 widget 共用同一口径。
+ * 超出在块内滚动，避免超长内容把输入区顶出可视区（实测 80 行 widget 会顶掉输入框）。
+ */
+export const CHAT_BLOCK_MAX_HEIGHT = "min(320px, 45vh)";
+export const CHAT_BLOCK_MAX_HEIGHT_MOBILE = "min(240px, 32vh)";

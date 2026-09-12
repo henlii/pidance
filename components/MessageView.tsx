@@ -24,6 +24,7 @@ import { parseAnsiLine } from "@/lib/ansi";
 import type { ToolExecutionSnapshot, ToolExecutionStatus } from "@/lib/tool-execution-buffer";
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import { useI18n } from "@/lib/i18n";
+import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE } from "@/lib/chat-column";
 import { encodeFilePathForApi } from "@/lib/file-paths";
 import { extractMediaPathsFromText } from "@/lib/file-types";
 import type {
@@ -860,12 +861,9 @@ function TextBlock({ block, isStreaming, cwd, onOpenFile }: { block: TextContent
   return <MarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{block.text}</MarkdownBody>;
 }
 
-/** 思考 / 工具明细默认最大高度：超出在块内滚动，避免会话视口被无限撑高。
- * 桌面 320px；手机小视口按 32vh 收得更紧，避免块内滚动区占满屏幕。 */
-const STREAM_BLOCK_MAX_HEIGHT_DESKTOP = "min(320px, 45vh)";
-const STREAM_BLOCK_MAX_HEIGHT_MOBILE = "min(240px, 32vh)";
+/** 思考 / 工具明细默认最大高度：与扩展 widget 共用 CHAT_BLOCK_MAX_HEIGHT*（块内滚动）。 */
 function useStreamBlockMaxHeight(): string {
-  return useIsMobile() ? STREAM_BLOCK_MAX_HEIGHT_MOBILE : STREAM_BLOCK_MAX_HEIGHT_DESKTOP;
+  return useIsMobile() ? CHAT_BLOCK_MAX_HEIGHT_MOBILE : CHAT_BLOCK_MAX_HEIGHT;
 }
 /** 距块底多少 px 内视为仍跟随；用户上滚超出后停止自动向下。 */
 const STREAM_BLOCK_FOLLOW_TOLERANCE_PX = 24;
