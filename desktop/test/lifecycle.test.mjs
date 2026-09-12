@@ -16,6 +16,7 @@ const {
   probeService,
   resolveServerDir,
   resolveNodeBinary,
+  meetsNodeEngine,
   buildServerArgs,
   stopServerProcess,
   checkServerInputs,
@@ -114,19 +115,28 @@ test("服务目录解析：打包版固定用随包服务，开发版可用 PIDA
   );
 });
 
-test("Node 运行时解析：打包版缺内置 Node 必须报缺失，开发版用自身", () => {
-  assert.equal(
+test("Node 运行时解析：优先内置 node.exe，没有则用 Electron 自带 Node（Node 模式）", () => {
+  assert.deepEqual(
     resolveNodeBinary({ isPackaged: false, resourcesPath: "/res", execPath: "/usr/bin/electron", existsSync: () => false }),
-    "/usr/bin/electron",
+    { bin: "/usr/bin/electron", env: { ELECTRON_RUN_AS_NODE: "1" } },
   );
-  assert.equal(
+  assert.deepEqual(
     resolveNodeBinary({ isPackaged: true, resourcesPath: "/res", execPath: "/usr/bin/electron", existsSync: () => true }),
-    "/res/node/node.exe",
+    { bin: "/res/node/node.exe", env: {} },
   );
-  assert.equal(
+  assert.deepEqual(
     resolveNodeBinary({ isPackaged: true, resourcesPath: "/res", execPath: "/usr/bin/electron", existsSync: () => false }),
-    null,
+    { bin: "/usr/bin/electron", env: { ELECTRON_RUN_AS_NODE: "1" } },
+    "没有内置 Node 时必须回退到 Electron 自带 Node，而不是启动失败",
   );
+});
+
+test("Node 版本门槛：Electron 自带 Node 必须满足主包 engines", () => {
+  assert.equal(meetsNodeEngine("22.21.1", "22.19.0"), true);
+  assert.equal(meetsNodeEngine("22.19.0", "22.19.0"), true);
+  assert.equal(meetsNodeEngine("22.18.0", "22.19.0"), false);
+  assert.equal(meetsNodeEngine("24.18.0", "22.19.0"), true);
+  assert.equal(meetsNodeEngine(undefined, "22.19.0"), false);
 });
 
 test("IPC 调用方：只接受受信任主窗口的顶层 frame", () => {
@@ -286,17 +296,34 @@ test("关闭清理：非 win32 用信号终止；已退出的 child 不重复处
   );
 });
 
-test("启动失败：缺 Node 运行时或服务入口都要给出明确原因", () => {
+test("启动失败：缺运行时、Node 版本过低、缺服务入口都要给出明确原因", () => {
   assert.match(
     checkServerInputs({ serverBin: "/app/bin/pidance.js", nodeBin: null, existsSync: () => true }),
     /内置 Node/,
+  );
+  assert.match(
+    checkServerInputs({
+      serverBin: "/app/bin/pidance.js",
+      nodeBin: "/usr/bin/electron",
+      existsSync: () => true,
+      nodeVersion: "22.18.0",
+      requiredNodeVersion: "22.19.0",
+    }),
+    /低于主包要求/,
+    "Electron 自带 Node 太旧必须明确报错，而不是启动后莫名失败",
   );
   assert.match(
     checkServerInputs({ serverBin: "/app/bin/pidance.js", nodeBin: "/res/node/node.exe", existsSync: () => false }),
     /未找到 pidance 服务入口/,
   );
   assert.equal(
-    checkServerInputs({ serverBin: "/app/bin/pidance.js", nodeBin: "/res/node/node.exe", existsSync: () => true }),
+    checkServerInputs({
+      serverBin: "/app/bin/pidance.js",
+      nodeBin: "/usr/bin/electron",
+      existsSync: () => true,
+      nodeVersion: "22.21.1",
+      requiredNodeVersion: "22.19.0",
+    }),
     null,
   );
 });

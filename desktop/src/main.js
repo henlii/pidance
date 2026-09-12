@@ -27,6 +27,8 @@ const lifecycle = require("./server-lifecycle.js");
 const PORT = process.env.PIDANCE_PORT || "31415";
 const HOST = "127.0.0.1";
 const START_TIMEOUT_MS = 45_000;
+/** 主包 engines 要求；用 Electron 自带 Node 运行时必须满足。 */
+const REQUIRED_NODE_VERSION = "22.19.0";
 const START_HIDDEN = process.platform === "win32" && process.argv.includes("--hidden");
 
 function resolveServerDir() {
@@ -247,8 +249,14 @@ function stopServer() {
 function startServer() {
   const serverDir = resolveServerDir();
   const serverBin = path.join(serverDir, "bin", "pidance.js");
-  const nodeBin = resolveNodeBinary();
-  const missing = lifecycle.checkServerInputs({ serverBin, nodeBin, existsSync: fs.existsSync });
+  const { bin: nodeBin, env: nodeEnv } = resolveNodeBinary();
+  const missing = lifecycle.checkServerInputs({
+    serverBin,
+    nodeBin,
+    existsSync: fs.existsSync,
+    nodeVersion: process.versions.node,
+    requiredNodeVersion: REQUIRED_NODE_VERSION,
+  });
   if (missing) {
     dialog.showErrorBox(
       "Pidance 启动失败",
@@ -265,7 +273,7 @@ function startServer() {
   const runAsNode = !app.isPackaged && nodeBin === process.execPath ? { ELECTRON_RUN_AS_NODE: "1" } : {};
   child = spawn(nodeBin, lifecycle.buildServerArgs(serverBin, PORT, HOST), {
     cwd: serverDir,
-    env: { ...process.env, ...runAsNode, PIDANCE_DIST_DIR: distDir },
+    env: { ...process.env, ...nodeEnv, ...runAsNode, PIDANCE_DIST_DIR: distDir },
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
   });

@@ -12,8 +12,6 @@
     "test": "node --test test/*.test.mjs",
     "dev": "electron .",
     "fetch-node": "node scripts/fetch-node-win.mjs",
-    "prebuild:win:zip": "npm run fetch-node",
-    "prebuild:win:installer": "npm run fetch-node",
     "build:win:zip": "electron-builder --win zip --x64 --publish never",
     "build:win:installer": "electron-builder --win nsis --x64 --publish never"
   },
@@ -21,7 +19,7 @@
     "@henlii/pidance": "0.2.26"
   },
   "devDependencies": {
-    "electron": "^37.2.0",
+    "electron": "37.10.3",
     "electron-builder": "^26.0.12"
   },
   "build": {
@@ -33,12 +31,6 @@
       "assets/**/*",
       "package.json",
       "node_modules/@henlii/**"
-    ],
-    "extraResources": [
-      {
-        "from": "node",
-        "to": "node"
-      }
     ],
     "win": {
       "target": [

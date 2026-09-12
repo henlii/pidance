@@ -11,8 +11,11 @@ pidance 服务（127.0.0.1:31415）并打开沙箱窗口。端口上已有 **Pid
   创建桌面/开始菜单快捷方式；用户级安装（不需要管理员）。
 - 服务端来自 npm 包 `@henlii/pidance`（与 `desktop/package.json` 精确锁定，含 lockfile），
   打包进 `resources/app/node_modules/@henlii/pidance`（`asar:false`）。
-- 服务进程使用 `resources/node/node.exe`（`npm run fetch-node` 下载 Node win-x64，
-  满足主包 `engines.node >=22.19.0`），不依赖用户安装 Node。
+- 服务进程用**包内 Electron 自带的 Node** 运行（`ELECTRON_RUN_AS_NODE=1`，Electron 37.10.3
+  自带 Node 22.21.1，满足主包 `engines.node >=22.19.0`），不再单独捆绑 ~92MB 的 `node.exe`；
+  原生模块（node-pty / sharp）都是 NAPI 构建，两种运行时通用。
+  如需改回内置 Node：恢复 `build.extraResources` 的 `node/` 与 `prebuild:win:*` 钩子，
+  并跑 `npm run fetch-node`（`resolveNodeBinary` 会优先使用它）。
 
 桌面版窗口始终通过本机 `127.0.0.1:31415` 打开；本进程拉起的服务显式以
 `--hostname 127.0.0.1` 启动（#25 范围：桌面壳只服务本机，不跟随
@@ -37,13 +40,16 @@ pidance 服务（127.0.0.1:31415）并打开沙箱窗口。端口上已有 **Pid
 cd desktop
 npm ci --include=dev
 npm test                      :: 生命周期纯逻辑测试
-npm run fetch-node            :: 下载 Node win-x64 到 node\node.exe（build 也会自动执行）
 npm run build:win:zip         :: 便携 zip
 npm run build:win:installer   :: NSIS 安装版
 ```
 
 CI：`.github/workflows/desktop-win.yml` 在 windows-latest 上执行同一流程（安装 → 语法
-检查 → 测试 → 打包 → SHA256），产物挂在 workflow run 的 Artifacts 上，不自动发 Release。
+检查 → 测试 → 瘦身 → 打包 → **产物冒烟**（解包 zip，用包内 Electron 的 Node 起服务并探活
+`/api/home`）→ SHA256），产物挂在 workflow run 的 Artifacts 上，不自动发 Release。
+
+瘦身步骤只删调试/非目标平台资产（`*.map`、`*.pdb`、非 win32-x64 的 SWC/esbuild/sharp/
+node-pty prebuilds、next dev 产物），零运行引用。
 
 ## 安全边界
 

@@ -43,30 +43,46 @@ jobs:
         working-directory: desktop
         run: npm test
 
-      - name: 瘦身打包输入（仅删调试/dev 资产，零运行引用）
+      - name: 瘦身打包输入（仅删调试/dev 资产与非目标平台二进制，零运行引用）
         working-directory: desktop
         shell: pwsh
         run: |
+          function Get-DirSize($path) {
+            if (!(Test-Path $path)) { return 0 }
+            $sum = (Get-ChildItem $path -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+            if ($null -eq $sum) { return 0 }
+            return [math]::Round($sum / 1MB, 1)
+          }
+          $before = Get-DirSize node_modules
+
           # sourcemap：next / pi-sdk 调试数据，运行时无 require，删掉
           Get-ChildItem node_modules -Recurse -File -Filter *.map -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-          # 非 win32 平台 SWC 原生残留（本机 windows 只装 win32；防平台残差）
-          Get-ChildItem node_modules/@next -Directory -Filter "swc-*" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike "*win32*" } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          # 调试符号（node-pty 的 conpty/pty/winpty 各 ~5-6MB）
+          Get-ChildItem node_modules -Recurse -File -Filter *.pdb -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+          # 非目标平台原生二进制：只留 win32-x64（Electron/Node 运行时均为 x64）
+          Get-ChildItem node_modules/@next -Directory -Filter "swc-*" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike "*win32-x64*" } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          Get-ChildItem node_modules/@esbuild -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike "*win32-x64*" } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          Get-ChildItem node_modules/@img -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike "*win32-x64*" -and $_.Name -ne "colour" } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          Get-ChildItem node_modules/node-pty/prebuilds -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne "win32-x64" } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force node_modules/node-pty/third_party/conpty/*/win10-arm64 -ErrorAction SilentlyContinue
           # next dev 诊断/调试产物（生产服务不 require）
           Remove-Item -Recurse -Force node_modules/next/dist/diagnostics -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force node_modules/next/dist/compiled/next-devtools -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force node_modules/.cache -ErrorAction SilentlyContinue
-          Write-Host "slim done"
 
-      - name: 下载捆绑 Node win-x64
-        working-directory: desktop
-        run: npm run fetch-node
+          $after = Get-DirSize node_modules
+          Write-Host "slim done: $before MB -> $after MB"
 
       - name: 校验打包输入
         working-directory: desktop
         shell: pwsh
         run: |
-          if (!(Test-Path node/node.exe)) { throw "bundled node/node.exe is missing" }
           if (!(Test-Path node_modules/@henlii/pidance/bin/pidance.js)) { throw "Pidance package is missing" }
+          if (!(Test-Path node_modules/electron/dist/electron.exe)) { throw "Electron runtime is missing" }
+          # 服务用 Electron 自带的 Node 运行（ELECTRON_RUN_AS_NODE），其版本必须满足主包 engines
+          $nodeVer = (Get-Content node_modules/electron/dist/version -ErrorAction SilentlyContinue)
+          Write-Host "electron dist version: $nodeVer"
+          node -e "const [maj,min]=process.versions.node.split('.').map(Number); if (maj<22 || (maj===22 && min<19)) throw new Error('electron node too old'); console.log('builder node', process.versions.node)"
 
       - name: 构建 Windows zip（便携）
         working-directory: desktop
@@ -75,6 +91,47 @@ jobs:
       - name: 构建 NSIS 安装版
         working-directory: desktop
         run: npm run build:win:installer
+
+      - name: 打包产物冒烟（解包 zip → 用包内 Electron 的 Node 起服务 → 探活）
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem dist -File -Filter *.zip | Select-Object -First 1
+          if (!$zip) { throw "zip artifact is missing" }
+          $smoke = Join-Path $env:RUNNER_TEMP "smoke"
+          Remove-Item -Recurse -Force $smoke -ErrorAction SilentlyContinue
+          Expand-Archive -Path $zip.FullName -DestinationPath $smoke -Force
+
+          $service = Join-Path $smoke "resources/app/node_modules/@henlii/pidance/bin/pidance.js"
+          $electron = Join-Path $smoke "Pidance Desktop.exe"
+          if (!(Test-Path $service)) { throw "packaged service entry is missing: $service" }
+          if (!(Test-Path $electron)) { throw "packaged electron binary is missing: $electron" }
+
+          $env:ELECTRON_RUN_AS_NODE = "1"
+          $log = Join-Path $env:RUNNER_TEMP "smoke-service.log"
+          $proc = Start-Process -FilePath $electron -ArgumentList @($service, "--port", "31419", "--hostname", "127.0.0.1", "--no-open") -PassThru -RedirectStandardOutput $log -RedirectStandardError "$log.err" -NoNewWindow
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              Start-Sleep -Seconds 2
+              if ($proc.HasExited) { break }
+              try {
+                $res = Invoke-WebRequest -Uri "http://127.0.0.1:31419/api/home" -UseBasicParsing -TimeoutSec 5
+                if ($res.StatusCode -eq 200 -or $res.StatusCode -eq 401) { $ready = $true; break }
+              } catch {
+                if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 401) { $ready = $true; break }
+              }
+            }
+            if (!$ready) {
+              Write-Host "--- service stdout ---"; Get-Content $log -ErrorAction SilentlyContinue | Select-Object -Last 40
+              Write-Host "--- service stderr ---"; Get-Content "$log.err" -ErrorAction SilentlyContinue | Select-Object -Last 40
+              throw "packaged service did not answer /api/home on 31419"
+            }
+            Write-Host "smoke ok: packaged service answered"
+          } finally {
+            if (!$proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+            Remove-Item -Recurse -Force $smoke -ErrorAction SilentlyContinue
+          }
 
       - name: 计算产物 SHA256（只算顶层制品，不含解包目录里的 exe）
         working-directory: desktop
