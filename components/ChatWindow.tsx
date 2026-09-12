@@ -432,7 +432,7 @@ const chatPlan = composeChatPlan({
         <div
           style={{
             flexShrink: 0,
-            padding: `0 ${CHAT_COLUMN_PADDING}px`,
+            padding: `0 ${CHAT_COLUMN_PADDING}px 8px`,
             paddingRight: isMobile ? CHAT_COLUMN_PADDING : CHAT_INPUT_RIGHT_PADDING,
           }}
         >
