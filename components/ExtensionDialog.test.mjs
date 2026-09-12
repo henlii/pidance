@@ -117,3 +117,23 @@ test("source contract：respondOnce 每 id 一次、无卸载 effect 响应、�
 test("source contract：inert 覆盖 disabled/expired/responded", () => {
   assert.ok(source.includes("const inert = disabled || expired || responded;"));
 });
+
+test("SSR/source：面板与输入框同宽同中线，内容区可滚动", () => {
+  const html = renderCard({
+    request: request("select", { options: ["一"] }),
+    onRespond: () => {},
+  });
+  // 与输入框一致的 820 宽度（旧 560 窄栏会显成错位的另一栏）
+  assert.ok(html.includes("width:min(820px, 100%)"), "面板未使用与输入框一致的宽度");
+  assert.ok(!html.includes("min(560px, 100%)"), "面板仍保留旧的窄栏宽度");
+  // column flex 里的滚动契约：flex 1 1 auto + min-height 0，否则内容超出被裁切而不是滚动
+  assert.ok(
+    html.includes("flex:1 1 auto;min-height:0;padding:10px 12px;overflow-y:auto"),
+    "内容区缺少可滚动契约（flex/min-height:0）",
+  );
+  // 面板自身不再带 padding：由 ChatWindow 按输入框同款内边距与 820 宽度包裹
+  const chatWindow = readFileSync(fileURLToPath(new URL("./ChatWindow.tsx", import.meta.url)), "utf8");
+  const block = chatWindow.slice(chatWindow.indexOf("{extensionDialog && ("), chatWindow.indexOf("{extensionDialog && (") + 600);
+  assert.ok(block.includes("CHAT_INPUT_RIGHT_PADDING"), "扩展面板未按输入框同款内边距包裹");
+  assert.ok(block.includes("maxWidth: 820"), "扩展面板未按输入框同款宽度包裹");
+});

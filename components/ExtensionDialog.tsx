@@ -134,14 +134,14 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
         flexShrink: 0,
         display: "flex",
         justifyContent: "center",
-        padding: "0 16px 8px",
         background: "var(--bg)",
       }}
     >
       <section
         aria-label={`${t("extension_extension")}: ${request.title}`}
         style={{
-          width: "min(560px, 100%)",
+          // 与输入框同宽（面板固定展开在输入框上方，宽度不一致会显成错位的另一栏）
+          width: "min(820px, 100%)",
           maxHeight: "min(52vh, 560px)",
           display: "flex",
           flexDirection: "column",
@@ -199,7 +199,7 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
           </span>
         </div>
 
-        <div style={{ padding: "10px 12px", overflowY: "auto", overscrollBehavior: "auto", touchAction: "auto" }}>
+        <div style={{ flex: "1 1 auto", minHeight: 0, padding: "10px 12px", overflowY: "auto", overscrollBehavior: "auto", touchAction: "auto" }}>
           {request.method === "confirm" && (
             <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
               <div

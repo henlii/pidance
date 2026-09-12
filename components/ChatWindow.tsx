@@ -428,13 +428,24 @@ const chatPlan = composeChatPlan({
   const chatInputElement = (
     <>
       {extensionDialog && (
-        <ExtensionDialog
-          request={extensionDialog}
-          disabled={writesDisabled || !sessionIdRef.current}
-          onRespond={(response) => {
-            void respondToExtensionUi(extensionDialog, response);
+        // 与输入框同内边距/同宽：面板固定展开在输入框上方，宽度/中线不一致会显成错位的一栏。
+        <div
+          style={{
+            flexShrink: 0,
+            padding: `0 ${CHAT_COLUMN_PADDING}px`,
+            paddingRight: isMobile ? CHAT_COLUMN_PADDING : CHAT_INPUT_RIGHT_PADDING,
           }}
-        />
+        >
+          <div style={{ maxWidth: 820, margin: "0 auto" }}>
+            <ExtensionDialog
+              request={extensionDialog}
+              disabled={writesDisabled || !sessionIdRef.current}
+              onRespond={(response) => {
+                void respondToExtensionUi(extensionDialog, response);
+              }}
+            />
+          </div>
+        </div>
       )}
       {isReadOnly && session ? (
         <ReadOnlySessionBar session={session} isMobile={isMobile} />
