@@ -90,6 +90,11 @@ export type SessionCatalogStore = {
     runningIds: readonly string[];
     runningStartedAt?: Record<string, number>;
     selectedSessionId?: string | null;
+    /**
+     * 本地仍在本进程在途的 send（registry 为准）。乐观 starting 标记只允许在这些 id
+     * 上跨过「权威快照未含它」的时刻，其余一律回收。
+     */
+    localInFlightIds?: readonly string[];
     now?: number;
   }): void;
   markRead(sessionId: string, atIso?: string): void;
@@ -127,6 +132,21 @@ export function createSessionCatalogStore(options?: {
   };
 
   const effectiveRunning = (): Set<string> => unionSets(state.runningIds, state.startingIds);
+
+  /**
+   * 下一组乐观 starting 标记：只保留「服务端尚未确认在跑」且「本地 send 仍在本进程
+   * 在途」的 id。服务端已确认在跑 → 徽标由 runningIds 承担；权威快照不含且本地无
+   * 在途 send → 这轮 run 已结束（或从未注册），标记必须回收，否则会永久残留
+   * 「运行中」——例如切走会话后 run 结束，快照不再含该 id，没有任何视图负责撤销。
+   */
+  const nextStarting = (runningIds: ReadonlySet<string>, localInFlightIds: ReadonlySet<string>): Set<string> => {
+    const next = new Set<string>();
+    for (const id of state.startingIds) {
+      if (runningIds.has(id)) continue;
+      if (localInFlightIds.has(id)) next.add(id);
+    }
+    return next;
+  };
 
   const recyclePending = (serverSessions: readonly SessionInfo[], archivedSessions: readonly SessionInfo[]) => {
     const archivedIds = new Set(archivedSessions.map((session) => session.id));
@@ -277,6 +297,7 @@ export function createSessionCatalogStore(options?: {
     },
     applyRunningSnapshot(input) {
       const nextRunning = new Set(input.runningIds);
+      const nextStartingIds = nextStarting(nextRunning, new Set(input.localInFlightIds ?? []));
       const previousEffective = effectiveRunning();
       const nextStarted = new Map(state.runningStartedAt);
       const nextEpoch = new Map(state.runningEpoch);
@@ -305,10 +326,10 @@ export function createSessionCatalogStore(options?: {
         if (!nextStarted.has(id)) nextStarted.set(id, now);
       }
       for (const id of [...nextStarted.keys()]) {
-        if (!nextRunning.has(id) && !state.startingIds.has(id)) nextStarted.delete(id);
+        if (!nextRunning.has(id) && !nextStartingIds.has(id)) nextStarted.delete(id);
       }
 
-      const nextEffective = unionSets(nextRunning, state.startingIds);
+      const nextEffective = unionSets(nextRunning, nextStartingIds);
       state.unread = applyRunningUnreadStateTransition(
         state.unread,
         previousEffective,
@@ -317,15 +338,9 @@ export function createSessionCatalogStore(options?: {
         nowIso,
       );
       state.runningIds = nextRunning;
+      state.startingIds = nextStartingIds;
       state.runningStartedAt = nextStarted;
       state.runningEpoch = nextEpoch;
-      for (const id of nextRunning) {
-        if (state.startingIds.has(id)) {
-          const starting = new Set(state.startingIds);
-          starting.delete(id);
-          state.startingIds = starting;
-        }
-      }
       emit();
     },
     markRead(sessionId, atIso = new Date(nowMs()).toISOString()) {

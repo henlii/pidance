@@ -102,6 +102,7 @@ import { useWorktreePreload } from "@/hooks/useWorktreePreload";
 import { useSidebarWorktreeActions } from "@/hooks/useSidebarWorktreeActions";
 import { mergeRunningStartedAt } from "@/lib/running-duration";
 import { createSessionCatalogStore, type SessionCatalogStore } from "@/lib/session-catalog-store";
+import { getOrCreateBrowserSessionRuntimeRegistry } from "@/lib/browser-session-runtime-registry";
 
 /**
  * 共享运行计时上下文（P1-5）：
@@ -281,10 +282,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   const commitRunningSnapshot = useCallback((ids: Iterable<string>, runningStartedAt?: Record<string, number>) => {
     runningSnapshotRevisionRef.current += 1;
+    const runningIds = [...ids];
+    // 乐观 starting 标记只允许活在「本地 send 仍在本进程在途」的窗口里（registry 是
+    // run 的 owner）：权威快照未含该 id 且 registry 已无在途 send → 回收标记。否则
+    // 切走会话后 run 结束、快照不再含该 id，标记会永久残留（列表一直显示运行中）。
+    const registry = getOrCreateBrowserSessionRuntimeRegistry();
+    const localInFlightIds = [...catalogStore.getState().startingIds]
+      .filter((id) => registry.getRunState(id)?.sendInFlight === true);
     catalogStore.applyRunningSnapshot({
-      runningIds: [...ids],
+      runningIds,
       runningStartedAt,
       selectedSessionId: catalogSelectedRef.current,
+      localInFlightIds,
       now: Date.now(),
     });
   }, [catalogStore]);

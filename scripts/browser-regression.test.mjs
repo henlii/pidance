@@ -12,6 +12,7 @@
  *   8. 新会话引导页出现（ensure_session 前的 UI 路径）
  *   9. 渲染桥异常不破坏页面（服务端 Node 测试覆盖，浏览器侧确认页面可正常加载）
  *  12. 引导页项目下拉跟随侧栏「新建会话」目标（同一实例内切项目）
+ *  13. 切走会话后 run 结束，侧栏不残留「运行中」（乐观 starting 标记回收）
  *
  * 移动端抽屉：agent-browser headless 无法模拟 viewport，标记为手动验证项。
  *
@@ -559,6 +560,97 @@ test("用例12：引导页项目下拉跟随侧栏「新建会话」目标", { t
         method: "PUT",
         headers: { "Content-Type": "application/json", ...AUTH_HEADER },
         body: JSON.stringify({ prefs: { draftTargetCwd: originalDraft.value } }),
+      }).catch(() => {});
+    }
+  }
+});
+
+test("用例13：run 结束的权威快照回收乐观运行标记（侧栏不残留运行中）", { timeout: 180_000 }, async () => {
+  // issue 回归：乐观 starting 标记由当前 chat 上报；chat 切走后 run 仍会结束，
+  // 权威 running 快照不再含该 id → 标记必须回收，否则列表一直显示运行中。
+  // 为使其可判定，先屏蔽侧栏的 running SSE，避免「含该 id 的快照」提前把标记消掉（那会
+  // 让坏实现也能通过），再在 run 结束后用一次权威对齐（focus → GET /api/agent/running）
+  // 暴露该规则。
+  let createdId = null;
+  const sseUrl = `${URL_BASE}/api/agent/running/events`;
+  const unroute = async () => {
+    await ab(["network", "unroute", sseUrl, "--session", SESSION], { json: false }).catch(() => {});
+  };
+  try {
+    await ab(["network", "route", sseUrl, "--abort", "--session", SESSION], { json: false });
+
+    const createRes = await fetch(`${URL_BASE}/api/agent/new`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...AUTH_HEADER },
+      body: JSON.stringify({
+        cwd: process.cwd(),
+        type: "prompt",
+        message: "请用 bash 工具执行 sleep 20（一次调用，不要拆开），完成后只回复 done。",
+      }),
+    });
+    const created = await createRes.json();
+    createdId = created?.sessionId ?? null;
+    assert.ok(createdId, `测试会话创建失败: ${createRes.status} ${JSON.stringify(created)}`);
+
+    const rowRunning = `(() => {
+      const row = document.querySelector('[data-session-id="${createdId}"]');
+      return row ? !!row.querySelector('[aria-label="运行中"]') : null;
+    })()`;
+
+    await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(createdId)}`, "--session", SESSION], { json: false });
+    await ensureAuthed();
+    await ab(["set", "viewport", "1280", "720", "--session", SESSION], { json: false });
+
+    // 1) 前置：侧栏该行必须已显示运行中（chat 乐观标记 / 列表 running 集均可）
+    let running = false;
+    for (let i = 0; i < 40 && !running; i += 1) {
+      await new Promise((r) => setTimeout(r, 500));
+      running = (await evalResult(rowRunning)) === true;
+    }
+    assert.ok(running, "测试会话未在侧栏显示运行中（前置条件不成立）");
+
+    // 2) 切走会话：当前 chat 不再上报该会话的运行态（标记无人撤销）
+    const switched = await evalResult(`(() => {
+      const rows = [...document.querySelectorAll('[data-session-id]')]
+        .filter((r) => r.getAttribute('data-session-id') !== ${JSON.stringify(createdId)});
+      const target = rows.map((r) => r.querySelector('.sidebar-row')).find(Boolean);
+      if (!target) return false;
+      target.click();
+      return true;
+    })()`);
+    assert.equal(switched, true, "侧栏没有可切换的其它会话");
+
+    // 3) 等 run 结束（服务端 running 集不再含该 id）
+    let finished = false;
+    for (let i = 0; i < 120 && !finished; i += 1) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const res = await fetch(`${URL_BASE}/api/agent/running`, { headers: AUTH_HEADER });
+      const body = res.ok ? await res.json() : {};
+      finished = Array.isArray(body.runningSessionIds) && !body.runningSessionIds.includes(createdId);
+    }
+    assert.ok(finished, "测试会话 run 未在预期时间内结束");
+
+    // 4) 打开权威对齐通道（focus/visibilitychange → GET /api/agent/running）
+    await unroute();
+    await evalResult("(() => { window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')); return true; })()");
+
+    // 5) 权威快照已说不在跑：侧栏行必须退出运行中
+    let stillRunning = true;
+    for (let i = 0; i < 20 && stillRunning; i += 1) {
+      await new Promise((r) => setTimeout(r, 500));
+      stillRunning = (await evalResult(rowRunning)) === true;
+      if (stillRunning && i === 8) {
+        // SSE 自动重连也可能带来同一权威快照：补一次对齐
+        await evalResult("(() => { window.dispatchEvent(new Event('focus')); return true; })()");
+      }
+    }
+    assert.equal(stillRunning, false, "run 结束后侧栏仍显示运行中（乐观标记未回收）");
+  } finally {
+    await unroute();
+    if (createdId) {
+      await fetch(`${URL_BASE}/api/sessions/${encodeURIComponent(createdId)}`, {
+        method: "DELETE",
+        headers: AUTH_HEADER,
       }).catch(() => {});
     }
   }
