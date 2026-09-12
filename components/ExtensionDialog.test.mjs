@@ -133,7 +133,10 @@ test("SSR/source：面板与输入框同宽同中线，内容区可滚动", () =
   );
   // 面板自身不再带 padding：由 ChatWindow 按输入框同款内边距与 820 宽度包裹
   const chatWindow = readFileSync(fileURLToPath(new URL("./ChatWindow.tsx", import.meta.url)), "utf8");
-  const block = chatWindow.slice(chatWindow.indexOf("{extensionDialog && ("), chatWindow.indexOf("{extensionDialog && (") + 600);
+  const block = chatWindow.slice(
+    chatWindow.indexOf("const chatInputElement"),
+    chatWindow.indexOf("const aboveEditorWidgets"),
+  );
   assert.ok(block.includes("CHAT_INPUT_RIGHT_PADDING"), "扩展面板未按输入框同款内边距包裹");
   assert.ok(block.includes("maxWidth: 820"), "扩展面板未按输入框同款宽度包裹");
 });

@@ -53,6 +53,17 @@ test("ProcessDetailsGroup 保留用户主动收起/展开按钮", () => {
   assert.match(groupSource, /onClick=\{\(\) => setExpanded\(\(v\) => !v\)\}/);
 });
 
+test("扩展面板打开时独占输入区：输入栏与底栏都不渲染", () => {
+  const source = readFileSync(fileURLToPath(new URL("./ChatWindow.tsx", import.meta.url)), "utf8");
+  // 面板与输入栏互斥：面板打开时不再渲染 ReadOnly/Locked 栏或 ChatInput
+  const inputBranch = source.slice(source.indexOf("const chatInputElement"), source.indexOf("const aboveEditorWidgets"));
+  assert.match(inputBranch, /\{extensionDialog \? \(/, "面板未与输入栏互斥渲染");
+  assert.match(inputBranch, /\) : isReadOnly && session \? \(/, "面板分支未排除只读/锁定栏");
+  assert.ok(inputBranch.includes("<ChatInput"), "ChatInput 分支应保留");
+  // 底栏（belowEditor widget + 状态条）同样让位
+  assert.match(source, /\{!extensionDialog && \(\s*\n\s*<div/, "底栏未随面板一起隐藏");
+});
+
 test("ProcessDetailsGroup 无 tool call 时不显示 toolCall 计数", () => {
   const html = renderToStaticMarkup(
     React.createElement(

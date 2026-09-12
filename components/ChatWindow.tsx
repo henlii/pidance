@@ -427,8 +427,9 @@ const chatPlan = composeChatPlan({
 
   const chatInputElement = (
     <>
-      {extensionDialog && (
-        // 与输入框同内边距/同宽：面板固定展开在输入框上方，宽度/中线不一致会显成错位的一栏。
+      {extensionDialog ? (
+        // 面板打开时独占输入区（与输入框同内边距/同宽）：输入栏（含队列、模型选择）与底栏
+        // 一并让位，否则面板与输入栏上下挤在一起、键盘归属也不清楚。
         <div
           style={{
             flexShrink: 0,
@@ -446,8 +447,7 @@ const chatPlan = composeChatPlan({
             />
           </div>
         </div>
-      )}
-      {isReadOnly && session ? (
+      ) : isReadOnly && session ? (
         <ReadOnlySessionBar session={session} isMobile={isMobile} />
       ) : lockedByOther ? (
         <LockedSessionBar isMobile={isMobile} />
@@ -867,22 +867,24 @@ const chatPlan = composeChatPlan({
           </div>
         )}
         {chatInputElement}
-        {/* belowEditor widget + footer 状态条（对齐 TUI：输入框下方） */}
-        <div
-          style={{
-            padding: `0 ${CHAT_COLUMN_PADDING}px`,
-            paddingRight: isMobile ? CHAT_COLUMN_PADDING : CHAT_INPUT_RIGHT_PADDING,
-          }}
-        >
-          <div style={{ maxWidth: 820, margin: "0 auto" }}>
-            {!footerCollapsed && (
-              <>
-                <ExtensionWidgets widgets={belowEditorWidgets} />
-                <ExtensionStatusBar statuses={extensionStatuses} />
-              </>
-            )}
+        {/* belowEditor widget + footer 状态条（对齐 TUI：输入框下方）；面板打开时与输入栏一起让位 */}
+        {!extensionDialog && (
+          <div
+            style={{
+              padding: `0 ${CHAT_COLUMN_PADDING}px`,
+              paddingRight: isMobile ? CHAT_COLUMN_PADDING : CHAT_INPUT_RIGHT_PADDING,
+            }}
+          >
+            <div style={{ maxWidth: 820, margin: "0 auto" }}>
+              {!footerCollapsed && (
+                <>
+                  <ExtensionWidgets widgets={belowEditorWidgets} />
+                  <ExtensionStatusBar statuses={extensionStatuses} />
+                </>
+              )}
+            </div>
           </div>
-        </div>
+        )}
       </div>
       </>
       )}
