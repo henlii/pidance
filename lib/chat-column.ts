@@ -6,8 +6,11 @@
  * 它们是 DOM 里的真实占位元素，因此会话列不再额外加左右内边距。
  */
 
-/** 会话区最大宽度（含消息列、输入栏、扩展面板、widget、todo、底栏）。 */
-export const CHAT_COLUMN_MAX_WIDTH = 1230;
+/**
+ * 会话区最大宽度（含消息列、输入栏、扩展面板、widget、todo、底栏）。
+ * 取整百便于阅读与对齐：原 820 的 1.5 倍为 1230，按要求再收 ~10% → 1100。
+ */
+export const CHAT_COLUMN_MAX_WIDTH = 1100;
 
 /** 两侧竖条（左侧用户消息导航条 / 右侧消息概览条）宽度。 */
 export const CHAT_GUTTER = 18;

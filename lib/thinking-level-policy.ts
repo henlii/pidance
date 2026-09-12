@@ -37,6 +37,25 @@ export function modelClickThinkingLevel(
   return namedLevel(cached) ?? fallback;
 }
 
+/**
+ * 输入框模型按钮上的档位标签。
+ *
+ * 只有「该会话的权威档位已确认」时才显示：
+ * - ready=false（切换中/加载中）→ null，不显示；
+ * - ready=true 但 level 为空（切会话瞬间已清空、权威值还没回来）→ null。
+ *   不能回落到 fallback：已有会话的 fallback 是 off，会让标签先闪成 off
+ *   （用户看到「显示变了、实际没变」），等权威值到达后才纠正。
+ * - 引导页（无会话档）由调用方传 fallback = settings 默认，属真实取值。
+ */
+export function thinkingLabel(
+  ready: boolean,
+  level: string | null | undefined,
+  fallback: string | null | undefined,
+): string | null {
+  if (!ready) return null;
+  return namedLevel(level) ?? (fallback !== null && fallback !== undefined ? namedLevel(fallback) : null);
+}
+
 /** ensure_session / 新建 body：有具体档位就传，不再传 auto。 */
 export function thinkingLevelForEnsureBody(
   level: string | null | undefined,
@@ -53,4 +72,4 @@ export function guidePageThinkingUpdate(
 ): string | null {
   return namedLevel(thinkingLevel);
 }
-
+
