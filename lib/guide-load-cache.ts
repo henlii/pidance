@@ -64,6 +64,32 @@ export function resolveGuideTargetProject(
   return parent ? parent.cwd : null;
 }
 
+/** 引导页外部目标同步动作：keep = 保持现状；clear = 回到未选择态；load = 切到该项目根。 */
+export type GuideTargetSyncAction =
+  | { kind: "keep" }
+  | { kind: "clear" }
+  | { kind: "load"; root: string };
+
+/**
+ * 引导页 targetCwd（新会话真实目标）与当前下拉选择的一致性判定。
+ *
+ * 引导页是条件渲染：同一实例内目标会被外部改写（会话列表项目行/工作树行「新建
+ * 会话」、顶部新建、刷新恢复），下拉不跟随就会出现「显示 A、实际建到 B」。
+ * - 目标为空 → 已空则 keep，否则 clear
+ * - 目标归属到列表项目且与当前选择不同 → load（切项目并重新加载分支列表）
+ * - 目标归属同一项目（含同项目内换工作树）→ keep，不重复拉取分支列表
+ * - 目标无法归属（项目不在列表内）→ 已空则 keep，否则 clear（不伪造项目条目）
+ */
+export function resolveGuideTargetSync(
+  projects: ReadonlyArray<{ cwd: string }>,
+  targetCwd: string | null,
+  currentRoot: string | null,
+): GuideTargetSyncAction {
+  const root = targetCwd ? resolveGuideTargetProject(projects, targetCwd) : null;
+  if (!root) return currentRoot === null ? { kind: "keep" } : { kind: "clear" };
+  return root === currentRoot ? { kind: "keep" } : { kind: "load", root };
+}
+
 export interface WorktreeCacheState {
   /** cwd → 最近一次成功加载的列表（stale 数据，用于 SWR 立即渲染） */
   data: Map<string, GuideWorktreeInfo[]>;

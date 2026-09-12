@@ -11,6 +11,7 @@
  *   7. 深色模式切换（主题持久化）
  *   8. 新会话引导页出现（ensure_session 前的 UI 路径）
  *   9. 渲染桥异常不破坏页面（服务端 Node 测试覆盖，浏览器侧确认页面可正常加载）
+ *  12. 引导页项目下拉跟随侧栏「新建会话」目标（同一实例内切项目）
  *
  * 移动端抽屉：agent-browser headless 无法模拟 viewport，标记为手动验证项。
  *
@@ -451,5 +452,114 @@ test("用例11：添加空项目 → 侧栏显示并可新建会话（项目独�
     assert.ok(text.includes("暂无会话") || text.includes("新建会话"), "空项目缺少新建会话入口");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("用例12：引导页项目下拉跟随侧栏「新建会话」目标", { timeout: 120_000 }, async (t) => {
+  // issue 回归：停在引导页时点会话列表里其他项目的「新建会话」，项目下拉必须
+  // 立刻切到该项目（引导页是条件渲染，同一实例内目标被外部改写）——而不是
+  // 靠组件重挂载（下面用标记属性证明是同一 select 节点）。
+  await ab(["open", URL_BASE, "--session", SESSION], { json: false }).catch(() => {});
+  await ensureAuthed();
+  await ab(["set", "viewport", "1280", "720", "--session", SESSION], { json: false });
+
+  // 该用例会改写共享的「上次新会话项目」：先读回原值，结束后还原（仅当期间
+  // 没有真实用户改写时才写回，避免盖掉用户手动选择）。
+  const readDraft = async () => {
+    const res = await fetch(`${URL_BASE}/api/preferences`, { headers: AUTH_HEADER }).catch(() => null);
+    if (!res?.ok) return { ok: false, value: null };
+    const body = await res.json().catch(() => null);
+    const value = body?.prefs?.draftTargetCwd;
+    return { ok: true, value: typeof value === "string" ? value : null };
+  };
+  const originalDraft = await readDraft();
+
+  const guideState = `(() => {
+    const s = document.querySelector('select.guide-select[aria-label="选择项目"]');
+    if (!s) return null;
+    const rows = [...document.querySelectorAll('.sidebar-row[title]')]
+      .filter((r) => r.getAttribute('data-sidebar-depth') === '0'
+        && r.querySelector('button[aria-label^="在 "]'))
+      .map((r) => r.getAttribute('title'));
+    return {
+      value: s.value,
+      loading: s.disabled,
+      options: [...s.options].map((o) => o.value),
+      // 侧栏能直接发起会话的项目（引导页选项 ∩ 侧栏可见项目行）
+      switchable: [...s.options].map((o) => o.value).filter((v) => v && rows.includes(v)),
+      // 同一实例（未重挂载）的标记：切换后仍应在
+      marked: s.dataset.guideProbe === '1',
+    };
+  })()`;
+  /** 有限次轮询直到条件成立（避免固定睡眠把"未加载完"当成终态）。 */
+  const waitFor = async (predicate, { attempts = 40, stepMs = 500 } = {}) => {
+    let last = null;
+    for (let i = 0; i < attempts; i += 1) {
+      last = await evalResult(guideState);
+      if (last && predicate(last)) return last;
+      await new Promise((r) => setTimeout(r, stepMs));
+    }
+    return last;
+  };
+
+  try {
+    // 1) 停到引导页（侧栏顶部新建会话 = 当前项目），等项目列表加载完
+    const opened = await evalResult(
+      "(() => { const b = [...document.querySelectorAll('button.sidebar-icon-btn')]"
+      + ".find((b) => !b.className.includes('--hover') && (b.getAttribute('aria-label') ?? '').includes('新建会话'));"
+      + "if (!b) return false; b.click(); return true; })()",
+    );
+    assert.equal(opened, true, "未找到侧栏新建会话按钮");
+    const ready = await waitFor((s) => !s.loading && s.options.length > 1 && s.switchable.length > 0);
+    assert.ok(ready && !ready.loading, "新会话引导页项目下拉未就绪（未加载完 ≠ 没有项目）");
+    if (ready.switchable.length < 2) return t.skip("环境只有一个侧栏可见项目，无法验证切换");
+
+    // 标记当前 select 节点：React 原地更新时标记保留，重挂载则丢失
+    await evalResult(
+      "(() => { const s = document.querySelector('select.guide-select[aria-label=\"选择项目\"]');"
+      + "if (!s) return false; s.dataset.guideProbe = '1'; return true; })()",
+    );
+
+    // 2) 先明确选中 A（原生 select 的 change 走真实 onTargetChange）
+    const a = ready.switchable.find((v) => v === ready.value) ?? ready.switchable[0];
+    if (a !== ready.value) {
+      await evalResult(
+        "(() => { const s = document.querySelector('select.guide-select[aria-label=\"选择项目\"]');"
+        + "const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;"
+        + `set.call(s, ${JSON.stringify(a)}); s.dispatchEvent(new Event('change', { bubbles: true })); return s.value; })()`,
+      );
+    }
+    const selected = await waitFor((s) => s.value === a);
+    assert.equal(selected?.value, a, `引导页未选中项目 A（${a}）`);
+
+    // 3) 点侧栏另一个项目 B 的「新建会话」→ 下拉必须切到 B
+    const b = ready.switchable.find((value) => value !== a);
+    const clicked = await evalResult(
+      `(() => {
+        const row = [...document.querySelectorAll('.sidebar-row[title]')]
+          .find((r) => r.getAttribute('title') === ${JSON.stringify(b)});
+        const button = row?.querySelector('button[aria-label^="在 "]');
+        if (!button) return false;
+        button.click();
+        return true;
+      })()`,
+    );
+    assert.equal(clicked, true, `侧栏未找到项目行「新建会话」按钮（root=${b}）`);
+    const after = await waitFor((s) => s.value === b);
+    assert.equal(after?.value, b, "引导页项目下拉未跟随侧栏新建会话的目标项目");
+    assert.equal(after?.marked, true, "引导页项目下拉被重挂载（切换应发生在同一实例内）");
+  } finally {
+    // 等客户端防抖落盘后再还原原值（未落盘时写回会被稍后的防抖写盖掉）
+    await new Promise((r) => setTimeout(r, 1500));
+    const current = await readDraft();
+    const untouched = !current.ok || current.value === originalDraft.value;
+    const changedByTest = current.ok && current.value !== null && current.value !== originalDraft.value;
+    if (changedByTest || untouched) {
+      await fetch(`${URL_BASE}/api/preferences`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...AUTH_HEADER },
+        body: JSON.stringify({ prefs: { draftTargetCwd: originalDraft.value } }),
+      }).catch(() => {});
+    }
   }
 });

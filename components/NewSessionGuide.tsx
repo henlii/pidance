@@ -4,6 +4,8 @@
  * 新会话引导选择器（OpenChamber draft-target-selectors 语义）：
  * 空态时在输入框上方提供 项目 + 分支 两个紧凑下拉。
  * - 选择目标目录；同时经 onTargetChange 同步全局项目身份（文件栏/Git/标题）
+ * - 外部目标变化（会话列表项目行/工作树行「新建会话」、顶部新建、刷新恢复）
+ *   经 resolveGuideTargetSync 收敛到项目下拉，保证「下拉显示的目标 = 实际建会话的目录」
  * - 不创建会话、不跳转路由（发送第一条消息才建会话）
  * - 发送第一条消息时新会话才在目标目录创建（Pidance 懒创建）
  * - 选择持久化到 localStorage（ChatWindow 管理），回到空态自动恢复
@@ -25,7 +27,7 @@ import {
   getDefaultWorktreeCache,
   hydrateWorktreeCache,
   parsePersistedWorktrees,
-  resolveGuideTargetProject,
+  resolveGuideTargetSync,
   serializePersistedWorktrees,
   type GuideProject,
   type GuideWorktreeInfo,
@@ -89,19 +91,9 @@ export function NewSessionGuide({ targetCwd, onTargetChange }: Props) {
   /** 同步当前选中的项目，避免迟到的 worktree 响应覆盖新选中项 */
   const selectedCwdRef = useRef<string | null>(null);
 
-  // 恢复持久化目标：targetCwd 匹配项目根/最长前缀 → 自动选中该项目并加载分支。
-  const restoreTargetRef = useRef((sorted: GuideProject[]) => {
-    if (!targetCwd) return;
-    const resolved = resolveGuideTargetProject(sorted, targetCwd);
-    if (resolved) {
-      setSelectedCwd(resolved);
-      void loadWorktreesRef.current(resolved);
-    }
-  });
-
   // 挂载时从 localStorage 恢复持久化工作树缓存（hydrate 只补缺失条目，不覆盖
-  // 模块级缓存已有数据）。必须声明在本 effect 之前，使下方 restoreTarget 触发
-  // 的 loadWorktrees 能直接命中 stale 秒渲染，避免刷新后首开引导页再等
+  // 模块级缓存已有数据）。必须声明在下方目标同步 effect 之前，使 targetCwd 恢复
+  // 触发的 loadWorktrees 能直接命中 stale 秒渲染，避免刷新后首开引导页再等
   // /api/worktrees（服务端冷态 2.7s / 热态 22ms）。
   useEffect(() => {
     hydrateWorktreeCache(worktreeCacheRef.current, readPersistedWorktrees());
@@ -119,7 +111,6 @@ export function NewSessionGuide({ targetCwd, onTargetChange }: Props) {
       const sorted = aggregateGuideProjects(cached, 12, addedProjectRoots);
       setProjects(sorted);
       setLoadingProjects(false);
-      restoreTargetRef.current(sorted);
     }
     void (async () => {
       try {
@@ -130,7 +121,6 @@ export function NewSessionGuide({ targetCwd, onTargetChange }: Props) {
         const sorted = aggregateGuideProjects(sessions, 12, addedProjectRoots);
         if (!cancelled) {
           setProjects(sorted);
-          restoreTargetRef.current(sorted);
         }
       } catch {
         // 拉取失败：保留本地缓存渲染的旧列表（无缓存时保持空列表）
@@ -141,7 +131,7 @@ export function NewSessionGuide({ targetCwd, onTargetChange }: Props) {
     return () => {
       cancelled = true;
     };
-    // 仅 mount 时执行（targetCwd 的后续变化由分支选择链路处理）
+    // 仅 mount 时执行（项目列表只加载一次；targetCwd 变化由下方同步 effect 收敛）
   }, [addedProjectRoots]);
 
   const loadWorktrees = useCallback((cwd: string): Promise<void> => {
@@ -186,8 +176,23 @@ export function NewSessionGuide({ targetCwd, onTargetChange }: Props) {
         }
       });
   }, []);
-  const loadWorktreesRef = useRef(loadWorktrees);
-  loadWorktreesRef.current = loadWorktrees;
+
+  // 目标同步（挂载恢复 + 外部切目标）：targetCwd 先到、项目列表后到（fetch
+  // /api/sessions 未返回）也在同一处收敛；引导页条件渲染、同一实例内目标会被
+  // 会话列表项目行/工作树行「新建会话」、顶部新建改写，项目下拉不跟随就会出现
+  // 「下拉显示 A、实际建到 B」。引导页自身的选择走 onChange → loadWorktrees
+  // （targetCwd 同步更新，判定 keep）；同项目内换工作树也不重复拉取分支列表。
+  useEffect(() => {
+    const action = resolveGuideTargetSync(projects, targetCwd, selectedCwdRef.current);
+    if (action.kind === "clear") {
+      selectedCwdRef.current = null;
+      setSelectedCwd(null);
+      setWorktrees(null);
+      setLoadingWorktrees(false);
+    } else if (action.kind === "load") {
+      void loadWorktrees(action.root);
+    }
+  }, [targetCwd, projects, loadWorktrees]);
 
   const main = worktrees?.find((w) => w.isMain) ?? null;
   const branches = worktrees?.filter((w) => !w.isMain) ?? [];

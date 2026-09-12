@@ -621,7 +621,9 @@ const chatPlan = composeChatPlan({
 
             <div className="mb-4">
               <NewSessionGuide
-                targetCwd={draftTargetCwd}
+                // 传实际创建目录（draft 为空时回落 intent cwd）：下拉显示的目标必须
+                // 等于新会话真正落在的目录，不因未手动选择而显示空态。
+                targetCwd={effectiveNewSessionCwd}
                 onTargetChange={handleDraftTargetChange}
               />
             </div>
