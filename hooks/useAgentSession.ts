@@ -33,6 +33,7 @@ import {
 } from "@/lib/queue-merge";
 import { pendingSessionId } from "@/lib/new-session-intent";
 import type { ContextUsage, SessionStatsInfo } from "@/lib/pi-types";
+import { acceptRemoteQueue } from "@/lib/queue-state";
 import {
   applyExtensionUiRequest,
   clearAllExtensionUiBlocking,
@@ -161,7 +162,7 @@ type AgentStateResponse = {
   lockedByOther?: boolean;
   extensionStatuses?: ExtensionStatusItem[];
   extensionWidgets?: ExtensionWidgetItem[];
-  queuedMessages?: { steering?: string[]; followUp?: string[] } | null;
+  queuedMessages?: { steering?: string[]; followUp?: string[]; followUpRevision?: number | null } | null;
   pendingExtensionRequests?: AgentEvent[];
   /** host 侧本 run 的吞吐读数（冷挂载/刷新时 seed；本地采样后失效）。 */
   turnMetrics?: { tokensPerSecond?: number; ttftMs?: number } | null;
@@ -170,10 +171,18 @@ type AgentStateResponse = {
 export interface QueuedMessages {
   steering: string[];
   followUp: string[];
+  /** Host 队列版本（单调）；null = 未知（旧 Host），此时不做新旧判定 */
+  followUpRevision: number | null;
 }
 
-function normalizeQueuedMessages(q?: { steering?: string[]; followUp?: string[] } | null): QueuedMessages {
-  return { steering: q?.steering ?? [], followUp: q?.followUp ?? [] };
+function normalizeQueuedMessages(
+  q?: { steering?: string[]; followUp?: string[]; followUpRevision?: number | null } | null,
+): QueuedMessages {
+  return {
+    steering: q?.steering ?? [],
+    followUp: q?.followUp ?? [],
+    followUpRevision: typeof q?.followUpRevision === "number" ? q.followUpRevision : null,
+  };
 }
 
 // 通知状态机纯逻辑已抽至 lib/notice-reducer.ts；此处再导出保持既有消费方（如 ChatWindow）兼容。
@@ -411,7 +420,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets,
     extensionUiStateRef, commitExtensionUiState, patchExtensionUiState, dismissExtensionUiRequest,
   } = useExtensionUiState();
-  const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
+  const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [], followUpRevision: null });
+  /** 每会话已见的 Host 队列版本：过期快照（乱序回显）必须丢弃 */
+  const remoteQueueRevisionRef = useRef<Map<string, number>>(new Map());
   // 每会话本地 follow-up 队列：Host 是持久化 owner，浏览器只持「已确认基线 +
   // 一个乐观待提交值」，按 sessionId 分账（见 lib/queue-state.ts 的不变量）。
   const queueBookRef = useRef<QueueBook>({});
@@ -426,6 +437,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setQueuedMessages((current) => ({
       steering: steering ?? current.steering,
       followUp: projection(queueEntryNow()),
+      followUpRevision: remoteRevisionNow(),
     }));
   }, [queueEntryNow]);
   /** 接受 Host/磁盘权威队列（受代次与在途守卫）。 */
@@ -440,20 +452,36 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     );
     publishQueue();
   }, [publishQueue]);
+  /**
+   * 接受 Host 队列快照的唯一入口：先按 revision 丢弃过期回显，再交给账本 CAS。
+   * 没有这道守卫时，「引导整队发送」清队之后到达的旧快照会把已发送的队列写回 UI。
+   */
+  const observeRemoteQueue = useCallback((sid: string, followUp: readonly string[], revision: number | null | undefined): boolean => {
+    const seen = remoteQueueRevisionRef.current.get(sid);
+    const verdict = acceptRemoteQueue(seen, revision);
+    if (verdict.seen !== undefined) remoteQueueRevisionRef.current.set(sid, verdict.seen);
+    if (!verdict.accept) return false;
+    queueBookRef.current = observeQueue(
+      queueBookRef.current,
+      sid,
+      followUp,
+      queueEntry(queueBookRef.current, sid).revision,
+    );
+    return true;
+  }, []);
+  const remoteRevisionNow = useCallback((): number | null => {
+    const sid = currentQueueSessionIdRef.current;
+    if (!sid) return null;
+    return remoteQueueRevisionRef.current.get(sid) ?? null;
+  }, []);
+
   /** 热 state 投影：受在途守卫与代次约束，不得盖掉更新的本地写入。 */
   const applyProjectedQueues = useCallback((value?: AgentStateResponse["queuedMessages"]) => {
     const next = normalizeQueuedMessages(value);
     const sid = currentQueueSessionIdRef.current;
-    if (sid) {
-      queueBookRef.current = observeQueue(
-        queueBookRef.current,
-        sid,
-        next.followUp,
-        queueEntry(queueBookRef.current, sid).revision,
-      );
-    }
-    setQueuedMessages({ steering: next.steering, followUp: projection(queueEntryNow()) });
-  }, [queueEntryNow]);
+    if (sid) observeRemoteQueue(sid, next.followUp, next.followUpRevision);
+    setQueuedMessages({ steering: next.steering, followUp: projection(queueEntryNow()), followUpRevision: remoteRevisionNow() });
+  }, [queueEntryNow, observeRemoteQueue]);
   /**
    * 写入队列并同步给 Host。成功把乐观值转成新基线；失败按 revision CAS 清掉
    * 乐观值退回基线（而不是恢复「上一份乐观值」，那会留下从未被接受的中间态）。
@@ -841,7 +869,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
           setLockedByOther(hot.lockedByOther === true);
           if (!live) {
-            setQueuedMessages({ steering: [], followUp: projection(queueEntryNow()) });
+            setQueuedMessages({ steering: [], followUp: projection(queueEntryNow()), followUpRevision: remoteRevisionNow() });
           }
           return { running: false, live: false, activeRun: false, lockedByOther: hot.lockedByOther === true };
         }
@@ -1647,6 +1675,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setQueuedMessages({
           steering: [...((event.steering as string[] | undefined) ?? [])],
           followUp: projection(queueEntryNow()),
+          followUpRevision: remoteRevisionNow(),
         });
         break;
       case "auto_retry_start":
@@ -2311,9 +2340,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     const text = message.trim();
     if (!text) return;
-    if (images?.length || (!getRuntimeAgentRunning() && !isCompacting)) {
-      // 有图或空闲：直接 prompt（空闲时无“结束后投递”语义）；压缩中即使
-      // runtime 暂时没有 agentRunning，也必须进入 follow-up 队列。
+    const running = getRuntimeAgentRunning() || isCompacting;
+    if (images?.length && running) {
+      // 运行中带图：走 follow_up 命令（Host → SDK 的 follow-up 队列支持图片），
+      // 不能退化成「运行中直接 prompt」（会被拒），也不能丢图。
+      notifyAutoFollowSend();
+      const piImages = images.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+      try {
+        await sendAgentCommand(sid, { type: "follow_up", message: text, images: piImages });
+        ensureEventsConnected(sid);
+      } catch (e) {
+        opts.chatInputRef?.current?.prependText(text);
+        addNotice({ type: "error", message: String(e instanceof Error ? e.message : e) });
+      }
+      return;
+    }
+    if (images?.length || !running) {
+      // 有图（空闲）或空闲：直接 prompt（空闲时无"结束后投递"语义）。
       notifyAutoFollowSend();
       const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
       try {
@@ -2325,8 +2368,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // runtime 误判空闲（agent_start 事件未到/竞态窗口）时服务器会拒绝：
         // 必须转入 follow-up 队列，否则消息静默丢失，引导看起来「失效」。
         if (receipt?.status === "rejected") {
-          await updateLocalFollowUp([...projection(queueEntryNow()), text]);
-          ensureEventsConnected(sid);
+          if (piImages?.length) {
+            // Host 文字队列不支持图片：带图被拒时退回输入框，避免静默丢图。
+            opts.chatInputRef?.current?.prependText(text);
+            addNotice({ type: "error", message: t("input_imageSendRetry") });
+          } else {
+            await updateLocalFollowUp([...projection(queueEntryNow()), text]);
+            ensureEventsConnected(sid);
+          }
         }
       } catch (e) {
         console.error("Failed to send prompt:", e);
@@ -2499,15 +2548,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (remote === null) return;
         // 捕获发起时的代次：期间有本地写入或在途提交时丢弃该响应，
         // 避免「请求早于写入、响应晚于归零」把新值覆盖掉。
-        queueBookRef.current = observeQueue(queueBookRef.current, sid, remote, requestRevision);
-        lastRemoteQueueRef.current = remote;
+        queueBookRef.current = observeQueue(queueBookRef.current, sid, remote.items, requestRevision);
+        if (!observeRemoteQueue(sid, remote.items, remote.revision)) return;
+        lastRemoteQueueRef.current = remote.items;
         if (currentQueueSessionIdRef.current === sid) publishQueue();
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, [observeLocalQueue, publishQueue, session?.id]);
+  }, [observeLocalQueue, publishQueue, session?.id, observeRemoteQueue]);
 
   useEffect(() => {
     const sid = sessionIdRef.current;
@@ -2515,12 +2565,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const requestRevision = queueEntry(queueBookRef.current, sid).revision;
     const remote = readFollowUpQueuePreference(serverPrefs, sid);
     if (remote === null) return;
-    if (JSON.stringify(remote) === JSON.stringify(lastRemoteQueueRef.current)) return;
+    if (JSON.stringify(remote.items) === JSON.stringify(lastRemoteQueueRef.current)) {
+      // 内容未变也要推进已见版本，避免同一份旧快照在新一次刷新里再次被接受
+      acceptRemoteQueue(remoteQueueRevisionRef.current.get(sid), remote.revision);
+      return;
+    }
     // focus/visibilitychange 刷新（手机切回前台的常见路径）同样受代次与在途守卫约束。
-    lastRemoteQueueRef.current = remote;
-    queueBookRef.current = observeQueue(queueBookRef.current, sid, remote, requestRevision);
+    queueBookRef.current = observeQueue(queueBookRef.current, sid, remote.items, requestRevision);
+    if (!observeRemoteQueue(sid, remote.items, remote.revision)) return;
+    lastRemoteQueueRef.current = remote.items;
     if (currentQueueSessionIdRef.current === sid) publishQueue();
-  }, [observeLocalQueue, publishQueue, serverPrefs, session?.id]);
+  }, [observeLocalQueue, publishQueue, serverPrefs, session?.id, observeRemoteQueue]);
 
   // 会话切换：清空阻塞队列与可见卡片；不发送 extension_ui_response。
   useEffect(() => {
@@ -2596,6 +2651,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setQueuedMessages({
       steering: [],
       followUp: projection(queueEntry(queueBookRef.current, queueSid ?? "")),
+      followUpRevision: queueSid ? (remoteQueueRevisionRef.current.get(queueSid) ?? null) : null,
     });
     lastRemoteQueueRef.current = null;
 

@@ -161,6 +161,12 @@ export class SdkSessionHost {
   private lastStopReason: "completed" | "aborted" | "error" | null = null;
   /** 本地 follow-up 队列执行缓存（持久层仍是 prefs）。 */
   private followUpQueue: string[] = [];
+  /**
+   * 队列版本：每次内容变更 +1，随 state 投影与 prefs 一起下发。
+   * 客户端据此丢弃乱序到达的过期快照（否则「引导整队发送」清队后，
+   * 旧快照会把已发送的队列重新写回 UI）。
+   */
+  private followUpQueueRevision = 0;
   private followUpQueueHydrated = false;
   private flushingFollowUp = false;
   private followUpFlushBatch: string[] = [];
@@ -358,16 +364,30 @@ export class SdkSessionHost {
     this.followUpQueueHydrated = true;
     const prefs = readPidancePrefs(this.agentDir);
     const raw = getPidancePref(prefs, `sessionQueue.${this.realSessionId}`);
-    this.followUpQueue = Array.isArray(raw)
-      ? raw.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    const asItems = (value: unknown): string[] => Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
       : [];
+    if (Array.isArray(raw)) {
+      // 旧格式（纯数组）：无版本号，从 0 起算
+      this.followUpQueue = asItems(raw);
+      return;
+    }
+    const stored = raw && typeof raw === "object" ? (raw as { items?: unknown; revision?: unknown }) : null;
+    this.followUpQueue = asItems(stored?.items);
+    if (typeof stored?.revision === "number") this.followUpQueueRevision = stored.revision;
+  }
+
+  /** 队列内容变更唯一入口：同步推进版本号，保证快照可判新旧。 */
+  private updateFollowUpQueue(next: string[]): void {
+    this.followUpQueue = next;
+    this.followUpQueueRevision += 1;
   }
 
   private persistFollowUpQueue(): void {
     try {
       updatePidancePref(
         `sessionQueue.${this.realSessionId}`,
-        this.followUpQueue,
+        { items: this.followUpQueue, revision: this.followUpQueueRevision },
         this.agentDir,
       );
     } catch (error) {
@@ -435,11 +455,15 @@ export class SdkSessionHost {
       // flushAsOne：整组作为一条 prompt 发出，确认后只清空本次快照条目；
       // 快照之后新入队的条目保留，避免 set_follow_up_queue 整组替换时丢新消息。
       const original = new Set(this.followUpFlushOriginal);
-      this.followUpQueue = this.followUpQueue.filter((item) => !original.has(item));
+      this.updateFollowUpQueue(this.followUpQueue.filter((item) => !original.has(item)));
     } else {
       // 只移除已确认落盘/已 settled 的当前条目；未确认条目保留。
       const idx = this.followUpQueue.indexOf(item);
-      if (idx >= 0) this.followUpQueue.splice(idx, 1);
+      if (idx >= 0) {
+        const next = [...this.followUpQueue];
+        next.splice(idx, 1);
+        this.updateFollowUpQueue(next);
+      }
     }
     const remaining = [...this.followUpQueue];
     this.persistFollowUpQueue();
@@ -1206,6 +1230,7 @@ export class SdkSessionHost {
     projected.queuedMessages = {
       steering: this.hasQueueSnapshot ? [...this.localQueue.steering] : [],
       followUp: [...this.followUpQueue],
+      followUpRevision: this.followUpQueueRevision,
     };
     try {
       const usage = session.getContextUsage();
@@ -1324,7 +1349,7 @@ export class SdkSessionHost {
             sessionId: this.realSessionId,
             status: "accepted",
           };
-          this.followUpQueue = [...this.followUpQueue, parsed.message];
+          this.updateFollowUpQueue([...this.followUpQueue, parsed.message]);
           this.promptReceipts.set(parsed.submissionId, queuedReceipt);
           this.persistFollowUpQueue();
           this.options.onSessionListInvalidate?.();
@@ -1519,7 +1544,7 @@ export class SdkSessionHost {
         if (this.flushingFollowUp) {
           this.abortFollowUpFlush();
         }
-        this.followUpQueue = items;
+        this.updateFollowUpQueue(items);
         this.persistFollowUpQueue();
         // late-enqueue：如果已经 settled/空闲，立即调度一次投递。
         if (this.isSettled() && items.length > 0) this.scheduleFollowUpFlush();

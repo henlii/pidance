@@ -888,10 +888,44 @@ function pinStreamBlockToBottom(
   });
 }
 
+/**
+ * 折叠态内容预览行：块收起时也显示最后一行内容（流式期间随输出滚动更新）。
+ * 单行 + monospace + 省略号，不换行即可保持块头高度稳定；不渲染可聚焦元素，
+ * 点击穿透到外层的展开/收起按钮。
+ */
+function CollapsedPreviewLine({ text }: { text: string }) {
+  const lastLine = text.trimEnd().split("\n").pop() ?? "";
+  if (!lastLine) return null;
+  return (
+    <div
+      data-collapsed-preview="true"
+      title={lastLine}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "3px 10px 6px",
+        borderTop: "1px dashed var(--border)",
+        color: "var(--text-dim)",
+        fontFamily: "var(--font-mono)",
+        fontSize: 11,
+        lineHeight: 1.4,
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        pointerEvents: "none",
+      }}
+    >
+      <span style={{ flexShrink: 0, color: "var(--text-dim)" }}>›</span>
+      <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{lastLine}</span>
+    </div>
+  );
+}
+
 function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, blockIndex }: {
   block: ThinkingContent;
   duration?: number;
-  /** 本思考块仍是流式消息的最后一块：默认展开；本块输出结束（后续块出现或整段结束）立刻折叠 */
+  /** 本思考块仍在输出（流式中）：折叠态需要滚动显示最后一行 */
   isStreaming?: boolean;
   sessionId?: string;
   entryId?: string;
@@ -899,7 +933,8 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
 }) {
   const { t } = useI18n();
   const streamBlockMaxHeight = useStreamBlockMaxHeight();
-  const [expanded, setExpanded] = useState(isStreaming ?? false);
+  // 折叠/展开完全由用户决定：不随流式自动展开，也不随流式结束自动收回。
+  const [expanded, setExpanded] = useState(false);
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -907,10 +942,7 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
   const followBodyRef = useRef(true);
   const pinningBodyRef = useRef(false);
 
-  // 流式开始展开（默认可见），流式结束折叠；用户手动 toggle 在流式状态不变时不打扰
-  useEffect(() => {
-    setExpanded(isStreaming ?? false);
-  }, [isStreaming]);
+  // 不跟随流式状态改写 expanded：用户收起就被收起，流式结束也不弹开。
   const bodyText = loading
     ? t("message_thinkingLoading")
     : error ?? (block.deferred ? content : getThinkingText(block));
@@ -984,6 +1016,7 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
           <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>{formatElapsedDuration(duration * 1000)}</span>
         )}
       </button>
+      {!expanded && isStreaming && <CollapsedPreviewLine text={bodyText ?? ""} />}
       {expanded && (
         <div
           ref={bodyRef}
@@ -1015,7 +1048,7 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
 }
 
 
-function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, startedAt }: {
+function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, startedAt, defaultExpanded }: {
   block: ToolCallContent;
   result?: ToolResultMessage;
   snapshot?: ToolExecutionSnapshot;
@@ -1025,10 +1058,13 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
   pending?: boolean;
   /** 无快照时的执行开始时间（如 pendingBash 服务端快照）；pending 时实时计时。 */
   startedAt?: number;
+  /** 初始展开态；缺省折叠（折叠/展开只由用户决定，不随流式状态变化）。 */
+  defaultExpanded?: boolean;
 }) {
   const { t } = useI18n();
   const streamBlockMaxHeight = useStreamBlockMaxHeight();
-  const [expandedOverride, setExpandedOverride] = useState<boolean | null>(null);
+  // 折叠/展开完全由用户决定：运行中也不自动展开，结束后也不自动收回。
+  const [expanded, setExpanded] = useState(defaultExpanded === true);
   const [now, setNow] = useState(() => Date.now());
   const [resolvedDetails, setResolvedDetails] = useState<unknown>(undefined);
   const [resolvedResultContent, setResolvedResultContent] = useState<ToolResultMessage["content"] | undefined>(undefined);
@@ -1036,9 +1072,8 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
   const outputRef = useRef<HTMLPreElement>(null);
   const followOutputRef = useRef(true);
   const pinningOutputRef = useRef(false);
-  // 有 result 即本块输出已结束：立刻收回，不等下一轮模型调用或残留 running 快照。
+  // 仍在执行（无 result 且有运行中快照/已知 pending）：折叠态显示实时输出最后一行。
   const isRunning = !result && (snapshot?.status === "running" || pending === true);
-  const expanded = expandedOverride ?? isRunning;
   const isEditTool = isEditToolName(block.toolName);
   // 首屏可能 deferredHeavy：展开后懒加载完整 details 再算 diff
   const effectiveResult = result && (resolvedDetails !== undefined || resolvedResultContent !== undefined)
@@ -1125,7 +1160,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
     >
       {/* ── Tool call header ── */}
       <button
-        onClick={() => setExpandedOverride(!expanded)}
+        onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
         style={{
           display: "flex",
@@ -1165,6 +1200,13 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
           <polyline points="2 3.5 5 6.5 8 3.5" />
         </svg>
       </button>
+
+      {!expanded && isRunning && (() => {
+        // 折叠态：优先显示实时输出的最后一行（无输出时回落命令行），跟随流式滚动。
+        const liveText = snapshot?.output ?? "";
+        const lastLine = liveText.trimEnd().split("\n").pop() ?? "";
+        return <CollapsedPreviewLine text={lastLine.trim() ? lastLine : command} />;
+      })()}
 
       {/* ── Expanded: 参数友好摘要（替代原始 JSON，OpenChamber 风格） ── */}
       {expanded && command && (

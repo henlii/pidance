@@ -22,7 +22,17 @@ export function joinQueueForRecall(items: readonly string[]): string {
 }
 
 /** 从服务端偏好读取会话队列；兼容早期扁平键。缺失返回 null，空队列返回 []。 */
-export function readFollowUpQueuePreference(prefs: unknown, sessionId: string): string[] | null {
+export interface FollowUpQueuePreference {
+  items: string[];
+  /** Host 写入的单调版本号；旧数据（纯数组）为 null，表示无法判新旧。 */
+  revision: number | null;
+}
+
+/**
+ * 读取某会话的 follow-up 队列持久化值。
+ * 兼容两种形态：纯数组（旧）与 { items, revision }（新，带版本号用于丢弃过期回显）。
+ */
+export function readFollowUpQueuePreference(prefs: unknown, sessionId: string): FollowUpQueuePreference | null {
   if (!sessionId || typeof prefs !== "object" || prefs === null || Array.isArray(prefs)) return null;
   const record = prefs as Record<string, unknown>;
   const nested = record.sessionQueue;
@@ -30,8 +40,21 @@ export function readFollowUpQueuePreference(prefs: unknown, sessionId: string): 
     ? (nested as Record<string, unknown>)[sessionId]
     : undefined;
   const value = nestedValue ?? record[`sessionQueue.${sessionId}`];
-  if (!Array.isArray(value)) return null;
-  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  if (Array.isArray(value)) {
+    return {
+      items: value.filter((item): item is string => typeof item === "string" && item.trim().length > 0),
+      revision: null,
+    };
+  }
+  if (typeof value === "object" && value !== null) {
+    const entries = (value as { items?: unknown; revision?: unknown });
+    if (!Array.isArray(entries.items)) return null;
+    return {
+      items: entries.items.filter((item): item is string => typeof item === "string" && item.trim().length > 0),
+      revision: typeof entries.revision === "number" ? entries.revision : null,
+    };
+  }
+  return null;
 }
 
 /** 会话结束原因：只有正常完成才自动投递队列；中止/异常保留队列。 */

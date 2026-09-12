@@ -11,6 +11,16 @@ import { MessageView } from "./MessageView";
 import { ImagePreviewOverlay } from "./MessageImage";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
+import { MessageNavRail } from "./MessageNavRail";
+import { CHAT_COLUMN_MAX_WIDTH, CHAT_GUTTER } from "@/lib/chat-column";
+
+/**
+ * 输入区/面板/底栏的左右内边距：与消息列逐像素对齐。
+ * 消息列的左右边距由两侧竖条（MessageNavRail / ChatMinimap，各 CHAT_GUTTER px）
+ * 充当，所以输入区也要退同样宽度，否则两者左右边缘会差一个竖条。
+ */
+const CHAT_INPUT_SIDE_PADDING = CHAT_GUTTER;
+const CHAT_INPUT_SIDE_PADDING_MOBILE = 16;
 import { ExtensionDialog } from "./ExtensionDialog";
 import { NewSessionGuide } from "./NewSessionGuide";
 import { TodoPanel } from "./TodoPanel";
@@ -73,9 +83,7 @@ function phaseLabel(phase: AgentPhase, t: ReturnType<typeof useI18n>["t"]): stri
   return `${t("chat_thinking")}...`;
 }
 
-const CHAT_MINIMAP_WIDTH = 36;
-const CHAT_COLUMN_PADDING = 16;
-const CHAT_INPUT_RIGHT_PADDING = CHAT_COLUMN_PADDING + CHAT_MINIMAP_WIDTH;
+
 
 // 过程详情默认持续展开（Issue #13）：外层不再默认隐藏整个 user→answer 过程；
 // 用户仍可主动收起/展开，局部 thinking / tool 明细保持各自的按需折叠。
@@ -433,11 +441,10 @@ const chatPlan = composeChatPlan({
         <div
           style={{
             flexShrink: 0,
-            padding: `0 ${CHAT_COLUMN_PADDING}px 8px`,
-            paddingRight: isMobile ? CHAT_COLUMN_PADDING : CHAT_INPUT_RIGHT_PADDING,
+            padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px 8px`,
           }}
         >
-          <div style={{ maxWidth: 820, margin: "0 auto" }}>
+          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
             <ExtensionDialog
               request={extensionDialog}
               disabled={writesDisabled || !sessionIdRef.current}
@@ -506,11 +513,10 @@ const chatPlan = composeChatPlan({
     <div
       style={{
         flexShrink: 0,
-        padding: `0 ${CHAT_COLUMN_PADDING}px`,
-        paddingRight: isMobile ? CHAT_COLUMN_PADDING : CHAT_INPUT_RIGHT_PADDING,
+        padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px`,
       }}
     >
-      <div style={{ maxWidth: 820, margin: "0 auto" }}>
+      <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
         <TodoPanel
           todos={todos}
           collapsed={todosCollapsed}
@@ -649,27 +655,52 @@ const chatPlan = composeChatPlan({
           style={{
             position: "absolute",
             top: 12,
-            left: 0,
-            right: isMobile ? 0 : CHAT_MINIMAP_WIDTH,
+            left: isMobile ? 0 : CHAT_GUTTER,
+            right: isMobile ? 0 : CHAT_GUTTER,
             zIndex: 40,
-            padding: `0 ${CHAT_COLUMN_PADDING}px`,
             pointerEvents: "none",
           }}
         >
-          <div style={{ maxWidth: 760, margin: "0 auto" }}>
+          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
             <NoticeShelf notices={notices} activities={visibleActivities} onDismiss={dismissNotice} onTogglePin={toggleNoticePin} floating align="right" />
           </div>
         </div>
+        {/* 左侧用户消息导航条：绝对定位覆盖层，不参与布局——会话列宽度只由
+            scroller 的内边距决定，短会话（无节点）也不会因此变宽。 */}
+        {isMobile ? null : (
+          <div
+            style={{
+              position: "absolute",
+              top: 0,
+              bottom: 0,
+              left: 0,
+              width: CHAT_GUTTER,
+              zIndex: 30,
+            }}
+          >
+            <MessageNavRail
+              messages={messages}
+              plan={chatPlan}
+              scrollContainer={scrollContainerRef}
+              messageRefs={messageRefs}
+            />
+          </div>
+        )}
         <div
           ref={scrollContainerRef}
           data-chat-scroller="true"
-          className="min-h-0 flex-1 overflow-y-auto pt-4 [scrollbar-width:none]"
+          className="min-h-0 flex-1 overflow-y-auto py-4 [scrollbar-width:none]"
           // overflow-anchor:none：钉底由自动跟随显式负责，浏览器不再自行锚定；
           // 内嵌消息块滚到边界后允许滚轮/触屏继续传给会话容器。
-          style={{ overflowAnchor: "none", overscrollBehavior: "auto" }}
+          // 左右内边距与输入栏同口径（两侧各让出 18px 竖条 / 移动端 16px），
+          // 保证消息列、输入栏、扩展面板三者同宽同中心线。
+          style={{
+            overflowAnchor: "none",
+            overscrollBehavior: "auto",
+            padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px`,
+          }}
         >
-          <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
-            <div style={{ maxWidth: 760, margin: "0 auto" }}>
+          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
             {/* 状态条与 aboveEditor widget 已移至输入区（对齐 TUI footer/editor 布局） */}
 
             {(() => {
@@ -809,7 +840,6 @@ const chatPlan = composeChatPlan({
             {/* OpenChamber 风格底部常驻 spacer（桌面 10vh / 移动 40px）：给末端留呼吸感，
                 取代旧的 agentRunning 整视口占位——跟随钉底由 useAgentSession 的自动跟随负责。 */}
             <div aria-hidden="true" style={{ height: isMobile ? 40 : "10vh" }} />
-            </div>
           </div>
         </div>
         {/* 回到底部：仅 released 且不在末端区域时可见（样式与动效在 globals.css，
@@ -826,13 +856,25 @@ const chatPlan = composeChatPlan({
             <polyline points="6 9 12 15 18 9" />
           </svg>
         </button>
+        {/* 右侧消息概览条：同为覆盖层（不参与布局），宽度不影响消息列。 */}
         {isMobile ? null : (
-          <ChatMinimap
-            messages={messages}
-            plan={chatPlan}
-            scrollContainer={scrollContainerRef}
-            messageRefs={messageRefs}
-          />
+          <div
+            style={{
+              position: "absolute",
+              top: 0,
+              bottom: 0,
+              right: 0,
+              width: CHAT_GUTTER,
+              zIndex: 30,
+            }}
+          >
+            <ChatMinimap
+              messages={messages}
+              plan={chatPlan}
+              scrollContainer={scrollContainerRef}
+              messageRefs={messageRefs}
+            />
+          </div>
         )}
       </div>
 
@@ -840,11 +882,10 @@ const chatPlan = composeChatPlan({
         {/* aboveEditor widget（对齐 TUI：紧贴输入框上方） */}
         <div
           style={{
-            padding: `0 ${CHAT_COLUMN_PADDING}px`,
-            paddingRight: isMobile ? CHAT_COLUMN_PADDING : CHAT_INPUT_RIGHT_PADDING,
+            padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px`,
           }}
         >
-          <div style={{ maxWidth: 820, margin: "0 auto" }}>
+          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
             <ExtensionWidgets widgets={aboveEditorWidgets} />
           </div>
         </div>
@@ -871,11 +912,10 @@ const chatPlan = composeChatPlan({
         {!extensionDialog && (
           <div
             style={{
-              padding: `0 ${CHAT_COLUMN_PADDING}px`,
-              paddingRight: isMobile ? CHAT_COLUMN_PADDING : CHAT_INPUT_RIGHT_PADDING,
+              padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px`,
             }}
           >
-            <div style={{ maxWidth: 820, margin: "0 auto" }}>
+            <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
               {!footerCollapsed && (
                 <>
                   <ExtensionWidgets widgets={belowEditorWidgets} />
@@ -899,8 +939,8 @@ const chatPlan = composeChatPlan({
 function LockedSessionBar({ isMobile }: { isMobile: boolean }) {
   const { t } = useI18n();
   return (
-    <div style={{ flexShrink: 0, padding: "0 16px 8px", paddingRight: isMobile ? 16 : CHAT_INPUT_RIGHT_PADDING }}>
-      <div style={{ maxWidth: 820, margin: "0 auto" }}>
+    <div style={{ flexShrink: 0, padding: `0 ${isMobile ? 16 : CHAT_INPUT_SIDE_PADDING}px 8px` }}>
+      <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
         <div
           role="status"
           aria-label={t("chat_sessionWriteLocked")}
@@ -938,9 +978,9 @@ function ReadOnlySessionBar({ session, isMobile }: { session: SessionInfo; isMob
     ? `${sub.agent ? t("chat_agentNamed", { name: sub.agent }) : t("chat_subagent")} · ${t("chat_subagentRun", { count: sub.runIndex })}`
     : null;
   return (
-    // 与 ChatInput 相同的外边距节奏（桌面端右侧为 ChatMinimap 预留 36px）。
-    <div style={{ flexShrink: 0, padding: "0 16px 8px", paddingRight: isMobile ? 16 : CHAT_INPUT_RIGHT_PADDING }}>
-      <div style={{ maxWidth: 820, margin: "0 auto" }}>
+    // 与 ChatInput 相同的外边距节奏（桌面端两侧让出 18px 竖条）。
+    <div style={{ flexShrink: 0, padding: `0 ${isMobile ? 16 : CHAT_INPUT_SIDE_PADDING}px 8px` }}>
+      <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
         <div
           role="note"
           aria-label={t("chat_readOnlySession")}

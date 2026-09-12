@@ -24,6 +24,7 @@ import {
   type StreamingEnterAction,
 } from "@/lib/ui-preferences";
 import { isAudioPath, isImagePath, isVideoPath } from "@/lib/file-types";
+import { CHAT_COLUMN_MAX_WIDTH, CHAT_GUTTER } from "@/lib/chat-column";
 
 export type { AttachedImage, ChatInputHandle } from "@/lib/types";
 
@@ -591,7 +592,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   attachedUploadsRef.current = attachedUploads;
 
   const processImageFiles = useCallback(async (files: File[]) => {
-    if (isStreaming) return;
+    // 运行中同样允许附带图片：steer / follow-up 都支持图片（host 直接发 prompt），
+    // 原先这里直接 return 会让粘贴/拖入静默失效。
     const imageFiles = files.filter(isRasterImageFile);
     if (!imageFiles.length) return;
     setImageUploading(true);
@@ -868,7 +870,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     ? t(slashQuery ? "input_matchCountOne" : "input_commandCountOne")
     : t(slashQuery ? "input_matchCount" : "input_commandCount", { count: filteredSlashCommands.length });
   const hasInputText = Boolean(value.trim()) || hasReadyUploads;
-  const canQueueStreamingMessage = hasInputText && attachedImages.length === 0 && !hasUploading;
+  const canQueueStreamingMessage = hasInputText && !hasUploading;
 
   // ── @ file autocomplete ──────────────────────────────────────────────────
   // Recomputed from the text before the caret on every change/caret move.
@@ -1024,25 +1026,25 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const sendQueued = useCallback((mode: "steer" | "followup") => {
     const base = value.trim();
-    // 流式期：图片仍不可排队；路径附件是文本可排队
-    if (!base && !hasReadyUploads) return;
-    if (attachedImages.length) return;
+    if (!base && !hasReadyUploads && attachedImages.length === 0) return;
     if (hasUploading) return;
     onAudioUnlock?.();
     const msg = composeMessageWithUploads(base);
+    const images = attachedImages.length ? attachedImages : undefined;
     const streamingBehavior = mode === "steer" ? "steer" : "followUp";
     if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
-      onPromptWithStreamingBehavior(msg, streamingBehavior, undefined);
+      onPromptWithStreamingBehavior(msg, streamingBehavior, images);
       clearInput();
       return;
     }
-    // 队列/引导严格按配置：followup 无 onFollowUp 时不得降级为 steer（会打断当前运行）
+    // 队列/引导严格按配置：followup 无 onFollowUp 时不得降级为 steer（会打断当前运行）。
+    // 带图时由 hook 直接发 prompt（Host 文字队列不支持图片），不会静默丢图。
     if (mode === "steer" && onSteer) {
-      onSteer(msg, undefined);
+      onSteer(msg, images);
     } else if (mode === "followup" && onFollowUp) {
-      onFollowUp(msg, undefined);
+      onFollowUp(msg, images);
     } else if (mode === "steer" && onFollowUp) {
-      onFollowUp(msg, undefined);
+      onFollowUp(msg, images);
     }
     clearInput();
   }, [value, attachedImages.length, hasReadyUploads, hasUploading, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, composeMessageWithUploads]);
@@ -1443,8 +1445,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       style={{
         flexShrink: 0,
         background: "transparent",
-        padding: "0 16px 8px",
-        paddingRight: isMobile ? 16 : 52, // desktop: 16px base + 36px for ChatMinimap alignment
+        // 左右各让出一个竖条宽度：与消息列（两侧 18px 竖条）逐像素对齐
+        padding: `0 ${isMobile ? 16 : CHAT_GUTTER}px 8px`,
       }}
     >
       {/* Hidden file input：图片走模型副本；所有原文件作为二进制消息保存 */}
@@ -1460,7 +1462,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           e.target.value = "";
         }}
       />
-      <div style={{ maxWidth: 820, margin: "0 auto" }}>
+      <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
         <fieldset
           disabled={blocked}
           aria-disabled={blocked || undefined}
@@ -2064,11 +2066,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             const canSend = streamingSend
               ? canQueueStreamingMessage
               : Boolean((value.trim() || attachedImages.length || hasReadyUploads) && !hasUploading);
-            const sendTooltip = streamingSend
-              ? (attachedImages.length
-                ? t("input_imageQueueDisabled")
-                : t("input_sendQueueTooltip"))
-              : undefined;
+            const sendTooltip = streamingSend ? t("input_sendQueueTooltip") : undefined;
             return (
               <button
                 type="button"

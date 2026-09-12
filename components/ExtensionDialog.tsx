@@ -3,6 +3,7 @@
 import { useRef, useState, type CSSProperties } from "react";
 import type { ExtensionUiDialogRequest } from "@/lib/extension-ui-bridge";
 import { useI18n } from "@/lib/i18n";
+import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-column";
 import { MarkdownBody } from "./MarkdownBody";
 
 export type ExtensionDialogResponse =
@@ -141,7 +142,7 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
         aria-label={`${t("extension_extension")}: ${request.title}`}
         style={{
           // 与输入框同宽（面板固定展开在输入框上方，宽度不一致会显成错位的另一栏）
-          width: "min(820px, 100%)",
+          width: `min(${CHAT_COLUMN_MAX_WIDTH}px, 100%)`,
           maxHeight: "min(52vh, 560px)",
           display: "flex",
           flexDirection: "column",

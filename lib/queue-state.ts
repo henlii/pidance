@@ -125,3 +125,21 @@ export function observeQueue(
   if (hasPendingLocalChange(entry)) return book;
   return put(book, sessionId, { ...entry, confirmed: [...items] });
 }
+
+/**
+ * Host 队列快照的新旧判定。
+ *
+ * Host 为队列维护单调 revision（每次内容变更 +1），快照可能因 SSE/轮询/偏好同步
+ * 乱序到达；过期快照会把「已经被 steer 带走的队列」重新写回 UI（实测：引导整队
+ * 发送后队列又出现）。因此客户端只接受 >= 已见版本的快照。
+ *
+ * 快照未带版本（旧 Host / 旧持久化数据）时不做判定，照旧接受。
+ */
+export function acceptRemoteQueue(
+  seen: number | undefined,
+  revision: number | null | undefined,
+): { accept: boolean; seen: number | undefined } {
+  if (typeof revision !== "number") return { accept: true, seen };
+  if (seen !== undefined && revision < seen) return { accept: false, seen };
+  return { accept: true, seen: revision };
+}

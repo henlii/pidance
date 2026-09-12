@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo, RefObject } from "react";
 import type { AgentMessage, AssistantMessage, TextContent } from "@/lib/types";
 import { getChatPlanLiveMessage, trailingLiveUserStart, type ChatRenderPlanItem } from "@/lib/chat-compositor";
+import { CHAT_GUTTER } from "@/lib/chat-column";
 
 interface Props {
   messages: AgentMessage[];
@@ -11,8 +12,6 @@ interface Props {
   scrollContainer: RefObject<HTMLDivElement | null>;
   messageRefs: RefObject<(HTMLDivElement | null)[]>;
 }
-
-const MINIMAP_WIDTH = 36;
 
 function getMessagePreview(msg: AgentMessage | Partial<AgentMessage>): string {
   if (msg.role === "user") {
@@ -70,9 +69,9 @@ export function ChatMinimap({ messages, plan, scrollContainer, messageRefs }: Pr
   const [scrollRatio, setScrollRatio] = useState(0);
   const [viewportRatio, setViewportRatio] = useState(1);
   const [visible, setVisible] = useState(false);
-  const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [minimapHovered, setMinimapHovered] = useState(false);
   const [mouseYRatio, setMouseYRatio] = useState<number | null>(null);
+  const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const draggingRef = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -277,8 +276,8 @@ export function ChatMinimap({ messages, plan, scrollContainer, messageRefs }: Pr
         setMouseYRatio((e.clientY - rect.top) / rect.height);
       }}
       style={{
-        width: MINIMAP_WIDTH,
-        flexShrink: 0,
+        width: CHAT_GUTTER,
+        height: "100%",
         position: "relative",
         cursor: "default",
         userSelect: "none",
@@ -306,7 +305,6 @@ export function ChatMinimap({ messages, plan, scrollContainer, messageRefs }: Pr
       {/* Message nodes */}
       {nodes.map((node) => {
         const color = getNodeColor(node.msg);
-        const isNearest = minimapHovered && nearestIndex === node.index;
         const isUser = node.msg.role === "user";
         const dotTop = node.topRatio * 100;
 
@@ -331,14 +329,14 @@ export function ChatMinimap({ messages, plan, scrollContainer, messageRefs }: Pr
             {/* Dot */}
             <div
               style={{
-                width: isUser ? 8 : 6,
-                height: isUser ? 8 : 6,
+                width: isUser ? 6 : 5,
+                height: isUser ? 6 : 5,
                 borderRadius: isUser ? 2 : "50%",
                 background: color.bg,
                 border: `1.5px solid ${color.border}`,
                 flexShrink: 0,
                 transition: "transform 0.1s",
-                transform: isNearest ? "scale(1.6)" : "scale(1)",
+                transform: minimapHovered && nearestIndex === node.index ? "scale(1.6)" : "scale(1)",
               }}
             />
 
@@ -381,8 +379,8 @@ export function ChatMinimap({ messages, plan, scrollContainer, messageRefs }: Pr
               borderBottom: `1px solid ${isNearest ? color.border : "var(--border)"}`,
               borderLeft: `2px solid ${color.border}`,
               borderRadius: 4,
-              padding: "2px 7px",
-              width: 200,
+              padding: "3px 8px",
+              width: 220,
               zIndex: 100,
               pointerEvents: "none",
               opacity: isNearest ? 1 : 0.45,

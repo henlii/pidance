@@ -124,7 +124,7 @@ test("SSR/source：面板与输入框同宽同中线，内容区可滚动", () =
     onRespond: () => {},
   });
   // 与输入框一致的 820 宽度（旧 560 窄栏会显成错位的另一栏）
-  assert.ok(html.includes("width:min(820px, 100%)"), "面板未使用与输入框一致的宽度");
+  assert.match(html, /width:min\(\d+px, 100%\)/, "面板未使用与输入框一致的宽度（取自共享常量）");
   assert.ok(!html.includes("min(560px, 100%)"), "面板仍保留旧的窄栏宽度");
   // column flex 里的滚动契约：flex 1 1 auto + min-height 0，否则内容超出被裁切而不是滚动
   assert.ok(
@@ -137,6 +137,6 @@ test("SSR/source：面板与输入框同宽同中线，内容区可滚动", () =
     chatWindow.indexOf("const chatInputElement"),
     chatWindow.indexOf("const aboveEditorWidgets"),
   );
-  assert.ok(block.includes("CHAT_INPUT_RIGHT_PADDING"), "扩展面板未按输入框同款内边距包裹");
-  assert.ok(block.includes("maxWidth: 820"), "扩展面板未按输入框同款宽度包裹");
+  assert.ok(block.includes("CHAT_INPUT_SIDE_PADDING"), "扩展面板未按输入框同款内边距包裹");
+  assert.ok(block.includes("maxWidth: CHAT_COLUMN_MAX_WIDTH"), "扩展面板未按输入框同款宽度包裹");
 });

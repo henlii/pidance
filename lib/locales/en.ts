@@ -226,6 +226,7 @@ export const en = {
 
 
   chat_backToBottom: 'Back to bottom',
+  nav_userMessages: 'User message navigation (click to jump)',
   chat_readOnlySession: 'Read-only session',
   chat_readOnlySessionDescription: "Browsing only: sending, steering, follow-ups, compaction, forking, and setting changes are disabled. Messages, files and session stats remain viewable.",
   chat_extensionRequest: 'Extension request',
@@ -551,7 +552,7 @@ export const en = {
   sidebar_noExistingDirectory: "No existing directory",
   sidebar_projectMenuLabel: 'Menu',
   // input
-  input_queued: "Queued · {count}", input_expandQueue: "Expand queue", input_collapseQueue: "Collapse queue", input_searchingAllFiles: "searching all files…", input_indexTruncated: "index truncated", input_loadingFiles: "Loading files…", input_files: "Files", input_searching: "Searching…", input_noMatchingFiles: "No matching files", input_placeholderSteer: "Steer now / queue follow-up…", input_placeholderRunning: "Agent is running…", input_placeholderMessage: "Message… Type / for commands, @ for files", input_imageQueueDisabled: "Image attachments cannot be queued while the agent is running", input_steerTooltip: "Interrupt the current run and inject this message now", input_followUpTooltip: "Queue this message after the agent finishes", input_steer: "Steer", input_followUp: "Follow-up", input_send: "Send", input_shellStatus: "Shell · {scope}", input_shellLocal: "output stays local", input_shellModel: "output sent to model", input_more: "More", input_toolsNone: "No tools, read-only", input_toolsDefault: "4 built-in tools", input_toolsAll: "All built-in tools", input_stop: "Stop", input_soundDisable: "Disable completion sound", input_soundEnable: "Enable completion sound",
+  input_queued: "Queued · {count}", input_expandQueue: "Expand queue", input_collapseQueue: "Collapse queue", input_searchingAllFiles: "searching all files…", input_indexTruncated: "index truncated", input_loadingFiles: "Loading files…", input_files: "Files", input_searching: "Searching…", input_noMatchingFiles: "No matching files", input_placeholderSteer: "Steer now / queue follow-up…", input_placeholderRunning: "Agent is running…", input_placeholderMessage: "Message… Type / for commands, @ for files", input_imageSendRetry: "Agent is running; image not delivered. Content restored to the input.", input_steerTooltip: "Interrupt the current run and inject this message now", input_followUpTooltip: "Queue this message after the agent finishes", input_steer: "Steer", input_followUp: "Follow-up", input_send: "Send", input_shellStatus: "Shell · {scope}", input_shellLocal: "output stays local", input_shellModel: "output sent to model", input_more: "More", input_toolsNone: "No tools, read-only", input_toolsDefault: "4 built-in tools", input_toolsAll: "All built-in tools", input_stop: "Stop", input_soundDisable: "Disable completion sound", input_soundEnable: "Enable completion sound",
   chat_sendSubmittedSwitched: 'Message sent (session switched while sending)',
   chat_sendFailed: 'Message was not sent.',
   chat_sessionLocked: 'This session is open in another Pidance instance. Close it there, or wait until it goes idle.',

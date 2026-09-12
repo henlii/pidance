@@ -215,7 +215,37 @@ function toolMessage(command = "fallback command") {
   };
 }
 
-test("实时工具：运行中默认展开终端输出，并优先展示快照命令", () => {
+
+function thinkingMessage(text) {
+  return { role: "assistant", content: [{ type: "thinking", thinking: text }] };
+}
+
+test("思考块：流式中保持折叠，并滚动显示最后一行输出", () => {
+  const html = renderMessage(thinkingMessage("第一行推理\n第二行推理\n最后一行推理"), { isStreaming: true });
+  assert.ok(html.includes('aria-expanded="false"'), "流式中不得自动展开");
+  assert.ok(html.includes('data-collapsed-preview="true"'));
+  assert.ok(html.includes("最后一行推理"), "折叠态显示最后一行");
+  assert.ok(!html.includes("第二行推理"), "折叠态不渲染整段内容");
+});
+
+test("思考块：非流式（历史消息）不带折叠预览行", () => {
+  const html = renderMessage(thinkingMessage("旧推理"));
+  assert.ok(html.includes('aria-expanded="false"'));
+  assert.ok(!html.includes('data-collapsed-preview="true"'), "历史思考块保持安静，不显示滚动末行");
+});
+
+test("思考块：用户展开后渲染完整内容", () => {
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  const block = source.slice(source.indexOf("function ThinkingBlock("), source.indexOf("function ToolCallBlock("));
+  // 不随 isStreaming 改写展开态（除用户点击的 toggle 外无 setExpanded），且展开分支渲染完整 bodyText
+  const setExpandedCalls = block.match(/setExpanded\(/g) ?? [];
+  assert.equal(setExpandedCalls.length, 1, "只允许用户点击触发的 setExpanded");
+  assert.ok(block.includes("onClick={() => void toggle()}"));
+  assert.match(block, /\{expanded && \(/);
+  assert.ok(block.includes("{bodyText}"), "展开态渲染完整内容");
+});
+
+test("实时工具：运行中保持折叠，折叠摘要显示快照输出的最后一行", () => {
   const html = renderMessage(toolMessage(), {
     toolExecutionSnapshots: [{
       toolCallId: "tool-1",
@@ -228,12 +258,14 @@ test("实时工具：运行中默认展开终端输出，并优先展示快照�
     }],
   });
 
-  assert.ok(html.includes('aria-expanded="true"'));
-  assert.ok(html.includes("npm run lint -- --fix"));
-  assert.ok(html.includes("checking\nfinished"));
-  assert.ok(html.includes("Live output"));
-  assert.ok(html.includes("Output truncated at 64 KB"));
-  assert.match(html, /<pre[^>]*tabindex="0"[^>]*max-height:min\(320px, 45vh\)/);
+  // 运行中也不自动展开（折叠/展开只由用户决定）
+  assert.ok(html.includes('aria-expanded="false"'));
+  assert.ok(html.includes("npm run lint -- --fix"), "块头仍显示命令");
+  // 折叠态滚动显示最后一行：只出现末行，整段输出不渲染
+  assert.ok(html.includes("finished"));
+  assert.ok(!html.includes("checking\nfinished"));
+  assert.ok(!html.includes("Live output"));
+  assert.ok(!html.includes('data-collapsed-preview="true"') === false);
 });
 
 test("TUI 渲染桥：ANSI 调用/实时行优先于原始输出；有 result 后工具块收回", () => {
@@ -277,11 +309,19 @@ test("TUI 渲染桥：ANSI 调用/实时行优先于原始输出；有 result �
       status: "running",
     }],
   });
-  assert.ok(runningHtml.includes('aria-expanded="true"'));
-  assert.ok(runningHtml.includes("插件调用"));
-  assert.ok(runningHtml.includes("插件实时输出"));
-  assert.ok(!runningHtml.includes("原始实时输出"));
-  assert.match(runningHtml, /color:[^;]*(?:rgb|#|var\()/);
+  // 运行中保持折叠：折叠摘要只显示实时输出末行（ANSI 明细需用户展开）
+  assert.ok(runningHtml.includes('aria-expanded="false"'));
+  assert.ok(runningHtml.includes('data-collapsed-preview="true"'));
+  assert.ok(runningHtml.includes("原始实时输出"));
+  assert.ok(!runningHtml.includes("插件调用"));
+  assert.ok(!runningHtml.includes("插件实时输出"));
+
+  // 展开态（用户点击后）渲染桥语义不变：ANSI 调用/实时行优先于原始实时输出。
+  // SSR 无法点击，这里按源码契约断言展开分支仍走 renderedCallLines / renderedLiveLines。
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  const toolBlock = source.slice(source.indexOf("function ToolCallBlock("), source.indexOf("/** 空数组或畸形数组视为缺失"));
+  assert.match(toolBlock, /\{expanded && renderedCallLines && \(/, "展开分支应渲染 ANSI 调用行");
+  assert.match(toolBlock, /renderAnsiLines\(renderedLiveLines, "tool-live"\)/, "展开分支应优先渲染 ANSI 实时行");
 });
 
 test("实时工具：终态默认折叠为状态、命令与固定耗时摘要", () => {
