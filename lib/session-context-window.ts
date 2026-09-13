@@ -8,6 +8,8 @@ export const DEFAULT_SESSION_HISTORY_PAGE = 80;
 export type SessionContextWindow = SessionContext & {
   /** 当前窗口之前是否还有更旧消息（leaf 路径上）。 */
   hasMoreBefore: boolean;
+  /** 当前窗口之后是否还有更新消息（按 entryId 定位的中间窗口才有意义）。 */
+  hasMoreAfter?: boolean;
   /** 未切片前的消息总数（stats / UI 用）。 */
   totalMessageCount: number;
 };
@@ -46,6 +48,7 @@ export function sliceContextTail(
     return {
       ...context,
       hasMoreBefore: false,
+      hasMoreAfter: false,
       totalMessageCount,
     };
   }
@@ -56,6 +59,76 @@ export function sliceContextTail(
     thinkingLevel: context.thinkingLevel,
     model: context.model,
     hasMoreBefore: true,
+    hasMoreAfter: false,
+    totalMessageCount,
+  };
+}
+
+/**
+ * 取 aroundEntryId 附近的窗口（含该条本身）：前后各 limit/2 条。
+ *
+ * 用于「按 entryId 直接跳转到历史某条」——懒加载分页下逐页翻页成本过高
+ * （实测 1343 条消息要翻很多页），服务端一次定位即可。
+ * 前后游标都由窗口自身起止决定（不能用 totalMessageCount 推断，否则位于历史开头
+ * 也会一直「还有更早」），因此导航定位后仍可继续向上/向下加载。
+ *
+ * around 不在当前 leaf 路径上时返回 null（显式未命中）：由调用方决定如何提示，
+ * 不能静默回退尾页并当成命中。
+ */
+export function sliceContextAround(
+  context: SessionContext,
+  aroundEntryId: string,
+  limit: number = DEFAULT_SESSION_HISTORY_PAGE,
+): SessionContextWindow | null {
+  const totalMessageCount = context.messages.length;
+  const idx = context.entryIds.indexOf(aroundEntryId);
+  if (idx < 0) return null;
+  const n = clampLimit(limit, DEFAULT_SESSION_HISTORY_PAGE);
+  const half = Math.max(1, Math.floor(n / 2));
+  const start = Math.max(0, idx - half);
+  const end = Math.min(totalMessageCount, start + n);
+  return {
+    messages: context.messages.slice(start, end),
+    entryIds: context.entryIds.slice(start, end),
+    thinkingLevel: context.thinkingLevel,
+    model: context.model,
+    hasMoreBefore: start > 0,
+    hasMoreAfter: end < totalMessageCount,
+    totalMessageCount,
+  };
+}
+
+/**
+ * 取 afterEntryId 之后的更新窗口（不含 after 本身）。
+ * 与 sliceContextBefore 对称，供「定位到历史后继续向下加载」使用。
+ */
+export function sliceContextAfter(
+  context: SessionContext,
+  afterEntryId: string,
+  limit: number = DEFAULT_SESSION_HISTORY_PAGE,
+): SessionContextWindow {
+  const totalMessageCount = context.messages.length;
+  const idx = context.entryIds.indexOf(afterEntryId);
+  if (idx < 0 || idx >= totalMessageCount - 1) {
+    return {
+      messages: [],
+      entryIds: [],
+      thinkingLevel: context.thinkingLevel,
+      model: context.model,
+      hasMoreBefore: true,
+      hasMoreAfter: false,
+      totalMessageCount,
+    };
+  }
+  const n = clampLimit(limit, DEFAULT_SESSION_HISTORY_PAGE);
+  const end = Math.min(totalMessageCount, idx + 1 + n);
+  return {
+    messages: context.messages.slice(idx + 1, end),
+    entryIds: context.entryIds.slice(idx + 1, end),
+    thinkingLevel: context.thinkingLevel,
+    model: context.model,
+    hasMoreBefore: true,
+    hasMoreAfter: end < totalMessageCount,
     totalMessageCount,
   };
 }
@@ -78,6 +151,7 @@ export function sliceContextBefore(
       thinkingLevel: context.thinkingLevel,
       model: context.model,
       hasMoreBefore: false,
+      hasMoreAfter: false,
       totalMessageCount,
     };
   }
@@ -89,6 +163,7 @@ export function sliceContextBefore(
     thinkingLevel: context.thinkingLevel,
     model: context.model,
     hasMoreBefore: start > 0,
+    hasMoreAfter: true,
     totalMessageCount,
   };
 }

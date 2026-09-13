@@ -311,8 +311,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [historyLoading, setHistoryLoading] = useState(false);
   /** 当前内存窗口之前是否还有更旧消息（服务端 tail/before 分页）。 */
   const [hasMoreBefore, setHasMoreBefore] = useState(false);
+  /** 定位到历史窗口后是否还有「更新」的历史可向下加载（around 窗口专有） */
+  const [hasMoreAfter, setHasMoreAfter] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
+  /** activeLeafId 的 ref 镜像：跳转门禁要读「发起时」的 leaf */
+  const activeLeafIdRef = useRef<string | null>(null);
+  activeLeafIdRef.current = activeLeafId;
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [entryIds, setEntryIds] = useState<string[]>([]);
   /** 与 messages 平行的稳定 key（React 列表用），由 registry 投影。 */
@@ -333,6 +338,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, []);
   const historyLoadingRef = useRef(false);
   const hasMoreBeforeRef = useRef(false);
+  const hasMoreAfterRef = useRef(false);
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
   const [agentRunning, setAgentRunning] = useState(false);
   /** 最近一轮 run 的延迟/吞吐读数（由 registry snapshot 投影，算法见 TurnMetrics）。 */
@@ -561,6 +567,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     notifyAutoFollowEnd,
     markExternalScrollWrite,
     notifyProgrammaticSmooth,
+    notifyBrowsingHistory,
   } = useChatAutoFollow({
     isMobile: opts.isMobile ?? false,
     loading,
@@ -1013,6 +1020,134 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!isAbortError(e)) console.error("Failed to load context:", e);
     }
   }, [notifyAutoFollowBranchReset, beginLoadRequest]);
+
+  /**
+   * 按 entryId 定位跳转：服务端返回该条前后各半页的窗口，整体替换时间线后由调用方滚动。
+   *
+   * 为什么不是逐页翻页：懒加载分页 + 只渲染末 N 条，历史长会话（实测 1343 条消息）
+   * 要翻很多页才能到位。服务端一次定位即可，且窗口自带前后游标（能继续上下加载）。
+   *
+   * 门禁：请求发出时捕获 {sessionId, leafId, 代次}，返回时任一不匹配即整份作废
+   * （切会话 / 切分支 / 连点两次都不能改时间线或留下错误窗口）。
+   */
+  const jumpGenerationRef = useRef(0);
+  const jumpToEntry = useCallback(async (
+    entryId: string,
+    options?: { limit?: number },
+  ): Promise<boolean> => {
+    const sid = sessionIdRef.current;
+    if (!sid || !entryId) return false;
+    const generation = ++jumpGenerationRef.current;
+    const leafAtStart = activeLeafIdRef.current;
+    const isCurrent = () =>
+      jumpGenerationRef.current === generation
+      && sessionIdRef.current === sid
+      && activeLeafIdRef.current === leafAtStart;
+    const registry = getOrCreateBrowserSessionRuntimeRegistry();
+    const hydrateRequestSeq = registry.beginHydrate(sid);
+    const hydrateSinceSeq = registry.getSnapshot(sid)?.timelineSeq ?? 0;
+    try {
+      const params = new URLSearchParams({
+        around: entryId,
+        deferThinking: "1",
+        deferMedia: "1",
+      });
+      if (options?.limit) params.set("limit", String(options.limit));
+      if (leafAtStart) params.set("leafId", leafAtStart);
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`, {
+        signal: beginLoadRequest(),
+      });
+      // anchor 不在当前 leaf 路径 → 404：显式失败（不静默回退尾页）
+      if (!res.ok) return false;
+      const d = await res.json() as {
+        context: {
+          messages: AgentMessage[];
+          entryIds: string[];
+          hasMoreBefore?: boolean;
+          hasMoreAfter?: boolean;
+          totalMessageCount?: number;
+        };
+      };
+      if (!isCurrent()) return false;
+      const nextEntryIds = d.context.entryIds ?? [];
+      const nextMessages = d.context.messages ?? [];
+      if (nextEntryIds.length === 0) return false;
+      const outcome = registry.hydrate(sid, nextMessages, nextEntryIds, {
+        sinceSeq: hydrateSinceSeq,
+        hydrateRequestSeq,
+        mode: "replace",
+      });
+      if (outcome !== "applied" || !isCurrent()) return false;
+      messagesSessionIdRef.current = sid;
+      // 游标直接取服务端给出的窗口起止（不能用总数推断：否则历史开头也一直「还有更早」）
+      hasMoreBeforeRef.current = d.context.hasMoreBefore === true;
+      setHasMoreBefore(hasMoreBeforeRef.current);
+      const moreAfter = d.context.hasMoreAfter === true;
+      hasMoreAfterRef.current = moreAfter;
+      setHasMoreAfter(moreAfter);
+      // 定位即进入浏览历史态：否则自动跟随会立刻把视口拉回会话尾部
+      notifyBrowsingHistory();
+      return true;
+    } catch (e) {
+      if (!isAbortError(e)) console.error("Failed to jump to entry:", e);
+      return false;
+    }
+  }, [beginLoadRequest, notifyBrowsingHistory]);
+
+  /**
+   * 定位到历史窗口后继续向下加载「更新」的历史（与 loadOlderHistory 对称）。
+   * 只在 around 窗口留下 hasMoreAfter=true 时可用；尾部窗口不需要（它本来就是最新）。
+   */
+  const loadNewerHistory = useCallback(async (): Promise<boolean> => {
+    const sid = sessionIdRef.current;
+    if (!sid || !hasMoreAfterRef.current || historyLoadingRef.current) return false;
+    const after = entryIdsRef.current[entryIdsRef.current.length - 1];
+    if (!after) return false;
+    historyLoadingRef.current = true;
+    setHistoryLoading(true);
+    const registry = getOrCreateBrowserSessionRuntimeRegistry();
+    const hydrateRequestSeq = registry.beginHydrate(sid);
+    const hydrateSinceSeq = registry.getSnapshot(sid)?.timelineSeq ?? 0;
+    try {
+      const params = new URLSearchParams({ after, deferThinking: "1", deferMedia: "1" });
+      if (activeLeafId) params.set("leafId", activeLeafId);
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`, {
+        signal: beginLoadRequest(),
+      });
+      if (!res.ok) return false;
+      const d = await res.json() as {
+        context: {
+          messages: AgentMessage[];
+          entryIds: string[];
+          hasMoreAfter?: boolean;
+        };
+      };
+      if (sessionIdRef.current !== sid) return false;
+      const newerIds = d.context.entryIds ?? [];
+      const newerMsgs = d.context.messages ?? [];
+      if (newerIds.length === 0) {
+        hasMoreAfterRef.current = false;
+        setHasMoreAfter(false);
+        return false;
+      }
+      // 追加到尾部：与 hydrate 的 tail 语义一致（保留当前窗口在前的顺序）
+      const outcome = registry.hydrate(sid, [...(registry.getSnapshot(sid)?.messages ?? []), ...newerMsgs], [...entryIdsRef.current, ...newerIds], {
+        sinceSeq: hydrateSinceSeq,
+        hydrateRequestSeq,
+        mode: "replace",
+      });
+      if (outcome !== "applied") return false;
+      hasMoreAfterRef.current = d.context.hasMoreAfter === true;
+      setHasMoreAfter(hasMoreAfterRef.current);
+      return true;
+    } catch (e) {
+      if (!isAbortError(e)) console.error("Failed to load newer history:", e);
+      return false;
+    } finally {
+      historyLoadingRef.current = false;
+      setHistoryLoading(false);
+    }
+  }, [activeLeafId, beginLoadRequest]);
 
   const loadTools = useCallback(async (_sid: string) => {
     // 外部 Pi RPC 无 get_tools；工具由会话启动 allow-list 控制，无需探测。
@@ -2878,6 +3013,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     jumpButtonVisible, jumpToBottom, markExternalScrollWrite, notifyProgrammaticSmooth,
     // Actions
     loadOlderHistory,
+    loadNewerHistory,
+    hasMoreAfter,
+    jumpToEntry,
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue, handleSendQueueAsSteer,

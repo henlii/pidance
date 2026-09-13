@@ -225,6 +225,7 @@ export const zhCN: Record<TranslationKey, string> = {
 
 
 
+  chat_loadNewer: '加载较新的消息',
   chat_backToBottom: '回到底部',
   nav_userMessages: '用户消息导航（点击跳转）',
   chat_readOnlySession: '只读会话',

@@ -717,7 +717,7 @@ export function projectTreeForResponse<T extends {
  * 从 entries 构建 root→leaf 路径（不依赖 pi npm）。
  * leafId 缺省时取文件中最后一条有 id 的 entry。
  */
-function buildSessionPathLocal(
+export function buildSessionPathLocal(
   entries: SessionEntry[],
   leafId?: string | null,
 ): SessionEntry[] {

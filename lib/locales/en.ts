@@ -225,6 +225,7 @@ export const en = {
 
 
 
+  chat_loadNewer: 'Load newer messages',
   chat_backToBottom: 'Back to bottom',
   nav_userMessages: 'User message navigation (click to jump)',
   chat_readOnlySession: 'Read-only session',

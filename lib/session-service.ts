@@ -32,6 +32,8 @@ import {
 } from "./rpc-manager";
 import {
   buildSessionContext,
+  buildSessionPathLocal,
+  resolveNavigationLeafId,
   buildSessionNavigationSnapshot,
   cacheSessionPath,
   invalidateSessionListCache,
@@ -77,10 +79,14 @@ import {
   realArchiveFs,
 } from "./session-archive";
 import { getRunningStartedAt as readRunningStartedAt } from "./running-state";
+import { buildUserMessageOutline, type UserMessageOutlineItem } from "./session-outline";
+import { sliceContextAfter, sliceContextAround } from "./session-context-window";
 import { getRunningStartedAtTable } from "./live-session-registry";
 import { searchSessionsFulltext, type SessionSearchResult } from "./session-fulltext-search";
 
 export type SessionCommand = Record<string, unknown> & { type: string };
+
+export type SessionOutlineItem = UserMessageOutlineItem;
 
 export const READ_ONLY_SUBAGENT_ERROR = "Subagent sessions are read-only";
 export class ReadOnlySubagentError extends Error {
@@ -265,11 +271,20 @@ export type SessionService = {
     options: {
       leafId?: string;
       before?: string;
+      /** 按 entryId 定位窗口（跳转到历史某条）；与 before/after 互斥，优先 around */
+      around?: string;
+      /** 取 after 之后的更新窗口（定位到历史后继续向下加载） */
+      after?: string;
       limit: number | null;
       deferThinking?: boolean;
       deferToolResultImages?: boolean;
     },
   ): Promise<unknown>;
+  /**
+   * 只读：会话全部用户消息大纲（左侧导航条列出所有提问）。
+   * 直接读完整 entry 列表（live 内存视图或磁盘），不唤醒 writer、不写状态。
+   */
+  getUserMessageOutline(sessionId: string): Promise<SessionOutlineItem[]>;
   /** 只读：assistant entry 的 thinking 块文本；非 assistant/无该块返回 null。 */
   getEntryThinking(
     sessionId: string,
@@ -780,6 +795,20 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       };
     },
 
+    async getUserMessageOutline(sessionId) {
+      const view = await service.getReadView(sessionId);
+      if (!view) return [];
+      // 与 buildSessionContext 同口径：只取当前 leaf 路径上的 entries，
+      // 避免列出其它分支的提问（那些条 around 定位不到）。
+      const sm = view.manager as SessionManagerReadView;
+      const entries = (sm.getEntries?.() ?? []) as Parameters<typeof buildSessionPathLocal>[0];
+      const leafId = resolveNavigationLeafId(
+        entries as Array<{ id: string; type: string; parentId: string | null }>,
+        sm.getLeafId(),
+      );
+      return buildUserMessageOutline(buildSessionPathLocal(entries, leafId));
+    },
+
     async getContextPage(sessionId, options) {
       const view = await service.getReadView(sessionId);
       if (!view) return { context: null };
@@ -791,7 +820,15 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       });
       const limit = options.limit;
       let context;
-      if (options.before) {
+      if (options.around) {
+        const aroundWindow = sliceContextAround(full, options.around, limit ?? DEFAULT_SESSION_HISTORY_PAGE);
+        // anchor 不在当前 leaf 路径上：显式未命中，不回退尾页（否则会把「没找到」
+        // 当成命中，界面停在别处却报告成功）。
+        if (!aroundWindow) return { context: null, notFound: options.around };
+        context = aroundWindow;
+      } else if (options.after) {
+        context = sliceContextAfter(full, options.after, limit ?? DEFAULT_SESSION_HISTORY_PAGE);
+      } else if (options.before) {
         context = sliceContextBefore(full, options.before, limit ?? DEFAULT_SESSION_HISTORY_PAGE);
       } else if (limit !== null) {
         context = sliceContextTail(full, limit);

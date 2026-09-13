@@ -1,6 +1,6 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
-import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import type { BranchActions } from "@/lib/branch-bookmarks";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
@@ -12,6 +12,7 @@ import { ImagePreviewOverlay } from "./MessageImage";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { MessageNavRail } from "./MessageNavRail";
+import type { UserMessageOutlineItem } from "@/lib/session-outline";
 import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE, CHAT_COLUMN_MAX_WIDTH, CHAT_GUTTER } from "@/lib/chat-column";
 
 /**
@@ -200,6 +201,9 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     sessionIdRef, scrollContainerRef,
     jumpButtonVisible, jumpToBottom, markExternalScrollWrite, notifyProgrammaticSmooth,
     loadOlderHistory,
+    loadNewerHistory,
+    jumpToEntry,
+    hasMoreAfter,
     lockedByOther,
     handleSend, handleAbort, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
@@ -213,6 +217,46 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
     isMobile,
   });
+  /**
+   * 会话全部用户消息大纲（左侧导航条「列出所有提问」）。
+   * 只读接口：直接读完整 entry 列表，不受首屏懒加载窗口限制。
+   * 刷新时机：切会话、消息数变化（新提问落盘）、agent 结束。
+   */
+  const [userOutline, setUserOutline] = useState<UserMessageOutlineItem[]>([]);
+  /**
+   * entryId → 消息 DOM 的解析器（由渲染层提供）。
+   * 导航条跳转必须走这里：槽位映射（visibleRefIndexByMessage + 分页平移 + process
+   * group 共享槽位）是渲染层的知识，导航条自己算会指错消息（实测跳 2 号落到 1 号）。
+   */
+  const resolveMessageElementRef = useRef<((entryId: string) => HTMLElement | null) | null>(null);
+  /**
+   * 把渲染窗口（visibleCount）扩到包含目标 entry，返回是否扩了。
+   * 会话有「分页加载」与「只渲染末 N 条」两层懒加载：目标可能已加载但未被渲染，
+   * 此时 refs 里没有它 —— 必须先把窗口撑开到覆盖它，否则跳转永远落在旧位置。
+   */
+  const expandRenderWindowToEntryRef = useRef<((entryId: string) => boolean) | null>(null);
+  const outlineSessionId = session?.id ?? null;
+  useEffect(() => {
+    if (!outlineSessionId) {
+      setUserOutline([]);
+      return;
+    }
+    const controller = new AbortController();
+    void fetch(`/api/sessions/${encodeURIComponent(outlineSessionId)}/outline`, {
+      signal: controller.signal,
+      cache: "no-store",
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { userMessages?: UserMessageOutlineItem[] } | null) => {
+        if (controller.signal.aborted || !data) return;
+        setUserOutline(Array.isArray(data.userMessages) ? data.userMessages : []);
+      })
+      .catch(() => {
+        // 只读投影失败：保持上一次大纲，不清空（避免导航条闪没）
+      });
+    return () => controller.abort();
+  }, [outlineSessionId, messages.length, agentRunning]);
+
   const writesDisabled = isReadOnly || lockedByOther;
   const sessionBusy = agentRunning || bashRunning || isCompacting;
   const [todosCollapsed, setTodosCollapsed] = useState(true);
@@ -682,7 +726,12 @@ const chatPlan = composeChatPlan({
               messages={messages}
               plan={chatPlan}
               scrollContainer={scrollContainerRef}
-              messageRefs={messageRefs}
+              outline={userOutline}
+              entryIds={entryIds}
+              resolveMessageElementRef={resolveMessageElementRef}
+              expandRenderWindowToEntryRef={expandRenderWindowToEntryRef}
+              jumpToEntry={jumpToEntry}
+              isAtLiveTail={!hasMoreAfter}
             />
           </div>
         )}
@@ -723,6 +772,14 @@ const chatPlan = composeChatPlan({
                 messageRefs.current[refIndex] = el;
               };
 
+              // 供导航条跳转使用：按 entryId 找已渲染的消息元素。
+              resolveMessageElementRef.current = (entryId: string) => {
+                const index = entryIds.indexOf(entryId);
+                if (index < 0) return null;
+                const refIndex = visibleRefIndexByMessage.get(index);
+                return refIndex === undefined ? null : (messageRefs.current[refIndex] ?? null);
+              };
+
               const renderMessage = (item: ChatRenderItem): ReactNode => {
                 const isLive = item.source === "live";
                 const idx = isLive ? -1 : (item.messageIndex as number);
@@ -758,18 +815,32 @@ const chatPlan = composeChatPlan({
                 );
                 if (!isVisible || !item.attachRef || currentRefIdx === undefined) return view;
                 return (
-                  <div key={`${item.keyPrefix}-${stableKey}`} ref={attachVisibleRef(idx, currentRefIdx)}>
+                  <div
+                    key={`${item.keyPrefix}-${stableKey}`}
+                    ref={attachVisibleRef(idx, currentRefIdx)}
+                    // 定位/验收锚点：导航条跳转与浏览器回归按 entryId 断言目标位置
+                    data-message-entry-id={!isLive ? entryIds[idx] : undefined}
+                  >
                     {view}
                   </div>
                 );
               };
 
               const rendered: ReactNode[] = [];
+              /** 计划项下标 → 该计划项对应的消息下标（供渲染窗口撑开精确定位） */
+              const messageIndexByPlanIndex = new Map<number, number>();
               const plan = chatPlan;
               for (const item of plan) {
                 if (item.kind === "message") {
+                  const messageIndex = (item as { messageIndex?: number | null }).messageIndex;
+                  if (typeof messageIndex === "number") {
+                    messageIndexByPlanIndex.set(rendered.length, messageIndex);
+                  }
                   rendered.push(renderMessage(item));
                   continue;
+                }
+                if (item.attachRefMessageIndex !== undefined) {
+                  messageIndexByPlanIndex.set(rendered.length, item.attachRefMessageIndex);
                 }
                 const processRefIdx = item.attachRefMessageIndex === undefined ? undefined : visibleRefIndexByMessage.get(item.attachRefMessageIndex);
                 const processGroup = (
@@ -791,6 +862,18 @@ const chatPlan = composeChatPlan({
                   );
               }
               const { startIndex, hasMore: localHasMore } = getVisibleRenderWindow(rendered.length, visibleCount);
+              // 渲染窗口（只渲染末尾 visibleCount 条计划项）是否覆盖目标 entry：
+              // 目标可能已加载但落在窗口外，导航条跳转前需要先把窗口撑开到覆盖它。
+              expandRenderWindowToEntryRef.current = (entryId: string) => {
+                const targetIndex = entryIds.indexOf(entryId);
+                if (targetIndex < 0) return false;
+                const planIndex = [...messageIndexByPlanIndex.entries()]
+                  .find(([, messageIndex]) => messageIndex === targetIndex)?.[0];
+                if (planIndex === undefined || planIndex >= startIndex) return false;
+                // 渲染窗口是「末尾 visibleCount 条计划项」：撑开到覆盖目标计划项
+                setVisibleCount(rendered.length - planIndex);
+                return true;
+              };
               // 服务端仍有更旧时也要挂哨兵，否则本地渲染到头后无法再触发上滚加载。
               const showSentinel = shouldShowHistorySentinel(localHasMore, hasMoreBefore);
               return (
@@ -818,6 +901,29 @@ const chatPlan = composeChatPlan({
               <div className="flex items-center gap-2 py-2 text-[13px] text-text-muted">
                 <span className="size-1.5 rounded-full bg-status-running" aria-hidden="true" />
                 <span>{t("chat_runningCommand")}...</span>
+              </div>
+            )}
+
+            {/* 按 entryId 定位到历史后，窗口后面可能还有更新的历史：底部哨兵继续向下加载
+                （否则「定位到中间」会丢掉访问后续历史的路径）。 */}
+            {hasMoreAfter && (
+              <div className="py-3 text-center">
+                <button
+                  type="button"
+                  onClick={() => void loadNewerHistory()}
+                  disabled={historyLoading}
+                  style={{
+                    border: "1px solid var(--border)",
+                    borderRadius: 6,
+                    background: "var(--bg-panel)",
+                    color: "var(--text-muted)",
+                    cursor: historyLoading ? "default" : "pointer",
+                    fontSize: 12,
+                    padding: "4px 10px",
+                  }}
+                >
+                  {historyLoading ? t("chat_loadingSession") : t("chat_loadNewer")}
+                </button>
               </div>
             )}
 

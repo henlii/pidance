@@ -2,21 +2,21 @@
 
 /**
  * 会话区左侧的用户消息导航条（对齐 codex app 的左侧用户消息导航）：
- * - 每条用户消息一个**短横线**，沿轨道等距排布（不是按比例的小地图）；
- * - 鼠标悬浮显示信息卡：消息正文，卡片有最大宽高，超出省略号截断；
- * - 当前所在位置的那条渲染为深色（其余浅灰）；点击跳到该消息顶部。
+ * - **列出全部用户消息**：大纲来自服务端 `/api/sessions/:id/outline`（只读完整 entry
+ *   列表），因此不受首屏懒加载窗口限制；DOM 里没加载的提问同样会列出。
+ * - 每条用户消息一个**短横线**，整体上下居中；悬浮显示信息卡（最大宽高、超出省略）；
+ *   当前所在的一条为深色；点击跳到该消息。
+ * - 跳转：目标已在 DOM 里就直接滚动；否则连续分页加载更旧历史，直到该条出现后再滚。
  *
  * 与右侧 ChatMinimap 的分工：minimap 是整轮对话总览（用户+助手+视口框+拖拽滚动），
- * 本导航条只列用户消息，用于「快速跳到第 N 条提问」。
- *
- * 数据源与 minimap 相同：ChatWindow 传入的统一渲染计划（live 与磁盘消息同序），
- * 消息 DOM 引用经 messageRefs 复用（同一套可见消息槽位）。
+ * 本导航条只列提问，用于「快速跳到第 N 条提问」。
  * 布局：本组件宽 CHAT_GUTTER px（与右侧 ChatMinimap 等宽），是会话列两侧的对称竖条。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, RefObject } from "react";
 import type { AgentMessage } from "@/lib/types";
 import { getChatPlanLiveMessage, trailingLiveUserStart, type ChatRenderPlanItem } from "@/lib/chat-compositor";
+import { resolveActiveOutlineEntry, type UserMessageOutlineItem } from "@/lib/session-outline";
 import { useI18n } from "@/lib/i18n";
 import { CHAT_GUTTER } from "@/lib/chat-column";
 
@@ -25,7 +25,21 @@ interface Props {
   /** 统一渲染计划（含 live slot）：与 ChatMinimap 共用同一顺序 */
   plan: ChatRenderPlanItem[];
   scrollContainer: RefObject<HTMLDivElement | null>;
-  messageRefs: RefObject<(HTMLDivElement | null)[]>;
+  /** 会话全部用户消息大纲（服务端只读投影；空 = 尚未取到） */
+  outline: UserMessageOutlineItem[];
+  /** 已加载消息的 entryId 列表（与 messages 平行同序；来自 useAgentSession） */
+  entryIds: string[];
+  /** entryId → 已渲染的消息元素（由 ChatWindow 提供；槽位映射归渲染层所有） */
+  resolveMessageElementRef: RefObject<((entryId: string) => HTMLElement | null) | null>;
+  /** 把渲染窗口扩到包含该 entry（只渲染末 N 条，目标可能已加载但未渲染） */
+  expandRenderWindowToEntryRef: RefObject<((entryId: string) => boolean) | null>;
+  /**
+   * 按 entryId 跳到历史某条：服务端返回该条附近窗口并整体替换时间线（一次到位）。
+   * 返回是否成功；成功后调用方再滚到目标。
+   */
+  jumpToEntry: (entryId: string) => Promise<boolean>;
+  /** 当前窗口是否就是最新一段（用于「窗口内没有提问」时判定当前提问） */
+  isAtLiveTail: boolean;
 }
 
 /** 轨道上下内缩：首尾横线不贴边。 */
@@ -42,98 +56,28 @@ const CARD_MAX_WIDTH = 340;
 const CARD_MAX_HEIGHT = 180;
 const CARD_EDGE_MARGIN = 8;
 
-export interface MessageNavNode {
-  /** 在 allMessages 中的下标（定位 + 点击跳转） */
-  index: number;
-  /** 滚动内容中的相对位置 0–1 */
-  topRatio: number;
-  /** 完整消息文本（悬浮预览） */
-  text: string;
-  /** 消息 DOM 引用下标（可见消息序列） */
-  refIndex: number;
-}
-
-/** 用户消息纯文本：字符串或 text 块拼接（与渲染层同样的取值语义）。 */
-export function userMessageText(message: AgentMessage | Partial<AgentMessage>): string {
-  if (message.role !== "user") return "";
-  const content = (message as { content?: unknown }).content;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return (content as { type: string; text?: string }[])
-      .filter((block) => block.type === "text" && typeof block.text === "string")
-      .map((block) => block.text as string)
-      .join("\n");
-  }
-  return "";
-}
-
-/** 预览单行化（仅用于 aria-label：悬浮信息卡展示原文）。 */
-export function messageNavPreview(text: string, maxLength = 120): string {
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > maxLength ? `${flat.slice(0, maxLength)}…` : flat;
-}
-
-/**
- * 按 DOM 引用测量每个用户消息在滚动内容中的相对位置（读 DOM，不含状态）。
- *
- * ref 槽位编号必须与 ChatWindow 完全一致：ChatWindow 先按**消息顺序**给可见消息
- * （user/assistant）编号（visibleRefIndexByMessage），再在按**计划顺序**渲染时用
- * 该编号取槽位。因此这里不能按计划顺序自己累加（process group 会让两者错位），
- * 而是通过 slotOf 查表。
- */
-export function measureUserMessageNodes(input: {
-  plan: ChatRenderPlanItem[];
-  refs: ReadonlyArray<HTMLDivElement | null>;
-  scrollEl: Pick<HTMLElement, "scrollHeight" | "getBoundingClientRect" | "scrollTop">;
-  /** 消息下标 → ref 槽位（仅可见消息 user/assistant 有槽位）；与 ChatWindow 同判据 */
-  slotOf: (messageIndex: number) => number | undefined;
-  isUserMessage: (index: number) => boolean;
-  textOf: (index: number) => string;
-}): MessageNavNode[] {
-  const { plan, refs, scrollEl, slotOf, isUserMessage, textOf } = input;
-  const totalH = scrollEl.scrollHeight;
-  if (!totalH || totalH <= 0) return [];
-  const containerTop = scrollEl.getBoundingClientRect().top;
-  const out: MessageNavNode[] = [];
-
-  /** 计划项代表的消息下标：message 项看自身，processGroup 看它的代表消息。 */
-  const targetOf = (item: ChatRenderPlanItem): number | undefined => {
-    if (item.kind === "message") {
-      if (!item.attachRef) return undefined;
-      const index = item.messageIndex as number | null | undefined;
-      return index === null || index === undefined ? undefined : index;
-    }
-    return item.attachRefMessageIndex;
-  };
-
-  for (const item of plan) {
-    const target = targetOf(item);
-    if (target === undefined || !isUserMessage(target)) continue;
-    const slot = slotOf(target);
-    if (slot === undefined) continue;
-    const el = refs[slot];
-    if (!el) continue;
-    const top = el.getBoundingClientRect().top - containerTop + scrollEl.scrollTop;
-    out.push({
-      index: target,
-      refIndex: slot,
-      topRatio: Math.max(0, Math.min(1, top / totalH)),
-      text: textOf(target),
-    });
-  }
-  return out;
-}
-
-export function MessageNavRail({ messages, plan, scrollContainer, messageRefs }: Props) {
+export function MessageNavRail({
+  messages,
+  plan,
+  scrollContainer,
+  outline,
+  entryIds,
+  resolveMessageElementRef,
+  expandRenderWindowToEntryRef,
+  jumpToEntry,
+  isAtLiveTail,
+}: Props) {
   const { t } = useI18n();
-  const [nodes, setNodes] = useState<MessageNavNode[]>([]);
-  const [viewport, setViewport] = useState({ top: 0, height: 1 });
-  const [hovered, setHovered] = useState<number | null>(null);
   const [railHeight, setRailHeight] = useState(0);
+  const [hovered, setHovered] = useState<number | null>(null);
+  const [jumpingTo, setJumpingTo] = useState<string | null>(null);
+  /** 当前高亮：滚动位置对应的「最后一条已滚过」用户消息 entryId */
+  const [activeEntryId, setActiveEntryId] = useState<string | null>(null);
+  /** 已加载 entryId 列表与「还有更早历史」的 ref 镜像：jump 循环里读最新值 */
+  const entryIdsRef = useRef<string[]>(entryIds);
+  entryIdsRef.current = entryIds;
   const railRef = useRef<HTMLDivElement>(null);
-  /** 每条横线的 DOM（悬浮卡按其实际位置定位，避免等距数学与实际布局漂移） */
   const dashRefs = useRef<(HTMLButtonElement | null)[]>([]);
-  const measureTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 与 ChatMinimap 同一套消息顺序：live（流式）插到尾部用户消息之前。
   const allMessages = useMemo(() => {
     const live = getChatPlanLiveMessage(plan);
@@ -144,91 +88,70 @@ export function MessageNavRail({ messages, plan, scrollContainer, messageRefs }:
       ...messages.slice(split),
     ] as Array<AgentMessage | Partial<AgentMessage>>;
   }, [plan, messages]);
-  const allMessagesRef = useRef(allMessages);
-  allMessagesRef.current = allMessages;
-  // plan 由父组件每次渲染重建（composeChatPlan 未 memo）：只经 ref 读取，
-  // 避免 measure 身份变化导致节流定时器被反复清空、测量永不执行。
-  const planRef = useRef(plan);
-  planRef.current = plan;
-
-  const measure = useCallback(() => {
-    const scrollEl = scrollContainer.current;
-    if (!scrollEl) return;
-    const messages = allMessagesRef.current;
-    // 与 ChatWindow 同判据：可见消息按消息顺序编号（下标即槽位）
-    const slotOf = (index: number) => {
-      const role = messages[index]?.role;
-      if (role !== "user" && role !== "assistant") return undefined;
-      let slot = 0;
-      for (let i = 0; i < index; i += 1) {
-        const r = messages[i]?.role;
-        if (r === "user" || r === "assistant") slot += 1;
-      }
-      return slot;
-    };
-    const measured = measureUserMessageNodes({
-      plan: planRef.current,
-      refs: messageRefs.current ?? [],
-      scrollEl,
-      slotOf,
-      isUserMessage: (index) => messages[index]?.role === "user",
-      textOf: (index) => userMessageText(messages[index] ?? {}),
-    });
-    setNodes(measured);
-    const scrollable = scrollEl.scrollHeight - scrollEl.clientHeight;
-    setViewport({
-      top: scrollable > 0 ? scrollEl.scrollTop / scrollEl.scrollHeight : 0,
-      height: scrollEl.scrollHeight > 0 ? scrollEl.clientHeight / scrollEl.scrollHeight : 1,
-    });
-  }, [scrollContainer, messageRefs]);
 
   /**
-   * 节流测量（尾随）：流式期间 DOM 高度持续变化，150ms 足够跟手且不引发布局抖动。
-   * 关键：突发期间的后续事件必须记下来，否则首帧测量会落在「消息 DOM 还没挂完」
-   * 的时刻并且不再补测 —— 表现为导航条时有时无（实测只测到 1 条用户消息）。
+   * 更新「当前在哪条提问」。
+   *
+   * 只渲染末尾若干条计划项，长会话里大多数提问（含视口所在那条）可能都没渲染，
+   * 所以不能只看用户消息元素：先找「视口内最靠上的已渲染消息」（任意角色，
+   * 带 data-message-entry-id），再用它在加载窗口中的位置推导大纲里对应的提问。
+   * 判定不出来时保持原值（不清空，避免高亮闪没）。
    */
-  const pendingMeasureRef = useRef(false);
-  const scheduleMeasure = useCallback(() => {
-    if (measureTimerRef.current) {
-      pendingMeasureRef.current = true;
-      return;
-    }
-    measureTimerRef.current = setTimeout(() => {
-      measureTimerRef.current = null;
-      measure();
-      if (pendingMeasureRef.current) {
-        pendingMeasureRef.current = false;
-        scheduleMeasure();
+  const syncActive = useCallback(() => {
+    const scrollEl = scrollContainer.current;
+    if (!scrollEl) return;
+    const viewportTop = scrollEl.getBoundingClientRect().top;
+    const viewportBottom = viewportTop + scrollEl.clientHeight;
+    const rendered = scrollEl.querySelectorAll<HTMLElement>("[data-message-entry-id]");
+    // 取「真正最靠上」的可见消息：不能取 DOM 顺序里的第一个（计划顺序≠几何顺序，
+    // 会整体差一条提问），按 top 比较才与滚动位置严格对应。
+    let topVisibleEntryId: string | null = null;
+    let topVisibleTop = Number.POSITIVE_INFINITY;
+    let nearestAboveEntryId: string | null = null;
+    let nearestAboveTop = Number.NEGATIVE_INFINITY;
+    for (const el of rendered) {
+      const entryId = el.getAttribute("data-message-entry-id");
+      if (!entryId) continue;
+      const top = el.getBoundingClientRect().top;
+      if (top >= viewportTop && top <= viewportBottom) {
+        if (top < topVisibleTop) {
+          topVisibleTop = top;
+          topVisibleEntryId = entryId;
+        }
+      } else if (top < viewportTop && top > nearestAboveTop) {
+        // 视口上方最近的一条：视口内没有任何消息时用它当锚点
+        nearestAboveTop = top;
+        nearestAboveEntryId = entryId;
       }
-    }, 150);
-  }, [measure]);
+    }
+    const resolved = resolveActiveOutlineEntry({
+      outline,
+      loadedEntryIds: entryIds,
+      topVisibleEntryId: topVisibleEntryId ?? nearestAboveEntryId,
+      isAtLiveTail,
+    });
+    if (resolved !== null) setActiveEntryId(resolved);
+  }, [entryIds, isAtLiveTail, outline, scrollContainer]);
 
   useEffect(() => {
     const el = scrollContainer.current;
     if (!el) return;
-    el.addEventListener("scroll", scheduleMeasure, { passive: true });
-    const ro = new ResizeObserver(scheduleMeasure);
+    el.addEventListener("scroll", syncActive, { passive: true });
+    const ro = new ResizeObserver(syncActive);
     ro.observe(el);
     if (el.firstElementChild) ro.observe(el.firstElementChild);
-    scheduleMeasure();
+    syncActive();
     return () => {
-      el.removeEventListener("scroll", scheduleMeasure);
+      el.removeEventListener("scroll", syncActive);
       ro.disconnect();
-      if (measureTimerRef.current) {
-        clearTimeout(measureTimerRef.current);
-        measureTimerRef.current = null;
-      }
     };
-  }, [scrollContainer, scheduleMeasure]);
-
-  // 消息/计划变化后补测几次：ref 挂载发生在 React 提交之后，单次延迟测不准。
+  }, [scrollContainer, syncActive]);
   useEffect(() => {
-    const timers = [0, 120, 400].map((delay) => setTimeout(measure, delay));
-    return () => timers.forEach((timer) => clearTimeout(timer));
-  }, [messages.length, plan.length, measure]);
+    const timer = setTimeout(syncActive, 60);
+    return () => clearTimeout(timer);
+  }, [messages.length, outline.length, syncActive]);
 
-  // 轨道高度用于把比例换算成像素（节点定位的前提）。
-  // 首帧 nodes 为空 → 组件返回 null → railRef 尚未挂载，故依赖 nodes.length 重跑。
+  // 轨道高度用于把横线换算成像素（悬浮卡定位的前提）
   useEffect(() => {
     const el = railRef.current;
     if (!el) return;
@@ -237,7 +160,7 @@ export function MessageNavRail({ messages, plan, scrollContainer, messageRefs }:
     ro.observe(el);
     update();
     return () => ro.disconnect();
-  }, [nodes.length]);
+  }, [outline.length]);
 
   /** 悬浮卡顶边：贴着对应横线的实际位置，并夹在轨道可视范围内。 */
   const cardTop = useCallback((position: number): number => {
@@ -252,39 +175,90 @@ export function MessageNavRail({ messages, plan, scrollContainer, messageRefs }:
     return Math.max(CARD_EDGE_MARGIN, Math.min(maxTop, anchor - CARD_MAX_HEIGHT / 2));
   }, [railHeight]);
 
-  const jumpTo = useCallback((index: number) => {
+  /**
+   * 跳到某条提问：
+   * 1) 已在渲染窗口内 → 直接滚动（无网络往返）；
+   * 2) 否则请求服务端按 entryId 定位（前后各半页整体替换时间线），再等目标渲染后滚动；
+   * 3) 服务端失败 → 退回「撑开渲染窗口」的本地兜底。
+   */
+  const jumpTo = useCallback(async (entryId: string) => {
     const scrollEl = scrollContainer.current;
-    if (!scrollEl) return;
-    const node = nodes.find((item) => item.index === index);
-    const target = node ? messageRefs.current?.[node.refIndex] : null;
-    if (!target) return;
-    const top = target.getBoundingClientRect().top
-      - scrollEl.getBoundingClientRect().top
-      + scrollEl.scrollTop;
-    scrollEl.scrollTo({ top, behavior: "smooth" });
-  }, [nodes, scrollContainer, messageRefs]);
+    if (!scrollEl || jumpingTo) return;
+    const findTarget = (): HTMLElement | null =>
+      resolveMessageElementRef.current?.(entryId) ?? null;
+    /**
+     * 把目标滚到视口顶部：等一帧布局稳定后瞬时定位一次，再校正一次。
+     * （定位会整体替换时间线，跟随几帧内还会因图片/折叠块改变高度。）
+     */
+    const scrollToTarget = (el: HTMLElement) => {
+      const place = () => {
+        if (!el.isConnected) return;
+        const top = el.getBoundingClientRect().top
+          - scrollEl.getBoundingClientRect().top
+          + scrollEl.scrollTop;
+        scrollEl.scrollTo({ top, behavior: "auto" });
+      };
+      requestAnimationFrame(() => {
+        place();
+        // 高亮交给 syncActive 统一推导（它会看到目标已在视口内）
+        syncActive();
+        // 布局二次稳定后校正一次（只校正，不再循环抢滚）
+        window.setTimeout(() => {
+          place();
+          syncActive();
+        }, 250);
+      });
+    };
+
+    // 等目标进入 DOM（服务端定位后需要一拍渲染）
+    const waitForTarget = async (): Promise<HTMLElement | null> => {
+      for (let i = 0; i < 10; i += 1) {
+        const target = findTarget() ?? (expandRenderWindowToEntryRef.current?.(entryId) ? findTarget() : null);
+        if (target) return target;
+        await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+      }
+      return null;
+    };
+
+    const immediate = await waitForTarget();
+    if (immediate) {
+      scrollToTarget(immediate);
+      return;
+    }
+    setJumpingTo(entryId);
+    try {
+      const located = await jumpToEntry(entryId);
+      if (!located) return;
+      const target = await waitForTarget();
+      if (target) scrollToTarget(target);
+    } finally {
+      setJumpingTo(null);
+    }
+  }, [expandRenderWindowToEntryRef, jumpToEntry, jumpingTo, resolveMessageElementRef, scrollContainer, syncActive]);
 
   const onKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     event.preventDefault();
-    const current = hovered ?? 0;
+    const current = hovered === null ? 0 : outline.findIndex((item) => item.ordinal === hovered);
     const next = event.key === "ArrowDown"
-      ? Math.min(nodes.length - 1, current + 1)
+      ? Math.min(outline.length - 1, current + 1)
       : Math.max(0, current - 1);
-    setHovered(next);
-  }, [hovered, nodes.length]);
+    const item = outline[next];
+    if (!item) return;
+    setHovered(item.ordinal);
+    void jumpTo(item.entryId);
+  }, [hovered, outline, jumpTo]);
 
-  // 无用户消息、或轨道太矮（横线会挤在一起）时整条隐藏。
-  if (nodes.length === 0 || (railHeight > 0 && railHeight < MIN_USABLE_HEIGHT_PX)) return null;
+  // 无提问、或轨道太矮（横线会挤在一起）时整条隐藏。
+  if (outline.length === 0 || (railHeight > 0 && railHeight < MIN_USABLE_HEIGHT_PX)) return null;
 
-  // 当前项：视口内最靠下的一条用户消息（滚到底时即最后一条 → 渲染为深色）。
-  // topRatio 与 viewport 都是「占滚动内容高度的比例」，可直接比较。
-  const viewportBottomRatio = viewport.top + viewport.height;
-  let activeIndex: number | null = null;
-  nodes.forEach((node, position) => {
-    if (node.topRatio <= viewportBottomRatio) activeIndex = position;
-  });
-  const hoveredPosition = hovered === null ? null : nodes.findIndex((node) => node.index === hovered);
+  // 横线数量 × 间距 超出轨道高度 → 允许滚动（否则首尾被裁掉、点不到）
+  const listHeight = outline.length * (DASH_HEIGHT + 6 + DASH_GAP) - DASH_GAP;
+  const listOverflows = railHeight > 0 && listHeight > railHeight - NAV_INSET_PX * 2;
+  const hoveredPosition = hovered === null ? null : outline.findIndex((item) => item.ordinal === hovered);
+  const activePosition = activeEntryId === null
+    ? -1
+    : outline.findIndex((item) => item.entryId === activeEntryId);
 
   return (
     <div
@@ -312,27 +286,33 @@ export function MessageNavRail({ messages, plan, scrollContainer, messageRefs }:
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
-          justifyContent: "center",
+          // 短列表整体居中；长列表（超出轨道）改为可滚动，保证首尾横线都能点到
+          justifyContent: listOverflows ? "flex-start" : "center",
           gap: DASH_GAP,
-          overflow: "hidden",
+          overflowY: listOverflows ? "auto" : "hidden",
+          scrollbarWidth: "none",
+          paddingInline: 0,
         }}
       >
-        {nodes.map((node, position) => {
-          const isHovered = hovered === node.index;
-          const isActive = activeIndex === position;
+        {outline.map((item, position) => {
+          const isHovered = hovered === item.ordinal;
+          const isActive = activePosition === position;
+          const isJumping = jumpingTo === item.entryId;
           return (
             <button
-              key={node.index}
+              key={item.entryId}
               type="button"
-              data-nav-index={node.index}
+              data-nav-index={item.ordinal}
+              data-nav-entry={item.entryId}
               ref={(el) => {
                 dashRefs.current[position] = el;
               }}
-              aria-label={messageNavPreview(node.text) || t("nav_userMessages")}
+              aria-label={messageNavPreview(item.text) || t("nav_userMessages")}
               aria-current={isActive ? "true" : undefined}
-              onClick={() => jumpTo(node.index)}
-              onMouseEnter={() => setHovered(node.index)}
-              onFocus={() => setHovered(node.index)}
+              disabled={isJumping}
+              onClick={() => void jumpTo(item.entryId)}
+              onMouseEnter={() => setHovered(item.ordinal)}
+              onFocus={() => setHovered(item.ordinal)}
               style={{
                 width: DASH_WIDTH + 6,
                 height: 14,
@@ -340,7 +320,7 @@ export function MessageNavRail({ messages, plan, scrollContainer, messageRefs }:
                 padding: 0,
                 border: "none",
                 background: "none",
-                cursor: "pointer",
+                cursor: isJumping ? "progress" : "pointer",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -363,7 +343,7 @@ export function MessageNavRail({ messages, plan, scrollContainer, messageRefs }:
       </div>
 
       {/* 悬浮信息卡：有最大宽高，超出省略号截断；贴着轨道右侧、按需上下收敛 */}
-      {hoveredPosition !== null && nodes[hoveredPosition] && (
+      {hoveredPosition !== null && outline[hoveredPosition] && (
         <div
           role="tooltip"
           data-nav-preview="true"
@@ -392,9 +372,15 @@ export function MessageNavRail({ messages, plan, scrollContainer, messageRefs }:
             zIndex: 60,
           }}
         >
-          {nodes[hoveredPosition].text.trim() || t("nav_userMessages")}
+          {outline[hoveredPosition].text.trim() || t("nav_userMessages")}
         </div>
       )}
     </div>
   );
+}
+
+/** 预览单行化（用于 aria-label：悬浮信息卡展示原文）。 */
+export function messageNavPreview(text: string, maxLength = 120): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > maxLength ? `${flat.slice(0, maxLength)}…` : flat;
 }

@@ -125,6 +125,18 @@ export function useChatAutoFollow({
     setJumpButtonVisible(false);
   }, []);
 
+  /**
+   * 进入「浏览历史」态（released）：按 entryId 定位跳转后必须调用。
+   *
+   * 不能用 notifyAutoFollowBranchReset —— 那是「重置回 following 并钉底」，
+   * 会让定位结果在下一帧被拉回会话尾部（用户反馈过的「跳了又弹回去」）。
+   */
+  const notifyBrowsingHistory = useCallback(() => {
+    applyAutoFollowMode(reduceAutoFollow(autoFollowModeRef.current, { kind: "up-intent" }));
+    // 定位滚动是程序化写入：不让自动跟随把它当成用户上滚之外的意图
+    markExternalScrollWriteRef.current?.();
+  }, [applyAutoFollowMode]);
+
   const notifyAutoFollowEnd = useCallback(() => {
     runSettleUntilRef.current = Date.now() + RUN_SETTLE_MS;
     pendingEndPinRef.current = true;
@@ -138,6 +150,8 @@ export function useChatAutoFollow({
   const markExternalScrollWrite = useCallback(() => {
     externalWriteUntilRef.current = Date.now() + 150;
   }, []);
+  const markExternalScrollWriteRef = useRef<(() => void) | null>(null);
+  markExternalScrollWriteRef.current = markExternalScrollWrite;
 
   const notifyProgrammaticSmooth = useCallback(() => {
     programmaticSmoothUntilRef.current = Date.now() + PROGRAMMATIC_SMOOTH_IGNORE_MS;
@@ -346,5 +360,6 @@ export function useChatAutoFollow({
     notifyAutoFollowEnd,
     markExternalScrollWrite,
     notifyProgrammaticSmooth,
+    notifyBrowsingHistory,
   };
 }
