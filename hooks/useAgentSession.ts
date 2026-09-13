@@ -1051,7 +1051,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         around: entryId,
         deferThinking: "1",
         deferMedia: "1",
-        // 默认把窗口一直取到最新：跳转历史后仍要保留尾部（运行中会话的流式输出）
+        // 默认取到最新（toEnd=1）：跳转历史后，时间线必须仍然包含「目标 → 最新」整段，
+        // 否则运行中会话的尾部（流式输出）会脱离时间线。性能靠渲染窗口控制，不靠截断数据。
         toEnd: options?.toEnd === false ? "0" : "1",
       });
       if (options?.limit) params.set("limit", String(options.limit));

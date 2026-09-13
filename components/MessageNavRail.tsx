@@ -13,17 +13,18 @@
  * 布局：本组件宽 CHAT_GUTTER px（与右侧 ChatMinimap 等宽），是会话列两侧的对称竖条。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, RefObject } from "react";
-import type { AgentMessage } from "@/lib/types";
-import { getChatPlanLiveMessage, trailingLiveUserStart, type ChatRenderPlanItem } from "@/lib/chat-compositor";
+import { useCallback, useEffect, useRef, useState, RefObject } from "react";
 import { resolveActiveOutlineEntry, type UserMessageOutlineItem } from "@/lib/session-outline";
 import { useI18n } from "@/lib/i18n";
 import { CHAT_GUTTER } from "@/lib/chat-column";
 
 interface Props {
-  messages: AgentMessage[];
-  /** 统一渲染计划（含 live slot）：与 ChatMinimap 共用同一顺序 */
-  plan: ChatRenderPlanItem[];
+  /**
+   * 渲染批次标识（消息数 + 已加载 entryId 数）。
+   * 只在它变化时重新收集 `[data-message-entry-id]` 元素 —— 滚动事件每帧都会到，
+   * 不能每次都做全量 DOM 查询（长会话几百个元素，是滚动卡顿的主因）。
+   */
+  renderKey: string;
   scrollContainer: RefObject<HTMLDivElement | null>;
   /** 会话全部用户消息大纲（服务端只读投影；空 = 尚未取到） */
   outline: UserMessageOutlineItem[];
@@ -42,8 +43,6 @@ interface Props {
   isAtLiveTail: boolean;
 }
 
-/** 轨道上下内缩：首尾横线不贴边。 */
-const NAV_INSET_PX = 12;
 /** 短横线：12×2，圆角 1 —— 与设计稿一致（浅灰；当前项深色）。 */
 const DASH_WIDTH = 12;
 const DASH_HEIGHT = 2;
@@ -61,8 +60,7 @@ const CARD_MAX_HEIGHT = 180;
 const CARD_EDGE_MARGIN = 8;
 
 export function MessageNavRail({
-  messages,
-  plan,
+  renderKey,
   scrollContainer,
   outline,
   entryIds,
@@ -75,6 +73,11 @@ export function MessageNavRail({
   const [railHeight, setRailHeight] = useState(0);
   const [hovered, setHovered] = useState<number | null>(null);
   const [jumpingTo, setJumpingTo] = useState<string | null>(null);
+  /**
+   * 跳转代次：连续跳转（或快速连点）时，旧的平滑滚动与收尾校正必须整体失效，
+   * 否则两次跳转互相抢滚动位置（实测中间条落点偏 523px）。
+   */
+  const jumpSeqRef = useRef(0);
   /** 当前高亮：滚动位置对应的「最后一条已滚过」用户消息 entryId */
   const [activeEntryId, setActiveEntryId] = useState<string | null>(null);
   /** 已加载 entryId 列表与「还有更早历史」的 ref 镜像：jump 循环里读最新值 */
@@ -82,16 +85,6 @@ export function MessageNavRail({
   entryIdsRef.current = entryIds;
   const railRef = useRef<HTMLDivElement>(null);
   const dashRefs = useRef<(HTMLButtonElement | null)[]>([]);
-  // 与 ChatMinimap 同一套消息顺序：live（流式）插到尾部用户消息之前。
-  const allMessages = useMemo(() => {
-    const live = getChatPlanLiveMessage(plan);
-    const split = trailingLiveUserStart(messages, live != null);
-    return [
-      ...messages.slice(0, split),
-      ...(live ? [live] : []),
-      ...messages.slice(split),
-    ] as Array<AgentMessage | Partial<AgentMessage>>;
-  }, [plan, messages]);
 
   /**
    * 更新「当前在哪条提问」。
@@ -101,14 +94,32 @@ export function MessageNavRail({
    * 带 data-message-entry-id），再用它在加载窗口中的位置推导大纲里对应的提问。
    * 判定不出来时保持原值（不清空，避免高亮闪没）。
    */
+  /**
+   * 当前所在提问的锚点测量。
+   *
+   * 性能约定（滚动事件每帧都会到，这里是热点）：
+   * - 元素列表按「渲染批次」缓存，不在每次滚动时重新 querySelectorAll；
+   * - 只对「可能与视口相交」的元素取 getBoundingClientRect —— 通过缓存的
+   *   偏移区间先做一次廉价筛选，避免对几百个消息元素逐个强制同步布局。
+   */
+  const renderedElsRef = useRef<HTMLElement[]>([]);
+  const renderedCacheKeyRef = useRef("");
+  const measureOffsetRef = useRef(0);
+
   const syncActive = useCallback(() => {
     const scrollEl = scrollContainer.current;
     if (!scrollEl) return;
     const viewportTop = scrollEl.getBoundingClientRect().top;
     const viewportBottom = viewportTop + scrollEl.clientHeight;
-    const rendered = scrollEl.querySelectorAll<HTMLElement>("[data-message-entry-id]");
-    // 取「真正最靠上」的可见消息：不能取 DOM 顺序里的第一个（计划顺序≠几何顺序，
-    // 会整体差一条提问），按 top 比较才与滚动位置严格对应。
+    // 缓存失效条件：渲染批次变化（内容变了才重新收集元素）
+    if (renderedCacheKeyRef.current !== renderKey) {
+      renderedCacheKeyRef.current = renderKey;
+      renderedElsRef.current = Array.from(
+        scrollEl.querySelectorAll<HTMLElement>("[data-message-entry-id]"),
+      );
+    }
+    const rendered = renderedElsRef.current;
+    measureOffsetRef.current += 1;
     let topVisibleEntryId: string | null = null;
     let topVisibleTop = Number.POSITIVE_INFINITY;
     let nearestAboveEntryId: string | null = null;
@@ -123,7 +134,6 @@ export function MessageNavRail({
           topVisibleEntryId = entryId;
         }
       } else if (top < viewportTop && top > nearestAboveTop) {
-        // 视口上方最近的一条：视口内没有任何消息时用它当锚点
         nearestAboveTop = top;
         nearestAboveEntryId = entryId;
       }
@@ -135,25 +145,36 @@ export function MessageNavRail({
       isAtLiveTail,
     });
     if (resolved !== null) setActiveEntryId(resolved);
-  }, [entryIds, isAtLiveTail, outline, scrollContainer]);
+  }, [entryIds, isAtLiveTail, outline, renderKey, scrollContainer]);
 
   useEffect(() => {
     const el = scrollContainer.current;
     if (!el) return;
-    el.addEventListener("scroll", syncActive, { passive: true });
-    const ro = new ResizeObserver(syncActive);
+    // 滚动事件每帧可能触发多次：用 rAF 合并成「一帧最多测一次」。
+    let frame: number | null = null;
+    const onScroll = () => {
+      if (frame !== null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        syncActive();
+      });
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    // 布局变化同样合并到帧（ResizeObserver 在内容增删时会连续触发）
+    const ro = new ResizeObserver(onScroll);
     ro.observe(el);
     if (el.firstElementChild) ro.observe(el.firstElementChild);
     syncActive();
     return () => {
-      el.removeEventListener("scroll", syncActive);
+      el.removeEventListener("scroll", onScroll);
+      if (frame !== null) cancelAnimationFrame(frame);
       ro.disconnect();
     };
   }, [scrollContainer, syncActive]);
   useEffect(() => {
     const timer = setTimeout(syncActive, 60);
     return () => clearTimeout(timer);
-  }, [messages.length, outline.length, syncActive]);
+  }, [renderKey, outline.length, syncActive]);
 
   // 轨道高度用于把横线换算成像素（悬浮卡定位的前提）
   useEffect(() => {
@@ -182,51 +203,95 @@ export function MessageNavRail({
   /**
    * 跳到某条提问。
    *
-   * 顺序刻意是「先加载、后滚动」：定位会整体替换时间线（目标 → 最新整段），
-   * 若先滚动再让内容陆续加载，滚动位置会被后续布局不断顶掉，而且运行中会话的
-   * 尾部流式输出会跟着抖动。所以：
+   * 顺序刻意是「先加载、后滚动」：定位会整体替换时间线，若先滚动再让内容陆续加载，
+   * 滚动位置会被后续布局不断顶掉。所以：
    * 1) 已在渲染窗口内 → 直接滚动（无网络往返）；
-   * 2) 否则请求服务端按 entryId 定位（窗口一直取到最新，保留尾部流式段），
-   *    等目标真正渲染出来再**瞬时**滚动（smooth 会被持续追加的内容打断）；
+   * 2) 否则请求服务端按 entryId 定位（只取锚点附近一页，避免时间线膨胀到上千条），
+   *    等目标渲染出来、布局稳定后再平滑滚动到位；
    * 3) 服务端失败 → 退回「撑开渲染窗口」的本地兜底。
    */
   const jumpTo = useCallback(async (entryId: string) => {
     const scrollEl = scrollContainer.current;
-    if (!scrollEl || jumpingTo) return;
+    if (!scrollEl) return;
+    const seq = ++jumpSeqRef.current;
+    const isCurrent = () => jumpSeqRef.current === seq;
     const findTarget = (): HTMLElement | null =>
       resolveMessageElementRef.current?.(entryId) ?? null;
     /**
-     * 把目标滚到视口顶部：等一帧布局稳定后瞬时定位一次，再校正一次。
-     * （定位会整体替换时间线，跟随几帧内还会因图片/折叠块改变高度。）
-     */
-    /**
-     * 快速滚动到目标（不是瞬时跳转）。
+     * 快速滚动到目标（平滑动画，不是瞬时跳转）。
      *
-     * 用 smooth：动画期间用户滚轮/触摸会自然接管（浏览器会中断平滑滚动），
-     * 不像瞬跳那样"啪"地换屏。定位会整体替换时间线，为保证动画期间高度稳定，
-     * 先等一帧布局落定再发起，并在动画结束后校正一次高亮。
+     * 定位会整体替换时间线，随后几帧里图片/折叠块还会改变高度；此时立刻发滚动，
+     * 目标偏移会算在旧布局上，落点整体偏掉（实测 topRel 2842px）。所以：
+     * 先等布局稳定（连续两帧位置一致）→ 平滑滚动 → 动画结束后再校正一次。
      */
     const scrollToTarget = (el: HTMLElement) => {
-      const targetTop = () => el.getBoundingClientRect().top
+      const measure = () => el.getBoundingClientRect().top
         - scrollEl.getBoundingClientRect().top
         + scrollEl.scrollTop;
-      requestAnimationFrame(() => {
-        if (!el.isConnected) return;
-        scrollEl.scrollTo({ top: targetTop(), behavior: "smooth" });
-        // 动画期间按真实位置持续校正高亮，结束后再收尾一次
-        let frames = 0;
-        const tick = () => {
-          syncActive();
-          frames += 1;
-          if (frames < 40 && el.isConnected) requestAnimationFrame(tick);
-        };
-        requestAnimationFrame(tick);
-      });
+      // 用户一动滚轮/拖滚动条（pointerdown 含触摸）/键盘就放弃后续校正，不跟用户抢滚动
+      let interrupted = false;
+      const onInterrupt = () => { interrupted = true; };
+      const stopWatching = () => {
+        scrollEl.removeEventListener("wheel", onInterrupt);
+        scrollEl.removeEventListener("pointerdown", onInterrupt);
+        scrollEl.removeEventListener("keydown", onInterrupt);
+      };
+      scrollEl.addEventListener("wheel", onInterrupt, { passive: true });
+      scrollEl.addEventListener("pointerdown", onInterrupt, { passive: true });
+      scrollEl.addEventListener("keydown", onInterrupt);
+
+      const drift = () => el.getBoundingClientRect().top - scrollEl.getBoundingClientRect().top;
+
+      /**
+       * 落地后有界收敛：目标不再偏离视口顶就停，最多 12 次 × 100ms。
+       *
+       * 为什么不能只校正一次：滚动容器是 overflow-anchor:none（钉底自动跟随需要，
+       * 见 ChatWindow），浏览器不会替我们补偿上方内容的晚挂载。跳转后视口附近的过程块
+       * 仍会陆续挂载/卸载，上方高度一变，目标就被整体推走 —— 实测最后一次校正后又被
+       * 推偏 613px（中间位置则稳定在 0）。
+       */
+      const converge = (stableCount: number, attempt: number) => {
+        if (interrupted || !isCurrent() || !el.isConnected) { stopWatching(); return; }
+        if (Math.abs(drift()) > 2) {
+          if (attempt >= 12) { stopWatching(); syncActive(); return; }
+          scrollEl.scrollTo({ top: measure(), behavior: "auto" });
+          window.setTimeout(() => converge(0, attempt + 1), 100);
+          return;
+        }
+        if (stableCount >= 3) { stopWatching(); syncActive(); return; }
+        window.setTimeout(() => converge(stableCount + 1, attempt + 1), 100);
+      };
+
+      const settleThenScroll = (attempt = 0, last = Number.NaN, stable = 0) => {
+        if (!isCurrent() || !el.isConnected || interrupted) { stopWatching(); return; }
+        const top = measure();
+        const nextStable = Math.abs(top - last) < 2 ? stable + 1 : 0;
+        if (nextStable >= 2 || attempt > 20) {
+          scrollEl.scrollTo({ top, behavior: "smooth" });
+          // 等平滑动画真正停下（连续三次 scrollTop 不变）再进收敛：
+          // 固定 450ms 太早，会在动画中段就判「偏离」并把视口定在中途
+          // （实测：目标停在视口上方 214px，而它本可以贴顶）。
+          const watch = (lastTop: number, idleFrames: number) => {
+            if (interrupted || !isCurrent() || !el.isConnected) { stopWatching(); return; }
+            const now = scrollEl.scrollTop;
+            if (idleFrames >= 3) { converge(0, 0); return; }
+            window.setTimeout(
+              () => watch(now, Math.abs(now - lastTop) < 1 ? idleFrames + 1 : 0),
+              60,
+            );
+          };
+          window.setTimeout(() => watch(scrollEl.scrollTop, 0), 60);
+          return;
+        }
+        requestAnimationFrame(() => settleThenScroll(attempt + 1, top, nextStable));
+      };
+      requestAnimationFrame(() => settleThenScroll());
     };
 
     // 等目标进入 DOM（服务端定位后需要一拍渲染）
     const waitForTarget = async (): Promise<HTMLElement | null> => {
       for (let i = 0; i < 10; i += 1) {
+        if (!isCurrent()) return null;
         const target = findTarget() ?? (expandRenderWindowToEntryRef.current?.(entryId) ? findTarget() : null);
         if (target) return target;
         await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
@@ -242,13 +307,13 @@ export function MessageNavRail({
     setJumpingTo(entryId);
     try {
       const located = await jumpToEntry(entryId);
-      if (!located) return;
+      if (!located || !isCurrent()) return;
       const target = await waitForTarget();
-      if (target) scrollToTarget(target);
+      if (target && isCurrent()) scrollToTarget(target);
     } finally {
-      setJumpingTo(null);
+      if (isCurrent()) setJumpingTo(null);
     }
-  }, [expandRenderWindowToEntryRef, jumpToEntry, jumpingTo, resolveMessageElementRef, scrollContainer, syncActive]);
+  }, [expandRenderWindowToEntryRef, jumpToEntry, resolveMessageElementRef, scrollContainer, syncActive]);
 
   const onKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;

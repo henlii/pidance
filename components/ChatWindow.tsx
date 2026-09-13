@@ -88,8 +88,53 @@ function phaseLabel(phase: AgentPhase, t: ReturnType<typeof useI18n>["t"]): stri
 
 // 过程详情默认持续展开（Issue #13）：外层不再默认隐藏整个 user→answer 过程；
 // 用户仍可主动收起/展开，局部 thinking / tool 明细保持各自的按需折叠。
+//
+// 性能（不改可见效果）：展开态的内容改为**进视口才挂载**。child 元素本身的构造很便宜
+// （renderMessage 只拼 JSX），贵的是 React 把整棵子树渲染进 DOM —— 长会话里一轮过程
+// 动辄 40–50 条消息、47 次工具调用，按 entryId 跳到历史后整页可达 2.7 万 DOM 节点、
+// 秒级长任务。不把子树交给 React，就不会付这份代价。
 export function ProcessDetailsGroup({ messageCount, toolCallCount, children, t }: { messageCount: number; toolCallCount: number; children: ReactNode; t: ReturnType<typeof useI18n>["t"] }) {
   const [expanded, setExpanded] = useState(true);
+  const holderRef = useRef<HTMLDivElement>(null);
+  // 无 IntersectionObserver（SSR / jsdom / 老浏览器）时退化为直接挂载：
+  // 懒挂载只是性能优化，不能成为「内容可见」的前提条件。
+  const [inViewport, setInViewport] = useState(() => typeof IntersectionObserver === "undefined");
+  /**
+   * 卸载后用于占位的高度 = 上一次实测高度。
+   * 用估算值占位会让滚动位置漂移（实测连续跳转后目标偏 18012px）；
+   * 记住真实高度则挂载/卸载前后布局几乎不变。
+   */
+  const measuredHeightRef = useRef<number | null>(null);
+  // 挂载期间记录真实高度，供下次卸载时占位
+  useEffect(() => {
+    const el = holderRef.current;
+    if (!el || !inViewport) return;
+    const record = () => {
+      const h = el.getBoundingClientRect().height;
+      if (h > 0) measuredHeightRef.current = h;
+    };
+    record();
+    const ro = new ResizeObserver(record);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [inViewport]);
+
+  useEffect(() => {
+    const el = holderRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") return;
+    // 双向：进视口挂载，远离视口卸载。
+    // 必须可卸载 —— 连续跳转时已展开的块若不回收，DOM 会累积到 2 万+ 节点，
+    // 后一次跳转又变卡（实测第二次跳转长任务回到 92 个）。
+    // rootMargin 上下各留一屏半：预挂载减少滚动空白，卸载留足余量避免抖动。
+    const io = new IntersectionObserver(
+      (entries) => {
+        setInViewport(entries[0]?.isIntersecting === true);
+      },
+      { rootMargin: "150% 0px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
   const parts = [t("chat_processDetails"), `${messageCount} ${t(messageCount === 1 ? "chat_message" : "chat_messages")}`];
   if (toolCallCount > 0) parts.push(`${toolCallCount} ${t(toolCallCount === 1 ? "chat_toolCall" : "chat_toolCalls")}`);
 
@@ -122,11 +167,22 @@ export function ProcessDetailsGroup({ messageCount, toolCallCount, children, t }
           {parts.join(" · ")}
         </span>
       </button>
-      {expanded && (
-        <div style={{ marginTop: 8 }}>
-          {children}
-        </div>
-      )}
+      <div ref={holderRef}>
+        {expanded && (inViewport ? (
+          <div style={{ marginTop: 8 }}>{children}</div>
+        ) : (
+          // 占位高度按内容规模估算（每条消息/每次工具调用都占高度）：估得越准，
+          // 滚动条与后续定位的漂移越小。真实内容挂载后高度会替换掉它。
+          <div
+            style={{
+              marginTop: 8,
+              // 优先用上次实测高度（布局几乎不变）；首次未见才退化为估算
+              minHeight: measuredHeightRef.current ?? (messageCount * 56 + toolCallCount * 24),
+            }}
+            aria-hidden="true"
+          />
+        ))}
+      </div>
     </div>
   );
 }
@@ -723,8 +779,8 @@ const chatPlan = composeChatPlan({
             }}
           >
             <MessageNavRail
-              messages={messages}
-              plan={chatPlan}
+              // 渲染批次标识：只在消息/已加载条数变化时重建导航条的元素缓存
+              renderKey={`${messages.length}|${entryIds.length}`}
               scrollContainer={scrollContainerRef}
               outline={userOutline}
               entryIds={entryIds}
