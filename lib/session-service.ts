@@ -275,6 +275,8 @@ export type SessionService = {
       around?: string;
       /** 取 after 之后的更新窗口（定位到历史后继续向下加载） */
       after?: string;
+      /** around 窗口是否一直取到最新（跳转历史时保留尾部流式段） */
+      aroundToEnd?: boolean;
       limit: number | null;
       deferThinking?: boolean;
       deferToolResultImages?: boolean;
@@ -821,7 +823,12 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       const limit = options.limit;
       let context;
       if (options.around) {
-        const aroundWindow = sliceContextAround(full, options.around, limit ?? DEFAULT_SESSION_HISTORY_PAGE);
+        const aroundWindow = sliceContextAround(
+          full,
+          options.around,
+          limit ?? DEFAULT_SESSION_HISTORY_PAGE,
+          { toEnd: options.aroundToEnd === true },
+        );
         // anchor 不在当前 leaf 路径上：显式未命中，不回退尾页（否则会把「没找到」
         // 当成命中，界面停在别处却报告成功）。
         if (!aroundWindow) return { context: null, notFound: options.around };

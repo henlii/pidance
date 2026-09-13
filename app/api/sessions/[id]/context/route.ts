@@ -18,6 +18,8 @@ export async function GET(
   const around = url.searchParams.get("around") ?? undefined;
   // 定位到历史后继续向下加载：取 after 之后的更新窗口。
   const after = url.searchParams.get("after") ?? undefined;
+  // 跳转历史时窗口一直取到最新（保留尾部流式段，运行中会话不被切掉尾部）。
+  const aroundToEnd = url.searchParams.get("toEnd") !== "0";
   const deferThinking = url.searchParams.has("deferThinking");
   const deferToolResultImages = url.searchParams.has("deferMedia");
   const limit = parseContextLimitParam(
@@ -31,6 +33,7 @@ export async function GET(
       before,
       around,
       after,
+      aroundToEnd: around !== undefined ? aroundToEnd : undefined,
       limit,
       deferThinking,
       deferToolResultImages,

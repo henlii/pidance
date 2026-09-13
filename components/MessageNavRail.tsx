@@ -47,8 +47,10 @@ const NAV_INSET_PX = 12;
 /** 短横线：12×2，圆角 1 —— 与设计稿一致（浅灰；当前项深色）。 */
 const DASH_WIDTH = 12;
 const DASH_HEIGHT = 2;
-/** 相邻短横线间距（列表整体上下居中）。 */
-const DASH_GAP = 9;
+/** 相邻短横线间距（列表整体上下居中）；比初版减半，长会话更紧凑。 */
+const DASH_GAP = 4;
+/** 列表最大高度：超出后内部滚动（横线再多也够得到）。 */
+const LIST_MAX_HEIGHT_PX = 320;
 /** 轨道太矮（横线挤在一起）则整条隐藏。 */
 const MIN_USABLE_HEIGHT_PX = 120;
 /** 信息卡最大宽高：超出省略号截断，避免长消息把卡片撑爆。 */
@@ -176,9 +178,14 @@ export function MessageNavRail({
   }, [railHeight]);
 
   /**
-   * 跳到某条提问：
+   * 跳到某条提问。
+   *
+   * 顺序刻意是「先加载、后滚动」：定位会整体替换时间线（目标 → 最新整段），
+   * 若先滚动再让内容陆续加载，滚动位置会被后续布局不断顶掉，而且运行中会话的
+   * 尾部流式输出会跟着抖动。所以：
    * 1) 已在渲染窗口内 → 直接滚动（无网络往返）；
-   * 2) 否则请求服务端按 entryId 定位（前后各半页整体替换时间线），再等目标渲染后滚动；
+   * 2) 否则请求服务端按 entryId 定位（窗口一直取到最新，保留尾部流式段），
+   *    等目标真正渲染出来再**瞬时**滚动（smooth 会被持续追加的内容打断）；
    * 3) 服务端失败 → 退回「撑开渲染窗口」的本地兜底。
    */
   const jumpTo = useCallback(async (entryId: string) => {
@@ -253,8 +260,8 @@ export function MessageNavRail({
   if (outline.length === 0 || (railHeight > 0 && railHeight < MIN_USABLE_HEIGHT_PX)) return null;
 
   // 横线数量 × 间距 超出轨道高度 → 允许滚动（否则首尾被裁掉、点不到）
-  const listHeight = outline.length * (DASH_HEIGHT + 6 + DASH_GAP) - DASH_GAP;
-  const listOverflows = railHeight > 0 && listHeight > railHeight - NAV_INSET_PX * 2;
+  const listHeight = outline.length * (14 + DASH_GAP) - DASH_GAP;
+  const listOverflows = listHeight > LIST_MAX_HEIGHT_PX;
   const hoveredPosition = hovered === null ? null : outline.findIndex((item) => item.ordinal === hovered);
   const activePosition = activeEntryId === null
     ? -1
@@ -279,19 +286,19 @@ export function MessageNavRail({
       <div
         style={{
           position: "absolute",
-          top: NAV_INSET_PX,
-          bottom: NAV_INSET_PX,
+          // 垂直居中，并限制最大高度：超出后列表内部滚动
+          top: "50%",
+          transform: "translateY(-50%)",
           left: 0,
           right: 0,
+          maxHeight: `min(${LIST_MAX_HEIGHT_PX}px, 100%)`,
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
-          // 短列表整体居中；长列表（超出轨道）改为可滚动，保证首尾横线都能点到
           justifyContent: listOverflows ? "flex-start" : "center",
           gap: DASH_GAP,
-          overflowY: listOverflows ? "auto" : "hidden",
+          overflowY: "auto",
           scrollbarWidth: "none",
-          paddingInline: 0,
         }}
       >
         {outline.map((item, position) => {
@@ -330,11 +337,12 @@ export function MessageNavRail({
                 aria-hidden="true"
                 style={{
                   display: "block",
-                  width: DASH_WIDTH,
+                  // 悬浮：变黑（--text 最深）且长度翻倍，便于指哪打哪
+                  width: isHovered ? DASH_WIDTH * 2 : DASH_WIDTH,
                   height: DASH_HEIGHT,
                   borderRadius: DASH_HEIGHT / 2,
-                  background: isActive || isHovered ? "var(--text)" : "var(--border)",
-                  transition: "background 0.1s",
+                  background: isHovered ? "var(--text)" : isActive ? "var(--text-dim)" : "var(--border)",
+                  transition: "width 0.1s, background 0.1s",
                 }}
               />
             </button>

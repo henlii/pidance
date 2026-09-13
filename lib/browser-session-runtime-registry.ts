@@ -69,12 +69,16 @@ export type PendingBash = {
 /**
  * 一轮 run 的延迟与解码吞吐读数。
  *
- * 算法对齐 dsh 的 `turn-metrics`（`@deepseek-ai/dsh-client-ui-conversation`）：
- * - 每个 assistant step 的 `decodeMs` 是「首个 token → 消息结束」，**不含** TTFT；
- * - `outputTokens` 只用 provider 上报的 usage，不做字符估算；
- * - 只统计同时具备解码时间与 output tokens 的 step，再按轮求和后相除
- *   （即按解码时间加权，而不是各 step 速率的算术平均）；
- * - TTFT 取该轮最早的读数。
+ * **服务端是唯一计算方**（`lib/sdk-session-host.ts` 的 accumulateTurnMetrics /
+ * projectTurnMetrics）：口径与 dsh 的 `turn-metrics`（已核对
+ * `@deepseek-ai/dsh-client-ui-conversation@0.0.1-rc.1` 实现）一致 ——
+ * 每个 step 的 decodeMs 是「首 token → 消息结束」不含 TTFT；只用 provider 上报的
+ * output tokens；只累计两者齐全的 step，按解码时间加权（Σtokens/ΣdecodeMs）。
+ *
+ * 本模块只**接收与渲染**读数，两条来源：
+ * - SSE 事件携带的 `turnMetrics`（host 在 TTFT 首帧与每个 step 结束时下发）；
+ * - 冷挂载/重连时 `get_state` 的兜底读数（seedTurnMetrics）。
+ * 客户端不再自行累计（此前是双份实现，口径容易漂移）。
  */
 export type TurnMetrics = {
   /** 本轮 agent_start → 首个内容帧，毫秒。 */
@@ -82,62 +86,6 @@ export type TurnMetrics = {
   /** 本轮 provider 上报 output tokens / 解码总耗时。 */
   tokensPerSecond?: number;
 };
-
-type TurnMetricsAccumulator = {
-  startedAt: number;
-  /** 当前 step 的首个内容帧时刻；null 表示该 step 尚无内容。 */
-  firstTokenAt: number | null;
-  ttftMs: number | null;
-  decodeMs: number;
-  outputTokens: number;
-  sampled: boolean;
-  /**
-   * 本 step 是否从它的 message_start 就观测到。冷挂载（刷新/后台回收回来）时
-   * 只能看到 step 的尾部：此时 output tokens 是整段而解码时长只有尾巴，
-   * 计进去会得到虚高读数，所以这类 step 不参与累计。
-   */
-  stepObservedFromStart: boolean;
-};
-
-function emptyTurnMetrics(startedAt: number): TurnMetricsAccumulator {
-  return {
-    startedAt,
-    firstTokenAt: null,
-    ttftMs: null,
-    decodeMs: 0,
-    outputTokens: 0,
-    sampled: false,
-    stepObservedFromStart: true,
-  };
-}
-
-function projectTurnMetrics(accumulator: TurnMetricsAccumulator, seeded: TurnMetrics | null): TurnMetrics {
-  // 本地还没跑完一个完整 step 时，用服务端下发的读数兜底：刷新/冷挂载的页面看不到
-  // step 的开始，只有 host 有完整读数。本地一旦采样成功就以本地为准（更新更快）。
-  if (!accumulator.sampled && seeded) return { ...seeded };
-  const metrics: TurnMetrics = {};
-  // 起点未知（startedAt=0）时宁可不出 TTFT，也不显示一个荒谬的数字。
-  if (accumulator.ttftMs !== null && accumulator.startedAt > 0) metrics.ttftMs = accumulator.ttftMs;
-  if (accumulator.sampled && accumulator.decodeMs > 0) {
-    metrics.tokensPerSecond = accumulator.outputTokens / (accumulator.decodeMs / 1e3);
-  }
-  return metrics;
-}
-
-/** 该帧是否已经含可显示内容（空壳帧不算「首个 token」）。 */
-function hasRenderableContent(message: Partial<AgentMessage> | undefined): boolean {
-  if (!message) return false;
-  const content = (message as { content?: unknown }).content;
-  if (typeof content === "string") return content.length > 0;
-  return Array.isArray(content) && content.length > 0;
-}
-
-/** provider 上报的 output tokens；缺失/非法返回 null（不估算）。 */
-function usageOutputTokens(message: AgentMessage | undefined): number | null {
-  const usage = (message as { usage?: { output?: unknown } } | undefined)?.usage;
-  const value = usage?.output;
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
-}
 
 export type SessionRuntimeSnapshot = {
   sessionId: string;
@@ -308,9 +256,8 @@ type RuntimeSlot = {
   sseRetryTimer: TimerHandle | null;
   sseRetryAttempt: number;
   /** 本轮 run 的吞吐累积（见 TurnMetrics 注释）。 */
-  metrics: TurnMetricsAccumulator;
-  /** 服务端下发的本 run 读数（冷挂载兜底）；本地采样成功后置 null。 */
-  seededTurnMetrics: TurnMetrics | null;
+  /** 服务端下发的当前读数（客户端只渲染，不累计） */
+  metrics: TurnMetrics;
 };
 
 /** 视图附件 token：dispose 的身份，与 sessionId 解耦。 */
@@ -415,8 +362,7 @@ function createSlot(sessionId: string): RuntimeSlot {
     idleCloseTimer: null,
     sseRetryTimer: null,
     sseRetryAttempt: 0,
-    metrics: emptyTurnMetrics(0),
-    seededTurnMetrics: null,
+    metrics: {},
   };
 }
 
@@ -527,7 +473,7 @@ export function createBrowserSessionRuntimeRegistry(
       messages: slot.derived.messages,
       entryIds: slot.derived.entryIds,
       messageKeys: slot.derived.messageKeys,
-      turnMetrics: projectTurnMetrics(slot.metrics, slot.seededTurnMetrics),
+      turnMetrics: { ...slot.metrics },
       submissions: [...slot.submissions.values()],
       attachCount: slot.attachments.size,
     };
@@ -696,7 +642,15 @@ export function createBrowserSessionRuntimeRegistry(
 
   const applyEventToSlot = (slot: RuntimeSlot, event: AgentStreamEvent) => {
     const type = event.type;
+    // 服务端权威读数随事件下发（TTFT 首帧 / 每个 step 结束）：直接落到 slot 投影，
+    // 客户端不自行累计（口径只有一处）。
+    const eventMetrics = (event as { turnMetrics?: TurnMetrics }).turnMetrics;
+    if (eventMetrics && (typeof eventMetrics.tokensPerSecond === "number" || typeof eventMetrics.ttftMs === "number")) {
+      slot.metrics = { ...eventMetrics };
+    }
     if (type === "agent_start") {
+      // 新 run：清掉上一轮读数（服务端会在 TTFT 首帧/每个 step 结束重新下发）
+      if (!eventMetrics) slot.metrics = {};
       slot.snapshot.promptRunId += 1;
       slot.snapshot.agentRunning = true;
       slot.snapshot.completedRunId = null;
@@ -704,8 +658,7 @@ export function createBrowserSessionRuntimeRegistry(
       // 只能按 runId 条件释放，不能阻塞当前 run。
       slot.snapshot.finishingRunId = null;
       slot.snapshot.streamState = { isStreaming: true, streamingMessage: null };
-      slot.metrics = emptyTurnMetrics(now());
-      slot.seededTurnMetrics = null;
+      slot.metrics = {};
     } else if (type === "agent_end" || type === "prompt_done") {
       slot.snapshot.agentRunning = false;
       slot.snapshot.completedRunId = slot.snapshot.promptRunId;
@@ -714,17 +667,7 @@ export function createBrowserSessionRuntimeRegistry(
       const message = event.message as Partial<AgentMessage> | undefined;
       if (!slot.snapshot.agentRunning) return;
       if (message?.role === "user") return;
-      // step 边界：从这里开始本 step 的解码时长才是完整的。
-      if (type === "message_start") slot.metrics.stepObservedFromStart = true;
       if (message) {
-        // 首个内容帧：TTFT 的终点，也是本 step 解码时长的起点。
-        if (slot.metrics.firstTokenAt === null && hasRenderableContent(message)) {
-          const at = now();
-          slot.metrics.firstTokenAt = at;
-          if (slot.metrics.ttftMs === null && slot.metrics.startedAt > 0 && at >= slot.metrics.startedAt) {
-            slot.metrics.ttftMs = at - slot.metrics.startedAt;
-          }
-        }
         const rendered = attachCustomRenderedLines(
           message as AgentMessage,
           event.renderedLines,
@@ -818,23 +761,6 @@ export function createBrowserSessionRuntimeRegistry(
       } else if (completed && slot.snapshot.agentRunning) {
         const rendered = attachCustomRenderedLines(completed, event.renderedLines);
         appendMessageWithEntry(slot, normalizeToolCalls(rendered), entryId);
-      }
-      // 吞吐累积：只在**同时**拿到本 step 解码时长与 provider output tokens 时
-      // 计入（与 dsh 的 turn-metrics 同条件），否则该 step 不参与加权平均。
-      if (completed?.role === "assistant") {
-        const endedAt = now();
-        const decodeMs = slot.metrics.firstTokenAt === null || !slot.metrics.stepObservedFromStart
-          ? null
-          : Math.max(0, endedAt - slot.metrics.firstTokenAt);
-        slot.metrics.firstTokenAt = null;
-        slot.metrics.stepObservedFromStart = false;
-        const outputTokens = usageOutputTokens(completed);
-        if (decodeMs !== null && outputTokens !== null) {
-          slot.metrics.decodeMs += decodeMs;
-          slot.metrics.outputTokens += outputTokens;
-          slot.metrics.sampled = true;
-          slot.seededTurnMetrics = null;
-        }
       }
       slot.snapshot.streamState = emptyStream();
     }
@@ -1021,7 +947,7 @@ export function createBrowserSessionRuntimeRegistry(
       slot.snapshot.streamState = { isStreaming: true, streamingMessage: null };
       // 一轮从用户提交那一刻开始计：TTFT 含提交到首字的全部等待。
       // 也保证 agent_start 缺失时 startedAt 不会是 0（那会让 TTFT 变成天文数字）。
-      slot.metrics = emptyTurnMetrics(now());
+      slot.metrics = {};
       const optimisticKey = submissionKey(submissionId);
       slot.timeline = appendRecord(
         slot.timeline,
@@ -1212,23 +1138,15 @@ export function createBrowserSessionRuntimeRegistry(
       const resumedFrom = typeof startedAt === "number" && Number.isFinite(startedAt) && startedAt > 0
         ? startedAt
         : now();
-      slot.metrics = emptyTurnMetrics(resumedFrom);
-      // 冷挂载只能看到当前 step 的尾部：不参与累计（服务端读数通过 seedTurnMetrics 兜底）。
-      slot.metrics.stepObservedFromStart = false;
-      slot.seededTurnMetrics = null;
+      // 冷挂载只清空读数：当前 run 的真实读数由服务端随事件/状态下发
+      // （客户端不再自行累计，也不存在「本地比服务端新」的取舍）。
+      slot.metrics = {};
       publish(slot);
     },
     seedTurnMetrics(sessionId, metrics) {
       const slot = getSlot(sessionId, true)!;
-      if (!metrics) {
-        if (slot.seededTurnMetrics === null) return;
-        slot.seededTurnMetrics = null;
-        publish(slot);
-        return;
-      }
-      // 本地已跑完完整 step 时以本地为准，不被服务端旧值覆盖。
-      if (slot.metrics.sampled) return;
-      slot.seededTurnMetrics = { ...metrics };
+      // 服务端读数的兜底入口（冷挂载/重连）：直接作为当前读数渲染。
+      slot.metrics = metrics ? { ...metrics } : {};
       publish(slot);
     },
     async reconcile(sessionId) {

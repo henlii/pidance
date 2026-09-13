@@ -79,6 +79,7 @@ export function sliceContextAround(
   context: SessionContext,
   aroundEntryId: string,
   limit: number = DEFAULT_SESSION_HISTORY_PAGE,
+  options: { toEnd?: boolean } = {},
 ): SessionContextWindow | null {
   const totalMessageCount = context.messages.length;
   const idx = context.entryIds.indexOf(aroundEntryId);
@@ -86,7 +87,9 @@ export function sliceContextAround(
   const n = clampLimit(limit, DEFAULT_SESSION_HISTORY_PAGE);
   const half = Math.max(1, Math.floor(n / 2));
   const start = Math.max(0, idx - half);
-  const end = Math.min(totalMessageCount, start + n);
+  // toEnd：窗口从 anchor 前一小段一直取到最新（跳转历史时把「之后」整段一并带上，
+  // 运行中会话的尾部流式输出才不会被切掉）。
+  const end = options.toEnd ? totalMessageCount : Math.min(totalMessageCount, start + n);
   return {
     messages: context.messages.slice(start, end),
     entryIds: context.entryIds.slice(start, end),

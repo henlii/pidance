@@ -728,27 +728,38 @@ export class SdkSessionHost {
     return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
   }
 
-  /** 吞吐累加：与浏览器侧 projectTurnMetrics 同一套条件（时长与 tokens 都拿到才计入）。 */
-  private accumulateTurnMetrics(event: SdkAgentEvent): void {
+  /**
+   * 吞吐累加（服务端为唯一权威）。
+   *
+   * 与 dsh 的 turn-metrics 同口径：每个 step 的 decodeMs 是「首 token → 消息结束」
+   * 不含 TTFT；只用 provider 上报的 output tokens；只累计两者齐全的 step，
+   * 按解码时间加权（Σtokens / ΣdecodeMs），不是各 step 速率的算术平均。
+   *
+   * @returns 读数是否发生变化（调用方据此决定要不要随事件下发）
+   */
+  private accumulateTurnMetrics(event: SdkAgentEvent): boolean {
     const now = Date.now();
     if (event.type === "agent_start") {
       this.turnMetrics = { startedAt: now, firstTokenAt: null, ttftMs: null, decodeMs: 0, outputTokens: 0, sampled: false };
-      return;
+      return true;
     }
     if (event.type === "message_start" || event.type === "message_update") {
       const message = event.message as { role?: string; content?: unknown } | undefined;
-      if (message?.role === "user") return;
+      if (message?.role === "user") return false;
       if (this.turnMetrics.firstTokenAt === null && SdkSessionHost.hasRenderableContent(message)) {
         this.turnMetrics.firstTokenAt = now;
-        if (this.turnMetrics.ttftMs === null && this.turnMetrics.startedAt > 0 && now >= this.turnMetrics.startedAt) {
+        const isFirstStep = this.turnMetrics.ttftMs === null;
+        if (isFirstStep && this.turnMetrics.startedAt > 0 && now >= this.turnMetrics.startedAt) {
           this.turnMetrics.ttftMs = now - this.turnMetrics.startedAt;
         }
+        // TTFT 首帧即下发：顶栏能立刻显示延迟读数
+        return isFirstStep;
       }
-      return;
+      return false;
     }
     if (event.type === "message_end") {
       const message = event.message as { role?: string; usage?: { output?: unknown } } | undefined;
-      if (message?.role !== "assistant") return;
+      if (message?.role !== "assistant") return false;
       const decodeMs = this.turnMetrics.firstTokenAt === null ? null : Math.max(0, now - this.turnMetrics.firstTokenAt);
       this.turnMetrics.firstTokenAt = null;
       const outputTokens = SdkSessionHost.outputTokensOf(message);
@@ -756,8 +767,11 @@ export class SdkSessionHost {
         this.turnMetrics.decodeMs += decodeMs;
         this.turnMetrics.outputTokens += outputTokens;
         this.turnMetrics.sampled = true;
+        // step 结束：本 step 已计入，下发最新读数（客户端不再自行累计）
+        return true;
       }
     }
+    return false;
   }
 
   /** 投影给客户端的读数；起点未知时不编造 TTFT。 */
@@ -771,7 +785,8 @@ export class SdkSessionHost {
   }
 
   private handleSessionEvent(event: SdkAgentEvent): void {
-    this.accumulateTurnMetrics(event);
+    // 吞吐读数是否变化（真值附加到真正 emit 的对象上，见下方 eventToEmit）
+    const metricsChanged = this.accumulateTurnMetrics(event);
     switch (event.type) {
       case "agent_start":
         this.promptRunning = true;
@@ -870,6 +885,14 @@ export class SdkSessionHost {
         break;
     }
     let eventToEmit = event;
+    // 吞吐读数：TTFT 首帧 / 每个 step 结束时下发（服务端为唯一权威，客户端只渲染）。
+    // 必须挂到 eventToEmit —— 它是 emit 的目标对象，直接改 event 会被下面的浅拷贝丢掉。
+    if (metricsChanged) {
+      const projected = this.projectTurnMetrics();
+      if (projected.ttftMs !== undefined || projected.tokensPerSecond !== undefined) {
+        eventToEmit = { ...eventToEmit, turnMetrics: projected };
+      }
+    }
     // 上下文占用随每条 assistant 消息（每个工具轮次）变化：message_end 时 SDK
     // 权威 messages 已含刚结束的这条，getContextUsage() 即最新值；只在 agent_end
     // 下发会让顶栏在整个 run 期间停在上一轮读数。agent_end 保留同字段，避免
@@ -879,7 +902,9 @@ export class SdkSessionHost {
       && (event as { message?: { role?: string } }).message?.role === "assistant";
     if (event.type === "agent_end" || isAssistantMessageEnd) {
       const usage = this.contextUsageSnapshot();
-      if (usage) eventToEmit = { ...event, contextUsage: usage };
+      // 基于 eventToEmit 而不是 event：否则会丢掉上面刚挂上的 turnMetrics
+      // （同一帧既要带上下文占用、也要带吞吐读数）。
+      if (usage) eventToEmit = { ...eventToEmit, contextUsage: usage };
     }
     this.emit(this.withRenderedToolLines(eventToEmit));
   }

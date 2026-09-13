@@ -1033,7 +1033,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const jumpGenerationRef = useRef(0);
   const jumpToEntry = useCallback(async (
     entryId: string,
-    options?: { limit?: number },
+    options?: { limit?: number; toEnd?: boolean },
   ): Promise<boolean> => {
     const sid = sessionIdRef.current;
     if (!sid || !entryId) return false;
@@ -1051,6 +1051,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         around: entryId,
         deferThinking: "1",
         deferMedia: "1",
+        // 默认把窗口一直取到最新：跳转历史后仍要保留尾部（运行中会话的流式输出）
+        toEnd: options?.toEnd === false ? "0" : "1",
       });
       if (options?.limit) params.set("limit", String(options.limit));
       if (leafAtStart) params.set("leafId", leafAtStart);
