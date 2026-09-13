@@ -51,6 +51,8 @@ const DASH_HEIGHT = 2;
 const DASH_GAP = 4;
 /** 列表最大高度：超出后内部滚动（横线再多也够得到）。 */
 const LIST_MAX_HEIGHT_PX = 320;
+/** 横线相对轨道左侧的内缩：贴边太紧，视觉上像被裁掉。 */
+const DASH_LEFT_INSET_PX = 4;
 /** 轨道太矮（横线挤在一起）则整条隐藏。 */
 const MIN_USABLE_HEIGHT_PX = 120;
 /** 信息卡最大宽高：超出省略号截断，避免长消息把卡片撑爆。 */
@@ -197,23 +199,28 @@ export function MessageNavRail({
      * 把目标滚到视口顶部：等一帧布局稳定后瞬时定位一次，再校正一次。
      * （定位会整体替换时间线，跟随几帧内还会因图片/折叠块改变高度。）
      */
+    /**
+     * 快速滚动到目标（不是瞬时跳转）。
+     *
+     * 用 smooth：动画期间用户滚轮/触摸会自然接管（浏览器会中断平滑滚动），
+     * 不像瞬跳那样"啪"地换屏。定位会整体替换时间线，为保证动画期间高度稳定，
+     * 先等一帧布局落定再发起，并在动画结束后校正一次高亮。
+     */
     const scrollToTarget = (el: HTMLElement) => {
-      const place = () => {
-        if (!el.isConnected) return;
-        const top = el.getBoundingClientRect().top
-          - scrollEl.getBoundingClientRect().top
-          + scrollEl.scrollTop;
-        scrollEl.scrollTo({ top, behavior: "auto" });
-      };
+      const targetTop = () => el.getBoundingClientRect().top
+        - scrollEl.getBoundingClientRect().top
+        + scrollEl.scrollTop;
       requestAnimationFrame(() => {
-        place();
-        // 高亮交给 syncActive 统一推导（它会看到目标已在视口内）
-        syncActive();
-        // 布局二次稳定后校正一次（只校正，不再循环抢滚）
-        window.setTimeout(() => {
-          place();
+        if (!el.isConnected) return;
+        scrollEl.scrollTo({ top: targetTop(), behavior: "smooth" });
+        // 动画期间按真实位置持续校正高亮，结束后再收尾一次
+        let frames = 0;
+        const tick = () => {
           syncActive();
-        }, 250);
+          frames += 1;
+          if (frames < 40 && el.isConnected) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
       });
     };
 
@@ -282,19 +289,27 @@ export function MessageNavRail({
         userSelect: "none",
       }}
     >
-      {/* 短横线：整体在轨道内上下居中，条间固定间距（不随数量拉伸铺满） */}
+      {/* 短横线：整体在轨道内上下居中，条间固定间距（不随数量拉伸铺满）。
+          分两层是为了「纵向可滚 + 横向永不裁」：外层只做垂直居中与限高（overflow 保持
+          visible，否则会把相邻的 overflowX 强制成 auto 而裁掉悬浮加长部分），
+          内层才是真正的纵向滚动容器。 */}
       <div
         style={{
           position: "absolute",
-          // 垂直居中，并限制最大高度：超出后列表内部滚动
           top: "50%",
           transform: "translateY(-50%)",
-          left: 0,
-          right: 0,
+          left: DASH_LEFT_INSET_PX,
           maxHeight: `min(${LIST_MAX_HEIGHT_PX}px, 100%)`,
           display: "flex",
           flexDirection: "column",
-          alignItems: "center",
+        }}
+      >
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          // 悬浮加长（12 → 24px）比轨道宽：靠左对齐，加长部分向右伸出而不被裁
+          alignItems: "flex-start",
           justifyContent: listOverflows ? "flex-start" : "center",
           gap: DASH_GAP,
           overflowY: "auto",
@@ -321,7 +336,8 @@ export function MessageNavRail({
               onMouseEnter={() => setHovered(item.ordinal)}
               onFocus={() => setHovered(item.ordinal)}
               style={{
-                width: DASH_WIDTH + 6,
+                // 按钮定宽 = 悬浮加长后的宽度：加长时不会撑出横向滚动，也不会被裁
+                width: DASH_WIDTH * 2,
                 height: 14,
                 flexShrink: 0,
                 padding: 0,
@@ -330,7 +346,7 @@ export function MessageNavRail({
                 cursor: isJumping ? "progress" : "pointer",
                 display: "flex",
                 alignItems: "center",
-                justifyContent: "center",
+                justifyContent: "flex-start",
               }}
             >
               <span
@@ -348,6 +364,7 @@ export function MessageNavRail({
             </button>
           );
         })}
+      </div>
       </div>
 
       {/* 悬浮信息卡：有最大宽高，超出省略号截断；贴着轨道右侧、按需上下收敛 */}
