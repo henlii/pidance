@@ -213,6 +213,8 @@ export const en = {
   chat_runningCommand: 'Running command',
   chat_thinking: 'Thinking',
   chat_processDetails: 'Process details',
+  chat_blockThinking: 'Thinking',
+  chat_blockTool: 'Tool',
   chat_message: 'message',
   chat_messages: 'messages',
   chat_toolCall: 'tool call',

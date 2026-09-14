@@ -213,6 +213,8 @@ export const zhCN: Record<TranslationKey, string> = {
   chat_runningCommand: '正在运行命令',
   chat_thinking: '思考中',
   chat_processDetails: '过程详情',
+  chat_blockThinking: '思考',
+  chat_blockTool: '工具',
   chat_message: '条消息',
   chat_messages: '条消息',
   chat_toolCall: '次工具调用',

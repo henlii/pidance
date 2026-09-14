@@ -2,7 +2,7 @@
 
 import { memo, useState, useRef, useEffect, useMemo, type ReactNode } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { AlertTriangle, Check, CheckCircle2, ChevronDown, ChevronUp, Copy, FilePlus, FileText, GitBranch, Globe, ListTodo, Pencil, Search, ShieldCheck, Terminal, Webhook, XCircle } from "lucide-react";
+import { AlertTriangle, Check, CheckCircle2, ChevronDown, ChevronUp, Copy, FilePlus, GitBranch, Terminal, XCircle } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
 import { BinaryMessageGallery, BinaryMessageView } from "./BinaryMessageView";
 import { MessageImage, resolveImageContent } from "./MessageImage";
@@ -887,36 +887,64 @@ function pinStreamBlockToBottom(
 }
 
 /**
- * 折叠态内容预览行：块收起时也显示最后一行内容（流式期间随输出滚动更新）。
- * 单行 + monospace + 省略号，不换行即可保持块头高度稳定；不渲染可聚焦元素，
- * 点击穿透到外层的展开/收起按钮。
+ * 块标签：`【思考】` / `【工具】`。
+ *
+ * 设计约束（用户要求）：**永不出现独立标题行**。标签内联在内容前面 —— 折叠与流式中
+ * 整块只有一行（标签 + 末行内容），展开后也是标签接着内容，不再单独占一行标题。
+ * 标签本身是唯一的状态标识与展开/收起入口（不再有工具名、状态、耗时、图标等标题元素；
+ * 工具状态仍由左侧 3px 状态色边框表达）。
  */
-function CollapsedPreviewLine({ text }: { text: string }) {
-  const lastLine = text.trimEnd().split("\n").pop() ?? "";
-  if (!lastLine) return null;
+const BLOCK_LABEL_STYLE = {
+  flexShrink: 0,
+  padding: 0,
+  border: "none",
+  background: "none",
+  color: "var(--text-dim)",
+  cursor: "pointer",
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+  lineHeight: 1.4,
+} as const;
+
+/** 耗时/右对齐小字（标签行右侧，不占额外行高）。 */
+const BLOCK_META_STYLE = {
+  flexShrink: 0,
+  fontSize: 11,
+  color: "var(--text-dim)",
+  fontVariantNumeric: "tabular-nums",
+} as const;
+
+/** 折叠态单行摘要的公共排版：等宽、单行、省略号。 */
+const COLLAPSED_LINE_STYLE = {
+  flex: 1,
+  minWidth: 0,
+  color: "var(--text-dim)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+  lineHeight: 1.4,
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+} as const;
+
+/**
+ * 块标签按钮：`【思考】` / `【工具】`。
+ *
+ * 折叠与展开共用的唯一标识，也是展开/收起入口 —— 它永远内联在内容那一行里，
+ * 不单独占一行（展开态并进首个分区表头，见 ToolCallBlock）。
+ */
+function BlockLabelButton({ label, expanded, onToggle }: { label: string; expanded: boolean; onToggle: () => void }) {
+  const { t } = useI18n();
   return (
-    <div
-      data-collapsed-preview="true"
-      title={lastLine}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 6,
-        padding: "3px 10px 6px",
-        borderTop: "1px dashed var(--border)",
-        color: "var(--text-dim)",
-        fontFamily: "var(--font-mono)",
-        fontSize: 11,
-        lineHeight: 1.4,
-        whiteSpace: "nowrap",
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        pointerEvents: "none",
-      }}
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={expanded}
+      title={expanded ? t("chat_hideProcess") : t("chat_showProcess")}
+      style={BLOCK_LABEL_STYLE}
     >
-      <span style={{ flexShrink: 0, color: "var(--text-dim)" }}>›</span>
-      <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{lastLine}</span>
-    </div>
+      【{label}】
+    </button>
   );
 }
 
@@ -944,6 +972,12 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
   const bodyText = loading
     ? t("message_thinkingLoading")
     : error ?? (block.deferred ? content : getThinkingText(block));
+
+  /**
+   * 折叠态那一行显示什么：流式中取输出末行（随流式滚动更新）；历史块留空，
+   * 只有标签 —— 保持安静，不主动暴露旧推理。
+   */
+  const collapsedText = isStreaming ? ((bodyText ?? "").trimEnd().split("\n").pop() ?? "") : "";
 
   // deferred 思考内容按需加载（点击展开或流式中默认展开均触发）
   const loadIfDeferred = async () => {
@@ -992,55 +1026,45 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
         fontSize: 13,
       }}
     >
-      <button
-        onClick={() => void toggle()}
-        aria-expanded={expanded}
+      <div
         style={{
           display: "flex",
-          alignItems: "center",
+          alignItems: expanded ? "flex-start" : "center",
           gap: 6,
           width: "100%",
           padding: "6px 10px",
           background: "var(--bg-panel)",
-          border: "none",
-          color: "var(--text-muted)",
-          cursor: "pointer",
-          fontSize: 12,
-          textAlign: "left",
+          minWidth: 0,
         }}
       >
-        <span>{t("chat_thinking")}</span>
-        {duration !== undefined && (
-          <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>{formatElapsedDuration(duration * 1000)}</span>
-        )}
-      </button>
-      {!expanded && isStreaming && <CollapsedPreviewLine text={bodyText ?? ""} />}
-      {expanded && (
+        <BlockLabelButton label={t("chat_blockThinking")} expanded={expanded} onToggle={() => void toggle()} />
         <div
           ref={bodyRef}
-          tabIndex={0}
+          tabIndex={expanded ? 0 : undefined}
           className="chat-selectable"
           onScroll={(event) => {
             if (pinningBodyRef.current) return;
             followBodyRef.current = isNearStreamBlockBottom(event.currentTarget);
           }}
-          style={{
-            padding: "8px 10px",
+          style={expanded ? {
+            flex: 1,
+            minWidth: 0,
             color: error ? "var(--error-text)" : "var(--text-muted)",
             fontSize: 12,
             lineHeight: 1.6,
             whiteSpace: "pre-wrap",
-            background: "var(--bg-panel)",
-            borderTop: "1px solid var(--border)",
             maxHeight: streamBlockMaxHeight,
             overflow: "auto",
             overscrollBehavior: "auto",
             touchAction: "pan-y",
-          }}
+          } : COLLAPSED_LINE_STYLE}
         >
-          {bodyText}
+          {expanded ? bodyText : collapsedText}
         </div>
-      )}
+        {duration !== undefined && (
+          <span style={BLOCK_META_STYLE}>{formatElapsedDuration(duration * 1000)}</span>
+        )}
+      </div>
     </div>
   );
 }
@@ -1106,6 +1130,12 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
       ? (pending === true ? Math.max(0, now - startedAt) : duration === undefined ? Math.max(0, (now - startedAt)) : duration * 1000)
       : duration === undefined ? undefined : duration * 1000;
 
+  /**
+   * 折叠态那一行：运行中显示实时输出末行（随流式滚动更新），其余情况显示命令行 ——
+   * 命令行是识别这次调用的稳定信息，不随输出变化。
+   */
+  const liveLastLine = (snapshot?.output ?? "").trimEnd().split("\n").pop() ?? "";
+
   useEffect(() => {
     if (!isRunning) return;
     const id = setInterval(() => setNow(Date.now()), 500);
@@ -1156,60 +1186,39 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
         background: "var(--tool-bg)",
       }}
     >
-      {/* ── Tool call header ── */}
-      <button
-        onClick={() => setExpanded(!expanded)}
-        aria-expanded={expanded}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 7,
-          width: "100%",
-          padding: "6px 10px",
-          background: "none",
-          border: "none",
-          color: "var(--text-muted)",
-          cursor: "pointer",
-          fontSize: 12,
-          textAlign: "left",
-          minWidth: 0,
-        }}
-      >
-        {/* 工具图标 + 静态状态点：运行反馈由状态文字和右侧耗时共同表达。 */}
-        <span style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
-          {getToolIcon(block.toolName, statusColor)}
-          {isRunning && (
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: statusColor }} aria-hidden="true" />
+      {/* 标签与内容同一行：折叠/运行中整块只有一行（不再有标题栏 + 预览行两层）。
+          展开且存在命令分区时，标签并进该分区表头（展开后同样不出现标题行）。 */}
+      {(!expanded || !command) && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 7,
+            width: "100%",
+            padding: "6px 10px",
+            minWidth: 0,
+          }}
+        >
+          <BlockLabelButton label={t("chat_blockTool")} expanded={expanded} onToggle={() => setExpanded(!expanded)} />
+          {!expanded && (
+            <span style={COLLAPSED_LINE_STYLE}>
+              {isRunning && liveLastLine.trim() ? liveLastLine : command}
+            </span>
           )}
-        </span>
-        <span style={{ color: statusColor, fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11, flexShrink: 0 }}>
-          {block.toolName}
-        </span>
-        <span title={command} style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
-          {command}
-        </span>
-        {status && (
-          <span style={{ color: statusColor, fontSize: 10, fontWeight: 600, flexShrink: 0 }}>{t(TOOL_STATUS_KEYS[status])}</span>
-        )}
-        {elapsedMs !== undefined && (
-          <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{formatElapsedDuration(elapsedMs)}</span>
-        )}
-        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-dim)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: expanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
-          <polyline points="2 3.5 5 6.5 8 3.5" />
-        </svg>
-      </button>
-
-      {!expanded && isRunning && (() => {
-        // 折叠态：优先显示实时输出的最后一行（无输出时回落命令行），跟随流式滚动。
-        const liveText = snapshot?.output ?? "";
-        const lastLine = liveText.trimEnd().split("\n").pop() ?? "";
-        return <CollapsedPreviewLine text={lastLine.trim() ? lastLine : command} />;
-      })()}
+          {elapsedMs !== undefined && <span style={BLOCK_META_STYLE}>{formatElapsedDuration(elapsedMs)}</span>}
+        </div>
+      )}
 
       {/* ── Expanded: 参数友好摘要（替代原始 JSON，OpenChamber 风格） ── */}
       {expanded && command && (
-        <div style={{ padding: "8px 10px", borderTop: `1px solid color-mix(in srgb, ${statusColor} 22%, var(--border))`, background: "var(--bg-subtle)" }}>
-          <div style={{ marginBottom: 4, color: "var(--text-dim)", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em" }}>{t("message_toolCommand")}</div>
+        <div style={{ padding: "8px 10px", background: "var(--bg-subtle)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 4 }}>
+            <BlockLabelButton label={t("chat_blockTool")} expanded={expanded} onToggle={() => setExpanded(!expanded)} />
+            <span style={{ color: "var(--text-dim)", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em" }}>{t("message_toolCommand")}</span>
+            {elapsedMs !== undefined && (
+              <span style={{ ...BLOCK_META_STYLE, marginLeft: "auto" }}>{formatElapsedDuration(elapsedMs)}</span>
+            )}
+          </div>
           <code style={{ display: "block", maxHeight: streamBlockMaxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{command}</code>
         </div>
       )}
@@ -1329,13 +1338,6 @@ function AnsiToolLines({ lines, statusColor }: { lines: string[]; statusColor: s
     </pre>
   );
 }
-
-const TOOL_STATUS_KEYS = {
-  running: "message_toolStatusRunning",
-  success: "message_toolStatusSuccess",
-  error: "message_toolStatusError",
-  cancelled: "message_toolStatusCancelled",
-} as const;
 
 function getToolStatusColor(
   status: ToolExecutionStatus | undefined,
@@ -1620,22 +1622,6 @@ function isEditToolName(toolName: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** 工具名 → lucide 图标元素（OpenChamber 风格：每种工具一个可识别图标）。
- * 返回 JSX 元素而非组件类型：避免 render 中创建组件（react-hooks/static-components）。 */
-function getToolIcon(toolName: string, color: string): ReactNode {
-  const name = toolName.toLowerCase();
-  const props = { size: 12, color };
-  if (name === "bash" || name === "exec_command" || name === "terminal" || name.includes("shell")) return <Terminal {...props} />;
-  if (name === "edit" || name === "write" || name.includes("edit") || name.includes("write")) return <Pencil {...props} />;
-  if (name === "read" || name === "multi_read" || name.includes("read") || name.includes("view")) return <FileText {...props} />;
-  if (name === "grep" || name === "search" || name.includes("grep") || name.includes("search") || name.includes("find")) return <Search {...props} />;
-  if (name.includes("web") || name.includes("fetch") || name.includes("http") || name.includes("url")) return <Globe {...props} />;
-  if (name.includes("todo") || name.includes("task")) return <ListTodo {...props} />;
-  if (name.includes("notify") || name.includes("message")) return <Webhook {...props} />;
-  if (name.includes("approve") || name.includes("permission") || name.includes("confirm")) return <ShieldCheck {...props} />;
-  return <Terminal {...props} />;
 }
 
 /** 参数友好摘要：展开区替代原始 JSON 的关键字段展示（OpenChamber formatInputForDisplay 风格）。 */
