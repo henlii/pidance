@@ -6,7 +6,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { messageNavPreview, centeredRailScrollTop } = await jiti.import("./MessageNavRail.tsx");
+const { messageNavPreview, centeredRailScrollTop, railScrollHints } = await jiti.import("./MessageNavRail.tsx");
 
 // 说明：导航条改为「服务端完整大纲 + 懒加载跳转」后，节点不再由 DOM 测量得出
 // （见 lib/session-outline.ts 与 MessageNavRail 的 outline 驱动）。
@@ -55,5 +55,51 @@ test("centeredRailScrollTop：非法输入保持当前滚动位置", () => {
   assert.equal(
     centeredRailScrollTop({ scrollTop: 42, viewportHeight: 200, contentHeight: 1000, itemTop: Number.NaN, itemHeight: 14 }),
     42,
+  );
+});
+
+
+// ---------------------------------------------------------------------------
+// 上下滚动指示器：仅在对应方向还能滚动时显示
+// ---------------------------------------------------------------------------
+
+test("railScrollHints：顶部不显示上三角，底部不显示下三角", () => {
+  // 停在顶部：还能向下 → 只显示下三角
+  assert.deepEqual(
+    railScrollHints({ scrollTop: 0, viewportHeight: 200, contentHeight: 1000 }),
+    { up: false, down: true },
+  );
+  // 停在底部：还能向上 → 只显示上三角
+  assert.deepEqual(
+    railScrollHints({ scrollTop: 800, viewportHeight: 200, contentHeight: 1000 }),
+    { up: true, down: false },
+  );
+  // 中间：两个都显示
+  assert.deepEqual(
+    railScrollHints({ scrollTop: 400, viewportHeight: 200, contentHeight: 1000 }),
+    { up: true, down: true },
+  );
+});
+
+test("railScrollHints：内容未溢出（含刚好等高）时都不显示", () => {
+  assert.deepEqual(
+    railScrollHints({ scrollTop: 0, viewportHeight: 400, contentHeight: 300 }),
+    { up: false, down: false },
+  );
+  // 等高：没有可滚范围，不得显示指示器
+  assert.deepEqual(
+    railScrollHints({ scrollTop: 0, viewportHeight: 300, contentHeight: 300 }),
+    { up: false, down: false },
+  );
+});
+
+test("railScrollHints：1px 内视为到边（小数滚动位置不闪）", () => {
+  assert.deepEqual(
+    railScrollHints({ scrollTop: 0.5, viewportHeight: 200, contentHeight: 1000 }),
+    { up: false, down: true },
+  );
+  assert.deepEqual(
+    railScrollHints({ scrollTop: 799.5, viewportHeight: 200, contentHeight: 1000 }),
+    { up: true, down: false },
   );
 });

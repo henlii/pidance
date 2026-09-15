@@ -52,6 +52,9 @@ const DASH_GAP = 4;
 const LIST_MAX_HEIGHT_PX = 320;
 /** 横线相对轨道左侧的内缩：贴边太紧，视觉上像被裁掉。 */
 const DASH_LEFT_INSET_PX = 4;
+/** 上下滚动指示器：小三角尺寸（宽 8 × 高 5）。 */
+const SCROLL_HINT_HALF_WIDTH = 4;
+const SCROLL_HINT_HEIGHT = 5;
 /** 轨道太矮（横线挤在一起）则整条隐藏。 */
 const MIN_USABLE_HEIGHT_PX = 120;
 /** 信息卡最大宽高：超出省略号截断，避免长消息把卡片撑爆。 */
@@ -105,6 +108,19 @@ export function MessageNavRail({
   const renderedElsRef = useRef<HTMLElement[]>([]);
   /** 内层纵向滚动容器：长会话里导航条自身也要跟着当前项滚。 */
   const listRef = useRef<HTMLDivElement | null>(null);
+  /** 轨道能否向上/向下滚动（上下指示器据此显隐）。 */
+  const [railScroll, setRailScroll] = useState({ up: false, down: false });
+  const syncRailScrollHints = useCallback(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const next = railScrollHints({
+      scrollTop: list.scrollTop,
+      viewportHeight: list.clientHeight,
+      contentHeight: list.scrollHeight,
+    });
+    // 不变则保留旧对象，避免无意义重渲染（滚动事件每帧可能触发）
+    setRailScroll((prev) => (prev.up === next.up && prev.down === next.down ? prev : next));
+  }, []);
   const renderedCacheKeyRef = useRef("");
   const measureOffsetRef = useRef(0);
 
@@ -199,7 +215,25 @@ export function MessageNavRail({
     });
     if (Math.abs(next - list.scrollTop) < 1) return;
     list.scrollTop = next;
-  }, [activeEntryId, outline]);
+    // 居中后滚动位置变了，指示器需同步（scroll 事件也会到，这里保证首帧就对）
+    syncRailScrollHints();
+  }, [activeEntryId, outline, syncRailScrollHints]);
+
+  // 上下指示器的显隐跟随轨道的实际可滚状态（滚动 / 内容高度变化 / 尺寸变化）。
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const onScroll = () => syncRailScrollHints();
+    list.addEventListener("scroll", onScroll, { passive: true });
+    const ro = new ResizeObserver(onScroll);
+    ro.observe(list);
+    if (list.firstElementChild) ro.observe(list.firstElementChild);
+    syncRailScrollHints();
+    return () => {
+      list.removeEventListener("scroll", onScroll);
+      ro.disconnect();
+    };
+  }, [syncRailScrollHints, outline.length, railHeight]);
 
   // 轨道高度用于把横线换算成像素（悬浮卡定位的前提）
   useEffect(() => {
@@ -394,6 +428,24 @@ export function MessageNavRail({
           flexDirection: "column",
         }}
       >
+      {/* 上下指示器：轨道内容高于自身时才有意义；颜色与未选中的导航点一致。
+          绝对定位在「垂直居中包裹层」的上下方，因此不影响横线的居中与限高。 */}
+      {railScroll.up && (
+        <span
+          aria-hidden="true"
+          data-nav-scroll-hint="up"
+          style={{
+            position: "absolute",
+            top: -(SCROLL_HINT_HEIGHT + 4),
+            left: (DASH_WIDTH - SCROLL_HINT_HALF_WIDTH * 2) / 2,
+            width: 0,
+            height: 0,
+            borderLeft: `${SCROLL_HINT_HALF_WIDTH}px solid transparent`,
+            borderRight: `${SCROLL_HINT_HALF_WIDTH}px solid transparent`,
+            borderBottom: `${SCROLL_HINT_HEIGHT}px solid var(--border)`,
+          }}
+        />
+      )}
       <div
         ref={listRef}
         style={{
@@ -457,6 +509,22 @@ export function MessageNavRail({
           );
         })}
       </div>
+      {railScroll.down && (
+        <span
+          aria-hidden="true"
+          data-nav-scroll-hint="down"
+          style={{
+            position: "absolute",
+            bottom: -(SCROLL_HINT_HEIGHT + 4),
+            left: (DASH_WIDTH - SCROLL_HINT_HALF_WIDTH * 2) / 2,
+            width: 0,
+            height: 0,
+            borderLeft: `${SCROLL_HINT_HALF_WIDTH}px solid transparent`,
+            borderRight: `${SCROLL_HINT_HALF_WIDTH}px solid transparent`,
+            borderTop: `${SCROLL_HINT_HEIGHT}px solid var(--border)`,
+          }}
+        />
+      )}
       </div>
 
       {/* 悬浮信息卡：有最大宽高，超出省略号截断；贴着轨道右侧、按需上下收敛 */}
@@ -500,6 +568,22 @@ export function MessageNavRail({
 export function messageNavPreview(text: string, maxLength = 120): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > maxLength ? `${flat.slice(0, maxLength)}…` : flat;
+}
+
+/**
+ * 轨道还能向哪边滚动（决定上下指示器是否显示）。
+ *
+ * 容差 1px：滚动位置与内容高度都是小数（浏览器缩放/缩放系数），
+ * 用严格 0/相等判断会让指示器在贴边时闪烁。
+ */
+export function railScrollHints(input: {
+  scrollTop: number;
+  viewportHeight: number;
+  contentHeight: number;
+}): { up: boolean; down: boolean } {
+  const max = Math.max(0, input.contentHeight - input.viewportHeight);
+  if (max <= 1) return { up: false, down: false };
+  return { up: input.scrollTop > 1, down: input.scrollTop < max - 1 };
 }
 
 /**
