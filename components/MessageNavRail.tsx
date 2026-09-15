@@ -371,13 +371,18 @@ export function MessageNavRail({
      * 目标偏移会算在旧布局上，落点整体偏掉（实测 topRel 2842px）。所以：
      * 先等布局稳定（连续两帧位置一致）→ 平滑滚动 → 动画结束后再校正一次。
      */
-    const scrollToTarget = (el: HTMLElement) => {
+    const scrollToTarget = (el: HTMLElement, options?: { instantFirst?: boolean }) => {
       const measure = () => el.getBoundingClientRect().top
         - scrollEl.getBoundingClientRect().top
         + scrollEl.scrollTop;
       // 用户一动滚轮/拖滚动条（pointerdown 含触摸）/键盘就放弃后续校正，不跟用户抢滚动
       let interrupted = false;
       const onInterrupt = () => { interrupted = true; };
+      const watchInterrupts = () => {
+        scrollEl.addEventListener("wheel", onInterrupt, { passive: true });
+        scrollEl.addEventListener("pointerdown", onInterrupt, { passive: true });
+        scrollEl.addEventListener("keydown", onInterrupt);
+      };
       const stopWatching = () => {
         scrollEl.removeEventListener("wheel", onInterrupt);
         scrollEl.removeEventListener("pointerdown", onInterrupt);
@@ -387,9 +392,6 @@ export function MessageNavRail({
         // 只在仍属于本次跳转时清：旧的清理链不得抹掉新一次跳转的钉住。
         if (jumpPinRef.current === entryId) jumpPinRef.current = null;
       };
-      scrollEl.addEventListener("wheel", onInterrupt, { passive: true });
-      scrollEl.addEventListener("pointerdown", onInterrupt, { passive: true });
-      scrollEl.addEventListener("keydown", onInterrupt);
 
       const drift = () => el.getBoundingClientRect().top - scrollEl.getBoundingClientRect().top;
 
@@ -436,6 +438,20 @@ export function MessageNavRail({
         }
         requestAnimationFrame(() => settleThenScroll(attempt + 1, top, nextStable));
       };
+
+      watchInterrupts();
+      // 刚替换过时间线（服务端定位加载）时：**先瞬时到位**，再进入有界收敛。
+      //
+      // 为什么必需：跳转是「整体替换窗口 + 内容高度变化」，浏览器不会保持当前视口
+      // 对应的内容；若首次定位拖到下一帧（settleThenScroll 的 rAF），中间会先绘制
+      // 一帧错误位置 —— 用户看到的就是「显示的内容被换掉了，然后才滚到目标」。
+      // 这里仍在 waitForTarget 的 rAF 微任务中（绘制前），因此不会闪。
+      if (options?.instantFirst) {
+        scrollEl.scrollTop = measure();
+        syncActiveRef.current();
+        converge(0, 0);
+        return;
+      }
       requestAnimationFrame(() => settleThenScroll());
     };
 
@@ -464,7 +480,8 @@ export function MessageNavRail({
       const target = await waitForTarget();
       if (target && isCurrent()) {
         handedOff = true;
-        scrollToTarget(target);
+        // 走了服务端定位（窗口被替换）→ 首次定位必须瞬时，避免闪一帧错误位置
+        scrollToTarget(target, { instantFirst: true });
       }
     } finally {
       if (isCurrent()) setJumpingTo(null);
