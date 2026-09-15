@@ -5,6 +5,7 @@
 import { cacheSessionPath, invalidateSessionListCache, resolveSessionPath } from "./session-reader";
 import { openSessionView } from "./pi-session-io";
 import { getPidancePref, readPidancePrefs, type PidancePrefs } from "./pidance-prefs-file";
+import { hasQueuedFollowUp } from "./session-queue";
 import { startSdkSessionHost, type SdkSessionHost } from "./sdk-session-host";
 import { getRunningStartedAt as getLocalRunningStartedAt } from "./running-state";
 import {
@@ -344,8 +345,9 @@ export async function startRpcSession(
 }
 
 function hasQueuedText(value: unknown): boolean {
-  return Array.isArray(value)
-    && value.some((item) => typeof item === "string" && item.trim().length > 0);
+  // 与写入方共用同一解码器：只认数组会让当前格式 {items, revision} 被判为空，
+  // 重启后队列不会被恢复投递（A1/A2）。
+  return hasQueuedFollowUp(value);
 }
 
 /** 读取当前嵌套 prefs；同时兼容早期扁平 sessionQueue.<id> 键。 */

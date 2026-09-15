@@ -34,6 +34,11 @@ import {
   recordRunningStartedAt,
 } from "./running-state";
 import {
+  normalizeFollowUpItems,
+  parseFollowUpQueue,
+  serializeFollowUpQueue,
+} from "./session-queue";
+import {
   normalizeActivityInput,
   parseAppendActivityCommand,
   PIDANCE_ACTIVITY_CUSTOM_TYPE,
@@ -398,17 +403,11 @@ export class SdkSessionHost {
     this.followUpQueueHydrated = true;
     const prefs = readPidancePrefs(this.agentDir);
     const raw = getPidancePref(prefs, `sessionQueue.${this.realSessionId}`);
-    const asItems = (value: unknown): string[] => Array.isArray(value)
-      ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-      : [];
-    if (Array.isArray(raw)) {
-      // 旧格式（纯数组）：无版本号，从 0 起算
-      this.followUpQueue = asItems(raw);
-      return;
-    }
-    const stored = raw && typeof raw === "object" ? (raw as { items?: unknown; revision?: unknown }) : null;
-    this.followUpQueue = asItems(stored?.items);
-    if (typeof stored?.revision === "number") this.followUpQueueRevision = stored.revision;
+    // 解码只走共享 decoder：写入方与启动恢复必须同一套判定，
+    // 否则格式升级后恢复扫描会静默漏掉当前格式的队列。
+    const decoded = parseFollowUpQueue(raw);
+    this.followUpQueue = decoded.items;
+    this.followUpQueueRevision = decoded.revision;
   }
 
   /** 队列内容变更唯一入口：同步推进版本号，保证快照可判新旧。 */
@@ -421,7 +420,7 @@ export class SdkSessionHost {
     try {
       updatePidancePref(
         `sessionQueue.${this.realSessionId}`,
-        { items: this.followUpQueue, revision: this.followUpQueueRevision },
+        serializeFollowUpQueue({ items: this.followUpQueue, revision: this.followUpQueueRevision }),
         this.agentDir,
       );
     } catch (error) {
@@ -1621,9 +1620,22 @@ export class SdkSessionHost {
       }
 
       case "set_follow_up_queue": {
-        const items = Array.isArray(command.items)
-          ? (command.items as unknown[]).filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-          : [];
+        const items = normalizeFollowUpItems(command.items);
+        // 条件写入（CAS）：多标签各自基于同一快照整组替换时，后到的会静默丢掉
+        // 先到的入队。客户端带它最后一次见过的服务端 revision；不匹配则拒绝，
+        // 并把权威队列回给客户端。不传 expectedRevision 保持旧行为（首写无基线）。
+        const expectedRevision = typeof command.expectedRevision === "number"
+          && Number.isFinite(command.expectedRevision)
+          ? command.expectedRevision
+          : undefined;
+        if (expectedRevision !== undefined && expectedRevision !== this.followUpQueueRevision) {
+          return {
+            ok: false,
+            conflict: true,
+            revision: this.followUpQueueRevision,
+            items: [...this.followUpQueue],
+          };
+        }
         // flush 进行中：浏览器整组替换会与 sendNextFollowUp 的 batch 快照并发
         // （清队 → 消息仍被投递但 UI 已空 / 或反被 abort 丢弃）。先中止自动
         // 投递，再按新 items 落地；中止只复位批处理状态，未确认条目仍按新
@@ -1636,7 +1648,11 @@ export class SdkSessionHost {
         // late-enqueue：如果已经 settled/空闲，立即调度一次投递。
         if (this.isSettled() && items.length > 0) this.scheduleFollowUpFlush();
         this.resetIdleTimer();
-        return { ok: true, queued: this.followUpQueue.length };
+        return {
+          ok: true,
+          queued: this.followUpQueue.length,
+          revision: this.followUpQueueRevision,
+        };
       }
 
       case "follow_up": {

@@ -74,6 +74,7 @@ import {
 import { submissionKey } from "@/lib/session-timeline";
 import {
   beginSync,
+  isQueueWriteConflict,
   observeQueue,
   projection,
   proposeQueue,
@@ -83,6 +84,7 @@ import {
   type QueueBook,
   type QueueEntry,
 } from "@/lib/queue-state";
+import { normalizeFollowUpItems } from "@/lib/session-queue";
 import type { TimelineHydrateMode, TurnMetrics } from "@/lib/browser-session-runtime-registry";
 import {
   closeSelectionOp,
@@ -502,7 +504,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       .catch(() => undefined)
       .then(async () => {
         // Host 同步持久化并在 settled 后投递；浏览器不再并发写同一 queue prefs。
-        await sendAgentCommand(sid, { type: "set_follow_up_queue", items: [...next] });
+        // 带 expectedRevision：多标签各自基于同一快照整组替换时由服务端 CAS
+        // 拒绝过期写入，而不是静默覆盖另一标签页刚入队的消息。
+        const result = await sendAgentCommand<unknown>(sid, {
+          type: "set_follow_up_queue",
+          items: [...next],
+          expectedRevision: remoteQueueRevisionRef.current.get(sid) ?? null,
+        });
+        if (isQueueWriteConflict(result)) {
+          // 冲突：采纳服务端权威队列（不重试覆盖），并把用户文本退回输入框。
+          const conflict = result as { revision?: number; items?: unknown };
+          observeRemoteQueue(sid, normalizeFollowUpItems(conflict.items), conflict.revision);
+          if (currentQueueSessionIdRef.current === sid) publishQueue();
+          throw new Error(t("input_queueConflict"));
+        }
       });
     followUpSyncRef.current = sync.catch(() => undefined);
     try {
@@ -519,7 +534,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (currentQueueSessionIdRef.current === sid) publishQueue();
       throw error;
     }
-  }, [publishQueue]);
+  }, [publishQueue, observeRemoteQueue, t]);
 
   // 分支切换/总结进行中：树节点、发送与再次导航全部暂停，避免与 navigateTree 并发写。
   const [branchBusy, setBranchBusy] = useState(false);

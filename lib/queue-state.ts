@@ -143,3 +143,24 @@ export function acceptRemoteQueue(
   if (seen !== undefined && revision < seen) return { accept: false, seen };
   return { accept: true, seen: revision };
 }
+
+/**
+ * 服务端 `set_follow_up_queue` 的冲突回执判定。
+ *
+ * 多标签各自基于同一份快照整组替换时，服务端用 CAS 拒绝过期写入并返回权威队列；
+ * 客户端必须采纳权威队列（而不是重试覆盖），否则先到的那条入队会被静默丢弃。
+ */
+export type QueueWriteResult = {
+  ok?: boolean;
+  conflict?: boolean;
+  revision?: number;
+  items?: unknown;
+};
+
+export function isQueueWriteConflict(result: unknown): boolean {
+  return Boolean(
+    result
+    && typeof result === "object"
+    && (result as QueueWriteResult).conflict === true,
+  );
+}
