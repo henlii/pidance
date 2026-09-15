@@ -85,6 +85,7 @@ import {
   type QueueEntry,
 } from "@/lib/queue-state";
 import { normalizeFollowUpItems } from "@/lib/session-queue";
+import { canApplyProjection } from "@/lib/session-projection";
 import type { TimelineHydrateMode, TurnMetrics } from "@/lib/browser-session-runtime-registry";
 import {
   closeSelectionOp,
@@ -483,11 +484,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return remoteQueueRevisionRef.current.get(sid) ?? null;
   }, []);
 
-  /** 热 state 投影：受在途守卫与代次约束，不得盖掉更新的本地写入。 */
-  const applyProjectedQueues = useCallback((value?: AgentStateResponse["queuedMessages"]) => {
+  /**
+   * 热 state 投影：受在途守卫与代次约束，不得盖掉更新的本地写入。
+   *
+   * `sid` 是这份快照**属于哪个会话**。调用方必须传自己请求的那个会话，而不是
+   * 「当前显示的会话」—— 否则迟到的响应会把上一个会话的队列写进当前界面，
+   * 也会把当前会话的账写脏（跨会话串味的根因）。会话已切走则整份丢弃。
+   */
+  const applyProjectedQueues = useCallback((sid: string, value?: AgentStateResponse["queuedMessages"]) => {
+    if (currentQueueSessionIdRef.current !== sid) return;
     const next = normalizeQueuedMessages(value);
-    const sid = currentQueueSessionIdRef.current;
-    if (sid) observeRemoteQueue(sid, next.followUp, next.followUpRevision);
+    observeRemoteQueue(sid, next.followUp, next.followUpRevision);
     setQueuedMessages({ steering: next.steering, followUp: projection(queueEntryNow()), followUpRevision: remoteRevisionNow() });
   }, [queueEntryNow, observeRemoteQueue]);
   /**
@@ -854,7 +861,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           patchExtensionUiState({ widgets: liveState.extensionWidgets ?? [] });
         }
         if (liveState.queuedMessages !== undefined) {
-          applyProjectedQueues(liveState.queuedMessages);
+          applyProjectedQueues(sid, liveState.queuedMessages);
         }
         if (Array.isArray(liveState.pendingExtensionRequests)) {
           const queue = (liveState.pendingExtensionRequests as AgentEvent[])
@@ -1412,10 +1419,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   /**
    * 用 host 下发的本 run 吞吐读数兜底（冷挂载/刷新看不到 step 开始）。
    * 空对象（服务端也没有读数）等于清掉 seed，避免显示上一轮的旧值。
+   *
+   * `sid` 是这份读数**属于哪个会话**：必须由调用方显式传入，不能读「当前会话」
+   * ——否则为 A 发起的请求在切到 B 之后返回，会把 A 的读数 seed 进 B 的 slot。
    */
-  const seedTurnMetricsFromState = useCallback((state?: AgentStateResponse | null) => {
-    const sid = sessionIdRef.current;
-    if (!sid || !state) return;
+  const seedTurnMetricsFromState = useCallback((sid: string, state?: AgentStateResponse | null) => {
+    if (!state) return;
+    if (!canApplyProjection({ sessionId: sid }, { sessionId: sessionIdRef.current })) return;
     const metrics = state.turnMetrics ?? null;
     const usable = metrics && (metrics.tokensPerSecond !== undefined || metrics.ttftMs !== undefined)
       ? metrics
@@ -1427,10 +1437,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * 将 /api/agent 状态快照的附属字段应用到本地 state（散落重复点的统一收口）。
    * 只覆盖显式提供的字段；running/streaming 等执行态由调用方负责。
    */
-  const applyAgentStateSnapshot = useCallback((state?: AgentStateResponse | null) => {
+  const applyAgentStateSnapshot = useCallback((sid: string, state?: AgentStateResponse | null) => {
     if (!state) return;
+    // 会话已切走：整份快照（含队列投影）丢弃，避免迟到响应写进当前界面。
+    if (!canApplyProjection({ sessionId: sid }, { sessionId: sessionIdRef.current })) return;
     if (state.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
-    seedTurnMetricsFromState(state);
+    seedTurnMetricsFromState(sid, state);
     if (state.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt ?? null);
     if (isThinkingLevel(state.thinkingLevel)) setThinkingLevel(state.thinkingLevel);
     // host 热投影的模型：磁盘 loadSession 未返回前恢复模型显示，避免切换窗口
@@ -1442,7 +1454,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (state.extensionStatuses !== undefined) patchExtensionUiState({ statuses: state.extensionStatuses ?? [] });
     if (state.extensionWidgets !== undefined) patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
     if (state.queuedMessages !== undefined) {
-      applyProjectedQueues(state.queuedMessages);
+      applyProjectedQueues(sid, state.queuedMessages);
     }
   }, [applyProjectedQueues, patchExtensionUiState, seedTurnMetricsFromState, setLastKnownModel]);
 
@@ -1471,7 +1483,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         notifyAutoFollowEnd();
       });
       if (agentState && typeof agentState === "object" && "running" in agentState) {
-        applyAgentStateSnapshot(agentState.state);
+        applyAgentStateSnapshot(sid, agentState.state);
       }
     } finally {
       const current = registry.getRunState(sid);
@@ -1508,7 +1520,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       try {
         const result = await registry.reconcile(sid);
         if (!result || result.stale) return;
-        applyAgentStateSnapshot(result.state as AgentStateResponse | undefined);
+        applyAgentStateSnapshot(sid, result.state as AgentStateResponse | undefined);
         if (result.shouldFinish) {
           await finishAgentRun(sid, result.runId);
           return;
@@ -1561,23 +1573,33 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const result = await registry.reconcile(sid);
       if (!result || result.stale) return;
       const state = result.state as AgentStateResponse | undefined;
-      // Mirror compaction state unconditionally: a missed compaction_end
-      // would otherwise leave the Stop UI stuck.
-      setIsCompacting(state?.isCompacting ?? false);
+      // 迟到响应不得写进已切走的会话：压缩态与读数都以「该响应所属会话」为准，
+      // 不读「当前会话」推断目标（否则 A 的压缩态会写进 B 的界面）。
+      const stillCurrent = canApplyProjection(
+        { sessionId: sid },
+        { sessionId: sessionIdRef.current },
+      );
+      if (stillCurrent) {
+        // Mirror compaction state: a missed compaction_end would otherwise leave
+        // the Stop UI stuck.
+        setIsCompacting(state?.isCompacting ?? false);
+      }
       // 刷新/后台回收回来后，本 run 的完整读数只有服务端有：接上它（本地跑完一个
       // 完整 step 后 registry 会自动忽略 seed，不会用旧值覆盖更新的本地读数）。
-      seedTurnMetricsFromState(state);
+      seedTurnMetricsFromState(sid, state);
       // 迟到的响应不得覆盖已切走会话的上下文，也不得覆盖请求期间到达的更新读数
       // （压缩后的 {tokens:null} 合法，不能用「更大」判新旧）。
       if (
         state?.contextUsage !== undefined
-        && sessionIdRef.current === sid
-        && contextUsageGenerationRef.current === contextGenerationAtRequest
+        && canApplyProjection(
+          { sessionId: sid, generation: contextGenerationAtRequest },
+          { sessionId: sessionIdRef.current, generation: contextUsageGenerationRef.current },
+        )
       ) {
         setContextUsage(state.contextUsage ?? null);
       }
       if (state?.queuedMessages !== undefined) {
-        applyProjectedQueues(state.queuedMessages);
+        applyProjectedQueues(sid, state.queuedMessages);
       }
       if (result.shouldFinish) {
         await finishAgentRun(sid, result.runId);
@@ -2915,15 +2937,33 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
           if (agentState?.lockedByOther !== undefined) setLockedByOther(agentState.lockedByOther);
           if (agentState?.state) {
-            if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
-            if (agentState.state.contextUsage !== undefined) setContextUsage(agentState.state.contextUsage ?? null);
-            seedTurnMetricsFromState(agentState.state);
-            if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt ?? null);
-            if (isThinkingLevel(agentState.state.thinkingLevel)) setThinkingLevel(agentState.state.thinkingLevel);
-            if (agentState.state.extensionStatuses !== undefined) patchExtensionUiState({ statuses: agentState.state.extensionStatuses ?? [] });
-            if (agentState.state.extensionWidgets !== undefined) patchExtensionUiState({ widgets: agentState.state.extensionWidgets ?? [] });
+            // 这份快照属于本会话（session.id），但响应到达时用户可能已切走：
+            // 逐个字段都不得写进别的会话。
+            const stillCurrent = canApplyProjection(
+              { sessionId: session.id },
+              { sessionId: sessionIdRef.current },
+            );
+            if (stillCurrent && agentState.state.isCompacting !== undefined) {
+              setIsCompacting(agentState.state.isCompacting);
+            }
+            if (stillCurrent && agentState.state.contextUsage !== undefined) {
+              setContextUsage(agentState.state.contextUsage ?? null);
+            }
+            seedTurnMetricsFromState(session.id, agentState.state);
+            if (stillCurrent && agentState.state.systemPrompt !== undefined) {
+              setSystemPrompt(agentState.state.systemPrompt ?? null);
+            }
+            if (stillCurrent && isThinkingLevel(agentState.state.thinkingLevel)) {
+              setThinkingLevel(agentState.state.thinkingLevel);
+            }
+            if (stillCurrent && agentState.state.extensionStatuses !== undefined) {
+              patchExtensionUiState({ statuses: agentState.state.extensionStatuses ?? [] });
+            }
+            if (stillCurrent && agentState.state.extensionWidgets !== undefined) {
+              patchExtensionUiState({ widgets: agentState.state.extensionWidgets ?? [] });
+            }
             if (agentState.state.queuedMessages !== undefined) {
-              applyProjectedQueues(agentState.state.queuedMessages);
+              applyProjectedQueues(session.id, agentState.state.queuedMessages);
             }
             if (Array.isArray(agentState.state.pendingExtensionRequests)) {
               const queue = (agentState.state.pendingExtensionRequests as AgentEvent[])
