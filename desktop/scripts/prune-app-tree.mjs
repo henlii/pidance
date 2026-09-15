@@ -395,7 +395,7 @@ function main() {
     root: args.root,
     platform: `${args.platform}-${args.arch}`,
     beforeMB: Number((beforeBytes / 1048576).toFixed(1)),
-    plannedMB: Number((categories.reduce((sum, item) => sum + item.bytes, 0) / 1048576).toFixed(1)),
+    deleteMB: Number((categories.reduce((sum, item) => sum + item.bytes, 0) / 1048576).toFixed(1)),
     missingKeep,
     categories: categories.map((item) => ({ ...item, mb: Number((item.bytes / 1048576).toFixed(1)) })),
   };
@@ -403,7 +403,7 @@ function main() {
   if (args.json) {
     console.log(JSON.stringify(report, null, 2));
   } else {
-    console.log(`[prune] 目标平台 ${report.platform}；输入 ${report.beforeMB} MB → 计划删除 ${report.plannedMB} MB（${entries.length} 项）`);
+    console.log(`[prune] 目标平台 ${report.platform}；输入 ${report.beforeMB} MB → 计划删除 ${report.deleteMB} MB（${entries.length} 项）`);
     for (const item of report.categories) console.log(`  - ${item.category}: ${item.mb} MB / ${item.count} 项`);
   }
 
