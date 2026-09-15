@@ -116,6 +116,20 @@ export function httpStatusForSessionError(error: unknown): number {
   return 500;
 }
 
+/**
+ * /api/agent/new 的状态码映射：输入错误 400，否则交给通用映射。
+ *
+ * 存在的理由：Route 曾用 `String(error)` 与原文字符串比较，而 `String(new Error("cwd is required"))`
+ * 是 `"Error: cwd is required"`，两个 400 分支永远不会命中 —— 缺参数被当成 500。
+ * 判定放在 Service 层，Route 保持薄，且可直接单测。
+ */
+export function httpStatusForNewSessionError(error: unknown): number {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === "cwd is required") return 400;
+  if (message.startsWith("Directory does not exist:")) return 400;
+  return httpStatusForSessionError(error);
+}
+
 export type CreateNewSessionOptions = {
   cwd: string;
   command: SessionCommand & {

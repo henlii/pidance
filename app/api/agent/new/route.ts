@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { sessionService } from "@/lib/session-service";
+import { sessionService, httpStatusForNewSessionError } from "@/lib/session-service";
 
 // POST /api/agent/new  body: { cwd: string; type: string; message?: string; ... }
 // Spawns a brand-new pi session. Most calls immediately send the first command;
@@ -17,13 +17,9 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ success: true, sessionId, data });
   } catch (error) {
-    const message = String(error);
-    if (message === "cwd is required") {
-      return NextResponse.json({ error: "cwd is required" }, { status: 400 });
-    }
-    if (message.startsWith("Directory does not exist:")) {
-      return NextResponse.json({ error: message }, { status: 400 });
-    }
-    return NextResponse.json({ error: message }, { status: 500 });
+    // 不要再与 `String(error)` 比较：Error 的字符串形式带 "Error: " 前缀，
+    // 会让输入错误被误报为 500。统一走类型化映射。
+    const message = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ error: message }, { status: httpStatusForNewSessionError(error) });
   }
 }
