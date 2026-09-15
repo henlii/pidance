@@ -193,12 +193,16 @@ export function isFresh(lease: RunningLease, now: number): boolean {
   return now - lease.heartbeatAt <= RUNNING_LEASE_TTL_MS && isPidAlive(lease.pid);
 }
 
-function collectFreshLeases(agentDir: string, now: number): RunningLease[] {
+/**
+ * 扫描租约目录：回收「持有者已死 / 内容损坏」的文件，并返回新鲜租约。
+ * 删除必须在本锁内做（否则可能删掉刚写入的新 owner）。
+ */
+function scanLeases(agentDir: string, now: number): { fresh: RunningLease[]; removed: number } {
   const dir = leaseDir(agentDir);
-  if (!existsSync(dir)) return [];
-  // 清理过期文件也是「读-改-写」：必须在锁内做，否则可能删掉刚写入的新 owner。
+  if (!existsSync(dir)) return { fresh: [], removed: 0 };
   return withLeaseLock(agentDir, () => {
     const fresh: RunningLease[] = [];
+    let removed = 0;
     for (const name of readdirSync(dir)) {
       if (!name.endsWith(".json")) continue;
       const path = join(dir, name);
@@ -208,6 +212,7 @@ function collectFreshLeases(agentDir: string, now: number): RunningLease[] {
       if (canEvictLease(lease)) {
         try {
           unlinkSync(path);
+          removed += 1;
         } catch {
           /* ignore */
         }
@@ -216,15 +221,38 @@ function collectFreshLeases(agentDir: string, now: number): RunningLease[] {
       if (!isFresh(lease!, now)) continue; // 活持有者但心跳过期：保留，不计入 fresh 列表
       fresh.push(lease!);
     }
-    return fresh;
+    return { fresh, removed };
   });
+}
+
+/**
+ * 回收失效的运行租约文件（启动时调用）。
+ *
+ * 存在的理由：`releaseRunningLease` 只在优雅 dispose 时执行；进程崩溃、被 SIGKILL
+ * 或 dispose 未跑到时没有兜底删除，租约目录会**无界增长**（实测本机 2550 个文件
+ * / 11MB，抽样 300 个全部属于已死进程）。
+ *
+ * 只删持者已死的；心跳过期但进程仍活着的**一律保留**（见 #30 的规则）。
+ * 锁超时（另一进程正在写）不是错误：返回 skipped，下次启动再清。
+ */
+export function sweepStaleRunningLeases(
+  agentDir: string = getAgentDir(),
+  now = Date.now(),
+): { removed: number; active: number; skipped: boolean } {
+  try {
+    const { fresh, removed } = scanLeases(agentDir, now);
+    return { removed, active: fresh.length, skipped: false };
+  } catch (error) {
+    if (isLeaseLockTimeout(error)) return { removed: 0, active: 0, skipped: true };
+    throw error;
+  }
 }
 
 export function listFreshRunningLeaseSessions(
   agentDir: string | undefined = getAgentDir(),
   now = Date.now(),
 ): { sessionId: string; startedAt: number }[] {
-  return collectFreshLeases(agentDir, now).map((lease) => ({
+  return scanLeases(agentDir, now).fresh.map((lease) => ({
     sessionId: lease.sessionId,
     startedAt: lease.startedAt,
   }));
@@ -314,7 +342,7 @@ export function listFreshRunningLeaseSessionIds(
   agentDir: string = getAgentDir(),
   now = Date.now(),
 ): string[] {
-  return collectFreshLeases(agentDir, now).map((lease) => lease.sessionId);
+  return scanLeases(agentDir, now).fresh.map((lease) => lease.sessionId);
 }
 
 export function isRunningLeaseHeldByOther(
