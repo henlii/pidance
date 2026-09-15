@@ -365,13 +365,31 @@ export function MessageNavRail({
     const findTarget = (): HTMLElement | null =>
       resolveMessageElementRef.current?.(entryId) ?? null;
     /**
+     * 把锚点消息放回加载前相对容器顶的同一偏移（瞬时）。
+     * 锚点不在当前 DOM（不在新窗口 / 已卸载）返回 false，不做任何移动。
+     */
+    const applyAnchorOffset = (anchor: { entryId: string; offset: number }) => {
+      const el = resolveMessageElementRef.current?.(anchor.entryId);
+      if (!el || !el.isConnected) return false;
+      scrollEl.scrollTop = el.getBoundingClientRect().top
+        - scrollEl.getBoundingClientRect().top
+        + scrollEl.scrollTop
+        - anchor.offset;
+      return true;
+    };
+
+    /**
      * 快速滚动到目标（平滑动画，不是瞬时跳转）。
      *
      * 定位会整体替换时间线，随后几帧里图片/折叠块还会改变高度；此时立刻发滚动，
      * 目标偏移会算在旧布局上，落点整体偏掉（实测 topRel 2842px）。所以：
      * 先等布局稳定（连续两帧位置一致）→ 平滑滚动 → 动画结束后再校正一次。
      */
-    const scrollToTarget = (el: HTMLElement, options?: { instantFirst?: boolean }) => {
+    const scrollToTarget = (el: HTMLElement, options?: {
+      instantAtTarget?: boolean;
+      /** 换窗锚点：填充期间钉回加载前的视口内容 */
+      anchor?: { entryId: string; offset: number } | null;
+    }) => {
       const measure = () => el.getBoundingClientRect().top
         - scrollEl.getBoundingClientRect().top
         + scrollEl.scrollTop;
@@ -396,6 +414,17 @@ export function MessageNavRail({
       const drift = () => el.getBoundingClientRect().top - scrollEl.getBoundingClientRect().top;
 
       /**
+       * 换窗填充期持续把锚点钉回原位（无锚点时无事发生）。
+       *
+       * 为什么不能只还原一次：新窗口是**分批挂载**的（实测一帧内 47 → 74 条），
+       * 锚点上方内容变高就会把它整体推走 —— 一次性还原只挡住第一帧，之后仍漂
+       * 1695px。所以填充期间每帧重钉，直到平滑滚动开始（动画一开始就不该再抢滚动）。
+       */
+      const holdAnchor = () => {
+        if (options?.anchor) applyAnchorOffset(options.anchor);
+      };
+
+      /**
        * 落地后有界收敛：目标不再偏离视口顶就停，最多 12 次 × 100ms。
        *
        * 为什么不能只校正一次：滚动容器是 overflow-anchor:none（钉底自动跟随需要，
@@ -417,6 +446,8 @@ export function MessageNavRail({
 
       const settleThenScroll = (attempt = 0, last = Number.NaN, stable = 0) => {
         if (!isCurrent() || !el.isConnected || interrupted) { stopWatching(); return; }
+        // 布局还在变（分批挂载）期间先维持锚点不动，用户看到的内容才是连续的
+        holdAnchor();
         const top = measure();
         const nextStable = Math.abs(top - last) < 2 ? stable + 1 : 0;
         if (nextStable >= 2 || attempt > 20) {
@@ -440,19 +471,37 @@ export function MessageNavRail({
       };
 
       watchInterrupts();
-      // 刚替换过时间线（服务端定位加载）时：**先瞬时到位**，再进入有界收敛。
-      //
-      // 为什么必需：跳转是「整体替换窗口 + 内容高度变化」，浏览器不会保持当前视口
-      // 对应的内容；若首次定位拖到下一帧（settleThenScroll 的 rAF），中间会先绘制
-      // 一帧错误位置 —— 用户看到的就是「显示的内容被换掉了，然后才滚到目标」。
-      // 这里仍在 waitForTarget 的 rAF 微任务中（绘制前），因此不会闪。
-      if (options?.instantFirst) {
+      // 兜底路径：加载前那条可见消息不在新窗口里，锚点还原不了 —— 只能就地贴到目标。
+      // 仍跑在调用方的 rAF 微任务里（绘制前），所以只是「没有动画」，不会闪。
+      if (options?.instantAtTarget) {
         scrollEl.scrollTop = measure();
-        syncActiveRef.current();
         converge(0, 0);
         return;
       }
       requestAnimationFrame(() => settleThenScroll());
+    };
+
+    /**
+     * 记下「加载前视口顶部的可见消息」及其相对容器顶的偏移。
+     *
+     * 为什么需要：服务端定位会**整体替换时间线**（新窗口 = 目标前一页 → 最新），
+     * 而浏览器不会替我们保住「当前视口对应的内容」—— scrollTop 只是个数字，
+     * 换窗后它指向完全不同的内容，用户看到的就是「显示的内容被换掉了」。
+     */
+    const captureAnchor = (): { entryId: string; offset: number } | null => {
+      const containerTop = scrollEl.getBoundingClientRect().top;
+      let first: { entryId: string; offset: number } | null = null;
+      let best: { entryId: string; offset: number } | null = null;
+      for (const el of scrollEl.querySelectorAll<HTMLElement>("[data-message-entry-id]")) {
+        const anchorId = el.getAttribute("data-message-entry-id");
+        if (!anchorId) continue;
+        const offset = el.getBoundingClientRect().top - containerTop;
+        first ??= { entryId: anchorId, offset };
+        if (offset > 1) break; // 已经越过容器顶：后面的只会更靠下
+        best = { entryId: anchorId, offset };
+      }
+      // 视口在第一条消息之上（还没滚到任何消息）：用第一条当锚点，偏移为正也能还原
+      return best ?? first;
     };
 
     // 等目标进入 DOM（服务端定位后需要一拍渲染）
@@ -474,14 +523,21 @@ export function MessageNavRail({
       return;
     }
     setJumpingTo(entryId);
+    // 必须在替换时间线**之前**取锚点：之后 DOM 已经是新窗口，量不到旧视口的内容。
+    const anchor = captureAnchor();
     try {
       const located = await jumpToEntry(entryId);
       if (!located || !isCurrent()) return;
       const target = await waitForTarget();
       if (target && isCurrent()) {
         handedOff = true;
-        // 走了服务端定位（窗口被替换）→ 首次定位必须瞬时，避免闪一帧错误位置
-        scrollToTarget(target, { instantFirst: true });
+        // 期望顺序：加载内容 → **加载完成的同时**把视口锚回「加载前显示的那段内容」
+        // （同一个 rAF 内、绘制前完成，因此不闪）→ 再平滑滚到跳转目标（动画保留）。
+        // 锚点还原不了（旧内容不在新窗口里）才退化为就地贴到目标。
+        const restored = anchor !== null && applyAnchorOffset(anchor);
+        // 还原成功 → 填充期继续钉住锚点，然后平滑滚到目标（动画保留）；
+        // 旧内容不在新窗口里 → 只能就地贴到目标（同样不闪，但没有动画）。
+        scrollToTarget(target, restored && anchor ? { anchor } : { instantAtTarget: true });
       }
     } finally {
       if (isCurrent()) setJumpingTo(null);
