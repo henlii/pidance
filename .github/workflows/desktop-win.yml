@@ -1,9 +1,12 @@
 name: Desktop Windows Build
 
-# Windows 桌面壳构建：手动触发（workflow_dispatch）或推送 desktop/ 变更。
-# 产出 zip（便携解压即用，对应 #25 的 Windows zip 目标）与 NSIS 安装版，
-# 挂在 workflow run 的 Artifacts（含 sha256）。不自动发 GitHub Release；
-# 正式发布仍走 release.yml 与项目发布流程（同一 tgz + SHA256 审计）。
+# Windows 桌面壳：构建 → 瘦身 → **在真实产物上验证** → 安装包安装/卸载验证 → 产物 + sha256。
+# - 手动触发、推送 desktop/** 变更、以及主包发布 tag（v*）；
+# - tag 时把 zip / NSIS 安装包 / sha256 挂到**同一个 tag 的 GitHub Release**
+#   （与主包 tgz 同一个 Release；便携 zip 不支持自更新）；
+# - 验证不是只看端口：解包后跑 desktop/scripts/verify-packaged.mjs（页面 + _next 静态资源 +
+#   /api/about 版本 + node-pty + SDK 会话 + 关停/端口释放），再用真实 Electron 壳跑一次冒烟
+#   （desktop/scripts/smoke-shell.mjs），最后静默安装/卸载验证安装包。
 
 on:
   workflow_dispatch:
@@ -11,9 +14,11 @@ on:
     paths:
       - "desktop/**"
       - ".github/workflows/desktop-win.yml"
+    tags:
+      - "v*"
 
 permissions:
-  contents: read
+  contents: write # tag 构建时 gh release upload
 
 jobs:
   build-windows-installer:
@@ -31,58 +36,37 @@ jobs:
         working-directory: desktop
         run: npm ci --include=dev --no-audit --no-fund
 
-      - name: 检查桌面壳脚本语法
+      - name: 检查脚本语法
         working-directory: desktop
         run: |
           node --check src/main.js
           node --check src/preload.js
           node --check src/server-lifecycle.js
-          node --check scripts/fetch-node-win.mjs
+          node --check src/update-logic.js
+          node --check scripts/prune-app-tree.mjs
+          node --check scripts/verify-packaged.mjs
+          node --check scripts/smoke-shell.mjs
 
-      - name: 生命周期测试（复用判定/关闭清理/启动失败）
+      - name: 生命周期 / 瘦身 / 更新逻辑测试
         working-directory: desktop
         run: npm test
 
-      - name: 瘦身打包输入（仅删调试/dev 资产与非目标平台二进制，零运行引用）
+      - name: 校验打包输入（内置服务版本与 Electron 运行时的 Node 版本）
         working-directory: desktop
         shell: pwsh
         run: |
-          function Get-DirSize($path) {
-            if (!(Test-Path $path)) { return 0 }
-            $sum = (Get-ChildItem $path -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-            if ($null -eq $sum) { return 0 }
-            return [math]::Round($sum / 1MB, 1)
-          }
-          $before = Get-DirSize node_modules
-
-          # sourcemap：next / pi-sdk 调试数据，运行时无 require，删掉
-          Get-ChildItem node_modules -Recurse -File -Filter *.map -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-          # 调试符号（node-pty 的 conpty/pty/winpty 各 ~5-6MB）
-          Get-ChildItem node_modules -Recurse -File -Filter *.pdb -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-          # 非目标平台原生二进制：只留 win32-x64（Electron/Node 运行时均为 x64）
-          Get-ChildItem node_modules/@next -Directory -Filter "swc-*" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike "*win32-x64*" } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-          Get-ChildItem node_modules/@esbuild -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike "*win32-x64*" } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-          Get-ChildItem node_modules/@img -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike "*win32-x64*" -and $_.Name -ne "colour" } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-          Get-ChildItem node_modules/node-pty/prebuilds -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne "win32-x64" } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force node_modules/node-pty/third_party/conpty/*/win10-arm64 -ErrorAction SilentlyContinue
-          # next dev 诊断/调试产物（生产服务不 require）
-          Remove-Item -Recurse -Force node_modules/next/dist/diagnostics -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force node_modules/next/dist/compiled/next-devtools -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force node_modules/.cache -ErrorAction SilentlyContinue
-
-          $after = Get-DirSize node_modules
-          Write-Host "slim done: $before MB -> $after MB"
-
-      - name: 校验打包输入
-        working-directory: desktop
-        shell: pwsh
-        run: |
-          if (!(Test-Path node_modules/@henlii/pidance/bin/pidance.js)) { throw "Pidance package is missing" }
+          $expected = (Get-Content package.json -Raw | ConvertFrom-Json).dependencies.'@henlii/pidance'
+          $actual = (Get-Content node_modules/@henlii/pidance/package.json -Raw | ConvertFrom-Json).version
+          Write-Host "内置服务版本：$actual（desktop/package.json 声明 $expected）"
+          if ($expected -ne $actual) { throw "内置服务版本（$actual）与 desktop/package.json 声明（$expected）不一致" }
           if (!(Test-Path node_modules/electron/dist/electron.exe)) { throw "Electron runtime is missing" }
-          # 服务用 Electron 自带的 Node 运行（ELECTRON_RUN_AS_NODE），其版本必须满足主包 engines
-          $nodeVer = (Get-Content node_modules/electron/dist/version -ErrorAction SilentlyContinue)
-          Write-Host "electron dist version: $nodeVer"
-          node -e "const [maj,min]=process.versions.node.split('.').map(Number); if (maj<22 || (maj===22 && min<19)) throw new Error('electron node too old'); console.log('builder node', process.versions.node)"
+          # 服务以 ELECTRON_RUN_AS_NODE 跑在包内 Electron 自带的 Node 上：这里量的是**真实运行时**版本，
+          # 不是 runner 的 node。低于主包 engines 就直接失败，不靠人记得 Electron 升级时重看。
+          $env:ELECTRON_RUN_AS_NODE = "1"
+          $runtime = (& ".\node_modules\electron\dist\electron.exe" -e "process.stdout.write(process.versions.node)")
+          $engines = (Get-Content node_modules/@henlii/pidance/package.json -Raw | ConvertFrom-Json).engines.node
+          Write-Host "Electron 自带 Node：$runtime（主包 engines：$engines）"
+          node -e "const [maj,min]=process.argv[1].split('.').map(Number); if (maj<22 || (maj===22 && min<19)) throw new Error('electron node too old: '+process.argv[1]); console.log('electron node ok', process.argv[1])" "$runtime"
 
       - name: 构建 Windows zip（便携）
         working-directory: desktop
@@ -92,46 +76,50 @@ jobs:
         working-directory: desktop
         run: npm run build:win:installer
 
-      - name: 打包产物冒烟（解包 zip → 用包内 Electron 的 Node 起服务 → 探活）
+      - name: 解包 zip 并验证打包输入（页面/静态资源/版本/node-pty/SDK 会话/可停）
         working-directory: desktop
         shell: pwsh
         run: |
           $zip = Get-ChildItem dist -File -Filter *.zip | Select-Object -First 1
           if (!$zip) { throw "zip artifact is missing" }
-          $smoke = Join-Path $env:RUNNER_TEMP "smoke"
-          Remove-Item -Recurse -Force $smoke -ErrorAction SilentlyContinue
-          Expand-Archive -Path $zip.FullName -DestinationPath $smoke -Force
+          $app = Join-Path $env:RUNNER_TEMP "unpacked"
+          Remove-Item -Recurse -Force $app -ErrorAction SilentlyContinue
+          Expand-Archive -Path $zip.FullName -DestinationPath $app -Force
+          node scripts/verify-packaged.mjs --app-dir $app --port 31419 --label "便携 zip"
 
-          $service = Join-Path $smoke "resources/app/node_modules/@henlii/pidance/bin/pidance.js"
-          $electron = Join-Path $smoke "Pidance Desktop.exe"
-          if (!(Test-Path $service)) { throw "packaged service entry is missing: $service" }
-          if (!(Test-Path $electron)) { throw "packaged electron binary is missing: $electron" }
+      - name: 真实 Electron 壳冒烟（解包产物）
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          $app = Join-Path $env:RUNNER_TEMP "unpacked"
+          node scripts/smoke-shell.mjs --app-dir $app --port 31421
 
-          $env:ELECTRON_RUN_AS_NODE = "1"
-          $log = Join-Path $env:RUNNER_TEMP "smoke-service.log"
-          $proc = Start-Process -FilePath $electron -ArgumentList @($service, "--port", "31419", "--hostname", "127.0.0.1", "--no-open") -PassThru -RedirectStandardOutput $log -RedirectStandardError "$log.err" -NoNewWindow
-          try {
-            $ready = $false
-            for ($i = 0; $i -lt 60; $i++) {
-              Start-Sleep -Seconds 2
-              if ($proc.HasExited) { break }
-              try {
-                $res = Invoke-WebRequest -Uri "http://127.0.0.1:31419/api/home" -UseBasicParsing -TimeoutSec 5
-                if ($res.StatusCode -eq 200 -or $res.StatusCode -eq 401) { $ready = $true; break }
-              } catch {
-                if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 401) { $ready = $true; break }
-              }
-            }
-            if (!$ready) {
-              Write-Host "--- service stdout ---"; Get-Content $log -ErrorAction SilentlyContinue | Select-Object -Last 40
-              Write-Host "--- service stderr ---"; Get-Content "$log.err" -ErrorAction SilentlyContinue | Select-Object -Last 40
-              throw "packaged service did not answer /api/home on 31419"
-            }
-            Write-Host "smoke ok: packaged service answered"
-          } finally {
-            if (!$proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
-            Remove-Item -Recurse -Force $smoke -ErrorAction SilentlyContinue
-          }
+      - name: 安装/卸载验证（静默安装 → 壳冒烟 → 卸载干净）
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem dist -File -Filter "*Setup*.exe" | Select-Object -First 1
+          if (!$setup) { throw "NSIS installer is missing" }
+          $install = Join-Path $env:LOCALAPPDATA "Programs\Pidance Desktop"
+          Start-Process -FilePath $setup.FullName -ArgumentList "/S" -Wait
+          $exe = Join-Path $install "Pidance Desktop.exe"
+          for ($i = 0; $i -lt 30 -and !(Test-Path $exe); $i++) { Start-Sleep -Seconds 2 }
+          if (!(Test-Path $exe)) { throw "安装后找不到壳可执行文件：$exe" }
+          $service = Join-Path $install "resources/app/node_modules/@henlii/pidance/package.json"
+          if (!(Test-Path $service)) { throw "安装后找不到内置服务：$service" }
+          $installedVersion = (Get-Content $service -Raw | ConvertFrom-Json).version
+          $expected = (Get-Content package.json -Raw | ConvertFrom-Json).dependencies.'@henlii/pidance'
+          Write-Host "安装版内置服务版本：$installedVersion"
+          if ($installedVersion -ne $expected) { throw "安装版内置服务版本 $installedVersion ≠ $expected" }
+
+          node scripts/smoke-shell.mjs --app-dir $install --port 31422
+
+          $uninstaller = Join-Path $install "Uninstall Pidance Desktop.exe"
+          if (!(Test-Path $uninstaller)) { throw "找不到卸载器：$uninstaller" }
+          Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait
+          for ($i = 0; $i -lt 60 -and (Test-Path $install); $i++) { Start-Sleep -Seconds 2 }
+          if (Test-Path $install) { throw "卸载后目录仍存在：$install" }
+          Write-Host "安装/卸载验证通过"
 
       - name: 计算产物 SHA256（只算顶层制品，不含解包目录里的 exe）
         working-directory: desktop
@@ -143,6 +131,18 @@ jobs:
             Write-Host "$hash  $($_.Name)"
           }
 
+      - name: 体积摘要
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          $lines = @("## 桌面产物", "", "| 项 | 大小 |", "|---|---|")
+          foreach ($f in Get-ChildItem dist -File | Where-Object { $_.Extension -in ".exe", ".zip" }) {
+            $lines += "| $($f.Name) | $([math]::Round($f.Length / 1MB, 1)) MB |"
+          }
+          $lines += ""
+          $lines | Add-Content $env:GITHUB_STEP_SUMMARY
+          $lines | Write-Host
+
       - name: 上传产物（zip + Setup exe + sha256）
         uses: actions/upload-artifact@v4
         with:
@@ -153,3 +153,23 @@ jobs:
             desktop/dist/sha256.txt
           if-no-files-found: error
           retention-days: 30
+
+      - name: 挂到主包同名 Release（仅 v* tag）
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: desktop
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          $repo = "${{ github.repository }}"
+          # release.yml 也会在同一个 tag 上创建 Release（含主包 tgz）；等它出现再上传。
+          for ($i = 0; $i -lt 60; $i++) {
+            gh release view $env:TAG --repo $repo *> $null
+            if ($LASTEXITCODE -eq 0) { break }
+            Start-Sleep -Seconds 15
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Release $env:TAG 迟迟没有出现，无法挂桌面产物" }
+          $files = Get-ChildItem dist -File | Where-Object { $_.Extension -in ".exe", ".zip" } | ForEach-Object { $_.FullName }
+          gh release upload $env:TAG --repo $repo --clobber $files dist/sha256.txt
+          gh release view $env:TAG --repo $repo --json assets --jq '.assets[].name'

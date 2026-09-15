@@ -15,7 +15,6 @@ const {
   looksLikePidance,
   probeService,
   resolveServerDir,
-  resolveNodeBinary,
   meetsNodeEngine,
   buildServerArgs,
   stopServerProcess,
@@ -112,22 +111,6 @@ test("服务目录解析：打包版固定用随包服务，开发版可用 PIDA
   assert.equal(
     resolveServerDir({ isPackaged: false, resourcesPath: "/res", serverDirEnv: undefined, srcDir: "/repo/desktop/src" }),
     "/repo/desktop/src/../..",
-  );
-});
-
-test("Node 运行时解析：优先内置 node.exe，没有则用 Electron 自带 Node（Node 模式）", () => {
-  assert.deepEqual(
-    resolveNodeBinary({ isPackaged: false, resourcesPath: "/res", execPath: "/usr/bin/electron", existsSync: () => false }),
-    { bin: "/usr/bin/electron", env: { ELECTRON_RUN_AS_NODE: "1" } },
-  );
-  assert.deepEqual(
-    resolveNodeBinary({ isPackaged: true, resourcesPath: "/res", execPath: "/usr/bin/electron", existsSync: () => true }),
-    { bin: "/res/node/node.exe", env: {} },
-  );
-  assert.deepEqual(
-    resolveNodeBinary({ isPackaged: true, resourcesPath: "/res", execPath: "/usr/bin/electron", existsSync: () => false }),
-    { bin: "/usr/bin/electron", env: { ELECTRON_RUN_AS_NODE: "1" } },
-    "没有内置 Node 时必须回退到 Electron 自带 Node，而不是启动失败",
   );
 });
 

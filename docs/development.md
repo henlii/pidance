@@ -46,7 +46,10 @@ npm run dev       # 127.0.0.1:31416，输出 .next（与持续部署的 .next-pu
 | `npm run test:browser` | 需要运行中的测试服务及浏览器自动化环境 |
 | `npm run test:browser:context` | 需要测试服务、agent-browser 和可用模型，可能产生 API 调用费用 |
 | `npm run test:browser:sse` | 桌面/窄视口录制回放，检查流式投影 |
-| `cd desktop && npm test` | 桌面生命周期纯逻辑测试；不替代 Windows 产物冒烟 |
+| `cd desktop && npm test` | 桌面壳纯逻辑测试（生命周期/瘦身/更新逻辑）；不替代 Windows 产物验证 |
+| `cd desktop && npm run prune:win` | 按 win32-x64 类别瘦身打包输入；**会就地改 `desktop/node_modules`**（Linux 上跑完需 `npm ci` 复原） |
+| `cd desktop && npm run verify:packaged -- --app-dir <解包目录>` | 在真实打包产物上验页面/静态资源/版本/node-pty/SDK 会话/可停 |
+| `cd desktop && npm run smoke:shell -- --app-dir <解包目录>` | 用真实 Electron 壳加载页面并检查退出清理（需 Windows 桌面会话） |
 
 浏览器脚本使用 `PIDANCE_TEST_URL`，默认 `http://127.0.0.1:31416`。具体 fixture 和环境依赖以各测试文件开头为准。静态文档核对不代表这些测试已经执行。
 

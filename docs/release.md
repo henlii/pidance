@@ -18,7 +18,7 @@
 2. 同步主包 `package.json`、`package-lock.json` 的版本，以及中英 README 版本行。
 3. 新增 `docs/release-notes/v<version>.md`，中文在上、英文在下，写明包名、CLI、变更与验收范围；补齐 [发布记录索引](release-notes/README.md)。
 4. 执行 `npm run check`，通过后显式创建 `chore(release)` 提交。
-5. 桌面壳版本不会随主包自动更新；需要发布新桌面制品时单独同步 `desktop/package.json` 与 lockfile，验证精确依赖。
+5. 桌面壳与主包**同版本**：把 `desktop/package.json` 的 `version` 与 `@henlii/pidance` 依赖同步到目标版本，用 `npm install --package-lock-only` 同步 lockfile；不一致时桌面 workflow 的输入校验会直接失败。桌面壳必须与主包一起提交。
 
 当前 release workflow 不运行 `npm run check`，因此不能跳过发布前本地质量门禁。
 
@@ -57,12 +57,15 @@ gh run watch <run-id> --repo henlii/pidance
 8. 优先采用 `docs/release-notes/<tag>.md`，缺失时回退 commit 列表。
 9. `gh release create` 上传同一 tgz 和 sha256。
 
+同一个 `v*` tag 还会触发 [`.github/workflows/desktop-win.yml`](../.github/workflows/desktop-win.yml)（Windows 桌面壳）：瘦身 → 打包 zip/NSIS → 在解包产物上验证（页面 + `_next` 静态资源 + `/api/about` 版本 + node-pty + SDK 会话 + 可停）→ 真实 Electron 壳冒烟 → 静默安装/卸载验证 → 等 Release 建好后用 `gh release upload` 把 zip、Setup exe 与 sha256 挂到**同一个 Release**。桌面壳与主包同版本，但不会自动更新已安装的桌面版：用户在托盘里手动「检查更新」。
+
 ### 当前 CI 限制
 
 - 未包含完整 check 或安装后运行冒烟；这些验证需要在发布准备阶段补齐，不能声称 CI 自动完成。
 - npm 精确版本已存在时跳过 publish，GitHub Release 已存在时跳过创建。
 - 因此重跑构建所得 tgz **不能仅凭版本号相同就认定与 npm 已发布字节一致**。部分成功后应核对已有制品及哈希，不盲目重新打包上传。
 - tag 与 package 版本一致性需在推 tag 前人工/显式核对，当前 workflow 不提供完整的该项门禁。
+- 桌面制品**未做代码签名**（无证书）：用户首次安装会有 SmartScreen 提示；自更新按 Release 声明的 sha256 校验后才执行，校验不过不运行安装包。
 
 以上为现状限制，本轮仅整理文档，没有修改 workflow。
 

@@ -46,24 +46,6 @@ function resolveServerDir({ isPackaged, resourcesPath, serverDirEnv, srcDir }) {
   return `${srcDir}/../..`;
 }
 
-/**
- * 服务用哪个 Node 运行。
- *
- * 优先用 Electron 自带的 Node（`ELECTRON_RUN_AS_NODE=1`）：Electron 37.10+ 自带
- * Node 22.21.1，满足主包 engines >=22.19，能省掉 ~92MB 的 node.exe。
- * extraResources 里若仍放了 node/node.exe（历史构建/兜底），则优先用它。
- * 原生模块（node-pty / sharp）是 NAPI 构建，两种运行时都能加载。
- */
-function resolveNodeBinary({ isPackaged, resourcesPath, execPath, existsSync }) {
-  if (isPackaged) {
-    const bundled = `${resourcesPath}/node/node.exe`;
-    if (existsSync(bundled)) return { bin: bundled, env: {} };
-    return { bin: execPath, env: { ELECTRON_RUN_AS_NODE: "1" } };
-  }
-  // 开发模式：Electron 自身即以 Node 方式运行服务。
-  return { bin: execPath, env: { ELECTRON_RUN_AS_NODE: "1" } };
-}
-
 /** 版本号比较（a >= b）。 */
 function compareVersions(a, b) {
   const pa = String(a).split(".").map((v) => Number.parseInt(v, 10) || 0);
@@ -187,7 +169,7 @@ module.exports = {
   looksLikePidance,
   probeService,
   resolveServerDir,
-  resolveNodeBinary,
+  compareVersions,
   meetsNodeEngine,
   buildServerArgs,
   stopServerProcess,

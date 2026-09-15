@@ -11,7 +11,7 @@
 | 31416 工作区测试 | `.next-public` | 保留当前一份与温构建缓存，不在服务运行时删除 |
 | 独立源码 dev | 默认 `.next`，可由 `PIDANCE_DIST_DIR` 指定 | 先确认没有对应 dev 进程，再清理废弃输出；没有 `BUILD_ID` 不代表正在使用的 dev 输出可删除 |
 | 正式/候选构建 | 隔离根的 webpack `.next` → `henlii-pidance-<ver>.tgz` | 审计完成后保留 tgz + sha256，构建输出打包后清理 |
-| Windows 桌面制品 | `desktop/dist/`、workflow Artifacts | 与主包 tgz 分开，保留本次需要交付的 zip/installer 及哈希 |
+| Windows 桌面制品 | `desktop/dist/`、workflow Artifacts、`v*` tag 的 Release | 与主包 tgz 同一个 Release（便携 zip + NSIS Setup + sha256），保留本次需要交付的一份 |
 
 禁止工作区正式 `next build`，禁止 31415/31416 或 `.next`/`.next-public` 产物混用。
 
