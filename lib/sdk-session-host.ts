@@ -1312,6 +1312,9 @@ export class SdkSessionHost {
       pendingExtensionRequests: Array.from(
         this.extensionUi?.pendingSnapshot.values() ?? [],
       ),
+      // 活动 custom 面板快照：普通阻塞请求走 pendingExtensionRequests，
+      // 但 custom 没有快照的话，刷新/切回后面板内容与输入入口都会丢。
+      activeCustomUi: this.extensionUi?.customSnapshot ?? null,
     };
     projected.queuedMessages = {
       steering: this.hasQueueSnapshot ? [...this.localQueue.steering] : [],

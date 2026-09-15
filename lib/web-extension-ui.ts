@@ -33,6 +33,14 @@ export type WebExtensionUIAdapter = {
   statuses: Map<string, string>;
   widgets: Map<string, unknown>;
   pendingSnapshot: Map<string, Record<string, unknown>>;
+  /**
+   * 当前活动的 custom 面板快照（最后一次渲染行）。
+   *
+   * 普通阻塞请求走 pendingSnapshot，但 custom 只有「事件」没有快照：
+   * 刷新/切回来时服务端仍在等输入，浏览器却拿不到内容与输入入口。
+   * 这里保存最后可重放的投影，由 get_state 下发恢复。
+   */
+  customSnapshot: { id: string; lines: string[] } | null;
   respond: (id: string, response: Record<string, unknown>) => boolean;
   inputCustom: (id: string, data: string) => boolean;
   dispose: () => void;
@@ -112,6 +120,7 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
   const statuses = new Map<string, string>();
   const widgets = new Map<string, unknown>();
   const customSessions = new Map<string, CustomUiSession>();
+  let customSnapshot: { id: string; lines: string[] } | null = null;
 
   const uiContext: ExtensionUIContext = {
     select: (title, options, opts) =>
@@ -237,6 +246,7 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
           if (doneCalled) return;
           doneCalled = true;
           customSessions.delete(id);
+          if (customSnapshot?.id === id) customSnapshot = null;
           emit({
             type: "extension_ui_request",
             id,
@@ -263,6 +273,9 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
             method: "custom",
             lines,
           });
+          // 同时保存快照：刷新/切回后由 get_state 恢复面板内容与输入入口。
+          // 只保留最新一个（面板同时只应有一个活动 custom）。
+          customSnapshot = { id, lines: [...lines] };
         };
         const handleInput = (data: string) => {
           if (data === "\x03") {
@@ -366,6 +379,9 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
     statuses,
     widgets,
     pendingSnapshot,
+    get customSnapshot() {
+      return customSnapshot;
+    },
     respond(id, response) {
       const entry = pending.get(id);
       if (!entry) return false;
@@ -388,6 +404,7 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
         session.done(undefined);
       }
       customSessions.clear();
+      customSnapshot = null;
       statuses.clear();
       widgets.clear();
     },

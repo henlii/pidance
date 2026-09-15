@@ -19,8 +19,7 @@ export interface ExtensionUiState {
   blockingQueue: ExtensionUiBlockingRequest[];
 }
 
-export function createEmptyExtensionUiState(
-  partial?: Partial<Pick<ExtensionUiState, "statuses" | "widgets" | "customUi">>,
+export function createEmptyExtensionUiState(  partial?: Partial<Pick<ExtensionUiState, "statuses" | "widgets" | "customUi">>,
 ): ExtensionUiState {
   return {
     dialog: null,
@@ -33,6 +32,33 @@ export function createEmptyExtensionUiState(
 
 function isBlockingMethod(method: ExtensionUiRequest["method"]): method is ExtensionUiBlockingRequest["method"] {
   return method === "select" || method === "confirm" || method === "input" || method === "editor";
+}
+
+/**
+ * 从 host 状态恢复活动 custom 面板（Issue #34）。
+ *
+ * custom 面板只有 SSE 事件、没有重放，刷新或切回后服务端仍在等输入但浏览器端
+ * 既无内容也无输入入口。状态里的 `activeCustomUi` 是 host 保存的最后可重放投影。
+ *
+ * 规则：
+ * - 没有活动面板，或已渲染的就是同一个 id → 原样返回（不覆盖刚由事件刷新的行）；
+ * - 不同 id → 恢复它（面板内容 + 输入入口）。
+ * 只恢复不清理：关闭由 `closed` 事件负责，避免与刚打开的面板竞争。
+ */
+export function restoreCustomUi(
+  state: ExtensionUiState,
+  active: { id?: unknown; lines?: unknown } | null | undefined,
+): ExtensionUiState {
+  const id = typeof active?.id === "string" && active.id ? active.id : null;
+  if (!id) return state;
+  if (state.customUi?.id === id) return state;
+  const lines = Array.isArray(active?.lines)
+    ? (active!.lines as unknown[]).filter((line): line is string => typeof line === "string")
+    : [];
+  return {
+    ...state,
+    customUi: { type: "extension_ui_request", id, method: "custom", lines } as ExtensionUiCustomRequest,
+  };
 }
 
 function getBlockingQueue(state: ExtensionUiState): ExtensionUiBlockingRequest[] {
