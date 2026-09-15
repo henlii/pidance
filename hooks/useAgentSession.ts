@@ -1076,6 +1076,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const registry = getOrCreateBrowserSessionRuntimeRegistry();
     const hydrateRequestSeq = registry.beginHydrate(sid);
     const hydrateSinceSeq = registry.getSnapshot(sid)?.timelineSeq ?? 0;
+    // 进入「浏览历史」态必须发生在**加载之前**：hydrate 提交新窗口的那一帧会改变
+    // 内容高度，若此时仍是 following，自动跟随会先钉底（用户看到「先向下滚一段」），
+    // 随后才切态。放在这里后，整个定位过程（请求 → 提交 → 滚动）都不再被钉底打断。
+    notifyBrowsingHistory();
     try {
       const params = new URLSearchParams({
         around: entryId,
@@ -1118,8 +1122,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const moreAfter = d.context.hasMoreAfter === true;
       hasMoreAfterRef.current = moreAfter;
       setHasMoreAfter(moreAfter);
-      // 定位即进入浏览历史态：否则自动跟随会立刻把视口拉回会话尾部
-      notifyBrowsingHistory();
       return true;
     } catch (e) {
       if (!isAbortError(e)) console.error("Failed to jump to entry:", e);
