@@ -42,7 +42,7 @@
     "!.next/server/next-font-manifest.js"
   ],
   "scripts": {
-    "dev": "next dev -p 31415",
+    "dev": "next dev --turbopack -H 127.0.0.1 -p 31416",
     "build": "next build --webpack",
     "start": "node bin/pidance.js",
     "lint": "eslint .",
