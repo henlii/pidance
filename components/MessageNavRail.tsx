@@ -165,6 +165,17 @@ export function MessageNavRail({
     if (resolved !== null) setActiveEntryId(resolved);
   }, [entryIds, isAtLiveTail, outline, renderKey, scrollContainer]);
 
+  /**
+   * 总是拿到「最新一次渲染」的 syncActive。
+   *
+   * jumpTo 是异步流程：等待期间时间线会被换成新窗口并重渲染，而流程末尾若直接调用
+   * 当初捕获的 syncActive，它闭包里还是旧的 entryIds/outline —— 会按旧窗口解析出旧
+   * 的高亮（实测：跳转后仍高亮跳转前那条，手动滚动一下才正常，因为滚动事件用的是
+   * 最新闭包）。
+   */
+  const syncActiveRef = useRef(syncActive);
+  syncActiveRef.current = syncActive;
+
   useEffect(() => {
     const el = scrollContainer.current;
     if (!el) return;
@@ -272,6 +283,11 @@ export function MessageNavRail({
   const jumpTo = useCallback(async (entryId: string) => {
     const scrollEl = scrollContainer.current;
     if (!scrollEl) return;
+    // 点击即刻把该点设为当前项：不依赖异步流程末尾的解析结果。
+    // 理由：跳转会整体替换时间线，解析需要等新窗口渲染 + 滚动稳定，这期间用户已
+    // 经点过了；若末尾解析因窗口内无提问等原因返回 null（见 resolveActiveOutlineEntry），
+    // 高亮会一直停在跳转前那条。同步流程末尾仍会按实际位置校正一次。
+    setActiveEntryId(entryId);
     const seq = ++jumpSeqRef.current;
     const isCurrent = () => jumpSeqRef.current === seq;
     const findTarget = (): HTMLElement | null =>
@@ -310,14 +326,14 @@ export function MessageNavRail({
        * 推偏 613px（中间位置则稳定在 0）。
        */
       const converge = (stableCount: number, attempt: number) => {
-        if (interrupted || !isCurrent() || !el.isConnected) { stopWatching(); return; }
+        if (interrupted || !isCurrent() || !el.isConnected) { stopWatching(); syncActiveRef.current(); return; }
         if (Math.abs(drift()) > 2) {
-          if (attempt >= 12) { stopWatching(); syncActive(); return; }
+          if (attempt >= 12) { stopWatching(); syncActiveRef.current(); return; }
           scrollEl.scrollTo({ top: measure(), behavior: "auto" });
           window.setTimeout(() => converge(0, attempt + 1), 100);
           return;
         }
-        if (stableCount >= 3) { stopWatching(); syncActive(); return; }
+        if (stableCount >= 3) { stopWatching(); syncActiveRef.current(); return; }
         window.setTimeout(() => converge(stableCount + 1, attempt + 1), 100);
       };
 
@@ -372,7 +388,7 @@ export function MessageNavRail({
     } finally {
       if (isCurrent()) setJumpingTo(null);
     }
-  }, [expandRenderWindowToEntryRef, jumpToEntry, resolveMessageElementRef, scrollContainer, syncActive]);
+  }, [expandRenderWindowToEntryRef, jumpToEntry, resolveMessageElementRef, scrollContainer]);
 
   const onKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
