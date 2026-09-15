@@ -191,6 +191,11 @@ export type BrowserSessionRuntimeRegistryDeps = {
   wake?: (sessionId: string, signal?: AbortSignal) => Promise<void>;
   createEventStream?: (sessionId: string, onEvent: (event: AgentStreamEvent) => void) => EventStreamManager;
   getAgentState?: (sessionId: string) => Promise<RuntimeAgentState>;
+  /**
+   * 按 submissionId 发显式取消（服务端提交事务）。
+   * 与本地 AbortSignal 分开：取消 fetch 不等于后端停止。
+   */
+  cancelSubmission?: (submissionId: string) => Promise<{ status: "pending" | "confirmed" }>;
   restoreDraft?: (draftKey: string, draft: { value: string; images: AttachedImage[] }) => void;
   now?: () => number;
   makeSubmissionId?: () => string;
@@ -267,6 +272,9 @@ type ViewAttachment = {
 
 /** slot 空闲 SSE 关闭兜底窗口：切走后留一小段时间给快速切回，随后释放服务端 host。 */
 export const IDLE_SSE_CLOSE_DELAY_MS = 5_000;
+
+/** 显式取消请求的上限：Stop 不得被不响应的服务端拖死（超时即未知）。 */
+export const CANCEL_SUBMISSION_TIMEOUT_MS = 5_000;
 
 export type BrowserSessionRuntimeRegistry = {
   getSnapshot(sessionId: string): SessionRuntimeSnapshot | null;
@@ -1057,16 +1065,22 @@ export function createBrowserSessionRuntimeRegistry(
       const [submissionId, controller] = first;
       return { submissionId, cancel: () => controller.abort(), signal: controller.signal };
     },
-    abortSubmission(sessionId, submissionId) {
+    async abortSubmission(sessionId, submissionId) {
       const slot = getSlot(sessionId, false);
-      if (!slot) return Promise.resolve(null);
-      const controller = submissionId
-        ? slot.promptAborts.get(submissionId)
-        : [...slot.promptAborts.values()][0];
-      const inflight = submissionId
-        ? slot.inFlight.get(submissionId)
-        : [...slot.inFlight.values()][0];
+      if (!slot) return null;
+      const targetId = submissionId ?? [...slot.promptAborts.keys()][0];
+      const controller = targetId ? slot.promptAborts.get(targetId) : undefined;
+      const inflight = targetId ? slot.inFlight.get(targetId) : undefined;
       controller?.abort();
+      // 显式 Stop：先把取消意图交给服务端提交事务（真实 id 未知也能定位），
+      // 再等本地结算。服务端返回 pending/confirmed 均不冒充「已停止」。
+      if (targetId && deps.cancelSubmission) {
+        try {
+          await deps.cancelSubmission(targetId);
+        } catch {
+          // 取消请求失败：保持未知，不重发、不假装已停止。
+        }
+      }
       if (inflight) return inflight;
       return Promise.resolve(null);
     },
@@ -1344,6 +1358,22 @@ function createBrowserFetchDeps(): BrowserSessionRuntimeRegistryDeps {
       const data = await response.json().catch(() => ({})) as RuntimeAgentState & { error?: string };
       if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
       return data;
+    },
+    async cancelSubmission(submissionId) {
+      // 有界超时：Stop 不能被一个不响应的取消请求拖死。超时视为未知，
+      // 不重发、不假装已停止。
+      const response = await fetch(
+        `/api/agent/submissions/${encodeURIComponent(submissionId)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "cancel" }),
+          signal: AbortSignal.timeout(CANCEL_SUBMISSION_TIMEOUT_MS),
+        },
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const body = await response.json().catch(() => ({})) as { status?: string };
+      return { status: body.status === "confirmed" ? "confirmed" : "pending" };
     },
   };
 }

@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, unlinkSync } from "fs";
+import { randomUUID } from "node:crypto";
 import { join, resolve } from "path";
 import { allowFileRoot } from "./file-access";
 import { getAgentDir } from "./pi-paths";
@@ -135,6 +136,55 @@ export type SessionReadView = {
   source: "live" | "disk";
   filePath: string;
   manager: SessionManagerReadView;
+};
+
+/**
+ * 新建会话的提交事务状态。
+ *
+ * 存在的理由：真实 sessionId 只有 startRpcSession 返回后才拿得到，而用户可能
+ * 在那之前按 Stop。没有服务端可查询的身份，取消就只能取消浏览器自己的 fetch，
+ * 后端仍在跑。
+ */
+export type SubmissionStatus =
+  | "pending"
+  | "starting"
+  | "accepted"
+  | "running"
+  | "completed"
+  | "cancelled"
+  | "conflict"
+  | "unknown";
+
+export type SubmissionInfo = {
+  submissionId: string;
+  status: SubmissionStatus;
+  sessionId?: string;
+  /** 提交时的内容指纹（同 id 不同内容要冲突） */
+  fingerprint?: string;
+  error?: string;
+};
+
+export type CancelResult = {
+  submissionId: string;
+  /**
+   * pending=已登记（提交尚未落地或尚不存在），并未确认停掉任何东西；
+   * confirmed=已对原运行发出 abort。永不冒充「已停止」。
+   */
+  status: "pending" | "confirmed";
+};
+
+export const SUBMISSION_ID_CONFLICT_MESSAGE =
+  "Submission conflict: this submissionId was already used with different content";
+
+export const SESSION_SUBMISSION_CANCELLED_MESSAGE = "Submission was cancelled";
+
+/** 终态/取消 tombstone 保留上限（本进程内存，不声称跨重启 exactly-once）。 */
+const SUBMISSION_MAX_RECORDS = 500;
+
+/** 会话产品用例：新增提交事务查询/取消。 */
+export type SessionServiceSubmissionApi = {
+  getSubmission(submissionId: string): SubmissionInfo | null;
+  cancelSubmission(submissionId: string): Promise<CancelResult>;
 };
 
 export type SessionServiceDeps = {
@@ -319,6 +369,9 @@ export type SessionService = {
     input: { command: string; ok?: boolean; result?: string },
   ): Promise<{ entryId: string; data: { command: string; ok: boolean; result?: string; version?: number } }>;
   createNew(options: CreateNewSessionOptions): Promise<CreateNewSessionResult>;
+  getSubmission(submissionId: string): SubmissionInfo | null;
+  /** 取消：await 到 abort 已发出（或已登记 tombstone）才返回。 */
+  cancelSubmission(submissionId: string): Promise<CancelResult>;
   getRunningIds(): string[];
   getRunningStartedAt(): Record<string, number>;
   searchFulltext(
@@ -391,8 +444,46 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
   const currentArchiveRecords = () =>
     listArchiveRecords(deps.archiveFs ?? realArchiveFs, deps.archiveAgentDir?.() ?? getAgentDir());
 
-  /** 同一会话的删除单飞，避免两个 DELETE 竞态 unlink 同一个 JSONL。 */
+  /**
+   * 同一会话的删除单飞，避免两个 DELETE 竞态 unlink 同一个 JSONL。
+   */
   const deletionFlights = new Map<string, Promise<{ skippedSubagents: number }>>();
+
+  /**
+   * 提交事务表（进程内）。
+   *
+   * 目标：真实 sessionId 未知时也能按 submissionId 查询/取消。
+   * 边界：只保证本进程有效，不声称跨重启 exactly-once；终态有界保留，
+   * 取消 tombstone 同样有界（避免为早已消失的提交永久占内存）。
+   */
+  const submissions = new Map<string, {
+    info: SubmissionInfo;
+    /** 取消请求是否已到达 */
+    cancelRequested: boolean;
+    /** 取消是否已作用于原运行 */
+    cancelApplied: boolean;
+  }>();
+
+  const rememberSubmission = (info: SubmissionInfo): void => {
+    submissions.set(info.submissionId, {
+      info,
+      cancelRequested: false,
+      cancelApplied: false,
+    });
+    if (submissions.size <= SUBMISSION_MAX_RECORDS) return;
+    // 有界：先淘汰已到终态的最旧记录（保留取消 tombstone）。
+    for (const [key, record] of submissions) {
+      if (submissions.size <= SUBMISSION_MAX_RECORDS) break;
+      if (key === info.submissionId) continue;
+      if (record.info.status === "completed") submissions.delete(key);
+    }
+  };
+
+  /** 同 id 是否已用于不同内容（冲突防护）。 */
+  const submissionFingerprint = (cwd: string, command: SessionCommand): string => {
+    const message = typeof command.message === "string" ? command.message : "";
+    return `${cwd}\u0000${message}`;
+  };
 
   const awaitWriterReleased = async (sessionId: string): Promise<void> => {
     const session = deps.getRpcSession(sessionId);
@@ -967,8 +1058,39 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         ...promptCommand
       } = command;
 
+      // 提交事务：在第一个异步启动步骤之前登记，使取消能先于创建到达。
+      const submissionId = typeof promptCommand.submissionId === "string"
+        ? promptCommand.submissionId
+        : undefined;
+      const fingerprint = submissionFingerprint(cwd, promptCommand as SessionCommand);
+      if (submissionId) {
+        const existing = submissions.get(submissionId);
+        if (existing) {
+          if (existing.info.fingerprint && existing.info.fingerprint !== fingerprint) {
+            existing.info.status = "conflict";
+            throw new Error(SUBMISSION_ID_CONFLICT_MESSAGE);
+          }
+          // 同 id 且已被取消（含「取消先到」的 tombstone）：晚到的创建不得启动 prompt。
+          if (existing.cancelRequested) {
+            existing.info.status = "cancelled";
+            throw new Error(SESSION_SUBMISSION_CANCELLED_MESSAGE);
+          }
+          // 同 id 同内容且已有真实会话：复用已有事务（不重复启动/投递）。
+          if (existing.info.sessionId) {
+            return { sessionId: existing.info.sessionId, data: null };
+          }
+        }
+        rememberSubmission({
+          submissionId,
+          status: "pending",
+          fingerprint,
+        });
+      }
+
       // 临时 key 只用于启动锁，真正 id 由 pi 生成。
-      const tempKey = `__new__${deps.now()}`;
+      // 必须唯一：毫秒时间戳会在同毫秒的并发新建中碰撞，导致两个请求
+      // 合并到同一个 host（cwd/配置混用）。
+      const tempKey = `__new__${randomUUID()}`;
       const { session, realSessionId } = await deps.startRpcSession(
         tempKey,
         "",
@@ -977,14 +1099,38 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         navigationActions,
       );
 
+      const record = submissionId ? submissions.get(submissionId) : undefined;
+      /** 取消是否在启动完成后到达：此时不能再投递，并应中止已启动的运行。 */
+      const cancelledAfterStart = record?.cancelRequested === true;
+      if (record) {
+        record.info.sessionId = realSessionId;
+        record.info.status = cancelledAfterStart ? "cancelled" : "starting";
+      }
+
       deps.allowFileRoot(cwd);
       deps.invalidateSessionListCache();
 
-      if (provider && modelId) {
-        await session.send({ type: "set_model", provider, modelId });
-      }
-      if (thinkingLevel) {
-        await session.send({ type: "set_thinking_level", level: thinkingLevel });
+      try {
+        if (cancelledAfterStart) {
+          // 启动阶段被取消：不发 prompt，直接释放刚创建的 host。
+          await service.destroyAsync(realSessionId);
+          throw new Error(SESSION_SUBMISSION_CANCELLED_MESSAGE);
+        }
+
+        if (provider && modelId) {
+          await session.send({ type: "set_model", provider, modelId });
+        }
+        if (thinkingLevel) {
+          await session.send({ type: "set_thinking_level", level: thinkingLevel });
+        }
+        // 模型/思考档设置后再次校验：取消可能发生在这两步之间。
+        if (submissionId && submissions.get(submissionId)?.cancelRequested) {
+          await service.destroyAsync(realSessionId);
+          throw new Error(SESSION_SUBMISSION_CANCELLED_MESSAGE);
+        }
+      } catch (error) {
+        if (record) record.info.error = error instanceof Error ? error.message : String(error);
+        throw error;
       }
 
       if (promptCommand.type === "ensure_session") {
@@ -1006,7 +1152,49 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       }
 
       const data = await session.send(promptCommand as SessionCommand);
+      if (record) {
+        record.info.status = "accepted";
+        record.info.sessionId = realSessionId;
+      }
       return { sessionId: realSessionId, data };
+    },
+
+    getSubmission(submissionId) {
+      const record = submissions.get(submissionId);
+      return record ? { ...record.info } : null;
+    },
+
+    cancelSubmission(submissionId) {
+      const record = submissions.get(submissionId);
+      if (!record) {
+        // 未知提交：登记有界 tombstone，使晚到的同 id 创建不得启动 prompt。
+        // 返回 pending 而不冒充 confirmed：我们确实没有停止任何东西。
+        rememberSubmission({ submissionId, status: "cancelled" });
+        submissions.get(submissionId)!.cancelRequested = true;
+        return Promise.resolve({ submissionId, status: "pending" as const });
+      }
+      record.cancelRequested = true;
+      const sessionId = record.info.sessionId;
+      if (!sessionId) {
+        // 创建尚未完成：由 createNew 在拿到 host 前后自行中止。
+        record.info.status = "cancelled";
+        return Promise.resolve({ submissionId, status: "pending" as const });
+      }
+      if (record.cancelApplied) return Promise.resolve({ submissionId, status: "confirmed" as const });
+      record.cancelApplied = true;
+      record.info.status = "cancelled";
+      // 只 abort 该提交所属的**原运行**：不自动 wake/新建 host（取消不应有副作用），
+      // 也不影响同会话后来的新一轮。
+      const live = deps.getRpcSession(sessionId);
+      if (!live?.isAlive()) return Promise.resolve({ submissionId, status: "confirmed" as const });
+      return (async (): Promise<CancelResult> => {
+        try {
+          await live.send({ type: "abort" });
+        } catch (error) {
+          console.error("[pidance] cancel submission abort failed:", error);
+        }
+        return { submissionId, status: "confirmed" };
+      })();
     },
 
     getRunningIds() {
