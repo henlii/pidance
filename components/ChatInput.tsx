@@ -26,6 +26,7 @@ import {
 } from "@/lib/ui-preferences";
 import { isAudioPath, isImagePath, isVideoPath } from "@/lib/file-types";
 import { CHAT_COLUMN_MAX_WIDTH, CHAT_GUTTER } from "@/lib/chat-column";
+import { sessionExceedsModelWindow, DEFAULT_COMPACTION_RESERVE_TOKENS } from "@/lib/session-context-window";
 
 export type { AttachedImage, ChatInputHandle } from "@/lib/types";
 
@@ -115,6 +116,8 @@ interface Props {
     maxTokens?: number;
   }[];
   /** providerId → 是否有可用凭据；未认证且无环境凭据的 provider 模型在列表中灰显禁用。 */
+  /** 当前会话上下文占用（tokens，估算）；仅用于切换前与目标模型声明窗口对比。 */
+  sessionTokens?: number | null;
   modelAuthConfigured?: Record<string, boolean>;
   onModelChange?: (provider: string, modelId: string, thinkingLevel?: string | null) => void;
   onCompact?: () => void;
@@ -314,7 +317,7 @@ function QueuedMessageRow({ kind, text }: { kind: "steer" | "follow-up"; text: s
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, blocked = false, model, isAutoModelSelection, modelNames, modelList, modelAuthConfigured, onModelChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, blocked = false, model, isAutoModelSelection, modelNames, modelList, sessionTokens, modelAuthConfigured, onModelChange,
   onAbortCompaction, isCompacting, compactError, compactResult,
   thinkingLevel, thinkingReady, onThinkingLevelChange, defaultThinkingLevel, availableThinkingLevels, thinkingLevelMap, thinkingLevelMaps,
   retryInfo, queuedMessages, onRecallQueue, onSendQueueAsSteer,
@@ -442,9 +445,23 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       const parts: string[] = [m.name];
       if (typeof m.contextWindow === "number") parts.push(`${t("input_modelContext")} ${formatTokens(m.contextWindow)}`);
       if (typeof m.maxTokens === "number") parts.push(`${t("input_modelMaxOutput")} ${formatTokens(m.maxTokens)}`);
+      // 切换前对比：本会话占用（估算）与目标模型声明窗口。声明值可能是乐观的，
+      // 文案保留不确定性；命中也只提示、不阻止切换。
+      if (typeof sessionTokens === "number" && sessionTokens > 0 && typeof m.contextWindow === "number") {
+        parts.push(sessionExceedsModelWindow(sessionTokens, m.contextWindow)
+          ? t("input_modelSessionOverflow", {
+              tokens: formatTokens(sessionTokens),
+              window: formatTokens(m.contextWindow),
+              reserve: formatTokens(DEFAULT_COMPACTION_RESERVE_TOKENS),
+            })
+          : t("input_modelSessionUsage", {
+              tokens: formatTokens(sessionTokens),
+              window: formatTokens(m.contextWindow),
+            }));
+      }
       return parts.join(" · ");
     },
-    [t],
+    [t, sessionTokens],
   );
 
   const thinkingFallback = defaultThinkingLevel ?? "off";
@@ -2336,7 +2353,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                                 : <span style={{ width: 10, flexShrink: 0 }} />}
                               <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{opt.name}</span>
                               {typeof opt.contextWindow === "number" && (
-                                <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+                                <span style={{ flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, color: sessionExceedsModelWindow(sessionTokens, opt.contextWindow) ? "var(--status-warning)" : "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+                                  {/* 切换前预警：本会话估算占用已接近/超过该模型声明可用余量 */}
+                                  {sessionExceedsModelWindow(sessionTokens, opt.contextWindow) && (
+                                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                      <path d="M12 9v4" /><path d="M12 17h.01" /><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+                                    </svg>
+                                  )}
                                   {formatTokens(opt.contextWindow)}
                                 </span>
                               )}

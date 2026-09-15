@@ -491,6 +491,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   }, [statsKey, onSessionStatsChange]);
   useEffect(() => () => { onSessionStatsChange?.(null); }, [onSessionStatsChange]);
 
+  // 会话级上下文占用：热 state 优先；非 live（打开历史/只读）会话回退磁盘统计，
+  // 否则切换模型提示与错误卡片的占用行会缺数据。
+  const sessionContextUsage = sessionStats?.contextUsage ?? contextUsage ?? null;
+
   // Push context usage up to AppShell as well.
   const ctxKey = contextUsage
     ? `${contextUsage.percent ?? "null"}|${contextUsage.contextWindow}|${contextUsage.tokens ?? "null"}`
@@ -594,6 +598,7 @@ const chatPlan = composeChatPlan({
       isAutoModelSelection={isAutoModelSelection}
       modelNames={modelNames}
       modelList={modelList}
+      sessionTokens={sessionContextUsage?.tokens ?? null}
       modelAuthConfigured={modelAuthConfigured}
       onModelChange={handleModelChange}
       onCompact={session || isNew ? handleCompact : undefined}
@@ -890,6 +895,8 @@ const chatPlan = composeChatPlan({
                     showTimestamp={item.showTimestamp}
                     prevTimestamp={!isLive && idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
+                    contextUsage={sessionContextUsage}
+                    onCompactContext={!isLive && !sessionBusy && !writesDisabled ? handleCompact : undefined}
                   />
                 );
                 if (!isVisible || !item.attachRef || currentRefIdx === undefined) return view;

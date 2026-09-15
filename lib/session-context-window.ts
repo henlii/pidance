@@ -34,6 +34,27 @@ export function parseContextLimitParam(
   return clampLimit(n, fallbackWhenPresent);
 }
 
+/** 压缩预留量默认值（与 SDK/settings 默认一致）：声明窗口至少要比占用大这么多才留有余量。 */
+export const DEFAULT_COMPACTION_RESERVE_TOKENS = 16384;
+
+/**
+ * 会话占用是否超过目标模型声明的可用输入余量（窗口 - 压缩预留）。
+ *
+ * 仅做「声明值」层面的比较：sessionTokens 是估算值，声明窗口也可能高于上游真实限额
+ * （实测 cpa/grok-4.6 声明 500000，而 ≈381K 的会话已被上游拒绝），因此未命中不代表安全，
+ * 命中才是可靠信号。调用方在文案上必须保留这种不确定性。
+ */
+export function sessionExceedsModelWindow(
+  sessionTokens: number | null | undefined,
+  contextWindow: number | null | undefined,
+  reserveTokens: number = DEFAULT_COMPACTION_RESERVE_TOKENS,
+): boolean {
+  if (typeof sessionTokens !== "number" || !Number.isFinite(sessionTokens) || sessionTokens <= 0) return false;
+  if (typeof contextWindow !== "number" || !Number.isFinite(contextWindow) || contextWindow <= 0) return false;
+  const reserve = Number.isFinite(reserveTokens) && reserveTokens > 0 ? reserveTokens : 0;
+  return sessionTokens > contextWindow - reserve;
+}
+
 /**
  * 取 leaf 上下文的尾部窗口（最新 limit 条）。
  * messages/entryIds 平行切片；model/thinkingLevel 原样保留。

@@ -18,6 +18,7 @@ import { PIDANCE_COMMAND_CUSTOM_TYPE } from "@/lib/session-command-entry";
 import { PIDANCE_BINARY_CUSTOM_TYPE, parseBinaryMessageData } from "@/lib/message-binary";
 import { getBranchSummaryFileMetadata } from "@/lib/branch-bookmarks";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
+import { isUnexplainedUpstreamRejection } from "@/lib/provider-error";
 import { isActiveStreamBlock, isEmptyThinkingBlock } from "@/lib/message-display";
 import { getThinkingText, projectDisplayBlocks } from "@/lib/thinking-content";
 import { parseAnsiLine } from "@/lib/ansi";
@@ -27,6 +28,7 @@ import { useI18n } from "@/lib/i18n";
 import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE } from "@/lib/chat-column";
 import { encodeFilePathForApi } from "@/lib/file-paths";
 import { extractMediaPathsFromText } from "@/lib/file-types";
+import type { ContextUsage } from "@/lib/pi-types";
 import type {
   AgentMessage,
   UserMessage,
@@ -239,6 +241,10 @@ interface Props {
   showTimestamp?: boolean;
   prevTimestamp?: number;
   sessionId?: string;
+  /** 会话级上下文占用（用于「上游拒绝但未给原因」提示；tokens 为估算值）。 */
+  contextUsage?: ContextUsage | null;
+  /** 手动压缩上下文；只读/忙碌时由调用方不下发（handleCompact 内部另有 guard）。 */
+  onCompactContext?: () => void;
 }
 
 function formatTime(ts?: number): string | null {
@@ -268,12 +274,12 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, toolExecutionSnapshots, modelNames, cwd, onOpenFile, entryId, onBranchHere, onNewSessionFromHere, onBranchFromAssistant, onNewSessionFromAnswer, forking, showTimestamp, prevTimestamp, sessionId, toolsActive }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, toolExecutionSnapshots, modelNames, cwd, onOpenFile, entryId, onBranchHere, onNewSessionFromHere, onBranchFromAssistant, onNewSessionFromAnswer, forking, showTimestamp, prevTimestamp, sessionId, toolsActive, contextUsage, onCompactContext }: Props) {
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onBranchHere={onBranchHere} onNewSessionFromHere={onNewSessionFromHere} forking={forking} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} toolExecutionSnapshots={toolExecutionSnapshots} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} onBranchFromAssistant={onBranchFromAssistant} onNewSessionFromAnswer={onNewSessionFromAnswer} toolsActive={toolsActive} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} toolExecutionSnapshots={toolExecutionSnapshots} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} onBranchFromAssistant={onBranchFromAssistant} onNewSessionFromAnswer={onNewSessionFromAnswer} toolsActive={toolsActive} contextUsage={contextUsage} onCompactContext={onCompactContext} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -505,6 +511,8 @@ function AssistantMessageView({
   onBranchFromAssistant,
   onNewSessionFromAnswer,
   toolsActive,
+  contextUsage,
+  onCompactContext,
 }: {
   message: AssistantMessage;
   isStreaming?: boolean;
@@ -521,8 +529,11 @@ function AssistantMessageView({
   entryId?: string;
   onBranchFromAssistant?: (entryId: string) => void;
   onNewSessionFromAnswer?: (entryId: string) => void;
+  contextUsage?: ContextUsage | null;
+  onCompactContext?: () => void;
 }) {
   const { t } = useI18n();
+  const isMobile = useIsMobile();
   const time = showTimestamp ? formatTime(message.timestamp) : null;
   const blockItems = projectDisplayBlocks(message.content ?? [])
     .map(({ block, sourceIndex }) => ({ block, originalIndex: sourceIndex }))
@@ -728,6 +739,42 @@ function AssistantMessageView({
             ) : null}
           </div>
           {errorMessage ? <div>{errorMessage}</div> : null}
+          {/* 上游拒绝且未返回原因：SDK 的溢出识别带 ^ 锚定、被错误前缀挡住，
+              这里只给提示与手动压缩入口，不自动压缩、不自动重发。 */}
+          {isUnexplainedUpstreamRejection(errorMessage) ? (
+            <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
+              <div>{t("message_unexplainedRejection")}</div>
+              {contextUsage && contextUsage.tokens !== null ? (
+                <div style={{ opacity: 0.85 }}>
+                  {t("message_unexplainedRejectionUsage", {
+                    tokens: contextUsage.tokens.toLocaleString(),
+                    window: contextUsage.contextWindow.toLocaleString(),
+                  })}
+                </div>
+              ) : null}
+              {onCompactContext ? (
+                <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, marginTop: 2 }}>
+                  <button
+                    type="button"
+                    onClick={onCompactContext}
+                    style={{
+                      padding: isMobile ? "8px 12px" : "3px 10px",
+                      minHeight: isMobile ? 40 : undefined,
+                      borderRadius: 5,
+                      border: "1px solid currentColor",
+                      background: "transparent",
+                      color: "inherit",
+                      font: "inherit",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {t("message_compactContext")}
+                  </button>
+                  <span style={{ opacity: 0.85 }}>{t("message_compactContextHint")}</span>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       )}
 

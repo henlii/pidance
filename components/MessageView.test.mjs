@@ -359,3 +359,48 @@ test("历史工具：无快照时保持默认折叠", () => {
   assert.ok(html.includes("git status"));
   assert.ok(!html.includes("Live output"));
 });
+
+// 上游拒绝但未给原因：只在错误签名命中时给出提示与手动压缩入口（不自动压缩、不自动重发）
+function errorAssistant(errorMessage) {
+  return {
+    role: "assistant",
+    content: [],
+    provider: "cpa",
+    model: "grok-4.6",
+    stopReason: "error",
+    errorMessage,
+    timestamp: Date.now(),
+  };
+}
+
+test("无 body 的 4xx：给出疑似容量提示与压缩入口，并标注占用为估算", () => {
+  const html = renderMessage(
+    errorAssistant("OpenAI API error (400): 400 status code (no body)"),
+    { contextUsage: { percent: 99, contextWindow: 500000, tokens: 381233 }, onCompactContext: () => {} },
+  );
+
+  assert.ok(html.includes("rejected this request without a reason"));
+  assert.ok(html.includes("Compact context"));
+  assert.ok(html.includes("381,233"), "显示估算占用");
+  assert.ok(html.includes("500,000"), "显示声明窗口");
+  assert.ok(html.includes("estimated"), "占用必须标注为估算");
+});
+
+test("无 body 的 4xx：只读/忙碌（无回调）时不渲染压缩入口，提示仍在", () => {
+  const html = renderMessage(errorAssistant("OpenAI API error (413): no body"));
+  assert.ok(html.includes("rejected this request without a reason"));
+  assert.ok(!html.includes("Compact context"));
+});
+
+test("语义明确的 4xx：不给出容量提示（凭证/限流/路由各有其因）", () => {
+  for (const status of [401, 403, 404, 429]) {
+    const html = renderMessage(errorAssistant(`OpenAI API error (${status}): ${status} status code (no body)`));
+    assert.ok(!html.includes("rejected this request without a reason"), `${status} 不应给容量提示`);
+    assert.ok(!html.includes("Compact context"), `${status} 不应给压缩入口`);
+  }
+});
+
+test("带 body 的 400：上游已给原因，不追加容量提示", () => {
+  const html = renderMessage(errorAssistant("OpenAI API error (400): invalid request: unknown model"));
+  assert.ok(!html.includes("rejected this request without a reason"));
+});
