@@ -326,6 +326,9 @@ export type BrowserSessionRuntimeRegistry = {
   seedTurnMetrics(sessionId: string, metrics: TurnMetrics | null): void;
   /** 测试用：重置单例 */
   resetForTests(): void;
+  /** 测试用：当前 slot 数量与各 slot 的会话 id（验证回收） */
+  debugSlotCount(): number;
+  debugSlotIds(): string[];
 };
 
 function emptyStream(): StreamSnapshot {
@@ -529,11 +532,68 @@ export function createBrowserSessionRuntimeRegistry(
       || slot.snapshot.sendInFlight
       || slot.inFlight.size > 0
     ) return;
-    if (!slot.eventStream) return;
+    // 不要求 eventStream 存在：流可能在上一个空闲窗口已关闭，但 slot 仍需要
+    // 在窗口到期时被回收（#35）。closeIdleEventStream 对空 manager 安全返回。
     slot.idleCloseTimer = schedule(() => {
       slot.idleCloseTimer = null;
       closeIdleEventStream(slot);
+      // 同一空闲窗口到期后一并回收可丢弃的 slot（#35）：只在无人看、
+      // 无在途提交、无未落盘记录时才删，否则只收流不删数据。
+      evictIdleSlots();
     }, IDLE_SSE_CLOSE_DELAY_MS);
+  };
+
+  /**
+   * slot 是否可以安全丢弃（Issue #35）。
+   *
+   * 四个条件必须**同时**满足，宁可多留一个 slot，不可丢掉用户消息：
+   * 1. 无视图附件（没人看）；
+   * 2. 无快照订阅者；
+   * 3. 未运行、无在途提交（没有正在发的消息）；
+   * 4. timeline 里**没有未确认的本地记录**（乐观气泡、引导投递、外部追加）——
+   *    这是最关键的一条：它们还没进磁盘，丢了就真丢。
+   * 另外还要确认消息已落盘（entryIds 有内容），否则重建时可能什么都拉不到；
+   * 以及无待投递队列（队列本身在 host/prefs，但 UI 基线丢了会显示不一致）。
+   */
+  const canEvictSlot = (slot: RuntimeSlot): boolean => {
+    if (hasViewers(slot)) return false;
+    if (slot.snapshotListeners.size > 0) return false;
+    if (
+      slot.snapshot.agentRunning
+      || slot.snapshot.bashRunning
+      || slot.snapshot.sendInFlight
+      || slot.inFlight.size > 0
+      || slot.promptAborts.size > 0
+    ) return false;
+    // 未确认的本地记录：绝不可回收
+    if (slot.timeline.some((record) => record.pending)) return false;
+    if (slot.submissionKeys.size > 0) return false;
+    // 空 timeline 且无 entryId：可能只是打开但未 hydrate，留给下次
+    if (slot.timeline.length === 0) return false;
+    return true;
+  };
+
+  /**
+   * 回收可丢弃的 slot（无视图、无在途、无未落盘记录）。
+   *
+   * 存在的理由：`dispose()`（切会话/卸载）只退订视图，**不删 slot**；
+   * `slots.delete()` 之前只出现在 rekey 里。于是一个页面里打开过的每个会话都会
+   * 一直留着完整 timeline 与派生数组，直到刷新页面——长时间使用下无界增长。
+   *
+   * 为什么不在 dispose 里直接删：立即删掉会让「切走再马上切回」重新走磁盘
+   * hydrate（闪一下、丢掉流式尾部），而空闲收流已经是延迟 5s 的语义。
+   */
+  const evictIdleSlots = () => {
+    for (const [sessionId, slot] of [...slots]) {
+      if (!canEvictSlot(slot)) continue;
+      slot.eventStream?.close();
+      slot.eventStream = null;
+      slots.delete(sessionId);
+      // 别名指向它的一并清理，避免 getSlot 反复回查空槽
+      for (const [alias, canonical] of [...aliases]) {
+        if (canonical === sessionId || alias === sessionId) aliases.delete(alias);
+      }
+    }
   };
 
   const bumpTimeline = (slot: RuntimeSlot) => {
@@ -1261,6 +1321,12 @@ export function createBrowserSessionRuntimeRegistry(
     },
     resetForTests() {
       resetSingleton();
+    },
+    debugSlotCount() {
+      return slots.size;
+    },
+    debugSlotIds() {
+      return [...slots.keys()];
     },
   };
 
