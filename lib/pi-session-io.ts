@@ -14,21 +14,66 @@ export { CURRENT_SESSION_VERSION };
 export type { SessionHeader };
 
 /**
+ * SDK 私有（类声明中无 private 修饰、但未列入公开文档）的会话文件写入入口。
+ *
+ * 为何必须用它（已核实 dist/core/session-manager.d.ts 与运行时实测）：
+ * - `isPersisted()` 返回的是「启用了持久化」，**不是**「已写盘」
+ *   （无 assistant 时文件不存在而 isPersisted() 为 true）；
+ * - `_persist(entry)` 在无 assistant 时不建文件（有 flushed 门槛）；
+ * - 公开方法里没有 flush / materialize / save 之类的入口。
+ * 产品要求 ensure_session 后文件立即存在（否则不在列表、无法删除），
+ * 因此只能走 `_rewriteFile()`（重写全部 fileEntries，openSync(...,"w") 会建文件）
+ * 与 `flushed`（置 true 后 `_persist` 才走 append 而不是缓存）。
+ *
+ * 集中为单一适配层：SDK 升级导致这两项消失时**明确报错**，不再静默跳过
+ *（旧写法 `internal._rewriteFile?.()` 在升级后会什么也不做）。
+ */
+type SdkFileSurface = {
+  rewriteFile: () => void;
+  markFlushed: () => void;
+};
+
+export const SDK_SESSION_FILE_SURFACE_MISSING =
+  "Pi SDK 未提供会话文件写入入口（_rewriteFile / flushed）。请检查 @earendil-works/pi-coding-agent 版本（当前基线 0.85.1）与 pi-session-io 适配层。";
+
+function readSdkFileSurface(manager: SessionManager): SdkFileSurface | null {
+  const internal = manager as unknown as {
+    _rewriteFile?: unknown;
+    flushed?: unknown;
+  };
+  if (typeof internal._rewriteFile !== "function") return null;
+  return {
+    rewriteFile: () => (internal._rewriteFile as () => void).call(manager),
+    markFlushed: () => {
+      internal.flushed = true;
+    },
+  };
+}
+
+/** 供升级自检使用：SDK 是否仍提供这两项入口。 */
+export function hasSdkFileSurface(manager: SessionManager): boolean {
+  return readSdkFileSurface(manager) !== null;
+}
+
+function requireSdkFileSurface(manager: SessionManager): SdkFileSurface {
+  const surface = readSdkFileSurface(manager);
+  if (!surface) throw new Error(SDK_SESSION_FILE_SURFACE_MISSING);
+  return surface;
+}
+
+/**
  * Pi 在首条 assistant 前延迟落盘；Web 列表/删除需要文件立即存在。
  */
 export function materializeSessionFile(manager: SessionManager): void {
   const file = manager.getSessionFile();
   if (!file) return;
-  const internal = manager as unknown as {
-    _rewriteFile?: () => void;
-    flushed?: boolean;
-  };
+  const surface = requireSdkFileSurface(manager);
   if (!existsSync(file)) {
-    internal._rewriteFile?.();
+    surface.rewriteFile();
   }
   // 与 Pi 首条 assistant 落盘路径对齐：文件已存在时须标 flushed，否则后续 wx 会 EEXIST
   if (existsSync(file)) {
-    internal.flushed = true;
+    surface.markFlushed();
   }
 }
 
@@ -147,7 +192,9 @@ export function reparentSessionFile(
   if (!header || header.type !== "session") return;
   if (parentSession) header.parentSession = parentSession;
   else delete header.parentSession;
-  const internal = manager as unknown as { _rewriteFile?: () => void; flushed?: boolean };
-  internal._rewriteFile?.();
-  if (existsSync(filePath)) internal.flushed = true;
+  // 与 materialize 共用同一适配层：缺失时抛错，不让「重挂父子关系」静默失败
+  // （静默失败会让子会话一直指向已被删的父会话）。
+  const surface = requireSdkFileSurface(manager);
+  surface.rewriteFile();
+  if (existsSync(filePath)) surface.markFlushed();
 }
