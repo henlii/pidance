@@ -934,7 +934,7 @@ const COLLAPSED_LINE_STYLE = {
  * 结构上左侧是撑满剩余宽度的按钮（标签 + 摘要），右侧耗时是独立元素 ——
  * 这样整行（除耗时外）都可点，光标停在行内任意处都是手型。
  */
-function BlockHeaderRow({ label, expanded, onToggle, summary, meta, indent }: {
+function BlockHeaderRow({ label, expanded, onToggle, summary, meta, indent, showCommandLabel }: {
   label: string;
   expanded: boolean;
   onToggle: () => void;
@@ -942,8 +942,10 @@ function BlockHeaderRow({ label, expanded, onToggle, summary, meta, indent }: {
   summary: string | null;
   /** 行右侧的耗时等次要信息，不参与点击 */
   meta?: string | null;
-  /** 展开态并进分区表头时不需要额外内边距 */
+  /** 并进分区表头时不需要额外内边距（只影响间距） */
   indent?: boolean;
+  /** 渲染「命令」小字：只有工具块的命令分区需要，思考块不要 */
+  showCommandLabel?: boolean;
 }) {
   const { t } = useI18n();
   return (
@@ -978,7 +980,7 @@ function BlockHeaderRow({ label, expanded, onToggle, summary, meta, indent }: {
       >
         <span style={BLOCK_LABEL_STYLE}>【{label}】</span>
         {summary !== null && <span style={COLLAPSED_LINE_STYLE}>{summary}</span>}
-        {indent && <span style={{ color: "var(--text-dim)", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em", flexShrink: 0 }}>{t("message_toolCommand")}</span>}
+        {showCommandLabel && <span style={{ color: "var(--text-dim)", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em", flexShrink: 0 }}>{t("message_toolCommand")}</span>}
       </button>
       {meta && <span style={BLOCK_META_STYLE}>{meta}</span>}
     </div>
@@ -1011,10 +1013,41 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
     : error ?? (block.deferred ? content : getThinkingText(block));
 
   /**
-   * 折叠态那一行显示什么：流式中取输出末行（随流式滚动更新）；历史块留空，
-   * 只有标签 —— 保持安静，不主动暴露旧推理。
+   * 折叠态那一行：显示思考输出的末行（流式中随输出滚动更新，历史块显示已有内容）。
+   *
+   * 历史块的正文在服务端是 deferred（`thinking: ""`），所以要先把内容取回来才有得显示 ——
+   * 见下面的进视口惰性加载。这是「折叠态不显示内容」的根因：不是留空规则，
+   * 而是那时正文根本没加载。
    */
-  const collapsedText = isStreaming ? ((bodyText ?? "").trimEnd().split("\n").pop() ?? "") : "";
+  const collapsedText = (() => {
+    if (loading) return t("message_thinkingLoading");
+    const text = bodyText ?? "";
+    if (!text.trim()) return "";
+    return text.trimEnd().split("\n").pop() ?? "";
+  })();
+
+  /**
+   * 历史 deferred 思考内容：**进入视口才加载**（提前一屏）。
+   *
+   * 不在挂载时对每个历史块都取一次（长会话里可能有几十上百个），也不等用户点开
+   * 才显示 —— 用户要的是「收起来也能看到内容」。
+   */
+  const holderRef = useRef<HTMLDivElement>(null);
+  const [inViewport, setInViewport] = useState(false);
+  useEffect(() => {
+    const el = holderRef.current;
+    if (!el || block.deferred !== true || typeof IntersectionObserver === "undefined") return;
+    const io = new IntersectionObserver(
+      (entries) => { if (entries[0]?.isIntersecting) setInViewport(true); },
+      { rootMargin: "100% 0px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [block.deferred]);
+  useEffect(() => {
+    if (inViewport || expanded) void loadIfDeferred();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 视口/展开变化时触发
+  }, [inViewport, expanded]);
 
   // deferred 思考内容按需加载（点击展开或流式中默认展开均触发）
   const loadIfDeferred = async () => {
@@ -1056,6 +1089,7 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
 
   return (
     <div
+      ref={holderRef}
       style={{
         border: "1px solid var(--border)",
         borderRadius: 6,
@@ -1267,6 +1301,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
               summary={null}
               meta={elapsedMs === undefined ? null : formatElapsedDuration(elapsedMs)}
               indent
+              showCommandLabel
             />
           </div>
           <code style={{ display: "block", maxHeight: streamBlockMaxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{command}</code>

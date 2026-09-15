@@ -229,11 +229,13 @@ test("思考块：流式中保持折叠，单行显示最后一行输出", () =>
   assert.ok(!html.includes("第二行推理"), "折叠态不渲染整段内容");
 });
 
-test("思考块：非流式（历史消息）只有标签，不带末行", () => {
-  const html = renderMessage(thinkingMessage("旧推理"));
+test("思考块：非流式（历史消息）折叠态同样显示末行内容", () => {
+  const html = renderMessage(thinkingMessage("旧推理第一行\n旧推理末行"));
   assert.ok(html.includes('aria-expanded="false"'));
   assert.ok(html.includes("【Thinking】"));
-  assert.ok(!html.includes("旧推理"), "历史思考块保持安静，不显示滚动末行");
+  // 折叠态也要能看见内容（此前历史块只有标签，看起来像内容丢失）
+  assert.ok(html.includes("旧推理末行"), "历史块折叠态显示末行");
+  assert.ok(!html.includes("旧推理第一行"), "折叠态不渲染整段内容");
 });
 
 test("思考块：用户展开后渲染完整内容", () => {
