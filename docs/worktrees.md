@@ -1,5 +1,7 @@
 # Worktrees in Pidance
 
+[Documentation](README.md) · [简体中文](worktrees.zh-CN.md)
+
 Pidance can show all Git worktrees for one project in the sidebar. Use this when you want to keep separate checkouts for different branches, while keeping the project's sessions grouped together.
 
 ## When the Worktree Control Appears
@@ -39,13 +41,13 @@ Pidance creates the checkout at:
 For example, if the main checkout is:
 
 ```text
-/Users/alex/Documents/Workspace/pi-web
+/Users/alex/Documents/Workspace/pidance
 ```
 
 and you create branch `codex/worktree-help`, the worktree is created under:
 
 ```text
-/Users/alex/Documents/Workspace/pi-web-worktrees/codex-worktree-help
+/Users/alex/Documents/Workspace/pidance-worktrees/codex-worktree-help
 ```
 
 If the branch already exists, Pidance adds a worktree for that branch. If it does not exist, Pidance creates the branch from the current `HEAD`.

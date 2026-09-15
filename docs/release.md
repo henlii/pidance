@@ -1,216 +1,129 @@
-# 发布清单（v0.1.0 首发）
+# 发布与候选包
 
-本文描述 **@henlii/pidance** 的正式发版流程。**不表示任何版本已发布**；任一步失败都不得宣称成功。
+[文档导航](README.md) · [开发验证](development.md) · [产物管理](artifacts.md)
 
-发布目标：
+本文是现行发布操作说明，不代表已执行发布。主包为 `@henlii/pidance`，CLI **仅** `pidance`；桌面壳独立构建，见 [Desktop](../desktop/README.md)。
 
-- npm 包：`@henlii/pidance@0.1.0`（及后续版本）
-- GitHub Release：`henlii/pidance` 的 `v0.1.0`（及后续 tag）
+## 1. 发布边界
 
-Pidance 源自 [agegr/pi-web](https://github.com/agegr/pi-web)，底层仍兼容 [badlogic/pi-mono](https://github.com/badlogic/pi-mono) 的会话语义。发版前核对上游变更，保持会话文件与运行时兼容。
+- 日常开发在 `main`；只有明确发布任务才执行版本提交、push 和 tag。
+- 不使用本地“一键 version/tag/push/publish”脚本；版本、提交、tag 逐步显式操作。已配置的 tag CI 是正式发布执行方，会自动 publish，这是与本地脚本限制不同的边界。
+- 正式构建只在隔离发布根进行，不在工作区运行 `next build`，不影响 31415/31416，也不操作上游服务。
+- 必须前后 allowlist/内容审计；npm 与 GitHub Release 使用同一已验收 tgz 及 SHA-256。
+- 不移动或删除已发布 tag 来重试，不复用已发布版本号覆盖内容。发生版本冲突先核对远端状态。
 
-## 原则
+## 2. 版本准备与质量门禁
 
-1. **先版本提交并合并**，再基于干净 tag 在中性临时 worktree/checkout 构建与审计。
-2. **任何脚本不得自动** `version` / `tag` / `push` / `publish` / 创建 GitHub Release。
-3. 正式 `next build` **只允许**在隔离发布 checkout 中作为 `release:check` 的一部分执行；日常开发禁止 `next build`（会污染 `.next/`，干扰 `npm run dev`）。
-4. **生成前后均须审计**：`release:audit`（pack dry-run + 完整文本扫描）→ 显式 `npm pack` → `release:audit:tgz`（解析真实 tgz）→ 再 sha256 / 安装冒烟 / publish。不得用工作区文件冒充制品内容。
-5. `npm login` **仅在**实际 `npm publish` 前需要；预检与审计不需要登录。本机默认 registry 可为镜像（如 npmmirror），但**正式登录、身份检查、publish 与查询必须指向官方源** `https://registry.npmjs.org/`。`package.json` 的 `publishConfig.registry` / `access` 是防误发护栏，命令行仍应显式传 `--registry`。
-6. 公开安装入口 CLI **仅** `pidance`；**不得**注册 `pi-web`（该命令归上游）。产品默认端口 **31415**；正式服务只使用已安装的 Pidance 制品。
-7. npm 与 GitHub Release **必须使用同一个已验收 tgz**（及对应 SHA-256）。
+1. 确认工作区改动归属，目标版本在 npm/tag 中未占用。
+2. 同步主包 `package.json`、`package-lock.json` 的版本，以及中英 README 版本行。
+3. 新增 `docs/release-notes/v<version>.md`，中文在上、英文在下，写明包名、CLI、变更与验收范围；补齐 [发布记录索引](release-notes/README.md)。
+4. 执行 `npm run check`，通过后显式创建 `chore(release)` 提交。
+5. 桌面壳版本不会随主包自动更新；需要发布新桌面制品时单独同步 `desktop/package.json` 与 lockfile，验证精确依赖。
 
-## 0. 版本提交（在开发分支 / PR）
+当前 release workflow 不运行 `npm run check`，因此不能跳过发布前本地质量门禁。
 
-1. 将 `package.json` 的 `version` 设为目标版本（首发 `0.1.0` 已就位则跳过改号）。
-2. 完成功能与文档，PR 合并到默认分支。
-3. 在默认分支创建并推送 **annotated tag**（示例）：
+## 3. 显式 push 与 annotated tag
+
+以下 `<version>` / `<run-id>` 是占位符，执行时替换为本次确认值，不照抄占位符或自动猜测版本。
 
 ```bash
-git checkout main
-git pull --ff-only
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
+git status --short
+git push origin main
+git ls-remote --tags origin refs/tags/v<version>
+git tag -a v<version> -m "v<version>"
+git rev-parse HEAD
+git rev-parse v<version>^{}
+git push origin v<version>
 ```
 
-确认远端尚无同名 tag：
+创建前确认远端无同名 tag；推送前核对 annotated tag 解引用与预期 HEAD 一致，且 `package.json` 版本与 tag 一致。不同则停止，不通过强制重打 tag 掩盖错误。
 
 ```bash
-git ls-remote --tags origin v0.1.0
+gh run list --workflow release.yml --repo henlii/pidance --limit 5
+gh run watch <run-id> --repo henlii/pidance
 ```
 
-## 1. 隔离发布 checkout
+## 4. CI 的实际流程
 
-在**中性临时目录**（不要用日常开发工作区，避免本机路径/缓存渗入）检出干净 tag：
+事实来源：[`.github/workflows/release.yml`](../.github/workflows/release.yml)。`push v*` 触发：
+
+1. checkout tag，复制到中性根 `/tmp/pidance-release-build`。
+2. Node 24，`npm ci --include=dev`。
+3. webpack 生产构建。
+4. 生成前审计 `npm run release:audit`。
+5. `npm pack --ignore-scripts`，文件名来自 package 版本。
+6. 对真实 tgz 执行生成后审计，再生成 SHA-256。
+7. 使用 npm Trusted Publishing / OIDC 发布到官方源并附 provenance；需要发布方配置对应 trusted publisher，不使用长期 token。
+8. 优先采用 `docs/release-notes/<tag>.md`，缺失时回退 commit 列表。
+9. `gh release create` 上传同一 tgz 和 sha256。
+
+### 当前 CI 限制
+
+- 未包含完整 check 或安装后运行冒烟；这些验证需要在发布准备阶段补齐，不能声称 CI 自动完成。
+- npm 精确版本已存在时跳过 publish，GitHub Release 已存在时跳过创建。
+- 因此重跑构建所得 tgz **不能仅凭版本号相同就认定与 npm 已发布字节一致**。部分成功后应核对已有制品及哈希，不盲目重新打包上传。
+- tag 与 package 版本一致性需在推 tag 前人工/显式核对，当前 workflow 不提供完整的该项门禁。
+
+以上为现状限制，本轮仅整理文档，没有修改 workflow。
+
+## 5. 本地候选包（不发布）
 
 ```bash
-git worktree add /tmp/pidance-release-v0.1.0 v0.1.0
-cd /tmp/pidance-release-v0.1.0
-npm ci
+npm run package:candidate
+# 或指定专用构建根
+npm run package:candidate -- --build-root /tmp/pidance-candidate-example
 ```
 
-可选：设置中性 `HOME` 或构建目录，降低绝对路径泄漏风险（Next 仍可能内嵌中性构建路径；审计会扫描开发机 `HOME`/仓库绝对路径与内网 IP）。
+候选脚本可包含未提交改动，负责工作区镜像、隔离 webpack 构建、前后审计、pack 与 sha256，不修改版本、不提交、不推送、不发布。它不替代 `npm run check`。
 
-## 2. 质量门禁 + 正式构建 + 生成前审计
+默认产物为 `/tmp/pidance-release-build/henlii-pidance-<version>.tgz` 及 `.sha256`。不能将相同版本号的本地候选误称为 npm 已发布制品。
 
-```bash
-npm run release:check
-```
+### 手工隔离预检
 
-等价于：
+需要调查打包问题时，在专用中性 checkout 中执行（不要在主工作区运行）：
 
 ```bash
-npm run check && npm run build && npm run release:audit
-```
-
-说明：
-
-- `check`：`typecheck` + `lint` + 单元测试。
-- `build`：生产 `next build`（**仅此发布例外**）。
-- `release:audit`（pre-pack）：`npm pack --dry-run --json --ignore-scripts`（**不生成 tgz**），并校验：
-  - 必要 `.next` 产物与 `server`/`static` 非空；
-  - 仅 `bin.pidance`，无 `pi-web`；
-  - 无源码/测试/本地治理/密钥/dev cache 等禁入路径；
-  - 对清单中每个可扫描文本文件做**完整**有界扫描（单文件与总预算超限、读取失败均 fail closed，禁止截断后通过）；
-  - 拒绝私钥标记、明显 credential 赋值、仓库/HOME 绝对路径、硬编码内网主机与 `192.168.*.*` 地址。
-
-审计失败会列出具体路径与原因并以非零退出。**此时不要**继续 pack/publish。
-
-## 2.5 本地候选包（不发布）
-
-只想先打个本地 tgz（含未提交改动、不 version/tag/push/publish）时，
-用一条命令代替手工 rsync + 构建 + 审计：
-
-```bash
-npm run package:candidate                     # 默认 /tmp/pidance-release-build
-npm run package:candidate -- --build-root /tmp/xxx
-```
-
-脚本自动镜像工作区到中性构建根（增量复用 node_modules）、跑隔离
-webpack 构建、生成前后审计、npm pack 并写 sha256；产物与后续正式发布共用
-同一套审计规则。打完后编译产物只留最新 tgz+sha256，见 [产物管理](./artifacts.md)。
-
-## 3. 生成 tgz + 生成后审计 + 哈希
-
-pre-pack 通过后**显式**打包，再对**真实 tgz** 审计（直接读包内字节，不回读工作区冒充）：
-
-```bash
+npm ci --include=dev
+npm run check
+# 先清除维护环境的 PIDANCE_DIST_DIR / TURBOPACK；下面是 POSIX 示例
+env -u PIDANCE_DIST_DIR -u TURBOPACK npm run build
+npm run release:audit
 npm pack --ignore-scripts
-# 得到例如：henlii-pidance-0.1.0.tgz
-
-npm run release:audit:tgz -- henlii-pidance-0.1.0.tgz
-# 或：node scripts/audit-release-package.mjs --tgz henlii-pidance-0.1.0.tgz
+npm run release:audit:tgz -- henlii-pidance-<version>.tgz
+sha256sum henlii-pidance-<version>.tgz
 ```
 
-post-pack 规则与 pre 相同（allowlist / 必要产物 / bin / 敏感内容），且 **bin 只信 tgz 内 `package/package.json`**。CLI 会用当前干净 tag 的 `package.json` 的 `name`/`version` **仅比对包身份**（与 tgz 内声明不一致则失败）；内容与 bin 仍不读工作区冒充。解析有界：压缩体、解压总量、条目数、单条目大小均设上限；header checksum 与数值字段 fail closed；拒绝路径穿越/控制字符、符号链接/硬链接与非预期 tar 类型；双零结束后非零 trailing data 拒绝。
+审计使用 `PIDANCE_RELEASE_SOURCE_ROOT` 标明原始源码目录；它应与隔离构建根不同。不要在文档中写入维护机器的实际绝对路径。
 
-仅当 `release:audit:tgz` 通过后：
+## 6. 审计与冒烟
+
+- pre-pack 审计通过 dry-run 清单及完整有界扫描检查必要 `.next` 产物、CLI allowlist、禁入源码/测试/密钥/本机路径等内容。
+- post-pack 直接解析真实 tgz 字节，检查 tar 路径、条目类型、大小预算、包身份与相同敏感内容规则；不能回读工作区来替代包内容。
+- 审计失败立即停止，不继续 publish。
+- 将已审计的同一 tgz 安装到专用临时目录，使用 production 依赖验证 CLI/HTTP；使用隔离 `PI_CODING_AGENT_DIR` 和空闲端口（例如先确认未占用的 31999），**不用 31415/31416 做安装冒烟**。
+- 仅停止本次冒烟创建的进程并清理本次临时数据，不触碰真实会话。
+
+## 7. 失败与最终核对
+
+- **质量/审计失败**：修复原因后重新准备；未发布不得写“发布成功”。
+- **tag/版本冲突**：确认 npm、tag、Release 的实际状态，不自动删除 tag。
+- **npm 成功、Release 失败**：优先找回本次已发布的原 tgz 和哈希；核实一致后补 Release，不把重建包当作原包。
+- **OIDC 失败**：核对仓库/workflow/trusted publisher 配置；本地登录发布仅是另行授权的故障处理路径，不是默认步骤。
 
 ```bash
-sha256sum henlii-pidance-0.1.0.tgz | tee henlii-pidance-0.1.0.tgz.sha256
+npm view @henlii/pidance@<version> version dist.integrity dist.tarball --registry https://registry.npmjs.org/
+gh release view v<version> --repo henlii/pidance
 ```
 
-## 4. 安装冒烟（同一 tgz）
+最终核对精确版本、tag 指向、Release 附件及其 SHA-256，并验证 npm 下载内容与 Release tgz 一致。只有全部确认后才能报告发布完成。
 
-在另一干净目录用 **production 依赖** 安装**已审计**的同一 tgz：
+## 命令速查
 
-```bash
-mkdir -p /tmp/pidance-smoke && cd /tmp/pidance-smoke
-npm init -y
-npm install /tmp/pidance-release-v0.1.0/henlii-pidance-0.1.0.tgz --omit=dev
-npx pidance --help || true
-# 或短时启动：npx pidance --no-open -p 31415
-# 确认监听 31415，且命令名为 pidance（无 pi-web）
-```
-
-冒烟失败则停止，**不要** publish。
-
-## 4.5 可信发布（GitHub Actions + OIDC，推荐）
-
-本仓已配置 `.github/workflows/release.yml`（**可信发布**）：`push v* tag` 触发 CI，
-在 GitHub runner 上完成隔离构建 → `release:audit` 前后审计 → `npm pack` →
-`release:audit:tgz` → `sha256sum` → `npm publish --provenance --access public
---registry https://registry.npmjs.org/`（**OIDC 临时身份，无长期 token，账号 2FA 下
-无需 OTP**）→ `gh release create`（同一 tgz + sha256）。
-
-- **不使用 automation token**（完整发布权限、泄露风险高；npm 官方也建议自动化场景
-  改用可信发布）。
-- CI 发布流程与下方本地手动 publish 等效；本地步骤（构建/审计/冒烟）仍可用于
-  发布前的预检，但发布动作交给 CI。
-- npmjs.com 侧可在包发布后于包设置 → Access → **Trusted Publishing** 配置
-  GitHub repo 锁定（可选，进一步收紧为只允许该 repo 的 OIDC 发布）。
-- 重新触发：若 tag 已存在但 workflow 后才推送，删除远端 tag 重推即可
-  （`git push origin :refs/tags/v0.1.0` → 重建 annotated tag → `git push origin v0.1.0`）。
-
-## 5. 正式发布到 npm（显式）
-
-仅在 tgz 已通过 post-pack 审计与安装冒烟后。**务必使用官方 registry**（勿依赖本机镜像默认值）：
-
-```bash
-# 仅在本步前登录官方源（本机默认可能是 npmmirror 等镜像）
-npm login --registry https://registry.npmjs.org/
-npm whoami --registry https://registry.npmjs.org/   # 确认有权发布 @henlii/pidance
-
-npm publish /path/to/henlii-pidance-0.1.0.tgz \
-  --access public \
-  --registry https://registry.npmjs.org/
-```
-
-`package.json` 中 `publishConfig`（`access: public`、`registry: https://registry.npmjs.org/`）作为第二道护栏；仍建议在命令中显式写明 `--registry` 与 `--access`。
-
-验证：
-
-```bash
-npm view @henlii/pidance@0.1.0 version --registry https://registry.npmjs.org/
-```
-
-若官方源短暂滞后，用精确版本查询，勿仅看 latest。
-
-## 6. GitHub Release（同一 tgz + sha256）
-
-上传**同一个**已验收 tgz 与 sha256 文件（不得一边换包一边沿用旧哈希）：
-
-```bash
-gh release create v0.1.0 \
-  --repo henlii/pidance \
-  --verify-tag \
-  --title "v0.1.0" \
-  --notes-file release-notes.md \
-  henlii-pidance-0.1.0.tgz \
-  henlii-pidance-0.1.0.tgz.sha256
-```
-
-发布说明**中英双语，中文在上**，基于 `git log` 整理，并写明 npm 包名与版本；**不要**在未 publish 时写「已发布到 npm」。`push v* tag` 触发的 `release.yml` 会自动生成该双语说明（中文块在上、英文块在下，标题只写一次 `vX.Y.Z` 不带双 v）。
-
-## 7. 最终核对
-
-```bash
-gh release view v0.1.0 --repo henlii/pidance
-npm view @henlii/pidance@0.1.0 version --registry https://registry.npmjs.org/
-```
-
-期望：
-
-- GitHub Release 含与 npm 相同的 tgz + sha256；
-- npm 精确版本可解析；
-- 全程无自动 version/tag/push/publish 脚本副作用。
-
-## 本地脚本对照
-
-| 脚本 | 作用 | 是否允许自动 publish |
-| ------ | ------ | ---------------------- |
-| `release:audit` | **生成前** dry-run 清单 + 完整文本扫描 | 否 |
-| `release:audit:tgz -- <tgz>` | **生成后** 解析真实 tgz 审计 | 否 |
-| `release:check` | check + build + pre-pack 审计（隔离 checkout） | 否 |
-| （无） | 已删除旧的自动 `version`+`publish` 的 `release` 脚本 | — |
-
-顺序硬门禁：`release:audit` → `npm pack` → `release:audit:tgz` → `sha256` → 安装冒烟 → `npm publish <同一 tgz> --registry https://registry.npmjs.org/` → GitHub Release 上传同一 tgz。
-
-## 不在本清单范围
-
-- 对象存储 / R2 分发（后续议题）。
-- 开发机日常工作区直接 `npm run build` / `npm publish`。
-- 各环境自己的 systemd / 反代 / 安装目录布局（由运维方自管，不在本仓固化）。
-
-## 安装与运行（发布后）
-
-用户侧安装见仓库 README（`npx` / `npm i -g`）。非回环监听必须设置 `PIDANCE_PASSWORD`（兼容 `PI_WEB_PASSWORD`）。产品默认端口 **31415**；勿与上游 pi-web 默认端口混淆。
+| 命令 | 作用 | 发布副作用 |
+|---|---|---|
+| `npm run check` | typecheck + lint + 单测 | 无 |
+| `npm run package:candidate` | 候选构建、前后审计、pack、sha256 | 无 |
+| `npm run release:check` | check + build + pre-pack 审计，仅隔离 checkout | 无，不含 post-pack |
+| `npm run release:audit` | pre-pack 审计 | 无 |
+| `npm run release:audit:tgz -- <tgz>` | post-pack 审计 | 无 |
+| push `v*` tag | 触发正式 release workflow | **有：npm 与 GitHub Release** |

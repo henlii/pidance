@@ -1,4 +1,8 @@
-# Pidance UI 主题令牌
+# Pidance UI 主题令牌（设计参考）
+
+[设计稿索引](README.md) · [文档导航](../README.md)
+
+> 本文保留设计阶段的主题值与尺寸目标，不保证与当前生产 CSS 逐项一致。当前变量、selector 与实际值以 [app/globals.css](../../app/globals.css) 为准；修改组件时复用现有语义变量，不将本表复制为第二套运行时主题。
 
 两套方向保持 Pidance 现有 `--bg / --text / --accent` 命名骨架，并补充 surface、状态、焦点和阴影变量。组件只引用语义变量，不在组件内出现主题色值。
 

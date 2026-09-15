@@ -1,5 +1,7 @@
 # Pidance 里的 Worktree
 
+[文档导航](README.md) · [English](worktrees.md)
+
 Pidance 会把同一个 Git 项目的 main checkout 和 linked worktree 放在同一个项目下。你可以用它在不同分支之间切换工作目录，同时保留统一的会话列表。
 
 ## 什么时候会看到 Worktree 控件
@@ -39,13 +41,13 @@ Pidance 会把 checkout 放在：
 例如 main checkout 是：
 
 ```text
-/Users/alex/Documents/Workspace/pi-web
+/Users/alex/Documents/Workspace/pidance
 ```
 
 新建 `codex/worktree-help` 时，目录会是：
 
 ```text
-/Users/alex/Documents/Workspace/pi-web-worktrees/codex-worktree-help
+/Users/alex/Documents/Workspace/pidance-worktrees/codex-worktree-help
 ```
 
 如果这个 branch 已存在，Pidance 会为它添加 worktree。如果 branch 不存在，Pidance 会从当前 `HEAD` 创建这个 branch。

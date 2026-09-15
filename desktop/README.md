@@ -1,8 +1,12 @@
 # Pidance Desktop（Windows 桌面壳）
 
+[文档导航](../docs/README.md) · [主应用开发](../docs/development.md) · [发布流程](../docs/release.md)
+
+桌面包与主包独立版本化；当前 desktop 版本和内置主包均为 `0.2.26`，并不会随主仓 `0.2.28` 自动升级。精确值以本目录 `package.json` / lockfile 为准。
+
 面向 Windows 用户的 Electron 壳：解压/安装后双击「Pidance Desktop」，自动拉起本机
 pidance 服务（127.0.0.1:31415）并打开沙箱窗口。端口上已有 **Pidance** 服务则复用
-（不重复 spawn，也不停它）；关闭窗口只停本进程拉起的服务。
+（不重复 spawn，也不停它）；真正退出时只停本进程拉起的服务。启用最小化到托盘后，关窗只隐藏窗口。
 
 ## 产物形态
 
@@ -28,7 +32,8 @@ pidance 服务（127.0.0.1:31415）并打开沙箱窗口。端口上已有 **Pid
 | 31415 上已有 Pidance（如正式版安装包） | 复用，不 spawn、不停它；关窗不影响它（身份用页面 `<title>Pidance</title>` 指纹确认，不是「端口有人应答」） |
 | 31415 被其他程序占用 | 明确报错退出，绝不杀别人的进程 |
 | 31415 无人监听 | 用内置 Node 拉起随包 pidance，就绪后开窗 |
-| 关闭窗口 / 退出 | 只停本进程拉起的服务，win32 用 `taskkill /T` 收整棵进程树（PTY worker 一起收） |
+| 关闭窗口（已启用最小化到托盘） | 隐藏窗口，服务继续运行 |
+| 真正退出 / 未启用托盘最小化而关窗 | 只停本进程拉起的服务，win32 用 `taskkill /T` 收整棵进程树（PTY worker 一起收） |
 | 启动失败（缺 Node 运行时 / 缺服务入口 / 未就绪） | 明确错误框后退出 |
 
 复用判定不只看「端口开着」：会读回环根路径并校验响应体里的 Pidance 品牌标识
@@ -65,10 +70,13 @@ Web 端目前没有消费这些 IPC 的设置页；壳自身的行为（托盘�
 
 ## 开发模式
 
-```bash
+壳始终只操作 31415。调试时复用现有稳定服务，或把 `PIDANCE_SERVER_DIR` 指向**已安装稳定包目录**（含 `bin/pidance.js`），不要让壳在 31415 启动工作区源码。
+
+```powershell
 cd desktop
-npm run dev        # Electron 以仓库根为 server dir（PIDANCE_SERVER_DIR 可覆盖）；端口 31415
+npm ci --include=dev
+$env:PIDANCE_SERVER_DIR = '<已安装稳定 Pidance 包目录>'
+npm run dev
 ```
 
-注意：开发模式复用仓库根的 `node_modules`（主仓依赖已装好）；不要在 desktop/
-下手动 `npm install` 拉全量依赖——CI/打包使用 `npm ci --include=dev` 按 lockfile 精确安装。
+当前未打包模式在没有覆盖变量时仍会回退仓库根；这是代码现状，不是推荐的维护方式。本轮仅修正文档，没有更改该默认值。应用源码测试继续走 [31416](../docs/development.md)。

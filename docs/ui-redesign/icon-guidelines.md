@@ -1,8 +1,12 @@
-# Pidance 图标规范（Lucide React）
+# Pidance 图标设计参考（Lucide React）
 
-## 结论
+[设计稿索引](README.md) · [文档导航](../README.md)
 
-实现统一使用 `lucide-react`，通过项目内单一 `Icon` 组件封装；业务组件不得直接混用 Lucide、Unicode 符号和自绘 SVG。静态 HTML 稿中的 SVG 仅用于无依赖预览，不作为生产图标源码。
+## 适用范围
+
+本文是设计阶段建议，不是已实现组件 API。当前业务组件直接使用 `lucide-react`，并有品牌/文件类型等专用图标；不要为了符合下方示例新增一次性 `Icon` 抽象。尺寸、状态与可访问性建议供评审参考，具体实现沿用项目现有路径。
+
+下方 `Icon` 是历史示例，不表示仓库已经提供此组件。静态 HTML 稿中的 SVG 仅用于无依赖预览，不作为生产图标源码。
 
 ```tsx
 import type { LucideIcon } from "lucide-react";

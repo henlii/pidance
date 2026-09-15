@@ -4,7 +4,7 @@
   <p>
     <a href="./README.md">简体中文</a> ·
     <a href="https://github.com/henlii/pidance/issues">Issues</a> ·
-    <a href="./docs/release.md">Release guide</a>
+    <a href="./docs/README.md">Documentation</a>
   </p>
 </div>
 
@@ -32,7 +32,7 @@ Pidance is an open-source web client for the [Pi](https://github.com/badlogic/pi
 - **Pi ecosystem integration**: inspect synchronous and asynchronous subagent run status, interact with generic extension UI cards, and view read-only projections of structured todos.
 - **Central configuration**: manage provider authentication, API keys, models and model tests, session defaults, skills, plugins, and project trust.
 - **Polished interface**: responsive desktop/mobile layouts, a command palette, session minimap, completion sound, English and Chinese, plus Light / Dark / System themes.
-- **Explicit security boundaries**: project file allowlists, path and symlink checks, Host and CSRF guards, and mandatory passwords for non-loopback listeners.
+- **Access protection**: Host/CSRF guards, login authentication, and mandatory passwords for non-loopback CLI listeners. Agent and file access are for trusted operators; there is no project-directory sandbox. See [security boundaries](./docs/security.md).
 
 ## Quick start
 
@@ -60,11 +60,11 @@ pidance -p 8080 -H 127.0.0.1
 pidance --no-open
 ```
 
-`PORT` and `PIDANCE_NO_OPEN=1` are also supported. Pidance reads `~/.pi/agent` by default; set `PI_CODING_AGENT_DIR` to use another Pi agent directory.
+`PORT` and `PIDANCE_NO_OPEN=1` are also supported. The port can be configured in **Settings → General → Service and remote access** (default 31415; restart required). Pidance reads `~/.pi/agent` by default; set `PI_CODING_AGENT_DIR` to use another Pi agent directory.
 
 ### Remote or LAN access
 
-Listening on `0.0.0.0`, `::`, a LAN address, or another non-loopback host requires a password. The CLI refuses to start without one:
+The CLI binds to `127.0.0.1` by default. In **Settings → General → Service and remote access**, set a password and enable remote access to listen on `0.0.0.0` after a restart. Alternatively, configure it explicitly below. Listening on a non-loopback address requires a password; the CLI refuses to start without one:
 
 ```bash
 PIDANCE_PASSWORD='use-a-strong-password' pidance --hostname 0.0.0.0
@@ -86,7 +86,7 @@ pidance
 
 ```bash
 npm install
-npm run dev       # non-Windows source development entry (default http://localhost:31415)
+npm run dev       # standalone source development server: 127.0.0.1:31416, output .next
 npm run check     # typecheck + lint + unit tests
 ```
 
@@ -99,18 +99,17 @@ npm run test:browser          # browser regression (needs a running instance; de
 
 Do **not** run `npm run build` or `next build` during everyday development: it writes to `.next/` and can disrupt the development server. Production builds belong in an isolated release checkout through `npm run release:check`.
 
-Windows development convention: **31415 is reserved for the formal service build**. Continuous testing of the working tree uses **31416** via
-`.agents/skills/pidance-development/scripts/local-deploy.mjs restart`, with artifacts isolated in `.next-public`. Do not mix formal-service and working-tree processes, data directories, or build artifacts.
+Development convention: **31415 is reserved for the stable installation; the working tree uses 31416**. Continuous testing writes `.next-public`; standalone dev writes `.next`. `npm run dev` now targets 127.0.0.1:31416 (same port as the continuous deployment — do not run both). See the [development guide](./docs/development.md) for test isolation and multi-client checks.
 
 ## Release process
 
-Formal releases use a two-stage audit gate: run checks and the build in an isolated checkout, audit the prospective package, explicitly create the tgz, and then audit the real archive. Only that same accepted tgz may be used for installation smoke tests, npm, and the GitHub Release. No script automatically changes versions, creates tags, pushes, or publishes.
+Before releasing, run `npm run check`, prepare the version and bilingual release notes, then explicitly commit and push an annotated tag. Tag CI builds in isolation, audits before and after packing, publishes through npm OIDC, and creates the GitHub Release. npm and GitHub must use the same accepted tgz and SHA-256. The local candidate script does not change versions, tag, push, or publish.
 
 See [docs/release.md](./docs/release.md) for the complete procedure.
 
 ## Architecture
 
-Pidance is a Pi Web mode adapter: the main Agent runs the in-process Pi SDK (`AgentSessionRuntime`). See [#20](https://github.com/henlii/pidance/issues/20) for the implementation specification and acceptance criteria.
+Pidance is a Pi Web mode adapter: the main Agent runs the in-process Pi SDK (`AgentSessionRuntime`). See the [architecture guide](./docs/architecture.md) for current responsibilities and interaction flows; [#20](https://github.com/henlii/pidance/issues/20) records the earlier migration specification.
 
 ```text
 Browser / Route Handlers
@@ -134,17 +133,22 @@ Pi AgentSessionRuntime
 ```
 
 - **Read-only browsing** parses Pi `.jsonl` sessions without creating an AgentSession; scanners and caches never write JSONL.
-- **Sending a message** creates or reuses an in-process SDK session host only when needed.
+- **Write operations or explicit wake requests** create or reuse an SDK session host when needed; SSE only observes an existing Host.
 - Pi owns agent lifecycle, session replacement, resources, and JSONL/tree semantics. Pidance owns product use cases, the live registry, Web event projection, and UI adapters.
-- Session service, event streaming, Extension UI, project context, and chat composition remain one-way dependencies so the UI cannot bypass session lifecycle rules.
-- File endpoints only expose explicit roots such as selected projects, worktrees, and session working directories.
+- One-way dependencies and single-writer ownership are maintenance constraints, not a claim of complete concurrency safety. See the [known lifecycle, queue, cancellation, and recovery risks](./docs/architecture-review-2026-09-15.md).
+- File access is currently not restricted to project roots. Authenticated users must be trusted with the local Agent and file capabilities.
 
 ## Documentation
 
+Start with the [documentation index](./docs/README.md). Detailed maintainer guides are currently in Chinese.
+
+- [Architecture](./docs/architecture.md) · [Static review](./docs/architecture-review-2026-09-15.md)
+- [Development](./docs/development.md) · [Security](./docs/security.md)
+- [Windows desktop shell](./desktop/README.md) · [Version history](./docs/release-notes/README.md)
 - [Git worktrees](./docs/worktrees.md)
 - [Release and package auditing](./docs/release.md)
-- [Interface design system](./docs/ui-redesign/README.md)
-- [Theme tokens](./docs/ui-redesign/theme-tokens.md)
+- [Historical interface prototypes](./docs/ui-redesign/README.md)
+- [Theme token design reference](./docs/ui-redesign/theme-tokens.md)
 
 ## Upstream and license
 

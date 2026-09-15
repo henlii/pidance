@@ -4,7 +4,7 @@
   <p>
     <a href="./README.en.md">English</a> ·
     <a href="https://github.com/henlii/pidance/issues">问题反馈</a> ·
-    <a href="./docs/release.md">发布说明</a>
+    <a href="./docs/README.md">文档导航</a>
   </p>
 </div>
 
@@ -32,7 +32,7 @@ Pidance 是面向 [Pi](https://github.com/badlogic/pi-mono) coding agent 的开�
 - **Pi 生态集成**：展示同步与异步子代理运行状态、通用扩展 UI 卡片与交互，以及结构化 Todos 的只读投影。
 - **集中配置**：管理供应商认证、API Key、模型与测试、会话默认值、技能、插件和项目信任。
 - **精心打磨的界面**：响应式桌面/移动布局、命令面板、会话 minimap、完成提示音、中英双语，以及 Light / Dark / System 主题。
-- **边界明确的安全设计**：项目文件 allow-list、路径与符号链接检查、Host/CSRF 防护；非回环监听必须配置密码。
+- **访问防护**：Host/CSRF 检查与登录认证；CLI 非回环监听必须配置密码。文件与 Agent 能力面向可信操作者，不提供项目目录沙箱，见[安全边界](./docs/security.md)。
 
 ## 快速开始
 
@@ -89,7 +89,7 @@ pidance
 
 ```bash
 npm install
-npm run dev       # 非 Windows 源码开发入口（默认 http://localhost:31415）
+npm run dev       # 独立源码开发服务：127.0.0.1:31416，输出 .next
 npm run check     # typecheck + lint + 单元测试
 ```
 
@@ -102,19 +102,18 @@ npm run test:browser          # 浏览器回归（需已运行的实例，默认
 
 日常开发**不要**执行 `npm run build` 或 `next build`：它会写入 `.next/` 并干扰开发服务。正式构建只在隔离发布 checkout 中通过 `npm run release:check` 执行。
 
-Windows 开发约定：**31415 固定使用正式服务制品**；工作区源码的持续测试使用 **31416**，通过
-`.agents/skills/pidance-development/scripts/local-deploy.mjs restart` 部署到 `.next-public`。勿混用正式服务与工作区的进程、数据目录和构建产物。
+开发约定：**31415 保留给稳定安装版，工作区使用 31416**；持续测试输出到 `.next-public`，独立 dev 输出到 `.next`。`npm run dev` 已指向 127.0.0.1:31416（与持续部署同端口，不要同时运行）。测试数据与多端要求见[开发指南](./docs/development.md)。
 
 ## 发布
 
-正式发布采用“双审计”门禁：隔离 checkout 中完成质量检查与构建，生成前审计包清单和内容，显式 `npm pack`，再审计真实 tgz；同一份已验收 tgz 才能用于安装冒烟、npm 与 GitHub Release。脚本不会自动改版本、打 tag、push 或 publish。
+发布前完成 `npm run check`、版本与双语发布记录，显式提交并推送 annotated tag。tag CI 在隔离根构建、前后审计、打包，并通过 npm OIDC 发布及创建 GitHub Release。npm 与 Release 必须使用同一已验收 tgz 和 SHA-256；本地候选脚本不改版本、tag、push 或 publish。
 
 完整步骤见 [docs/release.md](./docs/release.md)。
 
 ## 架构概览
 
 Pidance 是 Pi 的 Web mode adapter：主 Agent 使用同进程 Pi SDK（`AgentSessionRuntime`）。
-完整实施规格与验收见 [#20](https://github.com/henlii/pidance/issues/20)。
+当前职责、交互链路与源码入口见[架构说明](./docs/architecture.md)；既有迁移规格见 [#20](https://github.com/henlii/pidance/issues/20)。
 
 ```text
 浏览器 / Route Handlers
@@ -138,17 +137,22 @@ Pi AgentSessionRuntime
 ```
 
 - **只读浏览**直接解析 Pi `.jsonl` 会话，不创建 AgentSession；快扫和缓存不得写 JSONL。
-- **发送消息**时才在服务端进程内创建或复用 SDK session host。
+- **写操作或显式 wake**按需创建或复用 SDK session host；SSE 本身只观察已有 Host。
 - Pi SDK 拥有 Agent、会话替换、资源和 JSONL/tree 语义；Pidance 只拥有产品用例、live registry、Web 事件与 UI 适配。
-- SessionService、事件流、Extension UI、项目上下文和聊天合成器保持单向依赖，UI 不绕过会话生命周期。
-- 文件端点仅允许访问已选择项目、工作树和会话工作目录等明确根路径。
+- 单向依赖与单写者是维护约束；目前仍有销毁、队列、停止和恢复方面的[已知架构风险](./docs/architecture-review-2026-09-15.md)，不应把目标约束当作完整并发保证。
+- 文件访问当前不限制在项目根目录；已认证使用者应视为拥有本机 Agent 与文件能力的可信操作者。
 
 ## 文档
 
+完整入口：[文档导航](./docs/README.md)。
+
+- [架构与会话交互](./docs/architecture.md) · [静态审查](./docs/architecture-review-2026-09-15.md)
+- [开发与验证](./docs/development.md) · [安全边界](./docs/security.md)
+- [Windows 桌面壳](./desktop/README.md) · [版本变更](./docs/release-notes/README.md)
 - [Git worktree 使用说明](./docs/worktrees.zh-CN.md)
 - [发布与制品审计](./docs/release.md)
-- [界面设计与主题规范](./docs/ui-redesign/README.md)
-- [主题 Token](./docs/ui-redesign/theme-tokens.md)
+- [历史界面设计稿](./docs/ui-redesign/README.md)
+- [主题 Token 设计参考](./docs/ui-redesign/theme-tokens.md)
 
 ## 上游与许可
 
