@@ -103,6 +103,8 @@ export function MessageNavRail({
    *   偏移区间先做一次廉价筛选，避免对几百个消息元素逐个强制同步布局。
    */
   const renderedElsRef = useRef<HTMLElement[]>([]);
+  /** 内层纵向滚动容器：长会话里导航条自身也要跟着当前项滚。 */
+  const listRef = useRef<HTMLDivElement | null>(null);
   const renderedCacheKeyRef = useRef("");
   const measureOffsetRef = useRef(0);
 
@@ -175,6 +177,29 @@ export function MessageNavRail({
     const timer = setTimeout(syncActive, 60);
     return () => clearTimeout(timer);
   }, [renderKey, outline.length, syncActive]);
+
+  // 让当前项始终停在轨道中部（长会话里导航条自己也会溢出）。
+  // 用即时定位而非平滑动画：它是对滚动的跟随，不是一次性跳转。
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list || activeEntryId === null) return;
+    const position = outline.findIndex((item) => item.entryId === activeEntryId);
+    if (position < 0) return;
+    const el = dashRefs.current[position];
+    if (!el) return;
+    // 用 rect 差值换算项偏移（不依赖 offsetParent）
+    const listRect = list.getBoundingClientRect();
+    const itemRect = el.getBoundingClientRect();
+    const next = centeredRailScrollTop({
+      scrollTop: list.scrollTop,
+      viewportHeight: list.clientHeight,
+      contentHeight: list.scrollHeight,
+      itemTop: itemRect.top - listRect.top + list.scrollTop,
+      itemHeight: itemRect.height,
+    });
+    if (Math.abs(next - list.scrollTop) < 1) return;
+    list.scrollTop = next;
+  }, [activeEntryId, outline]);
 
   // 轨道高度用于把横线换算成像素（悬浮卡定位的前提）
   useEffect(() => {
@@ -370,6 +395,7 @@ export function MessageNavRail({
         }}
       >
       <div
+        ref={listRef}
         style={{
           display: "flex",
           flexDirection: "column",
@@ -418,8 +444,9 @@ export function MessageNavRail({
                 aria-hidden="true"
                 style={{
                   display: "block",
-                  // 悬浮：变黑（--text 最深）且长度翻倍，便于指哪打哪
-                  width: isHovered ? DASH_WIDTH * 2 : DASH_WIDTH,
+                  // 悬浮或当前项：变长（DASH_WIDTH → 2×）便于指哪打哪。
+                  // 当前项长度翻倍是刻意的：长会话里它是唯一需要「随时看见」的项。
+                  width: isHovered || isActive ? DASH_WIDTH * 2 : DASH_WIDTH,
                   height: DASH_HEIGHT,
                   borderRadius: DASH_HEIGHT / 2,
                   background: isHovered ? "var(--text)" : isActive ? "var(--text-dim)" : "var(--border)",
@@ -473,4 +500,29 @@ export function MessageNavRail({
 export function messageNavPreview(text: string, maxLength = 120): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > maxLength ? `${flat.slice(0, maxLength)}…` : flat;
+}
+
+/**
+ * 导航条自身的 scrollTop，使当前项落在轨道中部。
+ *
+ * 存在的理由：长会话里轨道内容比自己高，而 activeEntryId 只驱动颜色与宽度，
+ * 没人滚动导航条本身 —— 于是滚到很早的消息时，导航条里对应的横线早已滚出可视区，
+ * 看不出「当前在哪」。
+ *
+ * @param itemTop 项相对内容顶部的偏移（调用方用 rect 差值 + scrollTop 换算）
+ * @returns 落在 [0, 最大可滚范围] 内的目标 scrollTop（内容未溢出时恒为 0）
+ */
+export function centeredRailScrollTop(input: {
+  scrollTop: number;
+  viewportHeight: number;
+  contentHeight: number;
+  itemTop: number;
+  itemHeight: number;
+}): number {
+  const { scrollTop, viewportHeight, contentHeight, itemTop, itemHeight } = input;
+  const max = Math.max(0, contentHeight - viewportHeight);
+  if (max === 0) return 0;
+  const target = itemTop + itemHeight / 2 - viewportHeight / 2;
+  if (!Number.isFinite(target)) return scrollTop;
+  return Math.min(max, Math.max(0, target));
 }

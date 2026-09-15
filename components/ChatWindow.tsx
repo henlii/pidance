@@ -1,6 +1,6 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import type { BranchActions } from "@/lib/branch-bookmarks";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
@@ -40,6 +40,7 @@ import {
   growVisibleCountOnAppend,
   resolveHistoryLoadAction,
   restoreScrollTop,
+  shouldCompensatePrepend,
   shouldShowHistorySentinel,
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
@@ -389,11 +390,17 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const prevScrollDistanceRef = useRef<number | null>(null);
+  /** 已补偿过的头部 entry id：只有「头部变老」（prepend）才需要补偿。 */
+  const compensatedHeadRef = useRef<string | null>(null);
   const prevPlanTotalRef = useRef<number | null>(null);
   // 会话切换时重置可见窗口与计划长度种子
   useEffect(() => {
     setVisibleCount(VISIBLE_PAGE_SIZE);
     prevPlanTotalRef.current = null;
+    // 距离快照属于上一个会话：带过去会在新会话的首次布局变化时被错误套用，
+    // 表现为「一打开/一切换就跳一大段」。
+    prevScrollDistanceRef.current = null;
+    compensatedHeadRef.current = null;
   }, [session?.id]);
 
   // IntersectionObserver on the sentinel div at the top of the message list.
@@ -421,6 +428,9 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
         // action === "load-server"：已到本地头，拉更旧页
         void loadOlderHistory().then((loaded) => {
           if (loaded) setVisibleCount((v) => getNextVisibleCount(v));
+          // 没拉到（失败/会话已切走）：本次不会发生 prepend，快照作废，
+          // 否则它会一直等到下一个无关的布局变化才被套用。
+          else prevScrollDistanceRef.current = null;
         });
       },
       { root: container, threshold: 0 },
@@ -431,16 +441,29 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
 
   // After visibleCount increases (more messages prepended), restore the
   // scroll position so the viewport doesn't jump.
-  useEffect(() => {
+  //
+  // 两个要点（否则就是「首次向上滚动跳过很大一段」）：
+  // 1. 必须是 useLayoutEffect：它在 DOM 变更后、**浏览器绘制前**同步执行。原实现用
+  //    useEffect，用户会先看到内容位移（prepend 把视口整体下推），随后才被拉回。
+  // 2. 只在「头部变老」时补偿：尾部追加（流式/新消息）也会改变 scrollHeight，
+  //    但它发生在视口下方，套用同一个补偿会把视口错误地下移。
+  useLayoutEffect(() => {
     if (prevScrollDistanceRef.current == null) return;
     const container = scrollContainerRef.current;
     if (!container) return;
+    const head = entryIds[0] ?? null;
+    if (!shouldCompensatePrepend({
+      savedDistance: prevScrollDistanceRef.current,
+      headEntryId: head,
+      compensatedHeadEntryId: compensatedHeadRef.current,
+    })) return;
+    compensatedHeadRef.current = head;
     // prepend 补偿是 auto-follow 之外的 scrollTop 写入：先标记，让随后的
     // scroll 事件不参与状态判定（用户在顶部阅读，绝不能被钉底逻辑拉走）。
     markExternalScrollWrite();
     container.scrollTop = restoreScrollTop(container.scrollHeight, prevScrollDistanceRef.current);
     prevScrollDistanceRef.current = null;
-  }, [visibleCount, messages.length, scrollContainerRef, markExternalScrollWrite]);
+  }, [entryIds, visibleCount, messages.length, scrollContainerRef, markExternalScrollWrite]);
   // Push session stats up to AppShell for the top bar.
   // Compare scalar fields to avoid loops from new object identity each render.
   const statsKey = sessionStats

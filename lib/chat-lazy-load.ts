@@ -59,6 +59,25 @@ export function captureScrollDistance(scrollHeight: number, scrollTop: number): 
   return scrollHeight - scrollTop;
 }
 
+/**
+ * 本次布局变化是否应做 prepend 补偿（Bug：首次向上滚动跳过很大一段）。
+ *
+ * 两个条件缺一不可：
+ * - 存在待补偿的距离快照（哨兵命中时捕获）；
+ * - **头部 entry id 变老**：只有头部插入更旧内容才会把视口向下推。尾部追加
+ *   （流式/新消息）同样会改变 scrollHeight，但它发生在视口下方，套用同一补偿
+ *   会把视口错误地下移。
+ */
+export function shouldCompensatePrepend(input: {
+  savedDistance: number | null;
+  headEntryId: string | null;
+  compensatedHeadEntryId: string | null;
+}): boolean {
+  if (input.savedDistance == null) return false;
+  if (!input.headEntryId) return false;
+  return input.headEntryId !== input.compensatedHeadEntryId;
+}
+
 export function restoreScrollTop(scrollHeight: number, savedDistance: number): number {
   return Math.max(0, scrollHeight - savedDistance);
 }
