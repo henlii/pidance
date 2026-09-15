@@ -93,6 +93,7 @@
 | R12 | 条件性安全风险 | `request-guard.ts:248` 无密码回环依据 Host 而非 TCP 来源；仅在绕过 CLI 门禁、无密码且被网络暴露等条件下成立。正常 CLI 有非回环密码门禁，不能删掉这项限定。 |
 | R13 | 错误契约异常 | `app/api/agent/new/route.ts` 用 `String(error)` 匹配无 `Error:` 前缀的消息，缺 cwd 等预期 400 可落为 500。统一类型化错误/消息提取。 |
 | R14 | P2 / 深链不可达 | `?session=<id>` 只在目标会话已落在侧栏首页列表时才恢复：`components/SessionSidebar.tsx:653` 用 `allSessions.find(...)` 定位，命中不了就 `found: false`（且 `restoredRef.current = true`，后续分页加载到该会话也不会重试）。旧的/未在当前页的历史会话通过 URL 打开会静默回到空工作区（实测同一 URL 先成功后失败）。方向：id 不命中列表时改用服务端 `info` 按 id 解析，或对 not-found 保留可重试状态。 |
+| R15 | P2 / 不可自愈 | 上游拒绝请求但不返回原因（无 body 的 400/413/422）时，Pi SDK 的溢出识别是**带 `^` 锚定**的文本正则，Responses 路径错误被包成 `OpenAI API error (400): 400 status code (no body)` 后不命中，遂不走「压缩后重试」；阈值判定又拿估算值比声明窗口（实测 `cpa/grok-4.6` 声明 500000，而 ≈381K 的会话已被上游拒），于是同一超限请求被反复重发，会话对该模型死锁，只能手动换回大窗口模型。已修：`lib/provider-error.ts` 分类 + 错误卡片提示与人工压缩入口 + 模型选择器占用对比（见 381f316）。上游 SDK 侧仍建议提 issue（用结构化状态码/错误体而非只去掉 `^`）。 |
 
 文件访问全开放是当前显式信任策略，不另报为目录穿越漏洞，但 README 不应宣称项目目录沙箱。
 
