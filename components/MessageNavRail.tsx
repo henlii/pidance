@@ -110,6 +110,16 @@ export function MessageNavRail({
   const listRef = useRef<HTMLDivElement | null>(null);
   /** 轨道能否向上/向下滚动（上下指示器据此显隐）。 */
   const [railScroll, setRailScroll] = useState({ up: false, down: false });
+  /** 系统是否要求减少动画（滚动动画、长度/淡入过渡均据此降级）。 */
+  const [reducedMotion, setReducedMotion] = useState(() => prefersReducedMotion());
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const mql = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => setReducedMotion(mql.matches);
+    update();
+    mql.addEventListener("change", update);
+    return () => mql.removeEventListener("change", update);
+  }, []);
   const syncRailScrollHints = useCallback(() => {
     const list = listRef.current;
     if (!list) return;
@@ -176,6 +186,10 @@ export function MessageNavRail({
   const syncActiveRef = useRef(syncActive);
   syncActiveRef.current = syncActive;
 
+  /** 供滚动效果读取：避免把 reducedMotion 写进回调依赖而重建滚动逻辑。 */
+  const reducedMotionRef = useRef(reducedMotion);
+  reducedMotionRef.current = reducedMotion;
+
   useEffect(() => {
     const el = scrollContainer.current;
     if (!el) return;
@@ -225,7 +239,15 @@ export function MessageNavRail({
       itemHeight: itemRect.height,
     });
     if (Math.abs(next - list.scrollTop) < 1) return;
-    list.scrollTop = next;
+    // 跳转（点击导航点/键盘）位移大 → 平滑；跟随聊天滚动的微小校正 → 瞬时。
+    list.scrollTo({
+      top: next,
+      behavior: railScrollBehavior({
+        reducedMotion: reducedMotionRef.current,
+        currentTop: list.scrollTop,
+        targetTop: next,
+      }),
+    });
     // 居中后滚动位置变了，指示器需同步（scroll 事件也会到，这里保证首帧就对）
     syncRailScrollHints();
   }, [activeEntryId, outline, syncRailScrollHints]);
@@ -445,23 +467,25 @@ export function MessageNavRail({
         }}
       >
       {/* 上下指示器：轨道内容高于自身时才有意义；颜色与未选中的导航点一致。
-          绝对定位在「垂直居中包裹层」的上下方，因此不影响横线的居中与限高。 */}
-      {railScroll.up && (
-        <span
-          aria-hidden="true"
-          data-nav-scroll-hint="up"
-          style={{
-            position: "absolute",
-            top: -(SCROLL_HINT_HEIGHT + 4),
-            left: (DASH_WIDTH - SCROLL_HINT_HALF_WIDTH * 2) / 2,
-            width: 0,
-            height: 0,
-            borderLeft: `${SCROLL_HINT_HALF_WIDTH}px solid transparent`,
-            borderRight: `${SCROLL_HINT_HALF_WIDTH}px solid transparent`,
-            borderBottom: `${SCROLL_HINT_HEIGHT}px solid var(--border)`,
-          }}
-        />
-      )}
+          绝对定位在「垂直居中包裹层」的上下方，因此不影响横线的居中与限高。
+          始终挂载、用 opacity 淡入淡出（条件挂载无法做过渡）；装饰性且不可交互。 */}
+      <span
+        aria-hidden="true"
+        data-nav-scroll-hint="up"
+        style={{
+          position: "absolute",
+          top: -(SCROLL_HINT_HEIGHT + 4),
+          left: (DASH_WIDTH - SCROLL_HINT_HALF_WIDTH * 2) / 2,
+          width: 0,
+          height: 0,
+          borderLeft: `${SCROLL_HINT_HALF_WIDTH}px solid transparent`,
+          borderRight: `${SCROLL_HINT_HALF_WIDTH}px solid transparent`,
+          borderBottom: `${SCROLL_HINT_HEIGHT}px solid var(--border)`,
+          opacity: railScroll.up ? 1 : 0,
+          transition: reducedMotion ? "none" : "opacity 0.18s ease",
+          pointerEvents: "none",
+        }}
+      />
       <div
         ref={listRef}
         style={{
@@ -518,29 +542,31 @@ export function MessageNavRail({
                   height: DASH_HEIGHT,
                   borderRadius: DASH_HEIGHT / 2,
                   background: isHovered ? "var(--text)" : isActive ? "var(--text-dim)" : "var(--border)",
-                  transition: "width 0.1s, background 0.1s",
+                  // 长度/颜色过渡：比 0.1s 稍长并缓动，当前项换位时更柔和。
+                  transition: reducedMotion ? "none" : "width 0.18s ease, background 0.18s ease",
                 }}
               />
             </button>
           );
         })}
       </div>
-      {railScroll.down && (
-        <span
-          aria-hidden="true"
-          data-nav-scroll-hint="down"
-          style={{
-            position: "absolute",
-            bottom: -(SCROLL_HINT_HEIGHT + 4),
-            left: (DASH_WIDTH - SCROLL_HINT_HALF_WIDTH * 2) / 2,
-            width: 0,
-            height: 0,
-            borderLeft: `${SCROLL_HINT_HALF_WIDTH}px solid transparent`,
-            borderRight: `${SCROLL_HINT_HALF_WIDTH}px solid transparent`,
-            borderTop: `${SCROLL_HINT_HEIGHT}px solid var(--border)`,
-          }}
-        />
-      )}
+      <span
+        aria-hidden="true"
+        data-nav-scroll-hint="down"
+        style={{
+          position: "absolute",
+          bottom: -(SCROLL_HINT_HEIGHT + 4),
+          left: (DASH_WIDTH - SCROLL_HINT_HALF_WIDTH * 2) / 2,
+          width: 0,
+          height: 0,
+          borderLeft: `${SCROLL_HINT_HALF_WIDTH}px solid transparent`,
+          borderRight: `${SCROLL_HINT_HALF_WIDTH}px solid transparent`,
+          borderTop: `${SCROLL_HINT_HEIGHT}px solid var(--border)`,
+          opacity: railScroll.down ? 1 : 0,
+          transition: reducedMotion ? "none" : "opacity 0.18s ease",
+          pointerEvents: "none",
+        }}
+      />
       </div>
 
       {/* 悬浮信息卡：有最大宽高，超出省略号截断；贴着轨道右侧、按需上下收敛 */}
@@ -584,6 +610,28 @@ export function MessageNavRail({
 export function messageNavPreview(text: string, maxLength = 120): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > maxLength ? `${flat.slice(0, maxLength)}…` : flat;
+}
+
+/** 同步读取系统「减少动画」偏好（SSR/老环境安全返回 false）。 */
+function prefersReducedMotion(): boolean {
+  if (typeof window === "undefined" || !window.matchMedia) return false;
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+/**
+ * 导航条跟随/跳转时的滚动行为。
+ *
+ * 两个约束：
+ * - 尊重系统「减少动画」：置 reduce 时一律瞬时（无障碍要求，不做动画）。
+ * - 小位移不启动画：跟随聊天滚动时 active 会高频变化，每帧重启一个平滑动画会
+ *   「追不上」而发飘；微小校正直接瞬时更跟手。
+ */
+export function railScrollBehavior(
+  input: { reducedMotion: boolean; currentTop: number; targetTop: number },
+  smallDeltaPx = 24,
+): ScrollBehavior {
+  if (input.reducedMotion) return "auto";
+  return Math.abs(input.targetTop - input.currentTop) < smallDeltaPx ? "auto" : "smooth";
 }
 
 /**

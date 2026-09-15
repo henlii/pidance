@@ -6,7 +6,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { messageNavPreview, centeredRailScrollTop, railScrollHints } = await jiti.import("./MessageNavRail.tsx");
+const { messageNavPreview, centeredRailScrollTop, railScrollHints, railScrollBehavior } = await jiti.import("./MessageNavRail.tsx");
 
 // 说明：导航条改为「服务端完整大纲 + 懒加载跳转」后，节点不再由 DOM 测量得出
 // （见 lib/session-outline.ts 与 MessageNavRail 的 outline 驱动）。
@@ -101,5 +101,52 @@ test("railScrollHints：1px 内视为到边（小数滚动位置不闪）", () =
   assert.deepEqual(
     railScrollHints({ scrollTop: 799.5, viewportHeight: 200, contentHeight: 1000 }),
     { up: true, down: false },
+  );
+});
+
+
+// ---------------------------------------------------------------------------
+// 平滑效果：滚动行为的选择（含 reduced-motion 降级）
+// ---------------------------------------------------------------------------
+
+test("railScrollBehavior：减少动画时一律瞬时", () => {
+  // 即使位移很大（点击跳转），系统要求减少动画也不得用平滑
+  assert.equal(
+    railScrollBehavior({ reducedMotion: true, currentTop: 0, targetTop: 500 }),
+    "auto",
+  );
+  assert.equal(
+    railScrollBehavior({ reducedMotion: true, currentTop: 100, targetTop: 108 }),
+    "auto",
+  );
+});
+
+test("railScrollBehavior：大位移用平滑（跳转）", () => {
+  assert.equal(
+    railScrollBehavior({ reducedMotion: false, currentTop: 0, targetTop: 500 }),
+    "smooth",
+  );
+  // 向下跳同样平滑
+  assert.equal(
+    railScrollBehavior({ reducedMotion: false, currentTop: 500, targetTop: 0 }),
+    "smooth",
+  );
+});
+
+test("railScrollBehavior：小位移瞬时（跟随聊天滚动时不发飘）", () => {
+  // 每个 item 行高 18（14 + gap 4）：跟随时相邻项位移小于阈值 → 瞬时更跟手
+  assert.equal(
+    railScrollBehavior({ reducedMotion: false, currentTop: 0, targetTop: 18 }),
+    "auto",
+  );
+  // 阈值边界：恰好等于 24 视为不够小 → 平滑
+  assert.equal(
+    railScrollBehavior({ reducedMotion: false, currentTop: 0, targetTop: 24 }),
+    "smooth",
+  );
+  // 可自定义阈值
+  assert.equal(
+    railScrollBehavior({ reducedMotion: false, currentTop: 0, targetTop: 18 }, 4),
+    "smooth",
   );
 });
