@@ -6,7 +6,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { messageNavPreview, centeredRailScrollTop, railScrollHints, railScrollBehavior } = await jiti.import("./MessageNavRail.tsx");
+const { messageNavPreview, centeredRailScrollTop, railScrollHints, railScrollBehavior, easeInOutCubic, RAIL_SCROLL_DURATION_MS } = await jiti.import("./MessageNavRail.tsx");
 
 // 说明：导航条改为「服务端完整大纲 + 懒加载跳转」后，节点不再由 DOM 测量得出
 // （见 lib/session-outline.ts 与 MessageNavRail 的 outline 驱动）。
@@ -149,4 +149,37 @@ test("railScrollBehavior：小位移瞬时（跟随聊天滚动时不发飘）",
     railScrollBehavior({ reducedMotion: false, currentTop: 0, targetTop: 18 }, 4),
     "smooth",
   );
+});
+
+
+// ---------------------------------------------------------------------------
+// 平滑动画：自控时长与缓动（原生 smooth 时长不可调且偏快，用户反馈“有点快”）
+// ---------------------------------------------------------------------------
+
+test("easeInOutCubic：端点与中点固定，且单调不减", () => {
+  assert.equal(easeInOutCubic(0), 0);
+  assert.equal(easeInOutCubic(1), 1);
+  assert.equal(easeInOutCubic(0.5), 0.5);
+  let previous = -1;
+  for (let t = 0; t <= 1.0001; t += 0.05) {
+    const value = easeInOutCubic(t);
+    assert.ok(value >= previous, `t=${t.toFixed(2)} 处应单调不减`);
+    previous = value;
+  }
+});
+
+test("easeInOutCubic：越界输入被夹到 [0,1]", () => {
+  assert.equal(easeInOutCubic(-1), 0);
+  assert.equal(easeInOutCubic(2), 1);
+});
+
+test("easeInOutCubic：两端比线性慢（缓入缓出，不是机械线性）", () => {
+  // 前 10% 只走不到 1% 的距离：起步柔和
+  assert.ok(easeInOutCubic(0.1) < 0.1, "起步应慢于线性");
+  // 后 10% 同理
+  assert.ok(easeInOutCubic(0.9) > 0.9, "收尾应慢于线性");
+});
+
+test("RAIL_SCROLL_DURATION_MS：明显慢于浏览器原生 smooth（用户反馈偏快）", () => {
+  assert.ok(RAIL_SCROLL_DURATION_MS >= 350, `期望 >= 350ms，实际 ${RAIL_SCROLL_DURATION_MS}`);
 });

@@ -134,9 +134,21 @@ export function MessageNavRail({
   const renderedCacheKeyRef = useRef("");
   const measureOffsetRef = useRef(0);
 
+  /**
+   * 跳转进行中「钉住」的目标：期间 syncActive 不得按旧视口改写当前项。
+   *
+   * 现象（用户实测）：点击导航点后，导航条先跳到目标，随后跟随内容滚动回到原位置，
+   * 再滚回目标。成因是跳转需要「替换时间线 → 等渲染 → 平滑滚动到位」好几拍，
+   * 期间 scroll 事件/定时器会按**当时的旧视口**解析出旧当前项并将高亮改回去。
+   * 钉住期间跳过解析，跳转结束时（stopWatching）解除。
+   */
+  const jumpPinRef = useRef<string | null>(null);
+
   const syncActive = useCallback(() => {
     const scrollEl = scrollContainer.current;
     if (!scrollEl) return;
+    // 跳转进行中：当前项由点击意图决定，不按中途视口改写
+    if (jumpPinRef.current !== null) return;
     const viewportTop = scrollEl.getBoundingClientRect().top;
     const viewportBottom = viewportTop + scrollEl.clientHeight;
     // 缓存失效条件：渲染批次变化（内容变了才重新收集元素）
@@ -190,6 +202,43 @@ export function MessageNavRail({
   const reducedMotionRef = useRef(reducedMotion);
   reducedMotionRef.current = reducedMotion;
 
+  /** 正在运行的导航条滚动动画（rAF）；新动画开始或卸载时必须取消。 */
+  const railTweenRef = useRef<number | null>(null);
+  const cancelRailTween = useCallback(() => {
+    if (railTweenRef.current !== null) {
+      cancelAnimationFrame(railTweenRef.current);
+      railTweenRef.current = null;
+    }
+  }, []);
+
+  /**
+   * 滚到目标位置：自控时长与缓动（原生 smooth 时长不可调）。
+   * 小位移与 reduced-motion 直接瞬时到位，不做动画。
+   */
+  const scrollRailTo = useCallback((list: HTMLElement, targetTop: number) => {
+    cancelRailTween();
+    const from = list.scrollTop;
+    const behavior = railScrollBehavior({
+      reducedMotion: reducedMotionRef.current,
+      currentTop: from,
+      targetTop,
+    });
+    if (behavior === "auto") {
+      list.scrollTop = targetTop;
+      return;
+    }
+    const delta = targetTop - from;
+    const startedAt = performance.now();
+    const step = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / RAIL_SCROLL_DURATION_MS);
+      list.scrollTop = from + delta * easeInOutCubic(progress);
+      railTweenRef.current = progress < 1 ? requestAnimationFrame(step) : null;
+    };
+    railTweenRef.current = requestAnimationFrame(step);
+  }, [cancelRailTween]);
+
+  useEffect(() => cancelRailTween, [cancelRailTween]);
+
   useEffect(() => {
     const el = scrollContainer.current;
     if (!el) return;
@@ -239,18 +288,12 @@ export function MessageNavRail({
       itemHeight: itemRect.height,
     });
     if (Math.abs(next - list.scrollTop) < 1) return;
-    // 跳转（点击导航点/键盘）位移大 → 平滑；跟随聊天滚动的微小校正 → 瞬时。
-    list.scrollTo({
-      top: next,
-      behavior: railScrollBehavior({
-        reducedMotion: reducedMotionRef.current,
-        currentTop: list.scrollTop,
-        targetTop: next,
-      }),
-    });
+    // 自己插值而不是用原生 smooth：后者的时长不可控且偏快。
+    // 大位移→动画；跟随的微小校正 / reduced-motion→瞬时。
+    scrollRailTo(list, next);
     // 居中后滚动位置变了，指示器需同步（scroll 事件也会到，这里保证首帧就对）
     syncRailScrollHints();
-  }, [activeEntryId, outline, syncRailScrollHints]);
+  }, [activeEntryId, outline, syncRailScrollHints, scrollRailTo]);
 
   // 上下指示器的显隐跟随轨道的实际可滚状态（滚动 / 内容高度变化 / 尺寸变化）。
   useEffect(() => {
@@ -309,7 +352,14 @@ export function MessageNavRail({
     // 理由：跳转会整体替换时间线，解析需要等新窗口渲染 + 滚动稳定，这期间用户已
     // 经点过了；若末尾解析因窗口内无提问等原因返回 null（见 resolveActiveOutlineEntry），
     // 高亮会一直停在跳转前那条。同步流程末尾仍会按实际位置校正一次。
+    // 点击即刻把该点设为当前项，并钉住到本次跳转结束：中间几拍不得被旧视口覆盖。
     setActiveEntryId(entryId);
+    jumpPinRef.current = entryId;
+    // 看门狗：滚动链应在秒级内以 stopWatching 收尾（并解除钉住）。若因异常卡住，
+    // 钉住会退化成「导航条永久不再跟随」——比高亮不准严重得多，所以有界兜底。
+    window.setTimeout(() => {
+      if (jumpPinRef.current === entryId) jumpPinRef.current = null;
+    }, JUMP_PIN_WATCHDOG_MS);
     const seq = ++jumpSeqRef.current;
     const isCurrent = () => jumpSeqRef.current === seq;
     const findTarget = (): HTMLElement | null =>
@@ -332,6 +382,10 @@ export function MessageNavRail({
         scrollEl.removeEventListener("wheel", onInterrupt);
         scrollEl.removeEventListener("pointerdown", onInterrupt);
         scrollEl.removeEventListener("keydown", onInterrupt);
+        // 所有退出路径（完成/被打断/目标移除）都经过这里：解除「钉住当前项」，
+        // 让导航条恢复跟随实际视口（否则会一直停在跳转目标上）。
+        // 只在仍属于本次跳转时清：旧的清理链不得抹掉新一次跳转的钉住。
+        if (jumpPinRef.current === entryId) jumpPinRef.current = null;
       };
       scrollEl.addEventListener("wheel", onInterrupt, { passive: true });
       scrollEl.addEventListener("pointerdown", onInterrupt, { passive: true });
@@ -396,8 +450,10 @@ export function MessageNavRail({
       return null;
     };
 
+    let handedOff = false;
     const immediate = await waitForTarget();
     if (immediate) {
+      handedOff = true;
       scrollToTarget(immediate);
       return;
     }
@@ -406,11 +462,17 @@ export function MessageNavRail({
       const located = await jumpToEntry(entryId);
       if (!located || !isCurrent()) return;
       const target = await waitForTarget();
-      if (target && isCurrent()) scrollToTarget(target);
+      if (target && isCurrent()) {
+        handedOff = true;
+        scrollToTarget(target);
+      }
     } finally {
       if (isCurrent()) setJumpingTo(null);
+      // 未交给 scrollToTarget（定位失败/目标没渲染出来）：立即按归属解除钉住。
+      // 漏这一步的后果不是“高亮不准”，而是导航条**永久停止跟随**。
+      if (!handedOff && jumpPinRef.current === entryId) jumpPinRef.current = null;
     }
-  }, [expandRenderWindowToEntryRef, jumpToEntry, resolveMessageElementRef, scrollContainer]);
+  }, [expandRenderWindowToEntryRef, jumpToEntry, resolveMessageElementRef, scrollContainer, syncActiveRef]);
 
   const onKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
@@ -617,6 +679,27 @@ function prefersReducedMotion(): boolean {
   if (typeof window === "undefined" || !window.matchMedia) return false;
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
+
+/**
+ * 缓动：两端慢、中间快。
+ *
+ * 原生 scrollTo({behavior:"smooth"}) 的时长由浏览器决定且不可调（实测偏快），
+ * 所以要自己插值。
+ */
+export function easeInOutCubic(t: number): number {
+  const x = Math.min(1, Math.max(0, t));
+  return x < 0.5 ? 4 * x * x * x : 1 - (-2 * x + 2) ** 3 / 2;
+}
+
+/** 导航条滚动动画时长（ms）：比浏览器原生 smooth 慢一点，观感更稳。 */
+export const RAIL_SCROLL_DURATION_MS = 420;
+
+/**
+ * 「钉住当前项」的看门狗上限（ms）。
+ * 滚动链正常在秒级内以 stopWatching 收尾；超出即视为异常，强制解除，
+ * 避免导航条永久不再跟随。
+ */
+const JUMP_PIN_WATCHDOG_MS = 5_000;
 
 /**
  * 导航条跟随/跳转时的滚动行为。
