@@ -86,15 +86,29 @@ export function parseSetBranchLabelCommand(command: Record<string, unknown>): {
   return { targetId, label: trimmed === "" ? undefined : trimmed };
 }
 
+/**
+ * 导航命令把 writer 让给离线写的显式交接入口。
+ *
+ * 由发起该命令的 Host 提供：只有它知道「不能等自己结束」的是哪条命令。
+ * Service 的离线写必须先 await 它，再打开磁盘 SessionManager。
+ */
+export type NavigationWriterHandoff = () => Promise<void>;
+
 export type NavigationActions = {
-  selectLeafExact(sessionId: string, entryId: string): Promise<{ cancelled: boolean }>;
+  selectLeafExact(
+    sessionId: string,
+    entryId: string,
+    handoff: NavigationWriterHandoff,
+  ): Promise<{ cancelled: boolean }>;
   branchFromAssistant(
     sessionId: string,
     assistantEntryId: string,
+    handoff: NavigationWriterHandoff,
   ): Promise<{ cancelled: boolean }>;
   createSessionFromLeaf(
     sessionId: string,
     entryId: string,
+    handoff: NavigationWriterHandoff,
   ): Promise<{ cancelled: boolean; newSessionId: string }>;
 };
 

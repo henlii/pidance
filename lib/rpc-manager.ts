@@ -7,6 +7,7 @@ export {
   parseNavigateTreeCommand,
   parseSetBranchLabelCommand,
   type NavigationActions,
+  type NavigationWriterHandoff,
   type AgentEvent,
   type LiveAgentSession,
   type PendingExtensionUi,

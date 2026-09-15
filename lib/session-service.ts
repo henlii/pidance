@@ -28,6 +28,7 @@ import {
   subscribeRunningSessions,
   type LiveAgentSession,
   type NavigationActions,
+  type NavigationWriterHandoff,
   type PendingExtensionUi,
 } from "./rpc-manager";
 import {
@@ -82,6 +83,7 @@ import { getRunningStartedAt as readRunningStartedAt } from "./running-state";
 import { buildUserMessageOutline, type UserMessageOutlineItem } from "./session-outline";
 import { sliceContextAfter, sliceContextAround } from "./session-context-window";
 import { getRunningStartedAtTable } from "./live-session-registry";
+import { SESSION_WRITER_BUSY_MESSAGE } from "./sdk-session-host";
 import { searchSessionsFulltext, type SessionSearchResult } from "./session-fulltext-search";
 
 export type SessionCommand = Record<string, unknown> & { type: string };
@@ -107,6 +109,8 @@ export function httpStatusForSessionError(error: unknown): number {
   if (error instanceof ReadOnlySubagentError || message === READ_ONLY_SUBAGENT_ERROR) return 403;
   if (message.includes("Session not found")) return 404;
   if (isSessionRunningLockedError(error) || message === SESSION_RUNNING_LOCKED_MESSAGE) return 409;
+  // 命令仍在进行、writer 无法交出：离线写不允许并发，fail closed 成冲突。
+  if (message === SESSION_WRITER_BUSY_MESSAGE) return 409;
   if (message === "Session is being deleted" || message.includes("closed while its title")) return 409;
   return 500;
 }
@@ -326,11 +330,23 @@ export type SessionService = {
   isReadOnly(sessionId: string): Promise<boolean>;
   /** 外进程占写锁：本进程可只读浏览，不得 ensureLive。本进程已 live 则 false。 */
   /** 精确 leaf 切换（user 叶也停在该 entry，不触发 Pi 的 user 编辑语义） */
-  selectLeafExact(sessionId: string, entryId: string): Promise<{ cancelled: boolean }>;
+  selectLeafExact(
+    sessionId: string,
+    entryId: string,
+    handoff?: NavigationWriterHandoff,
+  ): Promise<{ cancelled: boolean }>;
   /** assistant 轮末分支：computeTurnEnd 后 navigateTree */
-  branchFromAssistant(sessionId: string, assistantEntryId: string): Promise<{ cancelled: boolean }>;
+  branchFromAssistant(
+    sessionId: string,
+    assistantEntryId: string,
+    handoff?: NavigationWriterHandoff,
+  ): Promise<{ cancelled: boolean }>;
   /** through-entry 线性新会话（assistant 锚点先 resolve 到 turnEnd） */
-  createSessionFromLeaf(sessionId: string, entryId: string): Promise<{ cancelled: boolean; newSessionId: string }>;
+  createSessionFromLeaf(
+    sessionId: string,
+    entryId: string,
+    handoff?: NavigationWriterHandoff,
+  ): Promise<{ cancelled: boolean; newSessionId: string }>;
 };
 
 /**
@@ -400,8 +416,14 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
   };
 
   /** 离线写入也临时持有 writer lease，避免检查远端后到 openSessionView 前被抢占。 */
-  const withOfflineWriter = async <T>(sessionId: string, action: () => Promise<T> | T): Promise<T> => {
-    await awaitWriterReleased(sessionId);
+  const withOfflineWriter = async <T>(
+    sessionId: string,
+    action: () => Promise<T> | T,
+    handoff?: NavigationWriterHandoff,
+  ): Promise<T> => {
+    // 从导航命令内部发起时，由发起方（Host）显式交接：它不能等自己结束。
+    if (handoff) await handoff();
+    else await awaitWriterReleased(sessionId);
     return withHeldWriter(sessionId, action);
   };
 
@@ -1031,7 +1053,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       return deps.subscribeRunningSessions(listener);
     },
 
-    async selectLeafExact(sessionId, entryId) {
+    async selectLeafExact(sessionId, entryId, handoff) {
       if (typeof entryId !== "string" || entryId.trim() === "") {
         throw new Error("entryId is required");
       }
@@ -1045,7 +1067,10 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       if (liveBefore?.isAlive?.() && liveBefore.inner?.isBashRunning) {
         throw new Error("Cannot switch branch while a shell command is running");
       }
-      return withOfflineWriter(sessionId, async () => {
+      // 由发起命令的 Host 提供 writer 交接：它自己不能等自己结束。
+      const writeOffline = <T>(action: () => Promise<T>) =>
+        withOfflineWriter(sessionId, action, handoff);
+      return writeOffline(async () => {
         const filePath = await deps.resolveSessionPath(sessionId);
         if (!filePath) throw new Error("Session not found");
         const sessionManager = deps.openSessionView(filePath);
@@ -1071,7 +1096,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       });
     },
 
-    async branchFromAssistant(sessionId, assistantEntryId) {
+    async branchFromAssistant(sessionId, assistantEntryId, handoff) {
       if (typeof assistantEntryId !== "string" || assistantEntryId.trim() === "") {
         throw new Error("assistantEntryId is required");
       }
@@ -1084,7 +1109,10 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       if (liveBefore?.isAlive?.() && liveBefore.inner?.isBashRunning) {
         throw new Error("Cannot branch while a shell command is running");
       }
-      return withOfflineWriter(sessionId, async () => {
+      // 由发起命令的 Host 提供 writer 交接：它自己不能等自己结束。
+      const writeOffline = <T>(action: () => Promise<T>) =>
+        withOfflineWriter(sessionId, action, handoff);
+      return writeOffline(async () => {
         const filePath = await deps.resolveSessionPath(sessionId);
         if (!filePath) throw new Error("Session not found");
         const sessionManager = deps.openSessionView(filePath);
@@ -1114,7 +1142,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       });
     },
 
-    async createSessionFromLeaf(sessionId, entryId) {
+    async createSessionFromLeaf(sessionId, entryId, handoff) {
       if (typeof entryId !== "string" || entryId.trim() === "") {
         throw new Error("entryId is required");
       }
@@ -1136,7 +1164,10 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         | undefined;
       const inner = wrapper?.inner;
 
-      return withOfflineWriter(sessionId, async () => {
+      // 由发起命令的 Host 提供 writer 交接：它自己不能等自己结束。
+      const writeOffline = <T>(action: () => Promise<T>) =>
+        withOfflineWriter(sessionId, action, handoff);
+      return writeOffline(async () => {
         // 统一磁盘 Pi SessionManager；lease 覆盖整个 fork 读/写窗口。
         const filePath =
           (inner?.sessionFile || wrapper?.sessionFile) ??
@@ -1185,11 +1216,12 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
   // startRpcSession 注入 wrapper（rpc-manager 不再 import 本模块）。
   // 动作在 wrapper.send 时执行，彼时 service 已完整初始化，无 TDZ 风险。
   const navigationActions: NavigationActions = {
-    selectLeafExact: (sessionId, entryId) => service.selectLeafExact(sessionId, entryId),
-    branchFromAssistant: (sessionId, assistantEntryId) =>
-      service.branchFromAssistant(sessionId, assistantEntryId),
-    createSessionFromLeaf: (sessionId, entryId) =>
-      service.createSessionFromLeaf(sessionId, entryId),
+    selectLeafExact: (sessionId, entryId, handoff) =>
+      service.selectLeafExact(sessionId, entryId, handoff),
+    branchFromAssistant: (sessionId, assistantEntryId, handoff) =>
+      service.branchFromAssistant(sessionId, assistantEntryId, handoff),
+    createSessionFromLeaf: (sessionId, entryId, handoff) =>
+      service.createSessionFromLeaf(sessionId, entryId, handoff),
   };
 
   return service;

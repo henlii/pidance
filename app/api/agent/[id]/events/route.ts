@@ -61,11 +61,15 @@ export async function GET(
       }, 10_000);
 
       let cleaned = false;
+      let releaseDestroy: (() => void) | null = null;
       const cleanup = () => {
         if (cleaned) return;
         cleaned = true;
         clearInterval(heartbeat);
         unsubscribe();
+        // 已断开的流必须退订：否则 host 的销毁通知集合会随连接数增长。
+        releaseDestroy?.();
+        releaseDestroy = null;
         try {
           controller.close();
         } catch {
@@ -74,7 +78,12 @@ export async function GET(
       };
 
       // host destroy（空闲 dispose/删除）时主动终断 SSE 流
-      session.onDestroy(cleanup);
+      releaseDestroy = session.onDestroy(cleanup);
+      // 注册前已清理（客户端在注册窗口内断开）：立即退订，不留悬挂回调。
+      if (cleaned) {
+        releaseDestroy();
+        releaseDestroy = null;
+      }
 
       // Detect client disconnect via abort signal
       req.signal?.addEventListener("abort", cleanup);

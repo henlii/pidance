@@ -92,6 +92,13 @@ type ToolRenderStateEntry = {
   lastPartialRenderAt: number | undefined;
 };
 
+/**
+ * 命令仍在进行、无法安全交出 writer 时的失败消息。
+ * SessionService 把它映射为 409：宁可让离线写 fail closed，也不并发写同一个 JSONL。
+ */
+export const SESSION_WRITER_BUSY_MESSAGE =
+  "Session writer is busy: a command is still in flight";
+
 export type SdkSessionHostOptions = {
   sessionId: string;
   sessionFile: string;
@@ -100,6 +107,11 @@ export type SdkSessionHostOptions = {
   navigationActions?: NavigationActions;
   /** 兼容旧调用方；当前 settled host 立即 dispose，不再使用分钟级 idle timeout。 */
   idleTimeoutMs?: number;
+  /**
+   * 命令仍在进行时，destroyAsync 等待交出 writer 的上限；超时抛
+   * SESSION_WRITER_BUSY_MESSAGE。测试可注入更短值。
+   */
+  destroyWaitMs?: number;
   agentDir?: string;
   onRunningChange?: () => void;
   onSessionListInvalidate?: () => void;
@@ -153,8 +165,13 @@ export class SdkSessionHost {
   private startupHoldTimer: ReturnType<typeof setTimeout> | null = null;
   private startupHold = true;
   private activeCommandCount = 0;
-  private _scheduledRecheck = false;
-  private onDestroyCallback: (() => void) | null = null;
+  /** 销毁通知订阅者；多订阅互不覆盖（registry 清理与多条 SSE 共存）。 */
+  private destroyCallbacks = new Set<() => void>();
+  /**
+   * 命令仍在进行时的等待中销毁，按排除数分组。
+   * 导航命令交接（排除自己）与外部调用（不排除）判定不同，不能共享同一个等待。
+   */
+  private pendingDestroys = new Map<number, Promise<void>>();
   private _alive = true;
   private promptRunning = false;
   /** 最近一次 prompt 结束原因：队列自动投递只认 completed。 */
@@ -210,6 +227,7 @@ export class SdkSessionHost {
   private realSessionId: string;
   private realSessionFile: string;
   private readonly idleTimeoutMs: number;
+  private readonly destroyWaitMs: number;
   private readonly agentDir: string;
   private activeToolNames: string[] | undefined;
   /** 渲染桥主题（模块级缓存）；加载失败为 null → 跳过渲染。 */
@@ -225,6 +243,7 @@ export class SdkSessionHost {
     // 默认 30s 无端点兜底释放（有活跃 SSE 订阅时保活，不设倒计时）；
     // 测试可注入更短值验证释放路径。
     this.idleTimeoutMs = options.idleTimeoutMs ?? 30_000;
+    this.destroyWaitMs = options.destroyWaitMs ?? 5_000;
     this.agentDir = options.agentDir ?? getAgentDir();
     this.activeToolNames = options.toolNames;
   }
@@ -264,8 +283,17 @@ export class SdkSessionHost {
     );
   }
 
-  onDestroy(cb: () => void): void {
-    this.onDestroyCallback = cb;
+  /**
+   * 注册销毁通知，返回退订函数。
+   *
+   * 曾经是单槽赋值：registry 的清理回调会被随后连接的 SSE 覆盖，第二条 SSE 又
+   * 覆盖第一条 —— 于是死 host 留在 registry、只有最后一条流收到关闭通知。
+   */
+  onDestroy(cb: () => void): () => void {
+    this.destroyCallbacks.add(cb);
+    return () => {
+      this.destroyCallbacks.delete(cb);
+    };
   }
 
   onEvent(listener: SdkEventListener): () => void {
@@ -326,7 +354,9 @@ export class SdkSessionHost {
         return;
       }
       // 有队列且未 hold：由 flush 流程推进，不在这里 dispose。
-      void this.destroyAsync();
+      void this.destroyAsync().catch(() => {
+        /* 命令仍在进行（busy）：命令结束后的 resetIdleTimer 会再次触发回收 */
+      });
     }, delay);
   }
 
@@ -832,7 +862,11 @@ export class SdkSessionHost {
           && !this.flushingFollowUp
           && (this.followUpQueue.length === 0 || this.isFollowUpHeld());
         this.resetIdleTimer();
-        if (disposeAfterSettle) void this.destroyAsync();
+        if (disposeAfterSettle) {
+          void this.destroyAsync().catch(() => {
+            /* 命令仍在进行（busy）：命令结束后的 resetIdleTimer 会再次触发回收 */
+          });
+        }
         break;
       case "compaction_start":
       case "auto_compaction_start":
@@ -1802,8 +1836,11 @@ export class SdkSessionHost {
       case "select_leaf_exact": {
         const entryId = asString(command.entryId);
         if (!entryId) throw new Error("entryId is required");
-        if (this.options.navigationActions) {
-          return this.options.navigationActions.selectLeafExact(this.sessionId, entryId);
+        const navigation = this.options.navigationActions;
+        if (navigation) {
+          // 交出自己的 writer 后由 Service 离线写：本命令排除自己，不自等待。
+          const handoff = () => this.destroyExcluding(1);
+          return await navigation.selectLeafExact(this.sessionId, entryId, handoff);
         }
         // 无注入时直接 navigate
         const result = await session.navigateTree(entryId, { summarize: false });
@@ -1822,11 +1859,10 @@ export class SdkSessionHost {
       case "branch_from_assistant": {
         const assistantEntryId = asString(command.assistantEntryId);
         if (!assistantEntryId) throw new Error("assistantEntryId is required");
-        if (this.options.navigationActions) {
-          return this.options.navigationActions.branchFromAssistant(
-            this.sessionId,
-            assistantEntryId,
-          );
+        const navigation = this.options.navigationActions;
+        if (navigation) {
+          const handoff = () => this.destroyExcluding(1);
+          return await navigation.branchFromAssistant(this.sessionId, assistantEntryId, handoff);
         }
         throw new Error("branch_from_assistant is unavailable");
       }
@@ -1834,11 +1870,10 @@ export class SdkSessionHost {
       case "create_session_from_leaf": {
         const entryId = asString(command.entryId);
         if (!entryId) throw new Error("entryId is required");
-        if (this.options.navigationActions) {
-          return this.options.navigationActions.createSessionFromLeaf(
-            this.sessionId,
-            entryId,
-          );
+        const navigation = this.options.navigationActions;
+        if (navigation) {
+          const handoff = () => this.destroyExcluding(1);
+          return await navigation.createSessionFromLeaf(this.sessionId, entryId, handoff);
         }
         throw new Error("create_session_from_leaf is unavailable");
       }
@@ -1877,24 +1912,63 @@ export class SdkSessionHost {
   }
 
   destroy(): void {
-    void this.destroyAsync();
+    void this.destroyAsync().catch(() => {
+      /* busy（命令仍在进行）：命令结束后的 resetIdleTimer 会再次触发回收 */
+    });
   }
 
   async destroyAsync(): Promise<void> {
+    return this.destroyExcluding(0);
+  }
+
+  /**
+   * 请求销毁，并声明本次调用自己占用的命令数。
+   *
+   * @param excludeCommands 调用方自身正在执行的命令数。导航命令把 writer 让给
+   *   Service 的离线写时传 1：它等的是自己结束，会死锁；而外部调用（其它标签
+   *   页改名、删除）传 0，会正常等待导航命令结束。
+   */
+  private destroyExcluding(excludeCommands: number): Promise<void> {
     // 单飞：并发重入（Service 多条离线写路径 / idle 定时器）共享同一 dispose。
     if (this.destroyPromise) return this.destroyPromise;
-    if (!this._alive && !this.runtime) return;
-    // dispose 定时器只在 host 空闲时建立；若同一 tick 已有新命令开始
-    //（计数递增，compact/steer 等 send 返回前的微任务窗口），延后一帧再检查。
-    if (this.activeCommandCount > 0) {
-      if (this._scheduledRecheck) return;
-      this._scheduledRecheck = true;
-      setTimeout(() => {
-        this._scheduledRecheck = false;
-        if (!this.destroyPromise && this._alive) void this.destroyAsync();
-      }, 0);
-      return;
+    if (!this._alive && !this.runtime) return Promise.resolve();
+    if (this.activeCommandCount - excludeCommands > 0) {
+      let pending = this.pendingDestroys.get(excludeCommands);
+      if (!pending) {
+        pending = this.destroyWhenCommandsSettle(excludeCommands);
+        this.pendingDestroys.set(excludeCommands, pending);
+      }
+      return pending;
     }
+    return this.beginDispose();
+  }
+
+  /**
+   * 等正在进行的命令结束后再 dispose。超过 destroyWaitMs 招 busy：宁可让调用方
+   * fail closed（Service 映射 409），也不在命令持有 manager 时并发写。
+   */
+  private destroyWhenCommandsSettle(excludeCommands: number): Promise<void> {
+    const promise = (async () => {
+      const deadline = Date.now() + this.destroyWaitMs;
+      while (this.activeCommandCount - excludeCommands > 0) {
+        if (Date.now() >= deadline) throw new Error(SESSION_WRITER_BUSY_MESSAGE);
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 25);
+          timer.unref?.();
+        });
+      }
+      return this.beginDispose();
+    })().finally(() => {
+      // 结束/失败后清掉等待，让命令结束后的下一次 destroyAsync 能重新尝试。
+      if (this.pendingDestroys.get(excludeCommands) === promise) {
+        this.pendingDestroys.delete(excludeCommands);
+      }
+    });
+    return promise;
+  }
+
+  private beginDispose(): Promise<void> {
+    if (this.destroyPromise) return this.destroyPromise;
     this._alive = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
@@ -1925,7 +1999,15 @@ export class SdkSessionHost {
       this.followUpFlushAsOne = false;
       this.followUpFlushOriginal = [];
       clearRunningStartedAt(this.realSessionId);
-      this.onDestroyCallback?.();
+      // 多订阅逐一分发：任一订阅者抛错不得阻断其它订阅者（registry 清理必须跑到）。
+      for (const callback of [...this.destroyCallbacks]) {
+        try {
+          callback();
+        } catch (err) {
+          console.error("[pidance] sdk host destroy listener error:", err);
+        }
+      }
+      this.destroyCallbacks.clear();
       this.notifyRunning();
     })();
     return this.destroyPromise;
