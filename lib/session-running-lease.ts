@@ -175,14 +175,18 @@ function writeLease(path: string, lease: RunningLease): void {
 /**
  * 租约对「对端持有」是否有效：持有者 PID 必须仍然存活。
  *
- * 与 isFresh 的区别（重要）：isFresh 还要求心跳在 TTL 内，用于列表/回收。
- * 但「能否接管写权」**不得**只凭心跳过期：持有者可能只是被 SIGSTOP / 长时间
- * 阻塞 / GC 暂停，进程仍活着，其 SessionManager 仍持有 JSONL writer。
- * 旧实现只用 isFresh 判定接管，会在这种情况下让两个进程同时写同一 JSONL
- * （已实证：活进程暂停超过 TTL 后本进程 acquire 成功）。
+ * 与 isFresh 的区别（重要）：isFresh 还要求心跳在 TTL 内，只用于判断「新鲜度」。
+ * 而「能否接管 / 能否覆盖 / 能否删除」**一律不得**只看心跳：持有者可能只是被
+ * SIGSTOP / 长阻塞 / GC 暂停，进程仍活着，其 SessionManager 仍持有 JSONL writer。
+ * 只用 isFresh 判定会在这种情况下让两个进程同时写同一 JSONL。
  */
 export function isLeaseHeldByLiveOwner(lease: RunningLease | null): boolean {
   return Boolean(lease && isPidAlive(lease.pid));
+}
+
+/** 该租约是否可以被别人接管/覆盖/回收：只有持有者进程已死（或内容损坏）才行。 */
+function canEvictLease(lease: RunningLease | null): boolean {
+  return !isLeaseHeldByLiveOwner(lease);
 }
 
 export function isFresh(lease: RunningLease, now: number): boolean {
@@ -199,7 +203,9 @@ function collectFreshLeases(agentDir: string, now: number): RunningLease[] {
       if (!name.endsWith(".json")) continue;
       const path = join(dir, name);
       const lease = readLeaseFile(path);
-      if (!lease || !isFresh(lease, now)) {
+      // 只回收「持有者已死 / 内容损坏」的租约。心跳过期但进程仍活着的不能删：
+      // 它可能仍持有 writer（被暂停），删掉等于放行另一个进程接管。
+      if (canEvictLease(lease)) {
         try {
           unlinkSync(path);
         } catch {
@@ -207,7 +213,8 @@ function collectFreshLeases(agentDir: string, now: number): RunningLease[] {
         }
         continue;
       }
-      fresh.push(lease);
+      if (!isFresh(lease!, now)) continue; // 活持有者但心跳过期：保留，不计入 fresh 列表
+      fresh.push(lease!);
     }
     return fresh;
   });
@@ -239,7 +246,7 @@ export function acquireRunningLease(
     const path = leasePath(agentDir, sessionId);
     const current = existsSync(path) ? readLeaseFile(path) : null;
     // 只抢死持有者的租约：活进程（哪怕心跳过期）仍可能是 writer。
-    if (current && isLeaseHeldByLiveOwner(current) && current.pid !== process.pid) {
+    if (current && current.pid !== process.pid && !canEvictLease(current)) {
       return false;
     }
     // 首次 acquire 记录稳定 startedAt；同进程重 acquire/心跳沿用，跨进程可见同一 epoch。
@@ -267,7 +274,8 @@ export function heartbeatRunningLease(
     withLeaseLock(agentDir, () => {
       const path = leasePath(agentDir, sessionId);
       const current = existsSync(path) ? readLeaseFile(path) : null;
-      if (current && current.pid !== process.pid && isFresh(current, now)) return;
+      // 绝不覆盖活持有者的租约（哪怕对方心跳过期）：它就是 writer。
+      if (current && current.pid !== process.pid && !canEvictLease(current)) return;
       writeLease(path, {
         pid: process.pid,
         sessionId,
@@ -277,43 +285,6 @@ export function heartbeatRunningLease(
     });
   } catch (error) {
     if (!isLeaseLockTimeout(error)) throw error;
-  }
-}
-
-/**
- * 续写本进程持有的 writer 租约。
- *
- * @returns true = 租约仍是本进程的（已续写）；false = 已被其它进程接管，
- *   调用方必须停止写入。活持有者占用时**不抢夺**（不写别人的文件），
- *   等待它自然释放后下次心跳会自动认领自己。
- */
-export function refreshWriterLease(
-  sessionId: string,
-  agentDir: string = getAgentDir(),
-  now = Date.now(),
-): boolean {
-  if (!sessionId) return true;
-  try {
-    return withLeaseLock(agentDir, () => {
-      const path = leasePath(agentDir, sessionId);
-      const current = existsSync(path) ? readLeaseFile(path) : null;
-      if (!current || current.pid === process.pid) {
-        writeLease(path, {
-          pid: process.pid,
-          sessionId,
-          heartbeatAt: now,
-          startedAt: current && current.pid === process.pid ? current.startedAt : now,
-        });
-        return true;
-      }
-      // 当前 owner 是别进程：活持有者立即失权；死持有者的残留等待下次心跳
-      // 重新 acquire，不在这里写入（避免与重新认领的语义重叠）。
-      return !isPidAlive(current.pid);
-    });
-  } catch (error) {
-    // 拿不到锁无法确认所有权：保守当作仍持权，不影响正常心跳路径。
-    if (isLeaseLockTimeout(error)) return true;
-    throw error;
   }
 }
 

@@ -225,23 +225,6 @@ export function getRunningSessionIds(): string[] {
   return getRunningRpcSessionIds();
 }
 
-function isLeaseAwareHost(
-  host: LiveAgentSession,
-): host is LiveAgentSession & { checkWriterLease: () => Promise<void> } {
-  return typeof (host as { checkWriterLease?: unknown }).checkWriterLease === "function";
-}
-
-/** 心跳周期内的失权检测：只对实现了 checkWriterLease 的 host 生效。 */
-async function checkOwnedHostLease(sessionId: string): Promise<void> {
-  const host = getRegistry().get(sessionId);
-  if (!host || !isLeaseAwareHost(host)) return;
-  try {
-    await host.checkWriterLease();
-  } catch (error) {
-    console.error("[pidance] writer lease check failed:", error);
-  }
-}
-
 function getRunningListeners(): Set<(ids: string[]) => void> {
   if (!globalThis.__piRunningListeners) globalThis.__piRunningListeners = new Set();
   return globalThis.__piRunningListeners;
@@ -288,9 +271,6 @@ function syncOwnedRunningLeases(): void {
   for (const id of local) {
     heartbeatRunningLease(id);
     ownedRunningLeases.add(id);
-    // 失权检测：本 host 的租约若已被另一进程接管，立即停写并销毁，
-    // 避免两个进程同时追加同一 JSONL。放在心跳之后，用同一次锁间隙判定。
-    void checkOwnedHostLease(id);
   }
   for (const id of [...ownedRunningLeases]) {
     if (local.has(id)) continue;

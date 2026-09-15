@@ -20,7 +20,6 @@ import {
 } from "./pidance-prefs-file";
 import {
   acquireRunningLease,
-  refreshWriterLease,
   SESSION_RUNNING_LOCKED_MESSAGE,
 } from "./session-running-lease";
 
@@ -178,11 +177,6 @@ export class SdkSessionHost {
    */
   private pendingDestroys = new Map<number, Promise<void>>();
   private _alive = true;
-  /**
-   * 本 host 是否已失去 writer 租约（被另一进程接管）。
-   * 失去后拒绝新的写命令，避免两个进程同时追加同一 JSONL。
-   */
-  private leaseLost = false;
   private promptRunning = false;
   /** 最近一次 prompt 结束原因：队列自动投递只认 completed。 */
   private lastStopReason: "completed" | "aborted" | "error" | null = null;
@@ -1407,18 +1401,6 @@ export class SdkSessionHost {
   async send(command: Record<string, unknown>): Promise<unknown> {
     if (!this.runtime) throw new Error("SDK session is not alive");
     const type = command.type as string;
-    // 已失去 writer 租约：拒绝写命令（仍允许只读查询，便于浏览器对账）。
-    if (
-      this.leaseLost
-      && type !== "get_state"
-      && type !== "ensure_session"
-      && type !== "get_session_stats"
-      && type !== "get_tools"
-      && type !== "get_commands"
-      && type !== "get_last_assistant_text"
-    ) {
-      throw new Error(SESSION_RUNNING_LOCKED_MESSAGE);
-    }
     // get_state / ensure_session 都是只读预检（浏览器「新建会话占位」会先 ensure
     // 再 prompt）：保留 startup hold，避免 host 在首个真实写命令前被 0ms dispose，
     // 导致随后 wake/prompt 时文件未落盘而 404/被拒。真正的写命令才释放窗口。
@@ -1459,11 +1441,6 @@ export class SdkSessionHost {
           this.persistFollowUpQueue();
           this.options.onSessionListInvalidate?.();
           return queuedReceipt;
-        }
-        // 写命令拿到租约后，必须先确认它仍属于本 host：acquireRunningLease 只
-        // 拒绝「活持有者的租约」，而本进程可能已经失去过租约（见 leaseLost）。
-        if (this.leaseLost) {
-          throw new Error(SESSION_RUNNING_LOCKED_MESSAGE);
         }
         if (!acquireRunningLease(this.realSessionId)) {
           throw new Error(SESSION_RUNNING_LOCKED_MESSAGE);
@@ -1936,20 +1913,6 @@ export class SdkSessionHost {
       this.activeCommandCount = Math.max(0, this.activeCommandCount - 1);
       if (this.activeCommandCount === 0) this.resetIdleTimer();
     }
-  }
-
-  /**
-   * 检查本 host 是否仍持有 writer 租约；被接管则标记失权并销毁。
-   * 由 registry 心跳周期调用（见 syncOwnedRunningLeases）。
-   */
-  async checkWriterLease(): Promise<void> {
-    if (!this._alive || this.leaseLost) return;
-    if (refreshWriterLease(this.realSessionId)) return;
-    this.leaseLost = true;
-    console.warn(
-      `[pidance] session ${this.realSessionId} lost its writer lease to another process; disconnecting`,
-    );
-    await this.destroyAsync();
   }
 
   destroy(): void {
