@@ -66,8 +66,16 @@ jobs:
           if (!(Test-Path node_modules/electron/dist/electron.exe)) { throw "Electron runtime is missing" }
           # 服务以 ELECTRON_RUN_AS_NODE 跑在包内 Electron 自带的 Node 上：这里量的是**真实运行时**版本，
           # 不是 runner 的 node。低于主包 engines 就直接失败，不靠人记得 Electron 升级时重看。
+          # electron.exe 是 GUI 子系统程序，PowerShell 直接捕获它的 stdout 拿到的是空值
+          # （实测 EPIPE + `electron node too old: `），所以让子进程把版本写进文件再读。
+          $out = Join-Path $env:RUNNER_TEMP "electron-node-version.txt"
+          Remove-Item -Force $out -ErrorAction SilentlyContinue
           $env:ELECTRON_RUN_AS_NODE = "1"
-          $runtime = (& ".\node_modules\electron\dist\electron.exe" -e "process.stdout.write(process.versions.node)")
+          $env:PIDANCE_ELECTRON_NODE_OUT = $out
+          Start-Process -FilePath ".\node_modules\electron\dist\electron.exe" -Wait -NoNewWindow `
+            -ArgumentList @("-e", "require('node:fs').writeFileSync(process.env.PIDANCE_ELECTRON_NODE_OUT, process.versions.node)")
+          if (!(Test-Path $out)) { throw "拿不到 Electron 自带 Node 的版本（$out 没生成）" }
+          $runtime = (Get-Content $out -Raw).Trim()
           $engines = (Get-Content node_modules/@henlii/pidance/package.json -Raw | ConvertFrom-Json).engines.node
           Write-Host "Electron 自带 Node：$runtime（主包 engines：$engines）"
           node -e "const [maj,min]=process.argv[1].split('.').map(Number); if (maj<22 || (maj===22 && min<19)) throw new Error('electron node too old: '+process.argv[1]); console.log('electron node ok', process.argv[1])" "$runtime"
@@ -89,6 +97,12 @@ jobs:
           $app = Join-Path $env:RUNNER_TEMP "unpacked"
           Remove-Item -Recurse -Force $app -ErrorAction SilentlyContinue
           Expand-Archive -Path $zip.FullName -DestinationPath $app -Force
+          # zip 里可能是壳目录本身，也可能是多一层目录，两种都兼容。
+          if (!(Test-Path (Join-Path $app "resources"))) {
+            $inner = Get-ChildItem $app -Directory | Where-Object { Test-Path (Join-Path $_.FullName "resources") } | Select-Object -First 1
+            if ($inner) { $app = $inner.FullName }
+          }
+          if (!(Test-Path (Join-Path $app "resources"))) { throw "解包目录里找不到 resources：$app" }
           node scripts/verify-packaged.mjs --app-dir $app --port 31419 --label "便携 zip"
 
       - name: 真实 Electron 壳冒烟（解包产物）
@@ -96,6 +110,10 @@ jobs:
         shell: pwsh
         run: |
           $app = Join-Path $env:RUNNER_TEMP "unpacked"
+          if (!(Test-Path (Join-Path $app "resources"))) {
+            $inner = Get-ChildItem $app -Directory | Where-Object { Test-Path (Join-Path $_.FullName "resources") } | Select-Object -First 1
+            if ($inner) { $app = $inner.FullName }
+          }
           node scripts/smoke-shell.mjs --app-dir $app --port 31421
 
       - name: 安装/卸载验证（静默安装 → 壳冒烟 → 卸载干净）
