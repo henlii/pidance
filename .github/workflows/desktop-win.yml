@@ -61,7 +61,6 @@ jobs:
       - name: 用当前分支的服务端包替换 npm 上的内置服务
         shell: pwsh
         run: |
-          $root = Join-Path $env:RUNNER_TEMP "pidance-candidate"
           # Windows runner 的用户目录里有 Application Data 这类不可读的联接点，而 next build 里某处
           # 以用户目录为根的 **/* glob 会扫到它并 EPERM 直接让 webpack 编译失败（Linux runner 的
           # 用户目录干净，所以同一脚本在发布链路里从没暴露）。构建只需要工作区与构建根，
@@ -71,7 +70,11 @@ jobs:
           Write-Host "构建用 HOME：$fakeHome（原 USERPROFILE=$env:USERPROFILE）"
           $env:USERPROFILE = $fakeHome
           $env:HOME = $fakeHome
-          node scripts/make-candidate-package.mjs --build-root $root
+          # 必须用脚本默认的中性构建根（%TEMP%\pidance-release-build）：生成前后审计只认这个白名单。
+          # 指定 --build-root 到别处时，构建根自己会被当成敏感路径，而 Next 会把构建根绝对路径
+          # 写进 server chunk，审计直接失败。
+          $root = Join-Path (node -e "process.stdout.write(require('node:os').tmpdir())") "pidance-release-build"
+          node scripts/make-candidate-package.mjs
           $tgz = Get-ChildItem (Join-Path $root "*.tgz") | Sort-Object LastWriteTime | Select-Object -Last 1
           if (!$tgz) { throw "没有生成内置服务候选包：$root" }
           Write-Host "内置服务候选包：$($tgz.FullName)"
