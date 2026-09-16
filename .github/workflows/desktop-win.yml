@@ -55,6 +55,21 @@ jobs:
         working-directory: desktop
         run: npm test
 
+      # 桌面壳按 lockfile 装的是 npm 上已发布的 @henlii/pidance。但 CI 要验的是**当前分支的服务端**：
+      # 否则 desktop 的验证只覆盖壳本身，服务端的改动（例如 Windows 终端一连上就断）根本进不了产物，
+      # 跑绿了也不代表这份代码能跑。这里走与正式发布同构的本地候选包流程，把工作区包换进去。
+      - name: 用当前分支的服务端包替换 npm 上的内置服务
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "pidance-candidate"
+          node scripts/make-candidate-package.mjs --build-root $root
+          $tgz = Get-ChildItem (Join-Path $root "*.tgz") | Sort-Object LastWriteTime | Select-Object -Last 1
+          if (!$tgz) { throw "没有生成内置服务候选包：$root" }
+          Write-Host "内置服务候选包：$($tgz.FullName)"
+          Push-Location desktop
+          npm install --no-save --no-audit --no-fund $tgz.FullName
+          Pop-Location
+
       - name: 校验打包输入（内置服务版本与 Electron 运行时的 Node 版本）
         working-directory: desktop
         shell: pwsh
