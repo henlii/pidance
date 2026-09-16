@@ -4,7 +4,7 @@
  * 桌面壳更新流程的纯逻辑（不依赖 electron，node:test 可直接测）。
  *
  * 更新源固定为 GitHub Release 的桌面产物（与主包发布同一个 tag）：
- * - 只认 `Pidance Desktop Setup <ver>.exe`，便携 zip 不支持自更新。
+ * - 只认 `Pidance Desktop Setup <ver>.exe`（Windows 桌面只提供安装版，没有便携形态）。
  * - 下载后按 Release 资产声明的 sha256 校验，校验失败绝不执行安装包。
  * - 安装前必须先停掉本进程拉起的服务（外部复用的服务不动）。
  */

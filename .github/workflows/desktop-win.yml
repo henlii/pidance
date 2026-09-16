@@ -2,9 +2,11 @@ name: Desktop Windows Build
 
 # Windows 桌面壳：构建 → 瘦身 → **在真实产物上验证** → 安装包安装/卸载验证 → 产物 + sha256。
 # - 手动触发、推送 desktop/** 变更、以及主包发布 tag（v*）；
-# - tag 时把 zip / NSIS 安装包 / sha256 挂到**同一个 tag 的 GitHub Release**
-#   （与主包 tgz 同一个 Release；便携 zip 不支持自更新）；
-# - 验证不是只看端口：解包后跑 desktop/scripts/verify-packaged.mjs（页面 + _next 静态资源 +
+# - **只出 NSIS 安装版**：安装器自带安装目录与卸载器，而解压形态（便携 zip）没有这两样，
+#   对用户和验证都是负担，所以不产出 zip；
+# - tag 时把 Setup exe / sha256 挂到**同一个 tag 的 GitHub Release**（与主包 tgz 同一个 Release）；
+# - 验证不是只看端口：NSIS 安装包就是 electron-builder 从 dist/*-unpacked 应用目录压出来的，
+#   所以直接在那个目录上跑 desktop/scripts/verify-packaged.mjs（页面 + _next 静态资源 +
 #   /api/about 版本 + node-pty + SDK 会话 + 关停/端口释放），再用真实 Electron 壳跑一次冒烟
 #   （desktop/scripts/smoke-shell.mjs），最后静默安装/卸载验证安装包。
 
@@ -101,41 +103,27 @@ jobs:
           Write-Host "Electron 自带 Node：$runtime（主包 engines：$engines）"
           node -e "const [maj,min]=process.argv[1].split('.').map(Number); if (maj<22 || (maj===22 && min<19)) throw new Error('electron node too old: '+process.argv[1]); console.log('electron node ok', process.argv[1])" "$runtime"
 
-      - name: 构建 Windows zip（便携）
-        working-directory: desktop
-        run: npm run build:win:zip
-
-      - name: 构建 NSIS 安装版
+      - name: 构建 NSIS 安装版（同时留下 dist/*-unpacked 应用目录）
         working-directory: desktop
         run: npm run build:win:installer
 
-      - name: 解包 zip 并验证打包输入（页面/静态资源/版本/node-pty/SDK 会话/可停）
+      - name: 验证打包产物（页面/静态资源/版本/node-pty/SDK 会话/可停）
         working-directory: desktop
         shell: pwsh
         run: |
-          $zip = Get-ChildItem dist -File -Filter *.zip | Select-Object -First 1
-          if (!$zip) { throw "zip artifact is missing" }
-          $app = Join-Path $env:RUNNER_TEMP "unpacked"
-          Remove-Item -Recurse -Force $app -ErrorAction SilentlyContinue
-          Expand-Archive -Path $zip.FullName -DestinationPath $app -Force
-          # zip 里可能是壳目录本身，也可能是多一层目录，两种都兼容。
-          if (!(Test-Path (Join-Path $app "resources"))) {
-            $inner = Get-ChildItem $app -Directory | Where-Object { Test-Path (Join-Path $_.FullName "resources") } | Select-Object -First 1
-            if ($inner) { $app = $inner.FullName }
-          }
-          if (!(Test-Path (Join-Path $app "resources"))) { throw "解包目录里找不到 resources：$app" }
-          node scripts/verify-packaged.mjs --app-dir $app --port 31419 --label "便携 zip"
+          # NSIS 安装包就是从这个应用目录压出来的，验证它等于验证安装后落盘的文件树。
+          $app = Get-ChildItem dist -Directory | Where-Object { Test-Path (Join-Path $_.FullName "resources") } | Select-Object -First 1
+          if (!$app) { throw "dist 下找不到打包产物目录（*-unpacked）" }
+          Write-Host "验证目录：$($app.FullName)"
+          node scripts/verify-packaged.mjs --app-dir $app.FullName --port 31419 --label "打包产物"
 
-      - name: 真实 Electron 壳冒烟（解包产物）
+      - name: 真实 Electron 壳冒烟（打包产物）
         working-directory: desktop
         shell: pwsh
         run: |
-          $app = Join-Path $env:RUNNER_TEMP "unpacked"
-          if (!(Test-Path (Join-Path $app "resources"))) {
-            $inner = Get-ChildItem $app -Directory | Where-Object { Test-Path (Join-Path $_.FullName "resources") } | Select-Object -First 1
-            if ($inner) { $app = $inner.FullName }
-          }
-          node scripts/smoke-shell.mjs --app-dir $app --port 31421
+          $app = Get-ChildItem dist -Directory | Where-Object { Test-Path (Join-Path $_.FullName "resources") } | Select-Object -First 1
+          if (!$app) { throw "dist 下找不到打包产物目录（*-unpacked）" }
+          node scripts/smoke-shell.mjs --app-dir $app.FullName --port 31421
 
       - name: 安装/卸载验证（静默安装 → 壳冒烟 → 卸载干净）
         working-directory: desktop
@@ -168,7 +156,7 @@ jobs:
         working-directory: desktop
         shell: pwsh
         run: |
-          Get-ChildItem dist -File | Where-Object { $_.Extension -in ".exe", ".zip" } | ForEach-Object {
+          Get-ChildItem dist -File | Where-Object { $_.Extension -eq ".exe" } | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
             "$hash  $($_.Name)" | Out-File -Append -Encoding ascii dist/sha256.txt
             Write-Host "$hash  $($_.Name)"
@@ -179,19 +167,18 @@ jobs:
         shell: pwsh
         run: |
           $lines = @("## 桌面产物", "", "| 项 | 大小 |", "|---|---|")
-          foreach ($f in Get-ChildItem dist -File | Where-Object { $_.Extension -in ".exe", ".zip" }) {
+          foreach ($f in Get-ChildItem dist -File | Where-Object { $_.Extension -eq ".exe" }) {
             $lines += "| $($f.Name) | $([math]::Round($f.Length / 1MB, 1)) MB |"
           }
           $lines += ""
           $lines | Add-Content $env:GITHUB_STEP_SUMMARY
           $lines | Write-Host
 
-      - name: 上传产物（zip + Setup exe + sha256）
+      - name: 上传产物（Setup exe + sha256）
         uses: actions/upload-artifact@v4
         with:
           name: pidance-desktop-win
           path: |
-            desktop/dist/*.zip
             desktop/dist/*.exe
             desktop/dist/sha256.txt
           if-no-files-found: error
@@ -213,7 +200,7 @@ jobs:
             Start-Sleep -Seconds 15
           }
           if ($LASTEXITCODE -ne 0) { throw "Release $env:TAG 迟迟没有出现，无法挂桌面产物" }
-          $files = Get-ChildItem dist -File | Where-Object { $_.Extension -in ".exe", ".zip" } | ForEach-Object { $_.FullName }
+          $files = Get-ChildItem dist -File | Where-Object { $_.Extension -eq ".exe" } | ForEach-Object { $_.FullName }
           gh release upload $env:TAG --repo $repo --clobber $files dist/sha256.txt
           gh release view $env:TAG --repo $repo --json assets --jq '.assets[].name'
 
@@ -226,11 +213,9 @@ jobs:
         working-directory: desktop
         shell: pwsh
         run: |
-          $app = Join-Path $env:RUNNER_TEMP "unpacked"
-          if (!(Test-Path (Join-Path $app "resources"))) {
-            $inner = Get-ChildItem $app -Directory | Where-Object { Test-Path (Join-Path $_.FullName "resources") } | Select-Object -First 1
-            if ($inner) { $app = $inner.FullName }
-          }
+          $app = Get-ChildItem dist -Directory | Where-Object { Test-Path (Join-Path $_.FullName "resources") } | Select-Object -First 1
+          if (!$app) { Write-Host "跳过：找不到打包产物目录"; exit 0 }
+          $app = $app.FullName
           $entry = Join-Path $app "resources/app/node_modules/@henlii/pidance/bin/pidance.js"
           $exe = Join-Path $app "Pidance Desktop.exe"
           if (!(Test-Path $entry) -or !(Test-Path $exe)) { Write-Host "跳过：解包产物不完整"; exit 0 }

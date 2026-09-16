@@ -57,7 +57,7 @@ gh run watch <run-id> --repo henlii/pidance
 8. 优先采用 `docs/release-notes/<tag>.md`，缺失时回退 commit 列表。
 9. `gh release create` 上传同一 tgz 和 sha256。
 
-同一个 `v*` tag 还会触发 [`.github/workflows/desktop-win.yml`](../.github/workflows/desktop-win.yml)（Windows 桌面壳）：瘦身 → 打包 zip/NSIS → 在解包产物上验证（页面 + `_next` 静态资源 + `/api/about` 版本 + node-pty + SDK 会话 + 可停）→ 真实 Electron 壳冒烟 → 静默安装/卸载验证 → 等 Release 建好后用 `gh release upload` 把 zip、Setup exe 与 sha256 挂到**同一个 Release**。桌面壳与主包同版本，但不会自动更新已安装的桌面版：用户在托盘里手动「检查更新」。
+同一个 `v*` tag 还会触发 [`.github/workflows/desktop-win.yml`](../.github/workflows/desktop-win.yml)（Windows 桌面壳）：只出 NSIS 安装版（不做便携 zip）→ 瘦身 → 打包 → 在 electron-builder 留下的 `dist/*-unpacked` 应用目录上验证（页面 + `_next` 静态资源 + `/api/about` 版本 + node-pty + SDK 会话 + 可停）→ 真实 Electron 壳冒烟 → 静默安装/卸载验证 → 等 Release 建好后用 `gh release upload` 把 Setup exe 与 sha256 挂到**同一个 Release**。桌面壳与主包同版本，但不会自动更新已安装的桌面版：用户在托盘里手动「检查更新」。
 
 ### 当前 CI 限制
 

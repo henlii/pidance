@@ -20,7 +20,7 @@
  *
  * 更新：只做「托盘里手动检查 + 用户确认后下载安装」，不后台自动检查、不静默安装；
  * 安装包来自主包同名 tag 的 GitHub Release，sha256 摘要对不上或没声明就绝不执行；
- * 安装前先停掉本进程拉起的服务（外部复用不动）。便携 zip 不支持自更新。
+ * 安装前先停掉本进程拉起的服务（外部复用不动）。
  *
  * CI 冒烟：`PIDANCE_DESKTOP_SMOKE=1` 时窗口加载完成后打印 `__PIDANCE_SMOKE__`
  * JSON 并停服务退出（非零退出码表示失败）；仅供 CI 断言真实壳能加载页面。
@@ -411,7 +411,7 @@ async function checkForUpdates({ interactive = false } = {}) {
   }
   const messages = {
     "up-to-date": { message: "已是最新版本", detail: `当前版本 v${app.getVersion()}。` },
-    "no-asset": { message: "未找到桌面安装包", detail: "最新 Release 里没有桌面安装包（便携 zip 不支持自更新）。" },
+    "no-asset": { message: "未找到桌面安装包", detail: "最新 Release 里没有桌面安装包。" },
     unknown: { message: "无法判断更新", detail: "Release 列表为空或版本号无法解析。" },
     error: { message: "检查更新失败", detail: updateState.error ?? "未知错误" },
   };

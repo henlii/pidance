@@ -14,7 +14,6 @@
     "prune:win": "node scripts/prune-app-tree.mjs --platform win32 --arch x64",
     "verify:packaged": "node scripts/verify-packaged.mjs",
     "smoke:shell": "node scripts/smoke-shell.mjs",
-    "build:win:zip": "npm run prune:win && electron-builder --win zip --x64 --publish never",
     "build:win:installer": "npm run prune:win && electron-builder --win nsis --x64 --publish never"
   },
   "dependencies": {

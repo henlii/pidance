@@ -2,7 +2,7 @@
 
 [文档导航](../docs/README.md) · [主应用开发](../docs/development.md) · [发布流程](../docs/release.md) · [产物管理](../docs/artifacts.md)
 
-面向 Windows 用户的 Electron 壳：解压/安装后双击「Pidance Desktop」，自动拉起本机
+面向 Windows 用户的 Electron 壳：安装后双击「Pidance Desktop」，自动拉起本机
 pidance 服务（127.0.0.1:31415）并打开沙箱窗口。端口上已有 **Pidance** 服务则复用
 （不重复 spawn，也不停它）；真正退出时只停本进程拉起的服务。启用最小化到托盘后，关窗只隐藏窗口。
 
@@ -12,9 +12,11 @@ pidance 服务（127.0.0.1:31415）并打开沙箱窗口。端口上已有 **Pid
 
 ## 产物形态
 
-- **Windows zip（便携）**：`desktop/dist/*.zip`，解压即用；便携版不支持自更新。
 - **NSIS 安装版**：`desktop/dist/Pidance Desktop Setup <ver>.exe`，可选安装目录、
-  创建桌面/开始菜单快捷方式；用户级安装（不需要管理员）。
+  创建桌面/开始菜单快捷方式；用户级安装（不需要管理员），自带卸载器。
+- 只出安装版：解压形态（便携 zip）没有安装目录也没有卸载器，对用户和验证都是负担。
+- electron-builder 打安装包前会先把应用目录留在 `desktop/dist/*-unpacked`，
+  它和安装后落盘的文件树一致，CI 就在这个目录上验证与冒烟。
 - 服务端来自 npm 包 `@henlii/pidance`（与 `desktop/package.json` 精确锁定，含 lockfile），
   打包进 `resources/app/node_modules/@henlii/pidance`（`asar:false`）。
 - 服务进程用**包内 Electron 自带的 Node** 运行（`ELECTRON_RUN_AS_NODE=1`，Electron 37.10.3
@@ -74,8 +76,7 @@ cd desktop
 npm ci --include=dev
 npm test                      :: 生命周期 / 瘦身 / 更新逻辑纯测试
 npm run prune:win             :: 按 win32-x64 瘦身打包输入（可选，构建脚本会自动跑）
-npm run build:win:zip         :: 瘦身 + 便携 zip
-npm run build:win:installer   :: 瘦身 + NSIS 安装版
+npm run build:win:installer   :: 瘦身 + NSIS 安装版（并留下 dist/*-unpacked 应用目录）
 ```
 
 `prune:win` 会**就地改 `desktop/node_modules`**（删掉非目标平台与非运行资产）；在 Linux/macOS
@@ -89,11 +90,11 @@ npm run build:win:installer   :: 瘦身 + NSIS 安装版
 :: 1. 纯逻辑（任何平台）
 npm test
 
-:: 2. 解包产物：页面 + _next 静态资源 + /api/about 版本 + 运行时 Node 版本 + node-pty + SDK 会话 + 关停
-node scripts/verify-packaged.mjs --app-dir <解包目录> --port 31419
+:: 2. 打包产物目录：页面 + _next 静态资源 + /api/about 版本 + 运行时 Node 版本 + node-pty + SDK 会话 + 关停
+node scripts/verify-packaged.mjs --app-dir dist/win-unpacked --port 31419
 
 :: 3. 真实 Electron 壳（需要 Windows 桌面会话）：加载页面、退出清理、端口释放
-node scripts/smoke-shell.mjs --app-dir <解包目录或安装目录> --port 31421
+node scripts/smoke-shell.mjs --app-dir <打包产物目录或安装目录> --port 31421
 ```
 
 `verify-packaged` 会真的建一个 SDK 会话（`POST /api/agent/new` 的 `ensure_session`）并确认
@@ -104,13 +105,13 @@ CI（[`.github/workflows/desktop-win.yml`](../.github/workflows/desktop-win.yml)
 
 1. `npm ci` → 语法检查 → `npm test`；
 2. 校验打包输入（内置服务版本 = `desktop/package.json` 声明；用包内 Electron 量运行时 Node 版本 ≥ 主包 engines）；
-3. 打包 zip 与 NSIS（构建脚本自动瘦身）；
-4. 解包 zip → `verify-packaged`（31419）；
-5. 解包产物 → 真实壳 `smoke-shell`（31421）；
+3. 打包 NSIS 安装版（构建脚本自动瘦身，并留下 `dist/*-unpacked` 应用目录）；
+4. 打包产物目录 → `verify-packaged`（31419）；
+5. 打包产物目录 → 真实壳 `smoke-shell`（31421）；
 6. 静默安装到 `%LOCALAPPDATA%\Programs\Pidance Desktop` → 版本核对 → 壳冒烟（31422）→ 静默卸载 → 等目录消失；
 7. 算 SHA256、输出体积摘要、上传 Artifacts（30 天）；
 8. **`v*` tag 触发时**：等 `release.yml` 建好同一个 tag 的 Release，用 `gh release upload` 把
-   便携 zip、Setup exe、sha256.txt 挂上去（主包 tgz 也在那个 Release 里）。
+   Setup exe、sha256.txt 挂上去（主包 tgz 也在那个 Release 里）。
 
 ## 安全边界
 
