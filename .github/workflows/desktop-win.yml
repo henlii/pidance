@@ -66,16 +66,10 @@ jobs:
           if (!(Test-Path node_modules/electron/dist/electron.exe)) { throw "Electron runtime is missing" }
           # 服务以 ELECTRON_RUN_AS_NODE 跑在包内 Electron 自带的 Node 上：这里量的是**真实运行时**版本，
           # 不是 runner 的 node。低于主包 engines 就直接失败，不靠人记得 Electron 升级时重看。
-          # electron.exe 是 GUI 子系统程序，PowerShell 直接捕获它的 stdout 拿到的是空值
-          # （实测 EPIPE + `electron node too old: `），所以让子进程把版本写进文件再读。
-          $out = Join-Path $env:RUNNER_TEMP "electron-node-version.txt"
-          Remove-Item -Force $out -ErrorAction SilentlyContinue
+          # electron.exe 是 GUI 子系统程序：PowerShell 直接 & / Start-Process 都拿不到它的 stdout
+          # （实测 EPIPE、变量为空），所以由 node 用管道去捕。
           $env:ELECTRON_RUN_AS_NODE = "1"
-          $env:PIDANCE_ELECTRON_NODE_OUT = $out
-          Start-Process -FilePath ".\node_modules\electron\dist\electron.exe" -Wait -NoNewWindow `
-            -ArgumentList @("-e", "require('node:fs').writeFileSync(process.env.PIDANCE_ELECTRON_NODE_OUT, process.versions.node)")
-          if (!(Test-Path $out)) { throw "拿不到 Electron 自带 Node 的版本（$out 没生成）" }
-          $runtime = (Get-Content $out -Raw).Trim()
+          $runtime = node -e "const cp=require('node:child_process');const r=cp.spawnSync(require('node:path').join('node_modules','electron','dist','electron.exe'),['-e','process.stdout.write(process.versions.node)'],{encoding:'utf8'});if(!r.stdout)process.stderr.write(r.error?String(r.error):(r.stderr||'electron produced no output'));process.stdout.write((r.stdout||'').trim())"
           $engines = (Get-Content node_modules/@henlii/pidance/package.json -Raw | ConvertFrom-Json).engines.node
           Write-Host "Electron 自带 Node：$runtime（主包 engines：$engines）"
           node -e "const [maj,min]=process.argv[1].split('.').map(Number); if (maj<22 || (maj===22 && min<19)) throw new Error('electron node too old: '+process.argv[1]); console.log('electron node ok', process.argv[1])" "$runtime"
