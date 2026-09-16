@@ -62,6 +62,15 @@ jobs:
         shell: pwsh
         run: |
           $root = Join-Path $env:RUNNER_TEMP "pidance-candidate"
+          # Windows runner 的用户目录里有 Application Data 这类不可读的联接点，而 next build 里某处
+          # 以用户目录为根的 **/* glob 会扫到它并 EPERM 直接让 webpack 编译失败（Linux runner 的
+          # 用户目录干净，所以同一脚本在发布链路里从没暴露）。构建只需要工作区与构建根，
+          # 把 HOME/USERPROFILE 指到空目录即可隔离。
+          $fakeHome = Join-Path $env:RUNNER_TEMP "build-home"
+          New-Item -ItemType Directory -Force -Path $fakeHome | Out-Null
+          Write-Host "构建用 HOME：$fakeHome（原 USERPROFILE=$env:USERPROFILE）"
+          $env:USERPROFILE = $fakeHome
+          $env:HOME = $fakeHome
           node scripts/make-candidate-package.mjs --build-root $root
           $tgz = Get-ChildItem (Join-Path $root "*.tgz") | Sort-Object LastWriteTime | Select-Object -Last 1
           if (!$tgz) { throw "没有生成内置服务候选包：$root" }

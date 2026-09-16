@@ -178,6 +178,13 @@ export const en = {
   sidebar_readOnly: 'Read-only',
   sidebar_expandChild: 'Expand child sessions',
   sidebar_collapseChild: 'Collapse child sessions',
+  lineage_listLabel: 'Subagent sessions',
+  lineage_subagentCount: '{count} subagent(s)',
+  lineage_runningCount: '{count} running',
+  lineage_current: 'Current session',
+  lineage_switchTo: 'Switch to {title}',
+  lineage_stale: 'Update failed — data may be stale',
+  lineage_needsAttention: 'Needs attention',
   sidebar_expandRecentSessions: 'Expand recent sessions',
   sidebar_collapseRecentSessions: 'Collapse recent sessions',
   // archive

@@ -35,6 +35,7 @@ import {
   type SidebarPreferences,
 } from "@/lib/ui-preferences";
 import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
+import { refreshSubagentActivity, useSubagentActivity } from "@/hooks/useSubagentActivity";
 import { setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import {
   bumpGroupVisibleCount,
@@ -197,9 +198,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [archiveViewOpen, setArchiveViewOpen] = useState(false);
   const [archiveBusyId, setArchiveBusyId] = useState<string | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
-  // subagent 活跃运行（子会话 + 等待中的主会话）；由 /api/subagent-runs 推导。
-  const [subagentRunningIds, setSubagentRunningIds] = useState<Set<string>>(() => new Set());
-  const subagentPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // subagent 活跃运行（子会话 + 等待中的主会话）：数据源是与顶栏谱系共用的
+  // useSubagentActivity（单一 30s 轮询），这里只把子会话 id 映射成集合。
+  const { runningChildIds: subagentChildRunningIds } = useSubagentActivity();
+  const subagentRunningIds = useMemo(() => {
+    const ids = new Set<string>(subagentChildRunningIds);
+    for (const s of serverSessions) {
+      if (s.subagent?.parentSessionId && subagentChildRunningIds.has(s.id)) {
+        ids.add(s.subagent.parentSessionId);
+      }
+    }
+    return ids;
+  }, [subagentChildRunningIds, serverSessions]);
   // agent 询问用户中的会话（extension 弹窗/ask 暂停）：侧栏显示等待黄点。
   const [waitingUserIds, setWaitingUserIds] = useState<ReadonlySet<string>>(() => new Set());
   // ── P1-5 共享运行计时：1Hz ticker + first-seen 时间跟踪（见 RunningTimeContext）──
@@ -518,53 +528,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     };
   }, [commitRunningSnapshot]);
 
-  // subagent 活跃运行轮询：异步子会话运行中 → 子会话 + 其主会话显示 running。
-  // 数据源 /api/subagent-runs（read-only），30s 轮询 + 会话列表刷新时同步拉取。
-  const refreshSubagentRunning = useCallback(async () => {
-    try {
-      const res = await fetch("/api/subagent-runs?limit=50");
-      if (!res.ok) return;
-      const data = await res.json() as { runs?: Array<{
-        state?: string;
-        steps?: Array<{ sessionId?: string }>;
-      }> };
-      const active = (data.runs ?? []).filter((r) =>
-        r.state === "running" || r.state === "queued" || r.state === "paused",
-      );
-      const childIds = new Set<string>();
-      for (const run of active) {
-        for (const step of run.steps ?? []) {
-          if (step.sessionId) childIds.add(step.sessionId);
-        }
-      }
-      // 主会话等待中：子会话的 parent 也显示 running。
-      // 经 ref 读取最新会话列表（不把 setState updater 当数据源用）。
-      const parentIds = new Set<string>();
-      if (childIds.size > 0) {
-        for (const s of serverSessionsRef.current) {
-          if (s.subagent?.parentSessionId && childIds.has(s.id)) {
-            parentIds.add(s.subagent.parentSessionId);
-          }
-        }
-      }
-      setSubagentRunningIds(new Set([...childIds, ...parentIds]));
-    } catch {
-      // 轮询失败静默：保持上次状态。
-    }
-  }, []);
-
+  // 会话列表刷新后同步拉一次 subagent 状态（子会话刚被发现时）；定期轮询在
+  // useSubagentActivity 内部（顶栏谱系与侧栏共用，不再各自轮询）。
   useEffect(() => {
-    void refreshSubagentRunning();
-    subagentPollRef.current = setInterval(() => void refreshSubagentRunning(), 30_000);
-    return () => {
-      if (subagentPollRef.current) clearInterval(subagentPollRef.current);
-    };
-  }, [refreshSubagentRunning]);
-
-  // 会话列表刷新后同步拉一次 subagent 状态（子会话刚被发现时）。
-  useEffect(() => {
-    if (sessionRefreshDone) void refreshSubagentRunning();
-  }, [sessionRefreshDone, refreshSubagentRunning]);
+    if (sessionRefreshDone) refreshSubagentActivity();
+  }, [sessionRefreshDone]);
   useEffect(() => {
     // 未读只由服务器 running 快照的真实移除生成（catalog store 内部按 epoch 处理）；
     // 切换聊天导致 optimistic running 消失时，服务端 host 仍可能在执行，不能把

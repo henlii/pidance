@@ -178,6 +178,13 @@ export const zhCN: Record<TranslationKey, string> = {
   sidebar_readOnly: '只读',
   sidebar_expandChild: '展开子会话',
   sidebar_collapseChild: '折叠子会话',
+  lineage_listLabel: '子会话',
+  lineage_subagentCount: '{count} 个子会话',
+  lineage_runningCount: '{count} 运行中',
+  lineage_current: '当前会话',
+  lineage_switchTo: '切换到 {title}',
+  lineage_stale: '更新失败，数据可能过期',
+  lineage_needsAttention: '需要关注',
   sidebar_expandRecentSessions: '展开最近会话',
   sidebar_collapseRecentSessions: '折叠最近会话',
   // 归档

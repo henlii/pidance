@@ -17,6 +17,7 @@ import { AboutDialog } from "./AboutDialog";
 import { InstantTooltipHost } from "./InstantTooltipHost";
 import { UpdateBanner } from "./UpdateBanner";
 import { BranchNavigator } from "./BranchNavigator";
+import { SessionLineage } from "./SessionLineage";
 import { TerminalPanel } from "./TerminalPanel";
 import { useTheme } from "@/hooks/useTheme";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -1176,6 +1177,14 @@ function AppShellInner() {
               </svg>
             )}
           </button>
+          {/* 子会话谱系：主会话 / 子会话 / N 个子会话 ▾（侧栏隐藏子代理会话时的入口） */}
+          {showChat && selectedSession && (
+            <SessionLineage
+              catalogStore={catalogStoreRef.current}
+              session={selectedSession}
+              onSelectSession={handleSelectSession}
+            />
+          )}
           {/* Session stats — right-aligned in top bar */}
           {showChat && (sessionStats || contextUsage || turnMetrics.tokensPerSecond !== undefined) && (() => {
             const fmt = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
