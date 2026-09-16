@@ -1,52 +1,91 @@
 /**
  * 本地 follow-up 队列状态（纯函数，按 sessionId 分账）。
  *
- * Host 是队列的持久化 owner；浏览器只持有「已确认基线 + 一个乐观待提交值」。
- * 三条不变量，对应三个已发生过的缺陷：
+ * Host 是队列的唯一 owner：条目身份（id）、状态（waiting/claimed/unknown）与
+ * revision 都由服务端给出。浏览器只持有
  *
- * 1. **显示 = pending ?? confirmed**。回滚是把 pending 清掉退回基线，而不是
- *    「恢复上一份乐观值」——空队列连续写 [A]、[A,B] 都失败时，基线仍是 []，
- *    不会显示从未被服务端接受过的 [A]。
- * 2. **按 revision 做 CAS**。本地每次提出新 pending 都推进 revision；
- *   在途请求带自己的 revision，结算时 revision 不匹配就丢弃，避免旧结果
- *    覆盖更新的写入。
- * 3. **按 sessionId 分账**。切走会话后失败也要修正原会话条目，而不是改当前投影。
+ * - `items`：服务端最近一次权威快照里**可见**的条目（waiting + unknown）；
+ * - `inFlight`：已提交给 Pi、尚未确认的正文（claimed）；
+ * - `pending`：本地乐观待提交值（尚未拿到回执）；
+ * - `serverRevision`：CAS 基线，下一次写入的 expectedRevision 就是它。
  *
- * `syncs` 是在途提交计数：并发入队时先完成的一笔不得提前放行服务端投影。
+ * 四条不变量，各对应一个已发生过的缺陷：
+ *
+ * 1. **显示 = pending ?? items**。回滚是清掉 pending 退回权威条目，而不是
+ *    「恢复上一份乐观值」——空队列连续写 [A]、[A,B] 都失败时仍显示 []。
+ * 2. **内容与版本一次写入**。冲突回执必须同时采纳权威 items 与 revision；
+ *    只更新版本（旧行为）会形成「新版本 + 旧内容」，下一次合法 CAS 就删掉别人
+ *    刚入队的消息（R2）。
+ * 3. **成功回执即新基线**。写成功后必须采纳回执里的 revision，否则下一次写入带
+ *    过期版本被 CAS 拒绝，表现为「入队成功但转引导失败」，只能靠后续轮询偶然
+ *    恢复（R1）。
+ * 4. **按 sessionId 分账**。切走会话后失败也只能修正原会话条目。
  */
 
+import type { FollowUpItem, FollowUpItemState } from "./session-queue";
+
 export type QueueEntry = {
-  /** 最后一次被服务端/磁盘确认的队列。 */
-  confirmed: string[];
+  /** 权威可见条目（waiting + unknown），含身份与状态。 */
+  items: FollowUpItem[];
+  /** 已提交未确认的正文（claimed）。 */
+  inFlight: string[];
   /** 乐观待提交值；null = 没有在途本地改动。 */
   pending: string[] | null;
-  /** 本地代次：每次提出 pending 或接受确认 +1。 */
+  /** 本地代次：每次提出 pending 或采纳快照 +1。 */
   revision: number;
-  /** 在途 set_follow_up_queue 计数。 */
-  syncs: number;
+  /** 服务端 CAS 基线；null = 未知（旧数据），此时不带 expectedRevision。 */
+  serverRevision: number | null;
 };
 
 export type QueueBook = Readonly<Record<string, QueueEntry>>;
 
-const EMPTY: QueueEntry = { confirmed: [], pending: null, revision: 0, syncs: 0 };
+export type QueueSnapshot = {
+  items: FollowUpItem[];
+  revision: number | null;
+  inFlight?: string[];
+};
+
+const EMPTY: QueueEntry = {
+  items: [],
+  inFlight: [],
+  pending: null,
+  revision: 0,
+  serverRevision: null,
+};
 
 export function queueEntry(book: QueueBook, sessionId: string): QueueEntry {
   return book[sessionId] ?? EMPTY;
 }
 
-/** 显示投影：优先乐观待提交值，否则回落到已确认基线。 */
-export function projection(entry: QueueEntry): string[] {
-  return [...(entry.pending ?? entry.confirmed)];
+/** 队列内容（不含在途）。 */
+export function queueItemTexts(items: readonly FollowUpItem[]): string[] {
+  return items.map((item) => item.text);
 }
 
-/** 是否有在途本地改动（服务端旧快照不得覆盖）。 */
+/** 待发送条目（unknown 不自动投递，但仍在队列里等用户处置）。 */
+export function sendableItemTexts(items: readonly FollowUpItem[]): string[] {
+  return items.filter((item) => item.state !== "claimed").map((item) => item.text);
+}
+
+/** 显示投影：优先乐观待提交值，否则回落到权威条目。 */
+export function projection(entry: QueueEntry): string[] {
+  return [...(entry.pending ?? sendableItemTexts(entry.items))];
+}
+
+/** UI 行投影：权威条目 + 在途行，供队列面板显示状态。 */
+export function queueRows(entry: QueueEntry): { id: string; text: string; state: FollowUpItemState }[] {
+  if (entry.pending) {
+    return entry.pending.map((text, index) => ({ id: `pending-${index}`, text, state: "waiting" as const }));
+  }
+  return [
+    ...entry.items.map((item) => ({ id: item.id, text: item.text, state: item.state })),
+    ...entry.inFlight.map((text, index) => ({ id: `inflight-${index}`, text, state: "claimed" as const })),
+  ];
+}
+
+/** 是否有在途本地改动（仅影响显示，不影响权威快照落地）。 */
 export function hasPendingLocalChange(entry: QueueEntry): boolean {
   return entry.pending !== null;
-}
-
-/** 在途同步是否已归零（归零才允许服务端投影落地）。 */
-export function canAcceptObservation(entry: QueueEntry): boolean {
-  return entry.syncs <= 0;
 }
 
 function put(book: QueueBook, sessionId: string, entry: QueueEntry): QueueBook {
@@ -67,100 +106,79 @@ export function proposeQueue(
   };
 }
 
-export function beginSync(book: QueueBook, sessionId: string): QueueBook {
-  const entry = queueEntry(book, sessionId);
-  return put(book, sessionId, { ...entry, syncs: entry.syncs + 1 });
-}
-
-/** 结束一笔在途提交（可与成功/失败结算合并调用）。 */
-export function endSync(book: QueueBook, sessionId: string): QueueBook {
-  const entry = queueEntry(book, sessionId);
-  return put(book, sessionId, { ...entry, syncs: Math.max(0, entry.syncs - 1) });
-}
-
 /**
- * 提交成功：该代次的 pending 转为新的已确认基线。
- * revision 不匹配说明期间有更新的写入，本次结果作废（但同步计数照常归还）。
+ * 采纳权威快照（SSE 投影 / 写入回执 / prefs 回读）。
+ *
+ * 内容与版本**一起**落地；过期快照（revision 小于已见）整份丢弃，避免
+ * 「已经被 steer 带走的队列」被旧快照写回 UI，也避免旧版本回退 CAS 基线。
+ * `pending` 与 `revision`（本地代次）不受影响：显示仍优先乐观值，
+ * 在途写入的结算 CAS 也因此仍然有效。
  */
+export function adoptServerSnapshot(
+  book: QueueBook,
+  sessionId: string,
+  snapshot: QueueSnapshot,
+): QueueBook {
+  const entry = queueEntry(book, sessionId);
+  const incoming = snapshot.revision;
+  if (
+    typeof incoming === "number"
+    && typeof entry.serverRevision === "number"
+    && incoming < entry.serverRevision
+  ) {
+    return book;
+  }
+  return put(book, sessionId, {
+    ...entry,
+    items: [...snapshot.items],
+    inFlight: [...(snapshot.inFlight ?? [])],
+    serverRevision: typeof incoming === "number" ? incoming : entry.serverRevision,
+  });
+}
+
+/** 提交成功：该代次的 pending 转成回执里的权威条目。 */
 export function settleSyncSuccess(
   book: QueueBook,
   sessionId: string,
   revision: number,
-  items: readonly string[],
+  snapshot: QueueSnapshot,
 ): QueueBook {
-  const entry = queueEntry(book, sessionId);
-  const next = put(book, sessionId, { ...entry, syncs: Math.max(0, entry.syncs - 1) });
-  if (entry.revision !== revision) return next;
-  const current = queueEntry(next, sessionId);
-  return put(next, sessionId, { ...current, confirmed: [...items], pending: null });
+  const adopted = adoptServerSnapshot(book, sessionId, snapshot);
+  const entry = queueEntry(adopted, sessionId);
+  if (entry.revision !== revision) return adopted;
+  return put(adopted, sessionId, { ...queueEntry(adopted, sessionId), pending: null });
 }
 
-/** 提交失败：清掉该代次的乐观值，退回已确认基线。 */
+/**
+ * 提交失败：清掉该代次的乐观值，退回权威条目。
+ * 冲突回执同样必须采纳权威内容（否则内容与版本不一致）。
+ */
 export function settleSyncFailure(
   book: QueueBook,
   sessionId: string,
   revision: number,
+  snapshot?: QueueSnapshot,
 ): QueueBook {
-  const entry = queueEntry(book, sessionId);
-  const next = put(book, sessionId, { ...entry, syncs: Math.max(0, entry.syncs - 1) });
-  if (entry.revision !== revision) return next;
-  const current = queueEntry(next, sessionId);
-  return put(next, sessionId, { ...current, pending: null });
+  const adopted = snapshot ? adoptServerSnapshot(book, sessionId, snapshot) : book;
+  const entry = queueEntry(adopted, sessionId);
+  if (entry.revision !== revision) return adopted;
+  return put(adopted, sessionId, { ...queueEntry(adopted, sessionId), pending: null });
 }
 
-/**
- * 服务端/prefs 的权威观察。
- * `requestRevision` 是发起请求时捕获的代次：期间发生过本地写入或仍有在途提交时
- * 丢弃该响应，避免「请求早于写入、响应晚于归零」把新值覆盖掉。
- */
-export function observeQueue(
-  book: QueueBook,
-  sessionId: string,
-  items: readonly string[],
-  requestRevision: number,
-): QueueBook {
-  const entry = queueEntry(book, sessionId);
-  if (entry.revision !== requestRevision) return book;
-  if (!canAcceptObservation(entry)) return book;
-  if (hasPendingLocalChange(entry)) return book;
-  return put(book, sessionId, { ...entry, confirmed: [...items] });
-}
-
-/**
- * Host 队列快照的新旧判定。
- *
- * Host 为队列维护单调 revision（每次内容变更 +1），快照可能因 SSE/轮询/偏好同步
- * 乱序到达；过期快照会把「已经被 steer 带走的队列」重新写回 UI（实测：引导整队
- * 发送后队列又出现）。因此客户端只接受 >= 已见版本的快照。
- *
- * 快照未带版本（旧 Host / 旧持久化数据）时不做判定，照旧接受。
- */
-export function acceptRemoteQueue(
-  seen: number | undefined,
-  revision: number | null | undefined,
-): { accept: boolean; seen: number | undefined } {
-  if (typeof revision !== "number") return { accept: true, seen };
-  if (seen !== undefined && revision < seen) return { accept: false, seen };
-  return { accept: true, seen: revision };
-}
-
-/**
- * 服务端 `set_follow_up_queue` 的冲突回执判定。
- *
- * 多标签各自基于同一份快照整组替换时，服务端用 CAS 拒绝过期写入并返回权威队列；
- * 客户端必须采纳权威队列（而不是重试覆盖），否则先到的那条入队会被静默丢弃。
- */
-export type QueueWriteResult = {
+/** 服务端队列回执的形状（写入与派发共用）。 */
+export type QueueReceiptView = {
   ok?: boolean;
   conflict?: boolean;
+  persist?: boolean;
   revision?: number;
   items?: unknown;
+  inFlight?: unknown;
 };
 
 export function isQueueWriteConflict(result: unknown): boolean {
   return Boolean(
     result
     && typeof result === "object"
-    && (result as QueueWriteResult).conflict === true,
+    && (result as QueueReceiptView).conflict === true,
   );
 }

@@ -14,6 +14,7 @@ import {
 import { pendingSessionId } from "./new-session-intent";
 import type { PromptReceipt } from "./agent-commands";
 import { generateSubmissionId } from "./agent-commands";
+import type { FollowUpItem } from "./session-queue";
 import { attachCustomRenderedLines } from "./custom-rendered-lines";
 import { normalizeToolCalls } from "./normalize";
 import { PIDANCE_BINARY_CUSTOM_TYPE, parseBinaryMessageData } from "./message-binary";
@@ -158,8 +159,10 @@ export type SubmitPromptInput = {
 export type SubmitPromptResult = {
   submissionId: string;
   sessionId: string;
-  status: "accepted" | "rejected" | "unknown";
+  status: "accepted" | "rejected" | "unknown" | "queued";
   error?: string;
+  /** status = queued：服务端权威队列快照（乐观气泡改为队列面板表现）。 */
+  queue?: { items: FollowUpItem[]; revision: number; inFlight: string[] };
 };
 
 export type BrowserSessionRuntimeRegistryDeps = {
@@ -696,6 +699,27 @@ export function createBrowserSessionRuntimeRegistry(
     return { submissionId: submission.submissionId, sessionId: slot.sessionId, status, error };
   };
 
+  /**
+   * 已入队结算：载荷没丢，但它不是本轮 run。乐观气泡必须撤回（未投递消息只在
+   * 队列面板出现），也不恢复草稿（内容已在服务端队列里）；调用方拿到 queue 快照
+   * 去更新队列投影。
+   */
+  const settleQueued = (
+    slot: RuntimeSlot,
+    submission: PromptSubmission,
+    queue: { items: FollowUpItem[]; revision: number; inFlight: string[] },
+  ): SubmitPromptResult => {
+    settleSubmission(slot, submission.submissionId, "rejected", "queued");
+    dropUnconfirmedOptimistic(slot, submission.submissionId);
+    publish(slot);
+    return {
+      submissionId: submission.submissionId,
+      sessionId: slot.sessionId,
+      status: "queued",
+      queue,
+    };
+  };
+
   /** 移除尚无交付证据的乐观记录；返回是否真的移除（调用方据此决定恢复 draft）。 */
   const dropUnconfirmedOptimistic = (slot: RuntimeSlot, submissionId: string): boolean => {
     const key = slot.submissionKeys.get(submissionId);
@@ -1058,6 +1082,9 @@ export function createBrowserSessionRuntimeRegistry(
               if (receipt.status === "rejected") {
                 return settleFailure(slot, submission, "rejected", "rejected");
               }
+              if (receipt.status === "queued" && receipt.queue) {
+                return settleQueued(slot, submission, receipt.queue);
+              }
               settleSubmission(slot, submissionId, "accepted");
               publish(slot);
               return { submissionId, sessionId, status: "accepted" };
@@ -1092,6 +1119,9 @@ export function createBrowserSessionRuntimeRegistry(
           });
           if (receipt.status === "rejected") {
             return settleFailure(slot, submission, "rejected", "rejected");
+          }
+          if (receipt.status === "queued" && receipt.queue) {
+            return settleQueued(slot, submission, receipt.queue);
           }
           settleSubmission(slot, submissionId, "accepted");
           publish(slot);
@@ -1383,8 +1413,11 @@ function createBrowserFetchDeps(): BrowserSessionRuntimeRegistryDeps {
       if (!res.ok || body.error || !body.sessionId) {
         throw new Error(body.error ?? `HTTP ${res.status}`);
       }
-      const receipt = body.data ?? { submissionId: input.submissionId, sessionId: body.sessionId, status: "accepted" as const };
-      return { sessionId: body.sessionId, receipt };
+      if (!body.data || typeof body.data !== "object" || !body.data.status) {
+        // 没有回执就是没有回执：静默当成 accepted 会把未受理的消息标成已发送。
+        throw new Error("Invalid prompt receipt: expected a status");
+      }
+      return { sessionId: body.sessionId, receipt: body.data };
     },
     async postPrompt(sessionId, input) {
       const { submitAgentPrompt } = await import("./agent-client");

@@ -73,6 +73,13 @@ export interface ChatInputHandle {
   /** 整体替换输入框内容（分支/新会话预填语义，对齐 OC replace）。 */
   replaceText: (text: string) => void;
   addImages: (files: File[]) => void;
+  /**
+   * 发送失败后的原样恢复（正文 + 图片一起回输入框）。
+   *
+   * 与 prependText 的差别：图片必须能回来。失败回滚是「原会话草稿完整恢复」，
+   * 只退正文会把用户刚贴的图静默丢掉。
+   */
+  restoreDraft: (text: string, images?: AttachedImage[]) => void;
 }
 
 export interface ThinkingContent {

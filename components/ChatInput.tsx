@@ -3,7 +3,7 @@
 import React, { useRef, useState, useCallback, useEffect, useMemo, useId, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
 import { thinkingLabel as resolveThinkingLabel } from "@/lib/thinking-level-policy";
 import { createPortal } from "react-dom";
-import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
+import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessageRow as QueuedRow, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft-store";
 import { getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { listThinkingDisplayLevel, modelClickThinkingLevel } from "@/lib/thinking-level-policy";
@@ -284,7 +284,8 @@ function focusTriggerButton(anchor: HTMLElement | null): void {
   anchor?.querySelector<HTMLElement>("button")?.focus({ preventScroll: true });
 }
 
-function QueuedMessageRow({ kind, text }: { kind: "steer" | "follow-up"; text: string }) {
+/** 队列行。`stateLabel` 非空时额外渲染状态徽标（在途 / 结果未知）。 */
+function QueuedMessageRow({ kind, text, state, stateLabel }: { kind: "steer" | "follow-up"; text: string; state?: QueuedRow["state"]; stateLabel?: string }) {
   return (
     <div
       title={text}
@@ -311,6 +312,22 @@ function QueuedMessageRow({ kind, text }: { kind: "steer" | "follow-up"; text: s
       >
         {kind}
       </span>
+      {state && state !== "waiting" && (
+        // 在途/结果未知必须显式可见：用户不能把「已提交未确认」当成还排队着。
+        <span
+          style={{
+            flexShrink: 0,
+            fontSize: 10,
+            fontFamily: "var(--font-mono)",
+            padding: "1px 7px",
+            borderRadius: 999,
+            border: `1px solid ${state === "unknown" ? "color-mix(in srgb, var(--status-warning) 45%, transparent)" : "color-mix(in srgb, var(--accent) 35%, transparent)"}`,
+            color: state === "unknown" ? "var(--status-warning)" : "var(--text-dim)",
+          }}
+        >
+          {stateLabel ?? state}
+        </span>
+      )}
       <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
     </div>
   );
@@ -333,6 +350,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const isMobile = useIsMobile();
   /** 桌面流式期 Enter 默认动作（followUp/steer）；手机端回车仅换行。 */
   const [streamingEnterDefault, setStreamingEnterDefault] = useState<StreamingEnterAction>("followUp");
+  // 队列行（含在途 claimed 与结果未知 unknown）；旧 Host 不回 followUpRows 时回落正文。
+  const queuedRows: QueuedRow[] = queuedMessages?.followUpRows?.length
+    ? queuedMessages.followUpRows
+    : (queuedMessages?.followUp ?? []).map((text, index) => ({ id: `legacy-${index}`, text, state: "waiting" as const }));
+  const queueStateLabel = (state: QueuedRow["state"]) => state === "unknown"
+    ? t("input_queueStateUnknown")
+    : state === "claimed" ? t("input_queueStateClaimed") : undefined;
   useEffect(() => {
     setStreamingEnterDefault(loadStreamingEnterAction());
     const onStorage = (e: StorageEvent) => {
@@ -546,24 +570,37 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     });
   }, [value]);
 
+  /** 把 text 放到当前草稿之前（与 TUI 的队列恢复一致，空行分隔）。 */
+  const prependDraftText = useCallback((text: string) => {
+    if (!text.trim()) return;
+    const ta = textareaRef.current;
+    const current = ta ? ta.value : value;
+    const combined = [text, current].filter((t) => t.trim()).join("\n\n");
+    setValue(combined);
+    setAtQuery(null);
+    requestAnimationFrame(() => {
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(combined.length, combined.length);
+      ta.style.height = "auto";
+      ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+    });
+  }, [value]);
+
   useImperativeHandle(ref, () => ({
     insertIfEmpty: insertIfEmptyLocal,
-    prependText(text: string) {
-      if (!text.trim()) return;
-      const ta = textareaRef.current;
-      const current = ta ? ta.value : value;
-      // Mirrors the TUI's queue restore: queued text first, then whatever
-      // the user already typed, separated by a blank line.
-      const combined = [text, current].filter((t) => t.trim()).join("\n\n");
-      setValue(combined);
-      setAtQuery(null);
-      requestAnimationFrame(() => {
-        if (!ta) return;
-        ta.focus();
-        ta.setSelectionRange(combined.length, combined.length);
-        ta.style.height = "auto";
-        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-      });
+    prependText: prependDraftText,
+    restoreDraft(text: string, failedImages?: AttachedImage[]) {
+      // 失败回滚：正文与图片一起回原位（调用方保证只在原会话上调用）。
+      // 预览是浏览器临时态，clearInput 已回收旧 blob URL，这里按 base64 重建。
+      if (failedImages?.length) {
+        const restored = failedImages.map((image) => draftImageToAttachedImage(imageToDraftImage(image)));
+        setAttachedImages((previous) => {
+          const known = new Set(previous.map((image) => `${image.mimeType}:${image.data}`));
+          return [...previous, ...restored.filter((image) => !known.has(`${image.mimeType}:${image.data}`))];
+        });
+      }
+      prependDraftText(text);
     },
     replaceText(text: string) {
       // 分支 / 新会话预填：整体替换当前草稿（对齐 OC revert/fork 的 pendingInputText replace）。
@@ -1057,15 +1094,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       clearInput();
       return;
     }
-    // 队列/引导严格按配置：followup 无 onFollowUp 时不得降级为 steer（会打断当前运行）。
-    // 带图时由 hook 直接发 prompt（Host 文字队列不支持图片），不会静默丢图。
-    if (mode === "steer" && onSteer) {
-      onSteer(msg, images);
-    } else if (mode === "followup" && onFollowUp) {
-      onFollowUp(msg, images);
-    } else if (mode === "steer" && onFollowUp) {
-      onFollowUp(msg, images);
-    }
+    // 严格按 intent 投递：steer 只用 onSteer，followup 只用 onFollowUp。
+    // 不做隐式降级（缺回调时改走另一条会静默改变发送语义：引导变排队、或排队
+    // 变打断当前运行）；缺回调时**不清输入框**，旧实现无论有没有者消费都
+    // clearInput()，在繁忙态缺回调时等于静默丢消息。
+    const deliver = mode === "steer" ? onSteer : onFollowUp;
+    if (!deliver) return;
+    deliver(msg, images);
     clearInput();
   }, [value, attachedImages.length, hasReadyUploads, hasUploading, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, composeMessageWithUploads]);
 
@@ -1489,7 +1524,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
         >
         {/* Queued follow-up messages（steering 即时投递，不在队列块显示） */}
-        {(queuedMessages?.followUp.length ?? 0) > 0 && (
+        {queuedRows.length > 0 && (
           <div style={{
             marginBottom: 8,
             border: "1px solid var(--border)",
@@ -1511,7 +1546,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 textTransform: "uppercase",
                 letterSpacing: 0.4,
               }}>
-                {t("input_queued", { count: queuedMessages?.followUp.length ?? 0 })}
+                {t("input_queued", { count: queuedRows.length })}
               </span>
               <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
                 <button
@@ -1605,8 +1640,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 )}
               </div>
             </div>
-            {queueExpanded && queuedMessages?.followUp.map((text, i) => (
-              <QueuedMessageRow key={`followup-${i}`} kind="follow-up" text={text} />
+            {queueExpanded && queuedRows.map((row) => (
+              <QueuedMessageRow
+                key={row.id}
+                kind="follow-up"
+                text={row.text}
+                state={row.state}
+                stateLabel={queueStateLabel(row.state)}
+              />
             ))}
           </div>
         )}

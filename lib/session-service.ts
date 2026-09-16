@@ -10,7 +10,7 @@ import {
   reparentSessionFile,
   type SessionHeader,
 } from "./pi-session-io";
-import { parsePromptCommand, type PromptCommand, type PromptReceipt } from "./agent-commands";
+import { classifyPromptRejection, parsePromptCommand, type PromptCommand, type PromptReceipt } from "./agent-commands";
 import {
   generateSessionTitleFromMessages,
   resolveTitleModelConfig,
@@ -803,10 +803,18 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         if (data && typeof data === "object" && (data as PromptReceipt).status) {
           return data as PromptReceipt;
         }
-        return { submissionId: parsed.submissionId, sessionId, status: "accepted" };
+        // 没有回执就是没有回执：不能静默升级成「已接受」，
+        // 否则客户端会把根本没受理的消息当成已发送。
+        return { submissionId: parsed.submissionId, sessionId, status: "rejected", reason: "error" };
       } catch (error) {
         if (isSessionRunningLockedError(error)) throw error;
-        return { submissionId: parsed.submissionId, sessionId, status: "rejected" };
+        // 只做保守归类：不认识的错误一律 error，客户端不得据此自动重发。
+        return {
+          submissionId: parsed.submissionId,
+          sessionId,
+          status: "rejected",
+          reason: classifyPromptRejection(error),
+        };
       }
     },
 

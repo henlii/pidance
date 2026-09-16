@@ -92,11 +92,27 @@ function readPrefs(): ServerPrefs {
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * 整包 PUT 的载荷：剥掉宿主持有的 `sessionQueue`。
+ *
+ * 本地快照可能停在投递前，而任何一次偏好写入（草稿/hold）都会带着整包快照回写；
+ * 把旧队列连带旧版本号写回去会让「已投递」的条目变回 `waiting` 并被再投一次。
+ * 队列由 Host 独占写入（客户端只能通过 agent 命令 API 写）。
+ */
+function queueFreePrefsSnapshot(prefs: ServerPrefs): ServerPrefs {
+  const body: ServerPrefs = {};
+  for (const [key, value] of Object.entries(prefs)) {
+    if (key === "sessionQueue" || key.startsWith("sessionQueue.")) continue;
+    body[key] = value;
+  }
+  return body;
+}
+
 function scheduleSave(): void {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    const prefs = readPrefs();
+    const prefs = queueFreePrefsSnapshot(readPrefs());
     void fetch("/api/preferences", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -156,7 +172,7 @@ export function flushServerPrefs(): void {
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
-    const prefs = readPrefs();
+    const prefs = queueFreePrefsSnapshot(readPrefs());
     void fetch("/api/preferences", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },

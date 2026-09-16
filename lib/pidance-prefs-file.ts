@@ -176,6 +176,30 @@ export function updatePidancePref(
   });
 }
 
+/**
+ * 剥离客户端提交里的宿主持有键。
+ *
+ * `/api/preferences` PUT 是「整包快照 patch」。客户端内存里的快照可能停在投递
+ * 之前：一次无关的偏好写入（草稿/hold）会把旧队列连同旧版本号一起写回，把已投递
+ * 的条目恢复成 `waiting`，下一个 Host 实例就会再投一次（重复投递）。
+ *
+ * 队列的唯一 writer 是 Host（客户端只能通过 agent 命令 API 写），这里在入库前
+ * 兜底剥离 `sessionQueue` / 扁平 `sessionQueue.<id>`；`sessionQueueHold` 是
+ * 客户端持有的键，不在剥离范围内。
+ */
+export function stripHostOwnedQueuePrefs(patch: PidancePrefs): { patch: PidancePrefs; dropped: string[] } {
+  const out: PidancePrefs = {};
+  const dropped: string[] = [];
+  for (const [key, value] of Object.entries(patch)) {
+    if (key === "sessionQueue" || key.startsWith("sessionQueue.")) {
+      dropped.push(key);
+      continue;
+    }
+    out[key] = value;
+  }
+  return { patch: out, dropped };
+}
+
 /** API 整包 patch 的原子合并入口：锁内重新读取，保留并发写入的嵌套 sessionQueue。 */
 export function mergeAndWritePidancePrefs(
   patch: PidancePrefs,

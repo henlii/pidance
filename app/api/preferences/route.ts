@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   mergeAndWritePidancePrefs,
   readPidancePrefs,
+  stripHostOwnedQueuePrefs,
 } from "@/lib/pidance-prefs-file";
 
 export const dynamic = "force-dynamic";
@@ -40,7 +41,13 @@ export async function PUT(req: Request) {
         { status: 413 },
       );
     }
-    mergeAndWritePidancePrefs(prefs as Record<string, unknown>);
+    // 客户端整包快照可能带着投递前的旧队列：它只能读到队列，不能写回（
+    // 否则已投递条目会被恢复成 waiting 并重复投递）。
+    const { patch, dropped } = stripHostOwnedQueuePrefs(prefs as Record<string, unknown>);
+    if (dropped.length > 0) {
+      console.warn(`[pidance] ignored host-owned queue preferences from client: ${dropped.join(", ")}`);
+    }
+    mergeAndWritePidancePrefs(patch);
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json(

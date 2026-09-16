@@ -34,9 +34,12 @@ import {
   recordRunningStartedAt,
 } from "./running-state";
 import {
-  normalizeFollowUpItems,
+  followUpItemTexts,
   parseFollowUpQueue,
+  newFollowUpItem,
+  reconcileFollowUpItems,
   serializeFollowUpQueue,
+  type FollowUpItem,
 } from "./session-queue";
 import {
   normalizeActivityInput,
@@ -62,7 +65,20 @@ import {
   applyPassThroughExtendedThinkingInPlace,
   withPassThroughExtendedThinking,
 } from "./thinking-levels";
-import { parsePromptCommand, type PromptReceipt } from "./agent-commands";
+import {
+  classifyPromptRejection,
+  parseDispatchFollowUpQueueCommand,
+  parseFollowUpCommand,
+  parsePromptCommand,
+  parseSetFollowUpQueueCommand,
+  parseSteerCommand,
+  type DispatchFollowUpQueueCommand,
+  type PromptReason,
+  type PromptReceipt,
+  type QueueDispatchReceipt,
+  type QueueWriteReceipt,
+} from "./agent-commands";
+import { mergeFollowUpForSteer } from "./queue-merge";
 import {
   PIDANCE_BINARY_CUSTOM_TYPE,
   binaryMessageToUiMessage,
@@ -185,8 +201,14 @@ export class SdkSessionHost {
   private promptRunning = false;
   /** 最近一次 prompt 结束原因：队列自动投递只认 completed。 */
   private lastStopReason: "completed" | "aborted" | "error" | null = null;
-  /** 本地 follow-up 队列执行缓存（持久层仍是 prefs）。 */
-  private followUpQueue: string[] = [];
+  /**
+   * 本地 follow-up 队列执行缓存（持久层仍是 prefs）。
+   *
+   * 条目带稳定 id 与状态：`waiting` 可被自动 flush/清队消费，`claimed` 已提交给 SDK
+   * 尚未拿到受理结果（普通清队不得把它当成取消成功），`unknown` 是跨越重启或持久化
+   * 失败后的结果未知项（绝不自动重投）。
+   */
+  private followUpQueue: FollowUpItem[] = [];
   /**
    * 队列版本：每次内容变更 +1，随 state 投影与 prefs 一起下发。
    * 客户端据此丢弃乱序到达的过期快照（否则「引导整队发送」清队后，
@@ -195,11 +217,31 @@ export class SdkSessionHost {
   private followUpQueueRevision = 0;
   private followUpQueueHydrated = false;
   private flushingFollowUp = false;
-  private followUpFlushBatch: string[] = [];
+  /** 本次 flush 的投递单元（只固定 id；正文在认领时按 id 重取，见 deliverFollowUpUnit）。 */
+  private followUpFlushUnits: { ids: string[] }[] = [];
   private followUpFlushCursor = 0;
-  private followUpFlushConfirmed = false;
-  private followUpFlushAsOne = false;
-  private followUpFlushOriginal: string[] = [];
+  /**
+   * 投递在途标记（重入保护）。
+   * agent_settled 与 80ms 兜底定时器都会调 sendNextFollowUp：没有这个标记时
+   * 两个调用会同时通过 settled 检查，同一单元被认领并投递两次（重复消费）。
+   */
+  private followUpSending = false;
+  /**
+   * 内部投递票据：只有 flush 自己发起的 prompt 能穿过「投递在途」门禁。
+   * 用 symbol 身份而不是布尔标志——布尔会被「恰好在这一刻到达的外部请求」共享，
+   * 外部 prompt 于是和 flush 并发写同一个 SessionManager。
+   */
+  private readonly internalPromptTicket = Symbol("pidance internal follow-up prompt");
+  /**
+   * 认领落盘失败后的 fail-closed：禁止自动重试。否则 resetIdleTimer →
+   * scheduleFollowUpFlush 会立刻重入同一失败，磁盘写不进去时无限循环。
+   * 一次成功的队列写入（用户入队/清队/手动转引导）会重新解锁。
+   */
+  private followUpFlushBlocked = false;
+  /** 手动整队转引导在途：阻止并发 dispatch 把同一批内容投递两次。 */
+  private dispatchingFollowUpQueue = false;
+  /** steer / follow_up / 入队的幂等回执（同 submissionId 不重复作用）。 */
+  private commandReceipts = new Map<string, PromptReceipt>();
   private bashRunning = false;
   private bashCommand: {
     command: string;
@@ -344,7 +386,7 @@ export class SdkSessionHost {
     this.idleTimer = null;
     if (!this._alive || !this.runtime || this.startupHold || this.isRunning() || this.flushingFollowUp) return;
     if (this.listeners.length > 0) return; // 仍有活跃端点（SSE 订阅）→ 保活，不释放
-    if (this.followUpQueue.length > 0 && !this.isFollowUpHeld()) {
+    if (this.hasWaitingFollowUp() && !this.isFollowUpHeld()) {
       this.scheduleFollowUpFlush();
       return;
     }
@@ -358,7 +400,7 @@ export class SdkSessionHost {
       if (this.isRunning() || this.flushingFollowUp) return;
       // fire 时又出现订阅者（30s 窗口内端点重开）：取消释放，继续保活。
       if (this.listeners.length > 0) return;
-      if (this.followUpQueue.length > 0 && !this.isFollowUpHeld()) {
+      if (this.hasWaitingFollowUp() && !this.isFollowUpHeld()) {
         this.scheduleFollowUpFlush();
         return;
       }
@@ -394,7 +436,16 @@ export class SdkSessionHost {
         this.agentDir,
       );
     } catch (error) {
+      // hold 是「队列不许自动投递」的唯一开关：写失败必须让用户看见，
+      // 不能只打 console——否则 abort/error 之后队列会静默自动发出。
       console.error("[pidance] failed to persist follow-up hold:", error);
+      this.emit({
+        type: "follow_up_flush_error",
+        errorMessage: held
+          ? "failed to persist follow-up hold; the queue may flush automatically"
+          : "failed to clear follow-up hold; the queue may stay held",
+        ...this.queueReceiptBase(),
+      });
     }
   }
 
@@ -406,165 +457,423 @@ export class SdkSessionHost {
     // 解码只走共享 decoder：写入方与启动恢复必须同一套判定，
     // 否则格式升级后恢复扫描会静默漏掉当前格式的队列。
     const decoded = parseFollowUpQueue(raw);
-    this.followUpQueue = decoded.items;
+    this.followUpQueue = decoded.items.map((item) => (
+      // claimed 是「已提交 SDK、未拿到受理结果」。重启后该结果永远无法得知：
+      // 当 waiting 会自动重投（重复消费），丢掉又可能从未送达。保留内容但标成
+      // unknown，既不自动重投也不静默删除，由用户显式清队决定。
+      item.state === "claimed" ? { ...item, state: "unknown" as const } : item
+    ));
     this.followUpQueueRevision = decoded.revision;
   }
 
-  /** 队列内容变更唯一入口：同步推进版本号，保证快照可判新旧。 */
-  private updateFollowUpQueue(next: string[]): void {
-    this.followUpQueue = next;
-    this.followUpQueueRevision += 1;
+  /** 等待投递的条目：`unknown` 绝不自动投递，`claimed` 已认领（在途）。 */
+  private waitingFollowUp(): FollowUpItem[] {
+    return this.followUpQueue.filter((item) => item.state === "waiting");
   }
 
-  private persistFollowUpQueue(): void {
+  private hasWaitingFollowUp(): boolean {
+    return this.followUpQueue.some((item) => item.state === "waiting");
+  }
+
+  /** 客户端可见的队列快照：waiting + unknown（claimed 在途，不进列表）。 */
+  private visibleFollowUp(): FollowUpItem[] {
+    return this.followUpQueue.filter((item) => item.state !== "claimed");
+  }
+
+  private inFlightFollowUpTexts(): string[] {
+    return this.followUpQueue.filter((item) => item.state === "claimed").map((item) => item.text);
+  }
+
+  /**
+   * 队列唯一提交点：候选状态**先落盘、成功才发布到内存**，返回是否成功。
+   *
+   * 之前是「先改内存 → persist 内部 try/catch 吞掉错误」，接口无论写盘成败都回 ok；
+   * 于是崩溃/重启后要么丢队列，要么让旧队列复活（已确认送达的内容被再投一次）。
+   * 调用方必须用返回值判断，失败时不得声称已受理。
+   */
+  private commitFollowUpQueue(items: FollowUpItem[], reason: string): boolean {
+    const nextRevision = this.followUpQueueRevision + 1;
     try {
       updatePidancePref(
         `sessionQueue.${this.realSessionId}`,
-        serializeFollowUpQueue({ items: this.followUpQueue, revision: this.followUpQueueRevision }),
+        serializeFollowUpQueue({ items, revision: nextRevision }),
         this.agentDir,
       );
     } catch (error) {
-      console.error("[pidance] failed to persist follow-up queue:", error);
+      console.error(`[pidance] failed to persist follow-up queue (${reason}):`, error);
+      return false;
     }
+    this.followUpQueue = items;
+    this.followUpQueueRevision = nextRevision;
+    // 落盘成功即重新解锁：一次成功的写入就是对 fail-closed 状态的显式重试。
+    this.followUpFlushBlocked = false;
+    return true;
+  }
+
+  /** 把指定 id 的条目改成给定状态；返回新数组（不改内存）。 */
+  private withFollowUpState(ids: readonly string[], state: FollowUpItem["state"]): FollowUpItem[] {
+    const wanted = new Set(ids);
+    return this.followUpQueue.map((item) => (wanted.has(item.id) ? { ...item, state } : item));
+  }
+
+  private queueReceiptBase() {
+    return {
+      revision: this.followUpQueueRevision,
+      items: this.visibleFollowUp(),
+      inFlight: this.inFlightFollowUpTexts(),
+    };
+  }
+
+  private reject(submissionId: string, reason: PromptReason): PromptReceipt {
+    return { submissionId, sessionId: this.realSessionId, status: "rejected", reason };
+  }
+
+  /**
+   * 整包写入等待队列（CAS + 落盘）。
+   *
+   * 在途条目（claimed）不参与对齐也不被移除：“取消”不能把已提交给 Pi 的一批
+   * 当成取消成功（旧实现的取消回执是假的）；清队只影响尚未投递的内容。
+   */
+  private writeFollowUpQueue(texts: string[], expectedRevision: number | null): QueueWriteReceipt {
+    if (expectedRevision !== null && expectedRevision !== this.followUpQueueRevision) {
+      return { ok: false, conflict: true, reason: "revision", ...this.queueReceiptBase() };
+    }
+    const claimed = this.followUpQueue.filter((item) => item.state === "claimed");
+    const pool = this.followUpQueue.filter((item) => item.state !== "claimed");
+    const next = [...claimed, ...reconcileFollowUpItems(pool, texts)];
+    if (!this.commitFollowUpQueue(next, "set")) {
+      // 落盘失败：内存保持原状，不得声称已入队（否则 UI 认为已保存，重启后不存在）。
+      return { ok: false, persist: true, ...this.queueReceiptBase() };
+    }
+    return { ok: true, ...this.queueReceiptBase() };
+  }
+
+  /**
+   * 入队唯一入口（内部）：文本可靠落盘才算受理。
+   *
+   * `queued` 回执的含义是「已持久化到产品队列」；落盘失败必须回 rejected，
+   * 客户端才会把内容留在输入框而不是当成已保存。
+   */
+  private enqueueTexts(submissionId: string, texts: string[], reason?: PromptReason): PromptReceipt {
+    const write = this.writeFollowUpQueue([...followUpItemTexts(this.visibleFollowUp()), ...texts], null);
+    if (!write.ok) return this.reject(submissionId, "error");
+    this.emitQueueChanged();
+    if (this.isSettled() && this.hasWaitingFollowUp()) this.scheduleFollowUpFlush();
+    this.resetIdleTimer();
+    return {
+      submissionId,
+      sessionId: this.realSessionId,
+      status: "queued",
+      action: "queued",
+      ...(reason ? { reason } : {}),
+      queue: { items: write.items, inFlight: write.inFlight, revision: write.revision },
+    };
+  }
+
+  /**
+   * 整队转引导（原子：清队与投递是同一个服务端用例）。
+   *
+   * 旧实现是浏览器上的补偿 saga（清队 → 发 steer → 失败回填）：它会把 A 会话的
+   * 队列写回到切换后的 B，也无法判断清队之后是否已有在途批次被投递。
+   * 这里先按 id 认领并落盘，再投递；投递未被受理则把认领还回等待队列。
+   */
+  private async dispatchFollowUpQueue(
+    command: DispatchFollowUpQueueCommand,
+  ): Promise<QueueDispatchReceipt> {
+    if (this.bashRunning) {
+      return { ok: false, status: "rejected", reason: "bash", ...this.queueReceiptBase() };
+    }
+    if (this.session.isCompacting) {
+      // 压缩中不能起 run（服务端 prompt 也只会重新入队）：明确回绝并告知原因，
+      // 载荷留在队列里由压缩结束后的自动投递处理——不能谎报成「已派发」。
+      return { ok: false, status: "rejected", reason: "compacting", ...this.queueReceiptBase() };
+    }
+    if (this.flushingFollowUp || this.dispatchingFollowUpQueue) {
+      // 自动投递或另一次手动派发正在消费队列：再派发会让同一批内容投递两次。
+      return { ok: false, conflict: true, reason: "in-flight", ...this.queueReceiptBase() };
+    }
+    if (command.expectedRevision !== null && command.expectedRevision !== this.followUpQueueRevision) {
+      return { ok: false, conflict: true, reason: "revision", ...this.queueReceiptBase() };
+    }
+    const queued = this.waitingFollowUp();
+    const extra = command.extra?.trim();
+    if (queued.length === 0 && !extra) {
+      return { ok: false, status: "rejected", reason: "error", ...this.queueReceiptBase() };
+    }
+    const text = mergeFollowUpForSteer(followUpItemTexts(queued), extra);
+    // 认领：把整批 waiting 换成一个 claimed 条目，正文是**合并后的完整载荷**
+    // （含输入框 extra）。一次落盘同时完成「移除原条目」与「保存唯一副本」，
+    // 因此投递前进程死掉也不会丢内容（重启后按 unknown 呈现，不自动重发）。
+    const claim = newFollowUpItem(text, "claimed");
+    const next = [...this.followUpQueue.filter((item) => item.state === "claimed"), claim];
+    if (!this.commitFollowUpQueue(next, "dispatch-claim")) {
+      return { ok: false, status: "rejected", reason: "error", ...this.queueReceiptBase() };
+    }
+    this.dispatchingFollowUpQueue = true;
+    this.emitQueueChanged();
+    let action: "prompt" | "steer" | "queued" = "prompt";
+    try {
+      // 可消费 steer 的判据是 SDK 的活跃 run（session.isStreaming），不是 isSettled()：
+      // promptRunning 还包含 preflight，compact-only 也不是可消费 run（旧实现会在
+      // 这两种情况下把消息发成只入内存的 SDK steer，UI 上永远等不到它）。
+      if (this.session.isStreaming) {
+        action = "steer";
+        await this.session.steer(text, undefined);
+      } else {
+        // streamingBehavior：投递瞬间若恰有新 run 起步，SDK 入引导而不是报错。
+        const receipt = await this.send(
+          { type: "prompt", message: text, streamingBehavior: "steer" },
+          this.internalPromptTicket,
+        ) as PromptReceipt;
+        if (receipt?.status === "queued") {
+          // 服务端把载荷可靠放进了产品队列（compacting 等）：删除本次认领，
+          // 由队列里的新副本负责投递。不能既算已派发又留在队列（重复投递）。
+          action = "queued";
+          this.commitFollowUpQueue(
+            this.followUpQueue.filter((item) => item.id !== claim.id),
+            "dispatch-queued",
+          );
+          this.emitQueueChanged();
+          this.resetIdleTimer();
+          return { ok: true, status: "accepted", action, ...this.queueReceiptBase() };
+        }
+        if (receipt?.status !== "accepted") {
+          // 结构化拒绝：认领回队列（内容不消失），由用户重试。
+          this.commitFollowUpQueue(this.withFollowUpState([claim.id], "waiting"), "dispatch-release");
+          this.emitQueueChanged();
+          return {
+            ok: false,
+            status: "rejected",
+            reason: receipt?.reason ?? "error",
+            ...this.queueReceiptBase(),
+          };
+        }
+      }
+    } catch (error) {
+      // 未被受理 / 网络失败：归还认领（内容不得消失）。归还落盘失败时条目留 claimed：
+      // 它不会被自动重投，重启后转 unknown 由用户处置。
+      const released = this.commitFollowUpQueue(this.withFollowUpState([claim.id], "waiting"), "dispatch-release");
+      this.emitQueueChanged();
+      if (!released) {
+        this.emit({
+          type: "follow_up_flush_error",
+          errorMessage: "dispatch rejected and the claim could not be released; it stays claimed for the user to inspect",
+          ...this.queueReceiptBase(),
+        });
+      }
+      return {
+        ok: false,
+        status: "rejected",
+        reason: classifyPromptRejection(error),
+        ...this.queueReceiptBase(),
+      };
+    } finally {
+      this.dispatchingFollowUpQueue = false;
+    }
+    // 已受理：删除认领条目并落盘。
+    this.commitFollowUpQueue(
+      this.followUpQueue.filter((item) => item.id !== claim.id),
+      "dispatch-deliver",
+    );
+    this.emitQueueChanged();
+    this.resetIdleTimer();
+    return { ok: true, status: "accepted", action, ...this.queueReceiptBase() };
   }
 
   private scheduleFollowUpFlush(): void {
     if (!this._alive || !this.runtime) return;
     if (this.flushingFollowUp) return;
-    if (this.followUpQueue.length === 0) return;
+    // 认领落盘失败后 fail-closed：不自动重试（否则 resetIdleTimer → 本函数
+    // 会立刻重入同一失败，磁盘写不进去时无限循环）。
+    if (this.followUpFlushBlocked) return;
     if (this.isFollowUpHeld()) return;
+    if (this.dispatchingFollowUpQueue) return;
     if (!this.isSettled()) return;
+    const waiting = this.waitingFollowUp();
+    if (waiting.length === 0) return;
+    const asOne = readPidancePrefs(this.agentDir).queueFlushAsOne === true;
     this.flushingFollowUp = true;
-    this.followUpFlushAsOne = readPidancePrefs(this.agentDir).queueFlushAsOne === true;
-    this.followUpFlushOriginal = [...this.followUpQueue];
-    this.followUpFlushBatch = this.followUpFlushAsOne
-      ? [this.followUpFlushOriginal.join("\n\n")]
-      : [...this.followUpFlushOriginal];
+    // 投递单元只固定**身份**（之后按 id 认领）：正文在认领时从存活条目重新取，
+    // 否则用户清掉的条目会跟着旧批次发出去（也避免同文本条目被误删）。
+    this.followUpFlushUnits = asOne
+      ? [{ ids: waiting.map((item) => item.id) }]
+      : waiting.map((item) => ({ ids: [item.id] }));
     this.followUpFlushCursor = 0;
-    this.followUpFlushConfirmed = false;
     void this.sendNextFollowUp();
   }
 
+  /** 队列权威快照下发给其它标签页/端点（跨 tab 同一会话）。 */
+  private emitQueueChanged(): void {
+    const base = this.queueReceiptBase();
+    this.emit({
+      type: "follow_up_queue_changed",
+      sessionId: this.realSessionId,
+      items: base.items,
+      revision: base.revision,
+      inFlight: base.inFlight,
+    });
+  }
+
   private async sendNextFollowUp(): Promise<void> {
+    if (this.followUpSending) return;
     if (!this.flushingFollowUp) return;
     if (this.isFollowUpHeld()) {
       this.abortFollowUpFlush();
       return;
     }
-    const item = this.followUpFlushBatch[this.followUpFlushCursor];
-    if (item === undefined) {
+    const unit = this.followUpFlushUnits[this.followUpFlushCursor];
+    if (unit === undefined) {
       this.finishFollowUpFlush();
       return;
     }
     if (!this.isSettled()) {
       // 上一轮 run 尚未完全落定（SDK streaming 尾态）。不能静默 return：
       // 等 agent_settled 事件推进；这里兜底一拍后重试，防事件与 streaming
-      // 清态错位导致整队卡死或漏发。
+      // 清态错位导致整队卡死或漏发。此时**尚未认领**，条目仍在队列里。
       setTimeout(() => {
-        if (this.flushingFollowUp && this.followUpFlushCursor < this.followUpFlushBatch.length) {
+        if (this.flushingFollowUp && this.followUpFlushUnits[this.followUpFlushCursor] === unit) {
           void this.sendNextFollowUp();
         }
       }, 80);
       return;
     }
-    this.followUpFlushConfirmed = false;
+    this.followUpSending = true;
     try {
-      await this.send({ type: "prompt", message: item });
-      // 投递已受理（preflight 通过）即从队列移除并持久化：只等 message_end/
-      // agent_settled 确认会让「已送达」的条目继续留在队列里，下一次 settle 再发
-      // 一遍（实测同一文本 07:49 与 09:02 两次落盘）。确认事件仍会推进游标，
-      // 此处的移除对它是幂等的。
-      if (this.removeDeliveredFollowUp()) {
-        this.emit({
-          type: "follow_up_flushed",
-          sessionId: this.realSessionId,
-          item,
-          remaining: [...this.followUpQueue],
-        });
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      this.emit({ type: "follow_up_flush_error", errorMessage });
-      this.abortFollowUpFlush();
+      await this.deliverFollowUpUnit(unit);
+    } finally {
+      this.followUpSending = false;
     }
-  }
-
-  /**
-   * 从队列里移除本次已投递的条目并持久化，返回是否有变更。
-   *
-   * flushAsOne：整组作为一条 prompt 发出 → 只清空本次快照条目；快照之后新入队的
-   * 条目保留，避免 set_follow_up_queue 整组替换时丢新消息。
-   * 逐条：只移除本次投递的那一条（同文本重复入队时按出现顺序取第一条）。
-   */
-  private removeDeliveredFollowUp(): boolean {
-    if (this.followUpFlushAsOne) {
-      const original = new Set(this.followUpFlushOriginal);
-      const next = this.followUpQueue.filter((entry) => !original.has(entry));
-      if (next.length === this.followUpQueue.length) return false;
-      this.updateFollowUpQueue(next);
-      this.persistFollowUpQueue();
-      return true;
-    }
-    const item = this.followUpFlushBatch[this.followUpFlushCursor];
-    if (item === undefined) return false;
-    const idx = this.followUpQueue.indexOf(item);
-    if (idx < 0) return false;
-    const next = [...this.followUpQueue];
-    next.splice(idx, 1);
-    this.updateFollowUpQueue(next);
-    this.persistFollowUpQueue();
-    return true;
-  }
-
-  private confirmFollowUpFlush(): void {
-    if (!this.flushingFollowUp || this.followUpFlushConfirmed) return;
-    const item = this.followUpFlushBatch[this.followUpFlushCursor];
-    if (item === undefined) return;
-    this.followUpFlushConfirmed = true;
-    this.removeDeliveredFollowUp();
-    const remaining = [...this.followUpQueue];
-    this.persistFollowUpQueue();
-    this.emit({
-      type: "follow_up_flushed",
-      sessionId: this.realSessionId,
-      item,
-      remaining,
-    });
-    if (this.followUpFlushAsOne) {
-      this.finishFollowUpFlush();
-      return;
-    }
+    if (!this.flushingFollowUp) return;
     this.followUpFlushCursor += 1;
-    if (this.followUpFlushCursor >= this.followUpFlushBatch.length) {
+    if (this.followUpFlushCursor >= this.followUpFlushUnits.length) {
       this.finishFollowUpFlush();
     } else {
       void this.sendNextFollowUp();
     }
   }
 
+  /** 单个投递单元：按 id 重取存活条目 → 认领 → 投递 → 按回执出队。 */
+  private async deliverFollowUpUnit(unit: { ids: string[] }): Promise<void> {
+    // 0) 按 id 重取正文：预检/派发期间被用户清掉的条目不得再发出去
+    //    （旧实现用开始时固定的 unit.text，清队后旧批次仍会投递）。
+    const wanted = new Set(unit.ids);
+    const live = this.followUpQueue.filter(
+      (item) => wanted.has(item.id) && item.state === "waiting",
+    );
+    if (live.length === 0) {
+      this.emitQueueChanged();
+      return;
+    }
+    const ids = live.map((item) => item.id);
+    const text = live.map((item) => item.text).join("\n\n");
+    if (this.session.isCompacting || this.bashRunning) {
+      // 此刻不能起 run（手动压缩/shell 占用）：条目仍是 waiting，等结束后再投。
+      this.emit({
+        type: "follow_up_flush_error",
+        errorMessage: this.session.isCompacting
+          ? "follow-up delivery deferred while compaction is running"
+          : "follow-up delivery deferred while a shell command is running",
+        ...this.queueReceiptBase(),
+      });
+      this.abortFollowUpFlush();
+      return;
+    }
+    // 1) 认领：先落盘 claimed 再投递。崩溃/重启时条目以 claimed 留在磁盘上，
+    //    恢复时只能变成 unknown（不自动重投），不会重复消费。
+    if (!this.commitFollowUpQueue(this.withFollowUpState(ids, "claimed"), "claim")) {
+      // 认领落盘失败：不能投递（投了就是「发出去但没记录」的重复风险）。
+      // fail-closed：禁止自动重试，等一次成功的队列写入解锁。
+      this.followUpFlushBlocked = true;
+      this.emit({
+        type: "follow_up_flush_error",
+        errorMessage: "failed to persist follow-up queue before delivery",
+        ...this.queueReceiptBase(),
+      });
+      this.abortFollowUpFlush();
+      return;
+    }
+    this.emitQueueChanged();
+    let receipt: PromptReceipt | null = null;
+    try {
+      // 内部票据：只有 flush 自己发起的 prompt 能穿过「投递在途」门禁。
+      receipt = await this.send(
+        { type: "prompt", message: text },
+        this.internalPromptTicket,
+      ) as PromptReceipt;
+    } catch (error) {
+      // 未被受理（preflight 拒绝 / 网络失败）：把认领还回 waiting，内容不得消失。
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const released = this.commitFollowUpQueue(this.withFollowUpState(ids, "waiting"), "release");
+      this.emit({ type: "follow_up_flush_error", errorMessage, ...this.queueReceiptBase() });
+      // 归还落盘失败时条目留在 claimed：它不会被自动重投，重启后转 unknown 由用户处置。
+      this.abortFollowUpFlush();
+      if (released) this.emitQueueChanged();
+      return;
+    }
+    if (receipt?.status === "queued") {
+      // 没有被立即接受，但载荷已被可靠写进产品队列（compacting 等）：删除本次认领，
+      // 由队列里的新副本负责投递。不能既算已投递又留在队列（重复投递）。
+      this.commitFollowUpQueue(
+        this.followUpQueue.filter((item) => !new Set(ids).has(item.id)),
+        "deliver-queued",
+      );
+      // 不发 follow_up_flushed：这条并没有被投递，内容以队列条目形式存在，
+      // follow_up_queue_changed 已经是权威快照。
+      this.emitQueueChanged();
+      this.abortFollowUpFlush();
+      return;
+    }
+    if (receipt && receipt.status !== "accepted") {
+      // 结构化拒绝（如另一个 prompt 在途）：认领还回 waiting，不得当成已送达。
+      const released = this.commitFollowUpQueue(this.withFollowUpState(ids, "waiting"), "release");
+      this.emit({
+        type: "follow_up_flush_error",
+        errorMessage: `follow-up prompt rejected: ${receipt.reason ?? "unknown"}`,
+        ...this.queueReceiptBase(),
+      });
+      this.abortFollowUpFlush();
+      if (released) this.emitQueueChanged();
+      return;
+    }
+    // 2) 已受理：删除本次单元（按 id）并落盘。
+    const delivered = new Set(ids);
+    const removed = this.commitFollowUpQueue(
+      this.followUpQueue.filter((item) => !delivered.has(item.id)),
+      "deliver",
+    );
+    this.emit({
+      type: "follow_up_flushed",
+      sessionId: this.realSessionId,
+      item: text,
+      ...this.queueReceiptBase(),
+    });
+    if (!removed) {
+      // 已送达但删除没落盘：条目保持 claimed（不会自动重投），重启后转 unknown。
+      // 绝不标成 waiting——那会把已送达的内容再投一次。
+      this.emit({
+        type: "follow_up_flush_error",
+        errorMessage: "follow-up delivered but queue removal was not persisted",
+        ...this.queueReceiptBase(),
+      });
+    }
+    this.emitQueueChanged();
+  }
+
   private abortFollowUpFlush(): void {
     if (!this.flushingFollowUp) return;
     this.flushingFollowUp = false;
-    this.followUpFlushBatch = [];
+    this.followUpFlushUnits = [];
     this.followUpFlushCursor = 0;
-    this.followUpFlushConfirmed = false;
-    this.followUpFlushAsOne = false;
-    this.followUpFlushOriginal = [];
-    // 未确认条目已在 followUpQueue 中保留；persist 确保 prefs 与内存一致。
-    this.persistFollowUpQueue();
+    // 未确认条目仍在 followUpQueue 中（waiting 或 claimed），不需要写盘。
     this.resetIdleTimer();
   }
 
   private finishFollowUpFlush(): void {
     this.flushingFollowUp = false;
-    this.followUpFlushBatch = [];
+    this.followUpFlushUnits = [];
     this.followUpFlushCursor = 0;
-    this.followUpFlushConfirmed = false;
-    this.followUpFlushAsOne = false;
-    this.followUpFlushOriginal = [];
-    this.persistFollowUpQueue();
     this.resetIdleTimer();
-    if (this.followUpQueue.length > 0 && !this.isFollowUpHeld()) {
+    if (this.hasWaitingFollowUp() && !this.isFollowUpHeld()) {
       this.scheduleFollowUpFlush();
     }
   }
@@ -845,12 +1154,8 @@ export class SdkSessionHost {
         // 触发点必须是 agent_settled；agent_end 只记录本轮结果。
         if (this.lastStopReason === "completed") {
           if (this.flushingFollowUp) {
-            // message_end 可能缺失：agent_settled 作为兜底确认当前条目并推进。
-            if (!this.followUpFlushConfirmed) {
-              this.confirmFollowUpFlush();
-            } else {
-              void this.sendNextFollowUp();
-            }
+            // 本次投递已在受理后按 id 出队，这里只需推进下一单元。
+            void this.sendNextFollowUp();
           } else {
             this.scheduleFollowUpFlush();
           }
@@ -863,7 +1168,7 @@ export class SdkSessionHost {
         const disposeAfterSettle =
           event.type === "agent_settled"
           && !this.flushingFollowUp
-          && (this.followUpQueue.length === 0 || this.isFollowUpHeld());
+          && (!this.hasWaitingFollowUp() || this.isFollowUpHeld());
         this.resetIdleTimer();
         if (disposeAfterSettle) {
           void this.destroyAsync().catch(() => {
@@ -891,8 +1196,10 @@ export class SdkSessionHost {
         // 延后一帧再 materialize，确保 header+user 一同落盘（避免列表只见空会话/消失）。
         const msg = (event as { message?: { role?: string } }).message;
         if (msg?.role === "user") {
-          // follow-up 投递的 user 消息确认：这里才推进队列，不能在 prompt preflight 清队。
-          this.confirmFollowUpFlush();
+          // 注意：队列推进**不在这里**。
+          // 旧实现的删除动作本就在 prompt 受理时就完成了，message_end 的「确认」
+          // 反而靠游标推进误删下一条（同文本两条时更糟）；紧跟在受理后的再次
+          // 删除只能引入竞态，不提供额外保证。
           const binaryBatch = this.pendingBinaryBatches.shift();
           setImmediate(() => {
             try {
@@ -1251,7 +1558,7 @@ export class SdkSessionHost {
       this.startupHoldTimer.unref?.();
       this.resetIdleTimer();
       // 服务端重启/热重载后从 prefs 水合：空闲且未被 hold 时立即投递。
-      if (this.followUpQueue.length > 0 && !this.isFollowUpHeld() && this.isSettled()) {
+      if (this.hasWaitingFollowUp() && !this.isFollowUpHeld() && this.isSettled()) {
         this.scheduleFollowUpFlush();
       }
     } catch (error) {
@@ -1318,8 +1625,12 @@ export class SdkSessionHost {
     };
     projected.queuedMessages = {
       steering: this.hasQueueSnapshot ? [...this.localQueue.steering] : [],
-      followUp: [...this.followUpQueue],
+      // followUp 保留正文数组（旧客户端的读取路径）；followUpItems 带条目身份
+      // 与状态（claimed 在途、unknown 结果未知），客户端按它建账本。
+      followUp: followUpItemTexts(this.visibleFollowUp()),
+      followUpItems: this.visibleFollowUp(),
       followUpRevision: this.followUpQueueRevision,
+      inFlight: this.inFlightFollowUpTexts(),
     };
     try {
       const usage = session.getContextUsage();
@@ -1400,7 +1711,7 @@ export class SdkSessionHost {
     return { entryId, binary };
   }
 
-  async send(command: Record<string, unknown>): Promise<unknown> {
+  async send(command: Record<string, unknown>, ticket?: symbol): Promise<unknown> {
     if (!this.runtime) throw new Error("SDK session is not alive");
     const type = command.type as string;
     // get_state / ensure_session 都是只读预检（浏览器「新建会话占位」会先 ensure
@@ -1424,25 +1735,41 @@ export class SdkSessionHost {
         if (inFlight) return inFlight;
         const binaryBlocks = normalizeBinaryMessageInputs(parsed.binaryBlocks, this.agentDir);
         if (this.bashRunning) {
-          throw new Error("Cannot send a prompt while a shell command is running");
+          // 结构化回绝：客户端按 reason=shell 提示并回草稿，不能靠 HTTP 错误猜。
+          const busy = this.reject(parsed.submissionId, "bash");
+          this.promptReceipts.set(parsed.submissionId, busy);
+          return busy;
         }
         // AgentSession.prompt() rejects direct prompts while manual compaction is
         // running. Preserve the user's message in the existing Pidance follow-up
         // queue; compaction_end will schedule the normal prompt flush.
         if (session.isCompacting) {
           if (parsed.images?.length || binaryBlocks.length > 0) {
-            throw new Error("Media attachments cannot be queued while compaction is in progress");
+            // 附件不进文本队列（队列条目必须可序列化）；结构化回绝让客户端保留
+            // 输入（含图片），而不是先吞掉再报一个无原因的 HTTP 错误。
+            const receipt = this.reject(parsed.submissionId, "media");
+            this.promptReceipts.set(parsed.submissionId, receipt);
+            return receipt;
           }
-          const queuedReceipt: PromptReceipt = {
-            submissionId: parsed.submissionId,
-            sessionId: this.realSessionId,
-            status: "accepted",
-          };
-          this.updateFollowUpQueue([...this.followUpQueue, parsed.message]);
+          const queuedReceipt = this.enqueueTexts(parsed.submissionId, [parsed.message], "compacting");
           this.promptReceipts.set(parsed.submissionId, queuedReceipt);
-          this.persistFollowUpQueue();
           this.options.onSessionListInvalidate?.();
           return queuedReceipt;
+        }
+        // 自动投递在途：外部 prompt 不能并发起 run（两个 prompt 抢同一个
+        // SessionManager）。只有 flush 自己的内部票据能穿过——用布尔标志的话，
+        // 恰好在这一刻到达的外部请求会共享它，等于门禁不存在。
+        if (this.flushingFollowUp && ticket !== this.internalPromptTicket) {
+          const busy = this.reject(parsed.submissionId, "busy");
+          this.promptReceipts.set(parsed.submissionId, busy);
+          return busy;
+        }
+        // 没有活跃 SDK run 但有 prompt 在途（preflight 窗口）：并发 prompt 同样
+        // 会抢 SessionManager。结构化回绝，且发生在任何运行态变更之前。
+        if (this.promptRunning && !session.isStreaming) {
+          const busy = this.reject(parsed.submissionId, "busy");
+          this.promptReceipts.set(parsed.submissionId, busy);
+          return busy;
         }
         if (!acquireRunningLease(this.realSessionId)) {
           throw new Error(SESSION_RUNNING_LOCKED_MESSAGE);
@@ -1604,63 +1931,107 @@ export class SdkSessionHost {
       }
 
       case "steer": {
-        const message = String(command.message ?? "");
+        const parsed = parseSteerCommand(command);
+        const cached = this.commandReceipts.get(parsed.submissionId);
+        if (cached) return cached;
+        if (this.bashRunning) {
+          // 结构化回执而非抛异常：客户端要按原因提示并回草稿（R8/A8），
+          // 抛异常只会变成无法归类的 HTTP 错误。
+          const receipt = this.reject(parsed.submissionId, "bash");
+          this.commandReceipts.set(parsed.submissionId, receipt);
+          return receipt;
+        }
+        // 压缩中且没有活跃 agent loop：原生 steer 只进 SDK 的 steering queue，
+        // 要等到下一次 prompt 才被消费，UI 上看不到这条消息。放进产品队列，
+        // compaction_end 会按正常流程投递。
+        if (session.isCompacting && !session.isStreaming && !this.promptRunning) {
+          if (parsed.images?.length) {
+            // 产品文本队列不携带图片载荷：不能静默把它当纯文本入队（图片会丢）。
+            const receipt = this.reject(parsed.submissionId, "media");
+            this.commandReceipts.set(parsed.submissionId, receipt);
+            return receipt;
+          }
+          const receipt = this.enqueueTexts(parsed.submissionId, [parsed.message], "compacting");
+          this.commandReceipts.set(parsed.submissionId, receipt);
+          return receipt;
+        }
         // 浏览器运行态可能因 SSE 收尾/重连竞态落后于 host。Pi SDK 在空闲时
         // steer() 只入 steering queue、不会启动 LLM，消息会静默挂起；由 host
         // 以权威运行态决定：运行中保留原生 steer，空闲时转成下一轮 prompt。
         // flushingFollowUp 也视为 busy：让引导进入即将投递的下一轮，而不是
         // 和 Host 的队列 flush 并发启动两个 prompt。
         if (!this.isRunning() && !this.flushingFollowUp) {
-          return this.send({
+          const inner = await this.send({
             type: "prompt",
-            message,
-            images: command.images,
+            message: parsed.message,
+            images: parsed.images,
             streamingBehavior: "steer",
-          });
+          }) as PromptReceipt;
+          // 空闲引导实际生效动作是 prompt（含压缩中自动入队的情形）：
+          // 必须回给客户端，否则 UI 会按「已引导」显示实际已入队/未发出的消息。
+          const receipt: PromptReceipt = {
+            ...inner,
+            submissionId: parsed.submissionId,
+            action: inner.status === "accepted" ? "prompt" : "queued",
+          };
+          this.commandReceipts.set(parsed.submissionId, receipt);
+          return receipt;
         }
-        await session.steer(message, command.images as never);
-        return null;
+        await session.steer(parsed.message, parsed.images as never);
+        const receipt: PromptReceipt = {
+          submissionId: parsed.submissionId,
+          sessionId: this.realSessionId,
+          status: "accepted",
+          action: "steer",
+        };
+        this.commandReceipts.set(parsed.submissionId, receipt);
+        return receipt;
+      }
+
+      case "dispatch_follow_up_queue": {
+        const parsed = parseDispatchFollowUpQueueCommand(command);
+        const cached = this.commandReceipts.get(parsed.submissionId);
+        if (cached) return cached;
+        const dispatched = await this.dispatchFollowUpQueue(parsed);
+        // 幂等：同一 submissionId 重发不得再清一次队/再投一次。
+        this.commandReceipts.set(parsed.submissionId, dispatched as unknown as PromptReceipt);
+        return dispatched;
       }
 
       case "set_follow_up_queue": {
-        const items = normalizeFollowUpItems(command.items);
+        const parsed = parseSetFollowUpQueueCommand(command);
+        const cached = this.commandReceipts.get(parsed.submissionId);
+        if (cached) return cached;
         // 条件写入（CAS）：多标签各自基于同一快照整组替换时，后到的会静默丢掉
         // 先到的入队。客户端带它最后一次见过的服务端 revision；不匹配则拒绝，
-        // 并把权威队列回给客户端。不传 expectedRevision 保持旧行为（首写无基线）。
-        const expectedRevision = typeof command.expectedRevision === "number"
-          && Number.isFinite(command.expectedRevision)
-          ? command.expectedRevision
-          : undefined;
-        if (expectedRevision !== undefined && expectedRevision !== this.followUpQueueRevision) {
-          return {
-            ok: false,
-            conflict: true,
-            revision: this.followUpQueueRevision,
-            items: [...this.followUpQueue],
-          };
+        // 并把权威队列回给客户端。
+        const write = this.writeFollowUpQueue(parsed.items, parsed.expectedRevision);
+        if (write.ok) {
+          // 注意：这里**不**中止正在进行的 flush。清队/改队不得取消已提交的一批
+          // （旧实现在这里 abortFollowUpFlush，已投递内容于是从 UI 消失或反被漏发）。
+          // 已认领条目由 flush 按 id 自行出队，新条目等下一次调度。
+          this.emitQueueChanged();
+          if (this.isSettled() && this.hasWaitingFollowUp()) this.scheduleFollowUpFlush();
+          this.resetIdleTimer();
         }
-        // flush 进行中：浏览器整组替换会与 sendNextFollowUp 的 batch 快照并发
-        // （清队 → 消息仍被投递但 UI 已空 / 或反被 abort 丢弃）。先中止自动
-        // 投递，再按新 items 落地；中止只复位批处理状态，未确认条目仍按新
-        // items 语义处理（空 = 用户有意取消）。
-        if (this.flushingFollowUp) {
-          this.abortFollowUpFlush();
-        }
-        this.updateFollowUpQueue(items);
-        this.persistFollowUpQueue();
-        // late-enqueue：如果已经 settled/空闲，立即调度一次投递。
-        if (this.isSettled() && items.length > 0) this.scheduleFollowUpFlush();
-        this.resetIdleTimer();
-        return {
-          ok: true,
-          queued: this.followUpQueue.length,
-          revision: this.followUpQueueRevision,
-        };
+        return write;
       }
 
       case "follow_up": {
-        await session.followUp(String(command.message ?? ""), command.images as never);
-        return null;
+        const parsed = parseFollowUpCommand(command);
+        const cached = this.commandReceipts.get(parsed.submissionId);
+        if (cached) return cached;
+        // 产品队列条目必须是可序列化的纯文本。附件不能进来（歧义证据），但也不能
+        // 静默丢弃：明确拒绝，由调用方保留输入。
+        const receipt: PromptReceipt = this.bashRunning
+          ? this.reject(parsed.submissionId, "bash")
+          : parsed.images?.length
+            ? this.reject(parsed.submissionId, "media")
+            : !parsed.message.trim()
+              ? this.reject(parsed.submissionId, "error")
+              : this.enqueueTexts(parsed.submissionId, [parsed.message]);
+        this.commandReceipts.set(parsed.submissionId, receipt);
+        return receipt;
       }
 
       case "set_session_name": {
@@ -2016,11 +2387,9 @@ export class SdkSessionHost {
       this.bashRunning = false;
       this.bashCommand = null;
       this.flushingFollowUp = false;
-      this.followUpFlushBatch = [];
+      this.followUpFlushUnits = [];
       this.followUpFlushCursor = 0;
-      this.followUpFlushConfirmed = false;
-      this.followUpFlushAsOne = false;
-      this.followUpFlushOriginal = [];
+      this.followUpSending = false;
       clearRunningStartedAt(this.realSessionId);
       // 多订阅逐一分发：任一订阅者抛错不得阻断其它订阅者（registry 清理必须跑到）。
       for (const callback of [...this.destroyCallbacks]) {
