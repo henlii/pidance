@@ -63,6 +63,9 @@ async function startPidanceHttpServer(options) {
     // 见 bin/pidance-compression.js。
     installResponseCompression(req, res);
     void handle(req, res);
+    // 见下方 installUpgradeHandler 注释：Next 在首个请求里给同一个 server 挂了自己的
+    // upgrade 监听器（这一步在 handle() 内部同步发生），要在它挂完之后再清一次。
+    installUpgradeHandler();
   });
 
   function onHttpUpgrade(req, socket, head) {
@@ -77,6 +80,13 @@ async function startPidanceHttpServer(options) {
     }
     socket.destroy();
   }
+  // Node 的 upgrade 事件会依次调用**所有**监听器，而 Next 会在它处理的第一个请求里
+  // 给同一个 server 再挂一个（next/dist/server/next.js 的 setupWebSocketHandler）：
+  // /api/pty 升级握手完成后，Next 的处理器还会走到它自己的路由判定，并可能
+  // socket.end()，浏览器侧就是「终端刚连上就断」（WebSocket 1006）。
+  // Next 的挂载只发生一次，且我们的 Next 一直是 dev:false（用不到它那个 upgrade 分支），
+  // 所以清掉即可：每个请求前后各清一次，请求后那次清的就是 Next 刚挂上的那个；
+  // 平时就只剩我们自己的处理器。
   function installUpgradeHandler() {
     server.removeAllListeners("upgrade");
     server.on("upgrade", onHttpUpgrade);
