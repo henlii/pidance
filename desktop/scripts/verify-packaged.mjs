@@ -378,8 +378,8 @@ async function main() {
       );
     } else {
       // 服务刚就绪时 Next 可能还挂着第二个 upgrade 监听器，会抢走同一个 socket
-      // （表现为 WebSocket 刚收到首帧就被断开）。重试几次能在不改服务的前提下把这种情况
-      // 与「node-pty 真的坏了」区分开：真的坏了就是四次全失败。
+      // （表现为 WebSocket 刚收到首帧就被断开）。重试几次能把「监听器被抢」与
+      // 「node-pty 或 shell 真的起不来」区分开：真的坏了就是四次全失败。
       let probed = { ok: false, detail: "未开始探测" };
       for (let attempt = 1; attempt <= 4; attempt += 1) {
         probed = await probePtyRoundTrip(Number(args.port), 12_000);
@@ -387,7 +387,12 @@ async function main() {
         if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 1_000));
       }
       if (probed.ok) ok("原生模块 node-pty", `终端输入输出往返（${probed.detail}）`);
-      else bad("原生模块 node-pty", `连续 4 次探测都失败：${probed.detail}`);
+      else {
+        // 服务自己的 stderr 里会有 pty-worker 的报错（例如找不到 shell），失败时必须带出来，
+        // 否则下一轮只能看到「连上就断」而不知道原因。
+        const tail = stderr.split("\n").slice(-4).join(" | ");
+        bad("原生模块 node-pty", `连续 4 次探测都失败：${probed.detail}${tail ? `；服务 stderr 末尾：${tail}` : ""}`);
+      }
     }
 
     // 5. SDK 会话（ensure_session 不调模型，只建真实会话）

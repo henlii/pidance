@@ -2,22 +2,31 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 
 const pty = require("node-pty");
+const { resolveShell } = require("./pty-shell.cjs");
 
 const cwd = process.argv[2] || process.cwd();
 const cols = Number(process.argv[3]) || 80;
 const rows = Number(process.argv[4]) || 24;
-const shell = process.env.SHELL && process.env.SHELL.length > 0 ? process.env.SHELL : "/bin/bash";
+const shell = resolveShell(process.platform, process.env);
 const env = { ...process.env };
 delete env.PI_WEB_PASSWORD;
 delete env.PIDANCE_PASSWORD;
 
-const proc = pty.spawn(shell, [], {
-  name: "xterm-256color",
-  cols,
-  rows,
-  cwd,
-  env,
-});
+let proc;
+try {
+  proc = pty.spawn(shell, [], {
+    name: "xterm-256color",
+    cols,
+    rows,
+    cwd,
+    env,
+  });
+} catch (error) {
+  // 起不来就把原因发给浏览器再退出：父进程只看得到退出码，终端会静默消失。
+  const reason = error instanceof Error ? error.message : String(error);
+  process.stdout.write(JSON.stringify({ type: "out", d: `\r\n[pidance] 无法启动终端 shell（${shell}）：${reason}\r\n` }) + "\n");
+  process.exit(1);
+}
 
 proc.onData((data) => {
   process.stdout.write(JSON.stringify({ type: "out", d: data }) + "\n");

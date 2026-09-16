@@ -3,6 +3,7 @@
 
 const { existsSync, realpathSync } = require("fs");
 const { WebSocketServer } = require("ws");
+const { resolveShell } = require("./pty-shell.cjs");
 const ptyWss = new WebSocketServer({ noServer: true });
 
 function sanitizeEnv(env) {
@@ -33,18 +34,8 @@ function startPtySession(options) {
   const cwd = resolvePtyCwd(options.cwd);
   const cols = options.cols && options.cols > 0 ? options.cols : 80;
   const rows = options.rows && options.rows > 0 ? options.rows : 24;
-  // 平台默认 shell：Windows 没有 POSIX /bin/bash，必须走 PowerShell/cmd。
-  // 优先用户显式 SHELL（Linux/macOS 常见）；win32 用 PowerShell 否则 cmd。
-  let shell = process.env.SHELL && process.env.SHELL.length > 0 ? process.env.SHELL : "";
-  if (!shell) {
-    if (process.platform === "win32") {
-      shell = process.env.COMSPEC && process.env.COMSPEC.length > 0
-        ? process.env.COMSPEC
-        : "powershell.exe";
-    } else {
-      shell = "/bin/bash";
-    }
-  }
+  // 平台默认 shell：跟真正开终端的 pty-worker.js 用同一套规则（bin/pty-shell.cjs）。
+  const shell = resolveShell(process.platform, process.env);
   const proc = spawner.spawn(shell, [], {
     name: "xterm-256color",
     cols,
