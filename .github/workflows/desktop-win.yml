@@ -11,9 +11,13 @@ name: Desktop Windows Build
 on:
   workflow_dispatch:
   push:
+    # 分支推送只看 paths（tags 存在时若没写 branches，分支推送不会触发工作流）。
+    branches:
+      - main
     paths:
       - "desktop/**"
       - ".github/workflows/desktop-win.yml"
+    # tag 推送忽略 paths，直接构包并挂 Release。
     tags:
       - "v*"
 
