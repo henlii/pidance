@@ -189,3 +189,36 @@ jobs:
           $files = Get-ChildItem dist -File | Where-Object { $_.Extension -in ".exe", ".zip" } | ForEach-Object { $_.FullName }
           gh release upload $env:TAG --repo $repo --clobber $files dist/sha256.txt
           gh release view $env:TAG --repo $repo --json assets --jq '.assets[].name'
+
+      # 诊断，不阻塞：CLI 从跟产物不同盘的目录启动时，Next 还能不能找到路由清单。
+      # 壳自己总是以服务目录为 cwd（desktop/src/main.js），不走这条路径；
+      # 这里只是把 CLI 的真实风险面量出来，方便决定要不要单独修。
+      - name: "跨盘 cwd 诊断（CLI 从 C: 启动 D: 上的包，不阻塞）"
+        if: always()
+        continue-on-error: true
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          $app = Join-Path $env:RUNNER_TEMP "unpacked"
+          if (!(Test-Path (Join-Path $app "resources"))) {
+            $inner = Get-ChildItem $app -Directory | Where-Object { Test-Path (Join-Path $_.FullName "resources") } | Select-Object -First 1
+            if ($inner) { $app = $inner.FullName }
+          }
+          $entry = Join-Path $app "resources/app/node_modules/@henlii/pidance/bin/pidance.js"
+          $exe = Join-Path $app "Pidance Desktop.exe"
+          if (!(Test-Path $entry) -or !(Test-Path $exe)) { Write-Host "跳过：解包产物不完整"; exit 0 }
+          $cwd = Join-Path $env:RUNNER_TEMP "cli-probe"
+          New-Item -ItemType Directory -Force -Path $cwd | Out-Null
+          Write-Host "产物在 $app，cwd 在 $cwd"
+          $env:ELECTRON_RUN_AS_NODE = "1"
+          $proc = Start-Process -FilePath $exe -WorkingDirectory $cwd -PassThru -NoNewWindow `
+            -ArgumentList @($entry, "--port", "31423", "--hostname", "127.0.0.1", "--no-open")
+          $ok = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 2
+            try { $r = Invoke-WebRequest -Uri "http://127.0.0.1:31423/api/home" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop; if ($r.StatusCode -eq 200) { $ok = $true; break } } catch { }
+            if ($proc.HasExited) { Write-Host "进程已退出，退出码 $($proc.ExitCode)"; break }
+          }
+          if (!$proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+          if ($ok) { Write-Host "✓ 跨盘 cwd 也能起来" }
+          else { Write-Host "✗ 跨盘 cwd 起不来：CLI 从其他盘运行时需要额外处理（桌面壳不受影响）" }

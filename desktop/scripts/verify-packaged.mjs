@@ -320,8 +320,12 @@ async function main() {
   }
 
   let stderr = "";
+  // cwd 用服务目录，与真实壳一致（`desktop/src/main.js` 也是 `cwd: serverDir`）。
+  // 不能随便找个临时目录当 cwd：Windows 上 cwd 与 dir 不同盘时，Next 会把绝对 distDir
+  // 再拼一次，`join(cwd, dir, join(dir, ".next"))` → 路由清单路径错乱、服务起不来。
+  const serviceDir = path.dirname(path.dirname(serviceEntry));
   const child = spawn(nodeBin, [serviceEntry, "--port", String(args.port), "--hostname", "127.0.0.1", "--no-open"], {
-    cwd: workDir,
+    cwd: serviceDir,
     env,
     stdio: ["ignore", "pipe", "pipe"],
   });
