@@ -144,8 +144,11 @@ function parseItem(value: unknown, index: number): FollowUpItem | null {
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as { id?: unknown; text?: unknown; state?: unknown; images?: unknown };
-  if (typeof record.text !== "string" || !record.text.trim()) return null;
+  if (typeof record.text !== "string") return null;
   const images = parseQueuedImageRefs(record.images);
+  // 纯图条目（正文为空但有图）必须能恢复：旧实现在这里丢掉它，条目的图
+  // 随即被清扫——用户排的纯图消息就在刷新/重启后无声消失。
+  if (!record.text.trim() && images.length === 0) return null;
   return {
     id: typeof record.id === "string" && record.id.trim() ? record.id : legacyItemId(index, record.text),
     text: record.text,

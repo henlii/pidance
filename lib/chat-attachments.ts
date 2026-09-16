@@ -4,8 +4,8 @@
  * /api/files 预览需把该目录加入 allow-list。
  */
 
-import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "fs";
-import { join } from "path";
+import { createWriteStream, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { dirname, join } from "path";
 import { randomUUID } from "crypto";
 import { Readable, Transform } from "stream";
 import { pipeline } from "stream/promises";
@@ -185,7 +185,20 @@ export function saveQueueMediaBytes(
   const dir = ensureQueueOutboxDir(sessionId, agentDir);
   const storedName = uniqueAttachmentFileName(name);
   const target = join(dir, storedName);
-  writeFileSync(target, bytes, { flag: "wx", mode: 0o600 });
+  // 同目录临时文件 + rename：条目一旦可见就要求图已经完整存在（投递时回读到
+  // 半截文件会把损坏的图发给模型），而直接 writeFileSync 在进程被杀时留下半截。
+  const temp = join(dir, `.${storedName}.${randomUUID()}.part`);
+  try {
+    writeFileSync(temp, bytes, { flag: "wx", mode: 0o600 });
+    renameSync(temp, target);
+  } catch (error) {
+    try {
+      unlinkSync(temp);
+    } catch {
+      // 临时文件没落下或已被清掉:目标达成
+    }
+    throw error;
+  }
   return {
     id: storedName,
     path: normalizeSlashes(target),
@@ -194,14 +207,30 @@ export function saveQueueMediaBytes(
   };
 }
 
-/** 路径是否属于本会话的 outbox（防「客户端给个路径就发任意文件给模型」）。 */
+/** 单张排队图片的最大字节数（安全尺寸副本；超出即客户端违约，拒绝而不是读进来）。 */
+export const QUEUE_MEDIA_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * 路径是否属于本会话的 outbox（防「客户端给个路径就发任意文件给模型」）。
+ *
+ * 字面前缀不够：outbox 里一个指向别处的 symlink 会把任意文件变成「本会话的排队图」。
+ * 真实父目录必须就是 outbox 本身。
+ */
 export function isQueueMediaPath(sessionId: string, path: string, agentDir: string = getAgentDir()): boolean {
   const dir = getQueueOutboxDir(sessionId, agentDir);
   const candidate = normalizeSlashes(path.trim());
-  return candidate.startsWith(`${dir}/`) && !candidate.slice(dir.length + 1).includes("/");
+  if (!candidate.startsWith(`${dir}/`)) return false;
+  if (candidate.slice(dir.length + 1).includes("/")) return false;
+  try {
+    const realDir = realpathSync(dir);
+    return dirname(realpathSync(candidate)) === realDir;
+  } catch {
+    // 文件不存在（或目录不存在）：不是有效引用
+    return false;
+  }
 }
 
-/** 回读排队图片为 base64；文件不存在/路径越界返回 null（投递时降级为纯文本，不报错）。 */
+/** 回读排队图片为 base64；文件不存在/越界/非普通文件/过大返回 null。 */
 export function readQueueMediaBase64(
   sessionId: string,
   path: string,
@@ -209,7 +238,11 @@ export function readQueueMediaBase64(
 ): string | null {
   if (!isQueueMediaPath(sessionId, path, agentDir)) return null;
   try {
-    return readFileSync(normalizeSlashes(path)).toString("base64");
+    const target = normalizeSlashes(path);
+    // 只读普通文件，且限制尺寸：ref 路径来自持久化数据，不应无上限读进内存。
+    if (!lstatSync(target).isFile()) return null;
+    if (statSync(target).size > QUEUE_MEDIA_MAX_BYTES) return null;
+    return readFileSync(target).toString("base64");
   } catch {
     return null;
   }

@@ -350,10 +350,14 @@ export function parseSetFollowUpQueueCommand(
       throw new Error("items must be strings or { text, images? } objects");
     }
     const record = entry as Record<string, unknown>;
-    if (typeof record.text !== "string" || !record.text.trim()) {
+    if (typeof record.text !== "string") {
       throw new Error("items must be strings or { text, images? } objects");
     }
     const images = parseQueueItemImages(record.images);
+    // 纯图消息（正文为空）是合法的：UI 允许只发图；空正文且无图才是空条目。
+    if (!record.text.trim() && !images?.length) {
+      throw new Error("items must not be empty");
+    }
     items.push({ text: record.text, ...(images ? { images } : {}) });
   }
   return {

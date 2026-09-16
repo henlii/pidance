@@ -576,11 +576,17 @@ export class SdkSessionHost {
     if (images.length > MAX_QUEUED_ITEM_IMAGES) return null;
     const refs: QueuedImageRef[] = [];
     const created: QueuedImageRef[] = [];
+    // 任何一张失败都回滚本次已写出的文件：半途而废的写入没人引用，
+    // 不清理就是永久泄漏（且不会出现在任何条目的清扫范围里）。
+    const fail = (): null => {
+      this.discardQueueMedia(created);
+      return null;
+    };
     for (const image of images) {
       if (image.source === "ref") {
         // 只接受本会话 outbox 里的路径，并且必须真的存在（否则投递时会静默变纯文本）。
-        if (!isQueueMediaPath(this.realSessionId, image.path, this.agentDir)) return null;
-        if (!readQueueMediaBase64(this.realSessionId, image.path, this.agentDir)) return null;
+        if (!isQueueMediaPath(this.realSessionId, image.path, this.agentDir)) return fail();
+        if (!readQueueMediaBase64(this.realSessionId, image.path, this.agentDir)) return fail();
         refs.push({
           id: image.id,
           path: image.path,
@@ -591,7 +597,7 @@ export class SdkSessionHost {
       }
       try {
         const bytes = Buffer.from(image.data, "base64");
-        if (bytes.length === 0) return null;
+        if (bytes.length === 0) return fail();
         const ref = saveQueueMediaBytes(
           this.realSessionId,
           bytes,
@@ -603,7 +609,7 @@ export class SdkSessionHost {
         created.push(ref);
       } catch (error) {
         console.error("[pidance] failed to persist queued image:", error);
-        return null;
+        return fail();
       }
     }
     return { refs, created };
@@ -616,20 +622,26 @@ export class SdkSessionHost {
     }
   }
 
-  /** 队列条目图片 → SDK 图片载荷（文件缺失时降级为纯文本，不阻断投递）。 */
-  private readQueueImages(items: readonly FollowUpItem[]): PromptImage[] | undefined {
+  /**
+   * 从 outbox 回读整批图片。
+   *
+   * 返回缺失列表而不是「静默降级成纯文本」：图片读不出来意味着这段内容没被
+   * 完整保存，调用方必须 fail-closed（不投递、条目留在队列），否则用户的消息
+   * 会在无人知觉的情况下少了一半。
+   */
+  private readQueueImages(items: readonly FollowUpItem[]): { images: PromptImage[]; missing: string[] } {
     const refs = followUpItemImages(items);
-    if (refs.length === 0) return undefined;
     const images: PromptImage[] = [];
+    const missing: string[] = [];
     for (const ref of refs) {
       const data = readQueueMediaBase64(this.realSessionId, ref.path, this.agentDir);
       if (!data) {
-        console.error("[pidance] queued image missing, delivering text only:", ref.path);
+        missing.push(ref.path);
         continue;
       }
       images.push({ type: "image", data, mimeType: ref.mimeType });
     }
-    return images.length ? images : undefined;
+    return { images, missing };
   }
 
   /**
@@ -752,20 +764,29 @@ export class SdkSessionHost {
     // 整批合并为唯一副本：正文与图片一起带上（图片少一张就是静默丢内容，
     // 多一张就是投递了用户已经取回的内容）。
     const { text, images } = mergeFollowUpPayload(queued, extra);
+    // 认领之前先验证图片可读：认领之后才发现图丢了，就只能要么丢图、要么留下一个
+    // 永远发不出去的 claimed 条目。
+    const precheck = this.readQueueImages(queued);
+    if (precheck.missing.length) {
+      console.error("[pidance] queued image missing, dispatch rejected:", precheck.missing);
+      return { ok: false, status: "rejected", reason: "media", ...this.queueReceiptBase() };
+    }
     // 认领：把整批 waiting 换成一个 claimed 条目，正文是**合并后的完整载荷**
     // （含输入框 extra）。一次落盘同时完成「移除原条目」与「保存唯一副本」，
     // 因此投递前进程死掉也不会丢内容（重启后按 unknown 呈现，不自动重发）。
     const claim = images.length
       ? newFollowUpItem(text, "claimed", images)
       : newFollowUpItem(text, "claimed");
-    const next = [...this.followUpQueue.filter((item) => item.state === "claimed"), claim];
+    // 只把本批 waiting 换成唯一副本：**未参与派发的条目（claimed / unknown）必须原样保留**。
+    // 旧实现只保留 claimed，会把 unknown（上次崩溃前已发出、结果未知）连同它的图一起删掉。
+    const next = [...this.followUpQueue.filter((item) => item.state !== "waiting"), claim];
     if (!this.commitFollowUpQueue(next, "dispatch-claim")) {
       return { ok: false, status: "rejected", reason: "error", ...this.queueReceiptBase() };
     }
     this.dispatchingFollowUpQueue = true;
     this.emitQueueChanged();
     // 认领条目已带上合并后的图片引用：从文件回读为 SDK 载荷（整队转引导也不能丢图）。
-    const dispatchImages = this.readQueueImages([claim]);
+    const dispatchImages = precheck.images.length ? precheck.images : undefined;
     let action: "prompt" | "steer" | "queued" = "prompt";
     try {
       // 可消费 steer 的判据是 SDK 的活跃 run（session.isStreaming），不是 isSettled()：
@@ -928,7 +949,21 @@ export class SdkSessionHost {
     // 正文与图片一同取出：队列条目现在可以带图（A11），逐条投递时也不能丢图。
     const payload = mergeFollowUpPayload(live);
     const text = payload.text;
-    const images = this.readQueueImages(live);
+    const { images, missing } = this.readQueueImages(live);
+    if (missing.length) {
+      // 图片读不出来 = 载荷不完整：不得只发正文把用户的图静静丢掉。
+      // 条目保持 waiting，用户可在 UI 里看到它仍排队并自行处置（召回/清队）。
+      console.error("[pidance] queued image missing, delivery blocked:", missing);
+      this.followUpFlushBlocked = true;
+      this.emit({
+        type: "follow_up_flush_error",
+        errorMessage: "queued image is missing; delivery blocked",
+        ...this.queueReceiptBase(),
+      });
+      this.abortFollowUpFlush();
+      return;
+    }
+    const promptImages = images.length ? images : undefined;
     if (this.session.isCompacting || this.bashRunning) {
       // 此刻不能起 run（手动压缩/shell 占用）：条目仍是 waiting，等结束后再投。
       this.emit({
@@ -960,7 +995,7 @@ export class SdkSessionHost {
     try {
       // 内部票据：只有 flush 自己发起的 prompt 能穿过「投递在途」门禁。
       receipt = await this.send(
-        { type: "prompt", message: text, ...(images?.length ? { images } : {}) },
+        { type: "prompt", message: text, ...(promptImages ? { images: promptImages } : {}) },
         this.internalPromptTicket,
       ) as PromptReceipt;
     } catch (error) {

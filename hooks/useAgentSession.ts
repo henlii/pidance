@@ -140,9 +140,12 @@ function toQueuePayloads(text: string, images?: AttachedImage[]): QueueItemPaylo
  * 队列取回：把 Host outbox 里的图片字节读回输入框。
  *
  * 不写 `original`：outbox 副本会随队列条目一起删除，原图信息会让回填的消息
- * 指向一个很快就不存在的文件。单张读失败就跳过，不回滚已经取回的正文。
+ * 指向一个很快就不存在的文件。read 失败计入 `failed`（调用方必须据此决定能否
+ * 清队：读不回来又清掉队列，图就真的没了）。
  */
-async function fetchQueueImages(refs: readonly QueuedImageRef[]): Promise<AttachedImage[]> {
+async function fetchQueueImages(
+  refs: readonly QueuedImageRef[],
+): Promise<{ images: AttachedImage[]; failed: number }> {
   const loaded = await Promise.all(refs.map(async (ref): Promise<AttachedImage | null> => {
     try {
       // 必须带 type=read：不带 type 的 GET 默认是目录列表，对文件返回 400。
@@ -165,7 +168,10 @@ async function fetchQueueImages(refs: readonly QueuedImageRef[]): Promise<Attach
       return null;
     }
   }));
-  return loaded.filter((image): image is AttachedImage => image !== null);
+  return {
+    images: loaded.filter((image): image is AttachedImage => image !== null),
+    failed: loaded.filter((image) => image === null).length,
+  };
 }
 
 function streamReducer(state: StreamingState, action: StreamAction): StreamingState {
@@ -2828,11 +2834,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (items.length === 0) return;
     // 图片先读回（Host 的 outbox 副本会随清队一起删掉），再确认清队，
     // 避免清除失败时同一消息同时留在两处。
+    const refs = itemImageRefs(entry.items);
     let images: AttachedImage[] = [];
     try {
-      images = await fetchQueueImages(itemImageRefs(entry.items));
-    } catch {
-      images = [];
+      const loaded = await fetchQueueImages(refs);
+      if (loaded.failed > 0) {
+        // 图没全读回来就不能清队：清队会删掉 outbox 副本，读失败的那张就真没了。
+        addNotice({ type: "error", message: t("input_recallImagesFailed") });
+        return;
+      }
+      images = loaded.images;
+    } catch (error) {
+      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      return;
     }
     if (sessionIdRef.current !== sid) return;
     try {
@@ -2842,7 +2856,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (error) {
       addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
     }
-  }, [addNotice, isReadOnly, updateLocalFollowUp, opts.chatInputRef]);
+  }, [addNotice, isReadOnly, t, updateLocalFollowUp, opts.chatInputRef]);
 
   /**
    * 手动转引导：「整队 + 可选输入框内容」合并为一条 steer。
