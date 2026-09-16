@@ -70,6 +70,10 @@ interface Props {
   /** 最近一轮 run 的延迟/吞吐，供顶栏显示。 */
   onTurnMetricsChange?: (metrics: TurnMetrics) => void;
   onOpenFile?: (filePath: string) => void;
+  /** 输入框下方 footer（状态条）是否折叠：由 AppShell 持有（ChatWindow 按 sessionKey
+   *  重挂载，本页选择必须待在更上层的稳定宿主里）。 */
+  footerCollapsed: boolean;
+  onFooterToggle: () => void;
 }
 
 function phaseLabel(phase: AgentPhase, t: ReturnType<typeof useI18n>["t"]): string {
@@ -188,7 +192,7 @@ export function ProcessDetailsGroup({ messageCount, toolCallCount, children, t }
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, onGuideTargetChange, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onTurnMetricsChange, onOpenFile }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, onGuideTargetChange, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onTurnMetricsChange, onOpenFile, footerCollapsed, onFooterToggle }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -323,32 +327,11 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     setTodosCollapsed(true);
   }, [todoCollapseScope]);
 
-  // 输入框下方 footer（belowEditor widgets + 状态条）折叠开关；跨刷新记忆
-  const [footerCollapsed, setFooterCollapsed] = useState(() => {
-    try {
-      return localStorage.getItem("pidance.footerCollapsed") === "1";
-    } catch {
-      return false;
-    }
-  });
-  useEffect(() => {
-    try {
-      localStorage.setItem("pidance.footerCollapsed", footerCollapsed ? "1" : "0");
-    } catch {
-      /* localStorage 不可用时仅内存生效 */
-    }
-    setServerPref("footerCollapsed", footerCollapsed);
-  }, [footerCollapsed]);
-
   const serverPrefs = useServerPreferences();
   useEffect(() => {
     const remoteDraft = getServerPref<unknown>("draftTargetCwd");
     if (typeof remoteDraft === "string" && remoteDraft && remoteDraft !== draftTargetCwd && !guideDefaultCwd) {
       setDraftTargetCwd(remoteDraft);
-    }
-    const remoteFooter = getServerPref<unknown>("footerCollapsed");
-    if (typeof remoteFooter === "boolean" && remoteFooter !== footerCollapsed) {
-      setFooterCollapsed(remoteFooter);
     }
   }, [serverPrefs]);
 
@@ -624,7 +607,7 @@ const chatPlan = composeChatPlan({
       soundEnabled={soundEnabled}
       onSoundToggle={onSoundToggle}
       footerCollapsed={footerCollapsed}
-      onFooterToggle={isEmptyNew ? undefined : () => setFooterCollapsed((v) => !v)}
+      onFooterToggle={isEmptyNew ? undefined : onFooterToggle}
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? (effectiveNewSessionCwd ? `new:${effectiveNewSessionCwd}` : undefined)}
       cwd={session?.cwd ?? effectiveNewSessionCwd}

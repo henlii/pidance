@@ -8,7 +8,7 @@
  *
  * 状态迁移只来自四类触发：
  *   1. send / reset / jump-button → 立即回到 following（由调用方负责随后的 instant pin）；
- *   2. up-intent（wheel 向上、触摸下拉、ArrowUp/PageUp/Home）→ 立即 released，
+ *   2. up-intent（wheel 向上、触摸下拉、拖选文本、ArrowUp/PageUp/Home）→ 立即 released，
  *      即使此时仍在底部区域内——向上意图优先于任何区域判定；
  *   3. scroll 事件按几何判定：到真实底部恢复；向下进入末端区域恢复；
  *      following 中出现向上位移即 released（内容高度未变时，向上位移只可能
@@ -63,6 +63,23 @@ export function getRealBottomTolerance(isMobile: boolean): number {
 
 export function getTouchUpIntentThreshold(isMobile: boolean): number {
   return isMobile ? MOBILE_TOUCH_UP_INTENT_PX : TOUCH_UP_INTENT_PX;
+}
+
+/** 鼠标拖选阈值：按下后位移达到它才算拖选，单击（含切窗口时的那一下）不算。 */
+export const POINTER_SELECT_INTENT_PX = 4;
+
+/**
+ * 鼠标/笔按下后的位移是否构成拖选意图。
+ *
+ * 浏览器对表格等特殊块可能不派发 selectstart，所以调用方还要用位移兜底；
+ * 但不能在 pointerdown 当场释放：窗口从后台切回前台常伴随一次落在正文上的
+ * 单击，那不是阅读意图，释放会把自动跟随停掉。
+ */
+export function isPointerSelectIntent(
+  origin: { x: number; y: number },
+  current: { x: number; y: number },
+): boolean {
+  return Math.hypot(current.x - origin.x, current.y - origin.y) >= POINTER_SELECT_INTENT_PX;
 }
 
 export function isAtRealBottom(distance: number, tolerance: number = REAL_BOTTOM_TOLERANCE_PX): boolean {

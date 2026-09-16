@@ -60,6 +60,7 @@ import {
   saveSidebarWidth,
 } from "@/lib/ui-preferences";
 import { useI18n } from "@/lib/i18n";
+import { getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { hydrateSessionById } from "@/lib/session-hydrate";
 import {
   createNewSessionIntent,
@@ -87,6 +88,37 @@ function AppShellInner() {
   const [initialCwdError, setInitialCwdError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [restoreNonce, setRestoreNonce] = useState(0);
+  // 输入框下方 footer（状态条）折叠开关：shell 级 UI 状态，由 AppShell 持有。
+  // 不能放在 ChatWindow：它按 sessionKey 重挂载，重挂载会重读 localStorage（同源共享，
+  // 别的标签页可能刚改过），本页刚做出的选择会被带走。
+  const [footerCollapsed, setFooterCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("pidance.footerCollapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  // 本页用户手动开合过 footer：此后不再采用远端值（切回前台同步到的旧值会把折叠掀开）
+  const footerChosenRef = useRef(false);
+  const footerServerPrefs = useServerPreferences();
+  useEffect(() => {
+    if (footerChosenRef.current) return;
+    const remoteFooter = getServerPref<unknown>("footerCollapsed");
+    if (typeof remoteFooter === "boolean" && remoteFooter !== footerCollapsed) {
+      setFooterCollapsed(remoteFooter);
+    }
+  }, [footerServerPrefs, footerCollapsed]);
+  const handleFooterToggle = () => {
+    const next = !footerCollapsed;
+    footerChosenRef.current = true;
+    setFooterCollapsed(next);
+    try {
+      localStorage.setItem("pidance.footerCollapsed", next ? "1" : "0");
+    } catch {
+      /* localStorage 不可用时仅内存生效 */
+    }
+    setServerPref("footerCollapsed", next);
+  };
   const navigationStoreRef = useRef(createSessionNavigationStore());
   const catalogStoreRef = useRef(createSessionCatalogStore());
   // 乐观 starting 标记的兜底回收：标记由当前 chat 上报，chat 切走后没人撤销；
@@ -1335,6 +1367,8 @@ function AppShellInner() {
                 onContextUsageChange={handleContextUsageChange}
                 onTurnMetricsChange={handleTurnMetricsChange}
                 onOpenFile={handleOpenLinkedFile}
+                footerCollapsed={footerCollapsed}
+                onFooterToggle={handleFooterToggle}
               />
             ) : initialCwdStatus === "validating" ? (
               <div role="status" style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, color: "var(--text-muted)", textAlign: "center" }}>

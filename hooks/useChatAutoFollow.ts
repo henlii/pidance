@@ -11,6 +11,7 @@ import {
   getScrollDirection,
   getTouchUpIntentThreshold,
   isLayoutDrivenScroll,
+  isPointerSelectIntent,
   reduceAutoFollow,
   shouldShowJumpButton,
   type AutoFollowMode,
@@ -74,6 +75,10 @@ export function useChatAutoFollow({
   const isMobileRef = useRef(false);
   const prefersReducedMotionRef = useRef(false);
   const selectingRef = useRef(false);
+  /** 当前按下的指针 id：松开/取消必须来自同一次交互，避免杂散事件清掉进行中的交互态。 */
+  const activePointerIdRef = useRef<number | null>(null);
+  /** 左键按下起点（鼠标/笔）：拖选判定用，单击不释放跟随。 */
+  const selectOriginRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const [scrollContainerEl, setScrollContainerEl] = useState<HTMLDivElement | null>(null);
   isMobileRef.current = isMobile;
 
@@ -199,45 +204,84 @@ export function useChatAutoFollow({
     };
 
     // 拖选/长按选中文本 = 用户阅读意图：暂停自动跟随，避免 pin 重设 scrollTop 清掉选区。
-    // 表格等特殊块在 Chromium 里可能不触发 selectstart，所以 pointerdown 也释放。
-    const onSelectStart = (event: Event) => {
-      const target = event.target;
-      if (target instanceof Element && target.closest("input, textarea, [contenteditable='true']")) return;
-      if (autoFollowModeRef.current !== "following") return;
-      releaseOnUpIntent();
-    };
+    // 不能在按下或 selectstart 当场释放：从后台切回前台常带一次落在正文上的单击，
+    // Chromium 会为这次单击先发 selectstart（表格等块还会完全不发），按下即释放的表现
+    // 就是「切一下窗口自动滚动就停了」。判据放在松开那一刻：这次按下真的选出了一段
+    // 文本才算阅读意图；拖选位移 ≥ 阈值作为表格等不发 selectstart 场景的兜底。
     const onPointerDown = (event: PointerEvent) => {
+      if (event.pointerType === "touch") {
+        // 触摸只登记「正在交互」（pin 别抢滚动/选区）；方向与阈值由 touchstart/touchmove 把关
+        selectingRef.current = true;
+        activePointerIdRef.current = event.pointerId;
+        return;
+      }
       if (event.button !== 0) return;
       const target = event.target;
       if (target instanceof Element && target.closest("input, textarea, [contenteditable='true'], button, a")) return;
       selectingRef.current = true;
-      // 只改 ref：pointerdown 里 setState 会重渲染，把还没形成的选区掐掉。
+      activePointerIdRef.current = event.pointerId;
+      selectOriginRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      const origin = selectOriginRef.current;
+      if (!origin || !selectingRef.current || origin.pointerId !== event.pointerId) return;
+      if (!isPointerSelectIntent(origin, { x: event.clientX, y: event.clientY })) return;
+      selectOriginRef.current = null;
+      // 只改 ref（不用 releaseOnUpIntent）：pointermove 里 setState 会重渲染，
+      // 把还没成形的选区拖断；按钮状态由随后的 pointerup / scroll 事件对齐。
       autoFollowModeRef.current = reduceAutoFollow(autoFollowModeRef.current, { kind: "up-intent" });
     };
-    const onPointerUp = () => {
+    const onPointerUp = (event: PointerEvent) => {
+      if (activePointerIdRef.current !== event.pointerId) {
+        // 不是这一次交互的松开/取消（别的指针，或按下时没登记的控件区）：
+        // 不动交互态，也不补钉底
+        return;
+      }
+      const pressedContent = selectingRef.current;
+      activePointerIdRef.current = null;
+      selectOriginRef.current = null;
       selectingRef.current = false;
+      if (pressedContent && window.getSelection()?.type === "Range") {
+        // 双击选词/长按选中/拖选都会在松开时留下 Range；仅是单击留下的 Caret 不算
+        autoFollowModeRef.current = reduceAutoFollow(autoFollowModeRef.current, { kind: "up-intent" });
+      } else if (autoFollowModeRef.current === "following") {
+        // 按住期间内容增长被 pinToBottom 的交互态挡掉了；仍跟随就补一次守卫钉底，
+        // 否则内容会停在半途（下一次增长才被拉回）。只补钉底，不改成 released/following。
+        requestAnimationFrame(() => {
+          if (autoFollowModeRef.current === "following") pinToBottom("instant");
+        });
+      }
       updateJumpButtonVisibility();
     };
+    // 按住后切走窗口/拖到窗外：pointerup 可能落不到本页，
+    // 不清掉选择态就会让 pinToBottom 从此永久跳过（表现为自动滚动再也不跟随）。
+    const onWindowBlur = () => {
+      activePointerIdRef.current = null;
+      selectOriginRef.current = null;
+      selectingRef.current = false;
+    };
 
-    container.addEventListener("selectstart", onSelectStart);
     container.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", onPointerUp);
+    window.addEventListener("blur", onWindowBlur);
     container.addEventListener("wheel", onWheel, { passive: true });
     container.addEventListener("touchstart", onTouchStart, { passive: true });
     container.addEventListener("touchmove", onTouchMove, { passive: true });
     window.addEventListener("keydown", onKeyDown);
     return () => {
-      container.removeEventListener("selectstart", onSelectStart);
       container.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerUp);
+      window.removeEventListener("blur", onWindowBlur);
       container.removeEventListener("wheel", onWheel);
       container.removeEventListener("touchstart", onTouchStart);
       container.removeEventListener("touchmove", onTouchMove);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [scrollContainerEl, applyAutoFollowMode, updateJumpButtonVisibility]);
+  }, [scrollContainerEl, applyAutoFollowMode, updateJumpButtonVisibility, pinToBottom]);
 
   useEffect(() => {
     const container = scrollContainerEl;
