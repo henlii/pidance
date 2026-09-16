@@ -958,7 +958,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const slashCommandCountLabel = filteredSlashCommands.length === 1
     ? t(slashQuery ? "input_matchCountOne" : "input_commandCountOne")
     : t(slashQuery ? "input_matchCount" : "input_commandCount", { count: filteredSlashCommands.length });
-  const hasInputText = Boolean(value.trim()) || hasReadyUploads;
+  // 可入队的内容：正文、已附加的图（流式期只允许图）、或已就绪的上传。
+  // 旧定义漏了 attachedImages：纯图消息（不写正文）时发送按钮直接禁用，
+  // 用户点了没反应，也无任何提示。
+  const hasInputText = Boolean(value.trim()) || attachedImages.length > 0 || hasReadyUploads;
   const canQueueStreamingMessage = hasInputText && !hasUploading;
 
   // ── @ file autocomplete ──────────────────────────────────────────────────
