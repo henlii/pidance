@@ -285,7 +285,7 @@ function focusTriggerButton(anchor: HTMLElement | null): void {
 }
 
 /** 队列行。`stateLabel` 非空时额外渲染状态徽标（在途 / 结果未知）。 */
-function QueuedMessageRow({ kind, text, state, stateLabel }: { kind: "steer" | "follow-up"; text: string; state?: QueuedRow["state"]; stateLabel?: string }) {
+function QueuedMessageRow({ kind, text, state, stateLabel, imageCount }: { kind: "steer" | "follow-up"; text: string; state?: QueuedRow["state"]; stateLabel?: string; imageCount?: number }) {
   return (
     <div
       title={text}
@@ -312,6 +312,30 @@ function QueuedMessageRow({ kind, text, state, stateLabel }: { kind: "steer" | "
       >
         {kind}
       </span>
+      {imageCount ? (
+        // 图片数量必须可见：带图消息在 UI 里只有一个文字摘要，没有图数就看不出图还在。
+        <span
+          style={{
+            flexShrink: 0,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 3,
+            fontSize: 10,
+            fontFamily: "var(--font-mono)",
+            padding: "1px 7px",
+            borderRadius: 999,
+            border: "1px solid var(--border)",
+            color: "var(--text-dim)",
+          }}
+        >
+          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+            <path d="m21 15-5-5L5 21" />
+          </svg>
+          {imageCount}
+        </span>
+      ) : null}
       {state && state !== "waiting" && (
         // 在途/结果未知必须显式可见：用户不能把「已提交未确认」当成还排队着。
         <span
@@ -353,7 +377,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   // 队列行（含在途 claimed 与结果未知 unknown）；旧 Host 不回 followUpRows 时回落正文。
   const queuedRows: QueuedRow[] = queuedMessages?.followUpRows?.length
     ? queuedMessages.followUpRows
-    : (queuedMessages?.followUp ?? []).map((text, index) => ({ id: `legacy-${index}`, text, state: "waiting" as const }));
+    : (queuedMessages?.followUp ?? []).map((text, index) => ({ id: `legacy-${index}`, text, state: "waiting" as const, imageCount: 0 }));
   const queueStateLabel = (state: QueuedRow["state"]) => state === "unknown"
     ? t("input_queueStateUnknown")
     : state === "claimed" ? t("input_queueStateClaimed") : undefined;
@@ -570,8 +594,23 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     });
   }, [value]);
 
+  /**
+   * 把图片追加到草稿（去重）：失败回滚与队列取回共用。
+   * 预览只是浏览器临时态，这里按 base64 重建。
+   */
+  const appendAttachedImages = useCallback((images?: AttachedImage[]) => {
+    if (!images?.length) return;
+    const restored = images.map((image) => draftImageToAttachedImage(imageToDraftImage(image)));
+    setAttachedImages((previous) => {
+      const known = new Set(previous.map((image) => `${image.mimeType}:${image.data}`));
+      return [...previous, ...restored.filter((image) => !known.has(`${image.mimeType}:${image.data}`))];
+    });
+  }, []);
+
   /** 把 text 放到当前草稿之前（与 TUI 的队列恢复一致，空行分隔）。 */
-  const prependDraftText = useCallback((text: string) => {
+  const prependDraftText = useCallback((text: string, images?: AttachedImage[]) => {
+    if (!text.trim() && !images?.length) return;
+    appendAttachedImages(images);
     if (!text.trim()) return;
     const ta = textareaRef.current;
     const current = ta ? ta.value : value;
@@ -592,14 +631,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     prependText: prependDraftText,
     restoreDraft(text: string, failedImages?: AttachedImage[]) {
       // 失败回滚：正文与图片一起回原位（调用方保证只在原会话上调用）。
-      // 预览是浏览器临时态，clearInput 已回收旧 blob URL，这里按 base64 重建。
-      if (failedImages?.length) {
-        const restored = failedImages.map((image) => draftImageToAttachedImage(imageToDraftImage(image)));
-        setAttachedImages((previous) => {
-          const known = new Set(previous.map((image) => `${image.mimeType}:${image.data}`));
-          return [...previous, ...restored.filter((image) => !known.has(`${image.mimeType}:${image.data}`))];
-        });
-      }
+      appendAttachedImages(failedImages);
       prependDraftText(text);
     },
     replaceText(text: string) {
@@ -1509,11 +1541,29 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         ref={fileInputRef}
         type="file"
         multiple
-        disabled={blocked || isStreaming}
+        disabled={blocked}
         style={{ display: "none" }}
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
-          void processAttachmentFiles(files);
+          // 运行中只收图片（入队语义），其他文件等空闲：以前整个 input 在流式期被
+          // disabled，图片实际上只能在粘贴路径附件，与「带图入队」对不上。
+          if (isStreaming) {
+            const images = files.filter(isRasterImageFile);
+            if (images.length) void processImageFiles(images);
+            const others = files.filter((file) => !isRasterImageFile(file));
+            if (others.length) {
+              setAttachedUploads((prev) => [...prev, ...others.map((file) => ({
+                id: makeUploadId(),
+                name: file.name,
+                mimeType: file.type || "application/octet-stream",
+                size: file.size,
+                status: "error" as const,
+                error: t("input_uploadWhileStreaming"),
+              }))]);
+            }
+          } else {
+            void processAttachmentFiles(files);
+          }
           e.target.value = "";
         }}
       />
@@ -1647,6 +1697,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 text={row.text}
                 state={row.state}
                 stateLabel={queueStateLabel(row.state)}
+                imageCount={row.imageCount}
               />
             ))}
           </div>

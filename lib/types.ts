@@ -69,7 +69,8 @@ export interface AttachedImage {
 export interface ChatInputHandle {
   insertText: (text: string) => void;
   insertIfEmpty: (text: string) => void;
-  prependText: (text: string) => void;
+  /** 把 text（可选带图片）放到当前草稿之前（队列取回语义）。 */
+  prependText: (text: string, images?: AttachedImage[]) => void;
   /** 整体替换输入框内容（分支/新会话预填语义，对齐 OC replace）。 */
   replaceText: (text: string) => void;
   addImages: (files: File[]) => void;

@@ -23,11 +23,61 @@
 
 export type FollowUpItemState = "waiting" | "claimed" | "unknown";
 
+/**
+ * 队列条目携带的图片引用（issue #42 / A11）。
+ *
+ * 字节落在产品自己的 outbox 目录里（见 lib/chat-attachments.ts），条目只持引用：
+ * 偏好文件保持小而可读，且不必把 base64 在 prefs/SSE/回执里反复搬运。path 的
+ * 合法性（属于本会话 outbox）由 Host 在受理写入时校验，本模块只做结构解码。
+ */
+export type QueuedImageRef = {
+  /** 稳定身份 = 落盘文件名；客户端回传时按它复现同一份字节。 */
+  id: string;
+  path: string;
+  mimeType: string;
+  name: string;
+};
+
+/** 解码器容忍上限：超出部分丢弃（防御性边界，写入侧另有拒绝）。 */
+export const MAX_QUEUED_ITEM_IMAGES = 16;
+
 export type FollowUpItem = {
   id: string;
   text: string;
   state: FollowUpItemState;
+  /** 仅在有图时存在；空数组一律不写（保持回执/持久化形状老实）。 */
+  images?: QueuedImageRef[];
 };
+
+export function parseQueuedImageRefs(value: unknown): QueuedImageRef[] {
+  if (!Array.isArray(value)) return [];
+  const refs: QueuedImageRef[] = [];
+  for (const entry of value) {
+    if (refs.length >= MAX_QUEUED_ITEM_IMAGES) break;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const path = typeof record.path === "string" ? record.path.trim() : "";
+    const mimeType = typeof record.mimeType === "string" ? record.mimeType.trim() : "";
+    if (!path || !mimeType.startsWith("image/")) continue;
+    const fallbackId = path.split("/").pop() ?? "";
+    const id = typeof record.id === "string" && record.id.trim() ? record.id.trim() : fallbackId;
+    if (!id) continue;
+    const name = typeof record.name === "string" && record.name.trim() ? record.name.trim() : id;
+    refs.push({ id, path, mimeType, name });
+  }
+  return refs;
+}
+
+/** 两份引用的身份是否一致（id 即落盘名，不需要比 path）。 */
+export function sameQueuedImages(
+  a: readonly QueuedImageRef[] | undefined,
+  b: readonly QueuedImageRef[] | undefined,
+): boolean {
+  const left = a ?? [];
+  const right = b ?? [];
+  if (left.length !== right.length) return false;
+  return left.every((ref, index) => ref.id === right[index].id);
+}
 
 export type FollowUpQueueState = {
   items: FollowUpItem[];
@@ -62,8 +112,14 @@ function randomId(): string {
   return `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function newFollowUpItem(text: string, state: FollowUpItemState = "waiting"): FollowUpItem {
-  return { id: randomId(), text, state };
+export function newFollowUpItem(
+  text: string,
+  state: FollowUpItemState = "waiting",
+  images?: readonly QueuedImageRef[],
+): FollowUpItem {
+  const item: FollowUpItem = { id: randomId(), text, state };
+  if (images?.length) item.images = [...images];
+  return item;
 }
 
 /**
@@ -87,12 +143,14 @@ function parseItem(value: unknown, index: number): FollowUpItem | null {
     return text ? { id: legacyItemId(index, value), text, state: "waiting" } : null;
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as { id?: unknown; text?: unknown; state?: unknown };
+  const record = value as { id?: unknown; text?: unknown; state?: unknown; images?: unknown };
   if (typeof record.text !== "string" || !record.text.trim()) return null;
+  const images = parseQueuedImageRefs(record.images);
   return {
     id: typeof record.id === "string" && record.id.trim() ? record.id : legacyItemId(index, record.text),
     text: record.text,
     state: normalizeFollowUpItemState(record.state),
+    ...(images.length ? { images } : {}),
   };
 }
 
@@ -122,7 +180,12 @@ export function serializeFollowUpQueue(state: FollowUpQueueState): {
   revision: number;
 } {
   return {
-    items: state.items.map((item) => ({ id: item.id, text: item.text, state: item.state })),
+    items: state.items.map((item) => ({
+      id: item.id,
+      text: item.text,
+      state: item.state,
+      ...(item.images?.length ? { images: item.images.map((ref) => ({ ...ref })) } : {}),
+    })),
     revision: state.revision,
   };
 }
@@ -139,31 +202,63 @@ export function followUpItemTexts(items: readonly FollowUpItem[]): string[] {
 /**
  * 整包写入（`set_follow_up_queue`）与当前条目的对齐。
  *
- * 客户端只传正文数组（它没有服务端条目身份）；服务端按「正文 + 出现顺序」与当前
- * 条目对齐，保留未变化条目的 id 与状态，新出现的正文成为新 `waiting` 条目。
- * 不能用 `Set(正文)` 之类做集合运算：期间新入队的同文条目会被误删，同文两条也
- * 会塌成一条身份。
+ * 客户端传的是「正文 + 该条目的图片引用」（它没有服务端条目身份）；服务端按
+ * 「正文 + 出现顺序」与当前条目对齐，保留未变化条目的 id 与状态，新出现的正文
+ * 成为新 `waiting` 条目。不能用 `Set(正文)` 之类做集合运算：期间新入队的同文
+ * 条目会被误删，同文两条也会塌成一条身份。
+ *
+ * 图片处置：写载荷没带图的命中原条目→保留原图（旧客户端/旧回执不得静默丢图）；
+ * 带了图的以写载荷为准（校验在 Host 侧）。
  */
 export function reconcileFollowUpItems(
   current: readonly FollowUpItem[],
-  texts: readonly string[],
+  payloads: readonly { text: string; images?: readonly QueuedImageRef[] }[],
 ): FollowUpItem[] {
   const used = new Array<boolean>(current.length).fill(false);
   const next: FollowUpItem[] = [];
-  for (const text of texts) {
+  for (const payload of payloads) {
     let match = -1;
     for (let index = 0; index < current.length; index++) {
-      if (!used[index] && current[index].text === text) {
+      const candidate = current[index];
+      if (used[index] || candidate.text !== payload.text) continue;
+      // 同文的多个条目：优先命中图片也一致的那个，否则同文两条会互换图片。
+      if (sameQueuedImages(candidate.images, payload.images)) {
         match = index;
         break;
       }
+      if (match < 0) match = index;
     }
     if (match >= 0) {
       used[match] = true;
-      next.push(current[match]);
-    } else {
-      next.push(newFollowUpItem(text, "waiting"));
+      const existing = current[match];
+      const images = payload.images?.length ? payload.images : existing.images;
+      next.push({
+        id: existing.id,
+        text: payload.text,
+        state: existing.state,
+        ...(images?.length ? { images: [...images] } : {}),
+      });
+      continue;
     }
+    next.push(payload.images?.length
+      ? newFollowUpItem(payload.text, "waiting", payload.images)
+      : newFollowUpItem(payload.text, "waiting"));
   }
   return next;
+}
+
+/** 多条条目合并为一条投递载荷（整队转引导/自动投递）：正文与图片都要带上。 */
+export function mergeFollowUpPayload(
+  items: readonly FollowUpItem[],
+  extra?: string,
+): { text: string; images: QueuedImageRef[] } {
+  const texts = [...followUpItemTexts(items), ...(extra?.trim() ? [extra.trim()] : [])]
+    .map((text) => text.trim())
+    .filter((text) => text.length > 0);
+  return { text: texts.join("\n"), images: followUpItemImages(items) };
+}
+
+/** 条目图片按顺序摊平（投递时与正文一同交给 SDK）。 */
+export function followUpItemImages(items: readonly FollowUpItem[]): QueuedImageRef[] {
+  return items.flatMap((item) => item.images ?? []);
 }

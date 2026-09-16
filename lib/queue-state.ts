@@ -22,15 +22,38 @@
  * 4. **按 sessionId 分账**。切走会话后失败也只能修正原会话条目。
  */
 
-import type { FollowUpItem, FollowUpItemState } from "./session-queue";
+import type { QueueItemImagePayload, QueueItemPayload } from "./agent-commands";
+import type { FollowUpItem, FollowUpItemState, QueuedImageRef } from "./session-queue";
+
+export type { QueueItemPayload };
+
+/** 权威条目 → 写入载荷（图片按引用回传，Host 按 id 复用同一份文件）。 */
+export function itemToPayload(item: FollowUpItem): QueueItemPayload {
+  return {
+    text: item.text,
+    ...(item.images?.length
+      ? { images: item.images.map((ref): QueueItemImagePayload => ({
+        source: "ref",
+        id: ref.id,
+        path: ref.path,
+        mimeType: ref.mimeType,
+        name: ref.name,
+      })) }
+      : {}),
+  };
+}
+
+function toPayload(value: string | QueueItemPayload): QueueItemPayload {
+  return typeof value === "string" ? { text: value } : value;
+}
 
 export type QueueEntry = {
-  /** 权威可见条目（waiting + unknown），含身份与状态。 */
+  /** 权威可见条目（waiting + unknown），含身份、状态与图片引用。 */
   items: FollowUpItem[];
   /** 已提交未确认的正文（claimed）。 */
   inFlight: string[];
-  /** 乐观待提交值；null = 没有在途本地改动。 */
-  pending: string[] | null;
+  /** 乐观待提交载荷（正文 + 新图 base64 / 已有图引用）；null = 没有在途本地改动。 */
+  pending: QueueItemPayload[] | null;
   /** 本地代次：每次提出 pending 或采纳快照 +1。 */
   revision: number;
   /** 服务端 CAS 基线；null = 未知（旧数据），此时不带 expectedRevision。 */
@@ -69,17 +92,55 @@ export function sendableItemTexts(items: readonly FollowUpItem[]): string[] {
 
 /** 显示投影：优先乐观待提交值，否则回落到权威条目。 */
 export function projection(entry: QueueEntry): string[] {
-  return [...(entry.pending ?? sendableItemTexts(entry.items))];
+  return entry.pending
+    ? entry.pending.map((payload) => payload.text)
+    : sendableItemTexts(entry.items);
 }
 
-/** UI 行投影：权威条目 + 在途行，供队列面板显示状态。 */
-export function queueRows(entry: QueueEntry): { id: string; text: string; state: FollowUpItemState }[] {
+/**
+ * 下一次写入 Host 的整包载荷（正文 + 图片引用）。
+ *
+ * 有乐观值时以它为准（它就是用户想看到的目标状态），否则从权威条目重建；
+ * 两者都必须把图片带上，否则一次「只传正文」的写入会让 Host 丢掉队列里的图。
+ */
+export function payloadsForWrite(entry: QueueEntry): QueueItemPayload[] {
+  return entry.pending ?? entry.items.filter((item) => item.state !== "claimed").map(itemToPayload);
+}
+
+/** 权威条目里的图片引用按顺序摊平（取回时逐张回读）。 */
+export function itemImageRefs(items: readonly FollowUpItem[]): QueuedImageRef[] {
+  return items.flatMap((item) => item.images ?? []);
+}
+
+/** UI 行投影：权威条目 + 在途行，供队列面板显示状态与图片数量。 */
+export function queueRows(entry: QueueEntry): {
+  id: string;
+  text: string;
+  state: FollowUpItemState;
+  imageCount: number;
+}[] {
+  const count = (images?: readonly unknown[]) => (images?.length ?? 0);
   if (entry.pending) {
-    return entry.pending.map((text, index) => ({ id: `pending-${index}`, text, state: "waiting" as const }));
+    return entry.pending.map((payload, index) => ({
+      id: `pending-${index}`,
+      text: payload.text,
+      state: "waiting" as const,
+      imageCount: count(payload.images),
+    }));
   }
   return [
-    ...entry.items.map((item) => ({ id: item.id, text: item.text, state: item.state })),
-    ...entry.inFlight.map((text, index) => ({ id: `inflight-${index}`, text, state: "claimed" as const })),
+    ...entry.items.map((item) => ({
+      id: item.id,
+      text: item.text,
+      state: item.state,
+      imageCount: count(item.images),
+    })),
+    ...entry.inFlight.map((text, index) => ({
+      id: `inflight-${index}`,
+      text,
+      state: "claimed" as const,
+      imageCount: 0,
+    })),
   ];
 }
 
@@ -92,16 +153,16 @@ function put(book: QueueBook, sessionId: string, entry: QueueEntry): QueueBook {
   return { ...book, [sessionId]: entry };
 }
 
-/** 提出新的乐观值；返回本次代次供结算 CAS。 */
+/** 提出新的乐观载荷；返回本次代次供结算 CAS。 */
 export function proposeQueue(
   book: QueueBook,
   sessionId: string,
-  items: readonly string[],
+  items: readonly (string | QueueItemPayload)[],
 ): { book: QueueBook; revision: number } {
   const entry = queueEntry(book, sessionId);
   const revision = entry.revision + 1;
   return {
-    book: put(book, sessionId, { ...entry, pending: [...items], revision }),
+    book: put(book, sessionId, { ...entry, pending: items.map(toPayload), revision }),
     revision,
   };
 }

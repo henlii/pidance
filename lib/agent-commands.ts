@@ -43,10 +43,10 @@ export type FollowUpCommand = {
   images?: PromptImage[];
 };
 
-/** 整包写入等待队列：客户端只传正文，条目身份由 Host 对齐。 */
+/** 整包写入等待队列：客户端传正文（可带图片引用/新图 base64），条目身份由 Host 对齐。 */
 export type SetFollowUpQueueCommand = {
   type: "set_follow_up_queue";
-  items: string[];
+  items: QueueItemPayload[];
   expectedRevision: number | null;
   submissionId: string;
 };
@@ -122,7 +122,12 @@ type QueueReceiptBase = { revision: number; items: FollowUpItem[]; inFlight: str
 export type QueueWriteReceipt =
   | ({ ok: true } & QueueReceiptBase)
   | ({ ok: false; conflict: true; reason: "revision" } & QueueReceiptBase)
-  /** 落盘失败：内存未变，调用方不得声称已入队。 */
+  /**
+   * 落盘失败（队列或条目图片）：内存未变，调用方不得声称已入队。
+   *
+   * 图片落盘失败与队列落盘失败对用户是同一件事（内容没被可靠保存），因此共用
+   * 这个回执，而不是新增一种客户端还得单独处置的失败形态。
+   */
   | ({ ok: false; persist: true } & QueueReceiptBase);
 
 export type QueueDispatchReceipt =
@@ -281,6 +286,52 @@ export function parseFollowUpCommand(
   };
 }
 
+/** 队列条目的图片载荷：新图走 base64，已入库的图按引用回传。 */
+export type QueueItemImagePayload =
+  | { source: "data"; data: string; mimeType: string; name?: string }
+  | { source: "ref"; id: string; path: string; mimeType: string; name: string };
+
+export type QueueItemPayload = {
+  text: string;
+  images?: QueueItemImagePayload[];
+};
+
+function parseQueueItemImages(value: unknown): QueueItemImagePayload[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error("invalid queue image");
+  if (value.length === 0) return undefined;
+  const images: QueueItemImagePayload[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error("invalid queue image");
+    }
+    const record = entry as Record<string, unknown>;
+    const mimeType = normalizeBinaryMimeType(
+      typeof record.mimeType === "string" ? record.mimeType : undefined,
+    );
+    if (!mimeType?.startsWith("image/")) throw new Error("invalid queue image");
+    const name = typeof record.name === "string" && record.name.trim() ? record.name.trim() : undefined;
+    if (typeof record.data === "string" && record.data.length > 0) {
+      if (record.data.length > PROMPT_IMAGE_MAX_BASE64_BYTES) {
+        throw new Error("invalid queue image: payload too large");
+      }
+      images.push({ source: "data", data: record.data, mimeType, ...(name ? { name } : {}) });
+      continue;
+    }
+    const path = typeof record.path === "string" ? record.path.trim() : "";
+    const id = typeof record.id === "string" ? record.id.trim() : "";
+    if (!path || !id) throw new Error("invalid queue image");
+    images.push({ source: "ref", id, path, mimeType, name: name ?? id });
+  }
+  return images.length ? images : undefined;
+}
+
+/**
+ * 队列条目解码：字符串是旧格式（只有正文），对象可带图片。
+ *
+ * 非字符串且非对象的条目一律拒绝：旧行为是静默丢弃，于是「发错了格式」变成一次
+ * **空队列写入**，把用户未投递的消息悄悄清掉（issue #42 关注的正是这类静默丢失）。
+ */
 export function parseSetFollowUpQueueCommand(
   body: Record<string, unknown>,
   makeId: () => string = defaultSubmissionId,
@@ -288,14 +339,26 @@ export function parseSetFollowUpQueueCommand(
   if (body.items !== undefined && !Array.isArray(body.items)) {
     throw new Error("items must be an array");
   }
-  // 非字符串条目一律拒绝：旧行为是静默丢弃，于是「发错了格式」变成一次**空队列写入**，
-  // 把用户未投递的消息悄悄清掉（issue #42 关注的正是这类静默丢失）。
-  if (Array.isArray(body.items) && body.items.some((entry) => typeof entry !== "string" || entry.trim().length === 0)) {
-    throw new Error("items must be an array of non-empty strings");
+  const items: QueueItemPayload[] = [];
+  for (const entry of Array.isArray(body.items) ? body.items : []) {
+    if (typeof entry === "string") {
+      if (!entry.trim()) throw new Error("items must not contain empty text");
+      items.push({ text: entry });
+      continue;
+    }
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error("items must be strings or { text, images? } objects");
+    }
+    const record = entry as Record<string, unknown>;
+    if (typeof record.text !== "string" || !record.text.trim()) {
+      throw new Error("items must be strings or { text, images? } objects");
+    }
+    const images = parseQueueItemImages(record.images);
+    items.push({ text: record.text, ...(images ? { images } : {}) });
   }
   return {
     type: "set_follow_up_queue",
-    items: normalizeFollowUpItems(body.items),
+    items,
     expectedRevision: parseExpectedRevision(body.expectedRevision),
     submissionId: submissionIdOf(body, makeId),
   };

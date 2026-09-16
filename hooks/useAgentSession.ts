@@ -75,6 +75,8 @@ import { submissionKey } from "@/lib/session-timeline";
 import {
   adoptServerSnapshot,
   isQueueWriteConflict,
+  itemImageRefs,
+  payloadsForWrite,
   projection,
   proposeQueue,
   queueEntry,
@@ -86,7 +88,9 @@ import {
   type QueueReceiptView,
   type QueueSnapshot,
 } from "@/lib/queue-state";
-import { normalizeFollowUpItemList, type FollowUpItem } from "@/lib/session-queue";
+import { normalizeFollowUpItemList, type FollowUpItem, type QueuedImageRef } from "@/lib/session-queue";
+import type { QueueItemPayload } from "@/lib/agent-commands";
+import { encodeFilePathForApi } from "@/lib/file-paths";
 import { canApplyProjection } from "@/lib/session-projection";
 import type { TimelineHydrateMode, TurnMetrics } from "@/lib/browser-session-runtime-registry";
 import {
@@ -122,6 +126,47 @@ type StreamAction =
   | { type: "update"; message: Partial<AgentMessage> | null }
   | { type: "end" }
   | { type: "reset" };
+
+/** 输入框图片 → 队列载荷（安全尺寸 base64 直传，Host 落盘到会话 outbox）。 */
+function toQueuePayloads(text: string, images?: AttachedImage[]): QueueItemPayload[] {
+  if (!images?.length) return text ? [{ text }] : [];
+  return [{
+    text,
+    images: images.map((image) => ({ source: "data" as const, data: image.data, mimeType: image.mimeType })),
+  }];
+}
+
+/**
+ * 队列取回：把 Host outbox 里的图片字节读回输入框。
+ *
+ * 不写 `original`：outbox 副本会随队列条目一起删除，原图信息会让回填的消息
+ * 指向一个很快就不存在的文件。单张读失败就跳过，不回滚已经取回的正文。
+ */
+async function fetchQueueImages(refs: readonly QueuedImageRef[]): Promise<AttachedImage[]> {
+  const loaded = await Promise.all(refs.map(async (ref): Promise<AttachedImage | null> => {
+    try {
+      // 必须带 type=read：不带 type 的 GET 默认是目录列表，对文件返回 400。
+      const response = await fetch(
+        `/api/files/${encodeFilePathForApi(ref.path)}?type=read&mime=${encodeURIComponent(ref.mimeType)}`,
+        { cache: "no-store" },
+      );
+      if (!response.ok) return null;
+      const blob = await response.blob();
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+        reader.onerror = () => reject(reader.error ?? new Error("读取排队图片失败"));
+        reader.readAsDataURL(blob);
+      });
+      const data = dataUrl.slice(dataUrl.indexOf(",") + 1);
+      if (!data) return null;
+      return { data, mimeType: ref.mimeType, previewUrl: dataUrl };
+    } catch {
+      return null;
+    }
+  }));
+  return loaded.filter((image): image is AttachedImage => image !== null);
+}
 
 function streamReducer(state: StreamingState, action: StreamAction): StreamingState {
   switch (action.type) {
@@ -183,6 +228,8 @@ export interface QueuedMessageRow {
   text: string;
   /** waiting = 待投递；claimed = 已提交未确认；unknown = 结果未知（绝不自动重投） */
   state: "waiting" | "claimed" | "unknown";
+  /** 本条目携带的图片数量（图片实字节在 Host 侧的 outbox 目录，不在浏览器内存）。 */
+  imageCount: number;
 }
 
 export interface QueuedMessages {
@@ -539,7 +586,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * 成功/冲突都以回执里的权威快照为准：只更新版本不更新内容会形成「新版本 +
    * 旧内容」，下一次合法 CAS 就会删掉别人刚入队的消息（R2）。
    */
-  const updateLocalFollowUp = useCallback(async (next: string[], targetSid?: string) => {
+  const updateLocalFollowUp = useCallback(async (
+    next: readonly (string | QueueItemPayload)[],
+    targetSid?: string,
+  ) => {
     const sid = targetSid ?? currentQueueSessionIdRef.current ?? sessionIdRef.current;
     if (!sid) return;
     const proposal = proposeQueue(queueBookRef.current, sid, next);
@@ -551,9 +601,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Host 同步持久化并在 settled 后投递；浏览器不再并发写同一 queue prefs。
         // 带 expectedRevision：多标签各自基于同一快照整组替换时由服务端 CAS
         // 拒绝过期写入，而不是静默覆盖另一标签页刚入队的消息。
+        // items 带上图片载荷（新图 base64 / 已有图引用）：不传等于把队列里的图删掉。
+        const writeItems = payloadsForWrite(queueEntry(queueBookRef.current, sid));
         const receipt = await sendAgentCommand<QueueReceiptView>(sid, {
           type: "set_follow_up_queue",
-          items: [...next],
+          items: writeItems,
           expectedRevision: queueEntry(queueBookRef.current, sid).serverRevision,
         });
         queueBookRef.current = settleSyncSuccess(
@@ -2680,21 +2732,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       opts.chatInputRef?.current?.restoreDraft(text, images);
     };
     if (images?.length && running) {
-      // 运行中带图：走 follow_up 命令（Host → SDK 的 follow-up 队列支持图片），
-      // 不能退化成「运行中直接 prompt」（会被拒），也不能丢图。
-      const piImages = images.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+      // 运行中带图：不再整条回绝（旧行为让用户只能等结束后手动重发），
+      // 统一入队：图片安全尺寸字节由 Host 先落到会话 outbox，投递时再回读。
       try {
-        const receipt = await sendAgentCommand<PromptReceipt>(sid, { type: "follow_up", message: text, images: piImages });
-        if (receipt?.status === "rejected") {
-          restoreDraft();
-          addNotice({ type: "error", message: queueRejectionMessage(receipt.reason) });
-          return;
-        }
-        acceptQueuedReceipt(sid, receipt?.queue);
+        const entry = queueEntry(queueBookRef.current, sid);
+        await updateLocalFollowUp([...payloadsForWrite(entry), ...toQueuePayloads(text, images)], sid);
         ensureEventsConnected(sid);
-      } catch (e) {
+      } catch (error) {
         restoreDraft();
-        addNotice({ type: "error", message: String(e instanceof Error ? e.message : e) });
+        addNotice({
+          type: "error",
+          message: error instanceof Error ? error.message : String(error),
+        });
       }
       return;
     }
@@ -2717,12 +2766,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // 按**原因**处置，只有 busy/compacting/bash 这类延迟语义才转入队列，
         // 无模型/鉴权/媒体错误必须退回输入框而不是排队（否则错误被当成功）。
         if (receipt?.status === "rejected") {
-          if (piImages?.length || !isQueueablePromptReason(receipt.reason)) {
+          // 无模型/鉴权等不可延迟的原因必须退回输入框（否则错误被当成功）；
+          // busy/compacting/bash 这类延迟语义转入队列——包括带图消息，
+          // 图片随载荷一起入队（Host 落盘 outbox），不再因为「带图」而回退。
+          if (!isQueueablePromptReason(receipt.reason)) {
             restoreDraft();
             addNotice({ type: "error", message: queueRejectionMessage(receipt.reason) });
             return;
           }
-          await updateLocalFollowUp([...projection(queueEntry(queueBookRef.current, sid)), text], sid);
+          const entry = queueEntry(queueBookRef.current, sid);
+          await updateLocalFollowUp([...payloadsForWrite(entry), ...toQueuePayloads(text, images)], sid);
           ensureEventsConnected(sid);
         }
       } catch (e) {
@@ -2733,7 +2786,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     // 运行中入队：Host 同步落盘并返回权威队列；失败时退回本会话草稿。
     try {
-      await updateLocalFollowUp([...projection(queueEntry(queueBookRef.current, sid)), text], sid);
+      const entry = queueEntry(queueBookRef.current, sid);
+      await updateLocalFollowUp([...payloadsForWrite(entry), ...toQueuePayloads(text, images)], sid);
       // 入队即把本会话 SSE 连上（Host 空闲时 set_follow_up_queue 已 wake host）；
       // 否则 Host 稍后自动 flush 的 agent_start/message 事件没有订阅源 → UI 不更新，
       // 直到刷新才看见队列消息真正执行。
@@ -2769,13 +2823,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (isReadOnly) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
-    const items = projection(queueEntry(queueBookRef.current, sid));
+    const entry = queueEntry(queueBookRef.current, sid);
+    const items = projection(entry);
     if (items.length === 0) return;
-    // 取回：服务端确认清队后再回填，避免清除失败时同一消息同时留在两处。
+    // 图片先读回（Host 的 outbox 副本会随清队一起删掉），再确认清队，
+    // 避免清除失败时同一消息同时留在两处。
+    let images: AttachedImage[] = [];
+    try {
+      images = await fetchQueueImages(itemImageRefs(entry.items));
+    } catch {
+      images = [];
+    }
+    if (sessionIdRef.current !== sid) return;
     try {
       await updateLocalFollowUp([], sid);
       if (sessionIdRef.current !== sid) return;
-      opts.chatInputRef?.current?.prependText(joinQueueForRecall(items));
+      opts.chatInputRef?.current?.prependText(joinQueueForRecall(items), images);
     } catch (error) {
       addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
     }
