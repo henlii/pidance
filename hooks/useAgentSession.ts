@@ -87,7 +87,6 @@ import {
   queueEntry,
   queueRows,
   settleQueueWrite,
-  settleSyncFailure,
   type QueueBook,
   type QueueEntry,
   type QueueReceiptView,

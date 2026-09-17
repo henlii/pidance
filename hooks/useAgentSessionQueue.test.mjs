@@ -394,3 +394,61 @@ test("I7-c：未确认但服务端已受理（回执丢失）的载荷，不得�
     assert.deepEqual(queue.projection(entry), ["landed"], "它仍在队列里等待处置");
   }, { streaming: false });
 });
+
+test("J1：CAS 冲突后更早的 unknown 提交被定论，后续入队不得删掉别的标签页条目", async () => {
+  await withHost(async (host) => {
+    host.promptRunning = true;
+    const written = await host.send({ type: "set_follow_up_queue", items: ["keep"] });
+    const restored = [];
+    let calls = 0;
+    const env = environment(host, written.revision, restored, written.items, {
+      sendAgentCommand: async (_sid, command) => {
+        calls += 1;
+        // 第一次入队请求在途失败：内容从未到达服务端，但客户端只能按 unknown 处理。
+        if (calls === 1) throw new Error("network down");
+        return host.send(command);
+      },
+    });
+    await assert.rejects(env.updateLocalFollowUp([
+      ...queue.payloadsForWrite(queue.queueEntry(env.queueBookRef.current, "A")),
+      { text: "uncertain", attemptId: queue.newQueueAttemptId() },
+    ], "A"));
+    assert.equal(queue.hasUncertainWrite(queue.queueEntry(env.queueBookRef.current, "A")), true);
+
+    // 另一端把队列改成 [keep, other-tab]：本端下一次写入带过期版本，收到 CAS 冲突。
+    await host.send({
+      type: "set_follow_up_queue",
+      items: [...host.followUpQueue.map((entry) => ({ id: entry.id, text: entry.text })), { text: "other-tab", attemptId: "tab-b" }],
+      expectedRevision: host.followUpQueueRevision,
+    });
+    await assert.rejects(env.updateLocalFollowUp([
+      ...queue.payloadsForWrite(queue.queueEntry(env.queueBookRef.current, "A")),
+      { text: "retry", attemptId: queue.newQueueAttemptId() },
+    ], "A"));
+
+    const afterConflict = queue.queueEntry(env.queueBookRef.current, "A");
+    assert.equal(afterConflict.serverRevision, host.followUpQueueRevision, "冲突回执即新基线");
+    assert.deepEqual(
+      queue.projection(afterConflict),
+      ["keep", "other-tab"],
+      "投影跟随冲突回执里的权威队列，而不是过期 pending",
+    );
+    assert.equal(queue.hasUncertainWrite(afterConflict), false, "更早的未决提交被冲突回执定论");
+    assert.deepEqual(
+      restoredPayloads(restored).map((payload) => payload.text).sort(),
+      ["retry", "uncertain"],
+      "从未被受理的内容回草稿",
+    );
+
+    // 用户按屏幕上的队列再入队：不得用旧内容整包覆盖服务端。
+    await env.updateLocalFollowUp([
+      ...queue.payloadsForWrite(queue.queueEntry(env.queueBookRef.current, "A")),
+      { text: "foo", attemptId: queue.newQueueAttemptId() },
+    ], "A");
+    assert.deepEqual(
+      host.followUpQueue.map((entry) => entry.text),
+      ["keep", "other-tab", "foo"],
+      "另一标签页的条目必须还在",
+    );
+  }, { streaming: false });
+});

@@ -342,24 +342,44 @@ export function adoptServerSnapshot(
 }
 
 /**
- * 提交失败：该次提交**连同其后继**一起作废，退回权威条目。
+ * 快照是否可信到可以当权威。
  *
- * 后继整包是在「这次写入会成功」的前提下算出来的；一次失败（尤其 CAS 冲突）
- * 之后继续把它们发出去，就是用旧基线的新版本覆盖服务端刚发生的改动（F11）。
- * 调用方必须因此收到拒绝并把内容退回草稿。
- * 冲突回执同样必须采纳权威内容（否则内容与版本不一致）。
+ * 只有带服务端 revision 的回执才算一次真实的队列读：路由层的 400 空体（命令本身
+ * 不合法）也会被包成快照，拿它去改账本等于用「空队列」覆盖用户看到的队列。
  */
-export function settleSyncFailure(
-  book: QueueBook,
-  sessionId: string,
-  revision: number,
-  snapshot?: QueueSnapshot,
-): QueueBook {
-  const adopted = snapshot ? adoptServerSnapshot(book, sessionId, snapshot) : book;
-  const entry = queueEntry(adopted, sessionId);
-  const pending = entry.pending.filter((proposal) => proposal.revision < revision);
-  if (pending.length === entry.pending.length) return adopted;
-  return put(adopted, sessionId, { ...entry, pending });
+function authoritativeSnapshot(snapshot?: QueueSnapshot): QueueSnapshot | undefined {
+  return snapshot && typeof snapshot.revision === "number" ? snapshot : undefined;
+}
+
+/**
+ * 用权威快照给「更早的未决提交」定论（I7 的成功路径 / J1 的冲突、拒绝路径）。
+ *
+ * 返回需要回到草稿的载荷，以及被定论掉的本地代次。判定只用两个服务端事实：
+ * - 载荷的 attemptId 在 `admittedAttemptIds` 里 → 队列已持有它（还在队列里就在
+ *   快照的 items 里，已经不在了就是已被投递），**不恢复**；
+ * - 不在里面 → 这次写入从未被受理 → 内容安全地回到草稿（不会复制出重复副本）。
+ *
+ * `seen` 由调用方跨批次传入：同一次载荷可能同时出现在前一批与后继里，只归还一次。
+ */
+function settleUnsettledByAuthority(
+  entry: QueueEntry,
+  settledRevision: number,
+  admitted: ReadonlySet<string>,
+  seen: Set<string>,
+): { revisions: Set<number>; resolved: QueueItemPayload[] } {
+  const revisions = new Set<number>();
+  const resolved: QueueItemPayload[] = [];
+  for (const proposal of entry.pending) {
+    if (proposal.revision >= settledRevision) continue;
+    revisions.add(proposal.revision);
+    for (const payload of proposal.candidates) {
+      const attemptId = payload.attemptId;
+      if (!attemptId || seen.has(attemptId) || admitted.has(attemptId)) continue;
+      seen.add(attemptId);
+      resolved.push(payload);
+    }
+  }
+  return { revisions, resolved };
 }
 
 /** 服务端队列回执的形状（写入与派发共用）。 */
@@ -382,17 +402,12 @@ export function isQueueWriteConflict(result: unknown): boolean {
 }
 
 /**
- * 权威快照解决未决提交（issue #42 / I7）。
+ * 权威快照解决未决提交（issue #42 / I7、J1）。
  *
- * 一次被受理的写入意味着 Host 的队列状态**此刻**已知：所有**不晚于**它的本地提交
- * 都已经有了定论。旧实现只把「本次提交」出链，于是更早的 unknown 提交会永远留在
- * 链上——召回之后投影仍在显示服务端已经没有的条目，下一次入队又把它整包写回去
- * （「队列 + 草稿」各一份）。
- *
- * 只用两个服务端事实判定：
- * - 载荷的 attemptId 在 `admittedAttemptIds` 里 → 队列已持有它（还在队列里就在
- *   快照的 items 里，已经不在了就是已被投递），**不恢复**；
- * - 不在里面 → 这次写入从未被受理 → 内容安全地回到草稿（不会复制出重复副本）。
+ * 一次带权威快照的写入结果（受理，或冲突/拒绝但回执里带着服务端队列）意味着 Host
+ * 的队列状态**此刻**已知：所有**不晚于**它的本地提交都已经有了定论。旧实现只把
+ * 「本次提交」出链，于是更早的 unknown 提交会永远留在链上——它的正文会继续盖住
+ * 刚采纳的权威快照，下一次入队又把它整包写回去，删掉别的标签页刚入队的条目。
  *
  * 其后尚未发送的后继提交按身份重整：引用「已不在队列里的身份」的载荷从写入里
  * 去掉——否则后继会把已召回的条目又写成新条目，或把在途条目投递第二次。
@@ -407,20 +422,10 @@ function resolvePendingsAgainstAuthority(
   const entry = queueEntry(adopted, sessionId);
   const admitted = new Set(snapshot.admittedAttemptIds ?? entry.admittedAttemptIds);
   const liveIds = new Set(snapshot.items.map((item) => item.id));
-  const settled = entry.pending.filter((proposal) => proposal.revision <= settledRevision);
   const later = entry.pending.filter((proposal) => proposal.revision > settledRevision);
   const seen = new Set<string>();
-  const reclaimed: QueueItemPayload[] = [];
-  for (const proposal of settled) {
-    // 本次提交：队列持有它（规则 1），什么都不恢复。
-    if (proposal.revision === settledRevision) continue;
-    for (const payload of proposal.candidates) {
-      const attemptId = payload.attemptId;
-      if (!attemptId || seen.has(attemptId) || admitted.has(attemptId)) continue;
-      seen.add(attemptId);
-      reclaimed.push(payload);
-    }
-  }
+  // 更早的未决提交（本次之外的）：它们的效果已经含在快照里。
+  const reclaimed = settleUnsettledByAuthority(entry, settledRevision, admitted, seen).resolved;
   const gone = (payload: QueueItemPayload): boolean => {
     if (payload.attemptId && seen.has(payload.attemptId)) return true;
     return Boolean(payload.id && !liveIds.has(payload.id));
@@ -433,7 +438,7 @@ function resolvePendingsAgainstAuthority(
     }
     return { ...proposal, payloads, candidates };
   });
-  const untouched = settled.length === 0
+  const untouched = entry.pending.every((proposal) => proposal.revision > settledRevision)
     && pending.every((proposal, index) => proposal === later[index]);
   return {
     book: untouched ? adopted : put(adopted, sessionId, { ...entry, pending }),
@@ -452,16 +457,15 @@ function resolvePendingsAgainstAuthority(
  * 4. `unknown`：结果未知——内容留在队列侧并标记待确认，**绝不**同时复制成草稿
  *    （那是重复发送的入口，也可能把已投递的消息又发一遍）。
  *
- * 失败时连同后继提交一起作废，但恢复集合取「被作废的全部候选」（按令牌去重）：
- * 后继快照里含前一批载荷，只取最后一个会把只出现在前者里的载荷（如派发的 extra）丢掉。
+ * 失败（conflict / rejected）时连同后继提交一起作废，但恢复集合取「被作废的全部
+ * 候选」（按令牌去重）：后继快照里含前一批载荷，只取最后一个会把只出现在前者里的
+ * 载荷（如派发的 extra）丢掉。
  *
- * `accepted` 带权威快照时还会解决**更早**的未决提交，见
- * `resolvePendingsAgainstAuthority`（I7）：权威快照面前不存在「永远待确认」的
- * 本地提交，否则召回后它会把服务端已经没有的条目重新写回去。
- *
- * 只对「受理回执里的快照」做这件事：拒绝/冲突回执的 items 不保证是一次真实的
- * 队列读（路由层的 400 空体也会走这条路），拿它反推「服务端没有这条」会把仍在
- * 队列里的内容复制成草稿——那正是 I7 要消除的「队列 + 草稿」双份。
+ * 只要回执带着**可信的权威快照**（带服务端 revision），就同时解决**更早**的未决
+ * 提交（I7 在受理路径、J1 在冲突/拒绝路径）：账本一旦采信了权威内容，就不能再让
+ * 过期 pending 继续当投影和下一笔 set 的载荷——那会用「旧内容 + 新版本」删掉别的
+ * 标签页刚入队的条目。没有 revision 的回执（路由层 400 空体）不当权威：不采纳、
+ * 也不定论。
  */
 export function settleQueueWrite(
   book: QueueBook,
@@ -496,26 +500,38 @@ export function settleQueueWrite(
   }
   // 「成功」必须带得回权威快照才算数：没有快照就无法证明服务端持有什么，
   // 按结果未知处理比抧测安全（宁可不恢复，也不要复制出重复副本）。
-  if (disposition === "accepted" && snapshot && snapshot.revision !== null) {
+  if (disposition === "accepted") {
+    if (!snapshot || snapshot.revision === null) {
+      return {
+        book: put(book, sessionId, {
+          ...entry,
+          pending: entry.pending.map((proposal) => (
+            proposal.revision === revision ? { ...proposal, state: "uncertain" as const } : proposal
+          )),
+        }),
+        restore: [],
+        resolved: [],
+        uncertain: true,
+      };
+    }
     const authority = resolvePendingsAgainstAuthority(book, sessionId, revision, snapshot);
     return { book: authority.book, restore: [], resolved: authority.resolved, uncertain: false };
   }
-  if (disposition === "accepted") {
-    return {
-      book: put(book, sessionId, {
-        ...entry,
-        pending: entry.pending.map((proposal) => (
-          proposal.revision === revision ? { ...proposal, state: "uncertain" as const } : proposal
-        )),
-      }),
-      restore: [],
-      resolved: [],
-      uncertain: true,
-    };
-  }
-  const dropped = entry.pending.filter((proposal) => proposal.revision >= revision);
-  const admitted = new Set(snapshot?.admittedAttemptIds ?? entry.admittedAttemptIds);
+  // 失败（conflict / rejected）。
+  //
+  // 「定论」与「采纳」必须同时发生：账本一旦采信了回执里的权威队列（有 revision），
+  // 就不能再让更早的未决 pending 继续当投影和下一笔 set 的载荷（J1）——旧行为只丢掉
+  // 「本次及其后继」，那个永远待确认的 pending 会把「旧内容 + 新版本」写回去，删掉
+  // 别的标签页刚入队的条目。
+  const trusted = authoritativeSnapshot(snapshot);
+  const adopted = trusted ? adoptServerSnapshot(book, sessionId, trusted) : book;
+  const settled = queueEntry(adopted, sessionId);
+  const admitted = new Set(trusted?.admittedAttemptIds ?? settled.admittedAttemptIds);
   const seen = new Set<string>();
+  const older = trusted
+    ? settleUnsettledByAuthority(settled, revision, admitted, seen)
+    : { revisions: new Set<number>(), resolved: [] as QueueItemPayload[] };
+  const dropped = settled.pending.filter((proposal) => proposal.revision >= revision);
   const restore: QueueItemPayload[] = [];
   for (const proposal of dropped) {
     for (const payload of proposal.candidates) {
@@ -525,10 +541,14 @@ export function settleQueueWrite(
       restore.push(payload);
     }
   }
+  const pending = settled.pending.filter(
+    (proposal) => proposal.revision < revision && !older.revisions.has(proposal.revision),
+  );
+  const untouched = adopted === book && pending.length === settled.pending.length;
   return {
-    book: settleSyncFailure(book, sessionId, revision, snapshot),
+    book: untouched ? adopted : put(adopted, sessionId, { ...settled, pending }),
     restore,
-    resolved: [],
+    resolved: older.resolved,
     uncertain: false,
   };
 }
