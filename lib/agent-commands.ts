@@ -291,7 +291,13 @@ function submissionIdOf(body: Record<string, unknown>, makeId: () => string): st
 
 /** 队列 CAS 基线：缺失/非法一律视为「没有基线」（首写）。 */
 export function parseExpectedRevision(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+  if (value === undefined || value === null) return null;
+  // 非法值不得静默降级成「不做 CAS」：那会让过期写入覆盖服务端权威队列
+  // （另一个标签页刚追加的消息）。类型错误一律按 400 回绝。
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error("expectedRevision must be a non-negative number");
+  }
+  return value;
 }
 
 export function parseSteerCommand(

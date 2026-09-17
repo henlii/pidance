@@ -2572,6 +2572,31 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [t]);
 
+  /**
+   * 把失败/未投递的载荷归还**原会话**（正文 + 图片）。
+   *
+   * 归属由 sid 决定，与「用户现在看哪个会话」「输入框是否还挂着」无关：旧实现先判断
+   * `sessionIdRef.current === sid` 才恢复，用户在请求在途时切走会话，正文与图片就一起
+   * 消失（G3）。输入框挂着时由它按 ownerKey 写原会话草稿；没挂着就直接写草稿，下次
+   * 进入会话恢复。
+   */
+  const restorePayloadToSession = useCallback((
+    sid: string,
+    payload: { text: string; images?: AttachedImage[]; media?: readonly QueuedMediaRef[] },
+  ) => {
+    const images = payload.images ?? attachmentsFromQueueMedia(payload.media ?? []);
+    const input = opts.chatInputRef?.current;
+    if (input) {
+      input.restoreDraft(payload.text, images.length ? images : undefined, sid);
+      return;
+    }
+    const existing = getDraft(sid) ?? { value: "", images: [] };
+    setDraft(sid, {
+      value: [payload.text, existing.value].filter((value) => value.trim()).join("\n\n"),
+      images: [...images, ...existing.images],
+    });
+  }, [opts.chatInputRef, setDraft]);
+
   const handleSteer = useCallback(async (message: string, images?: AttachedImage[]) => {
     // 只读会话：steer 会写 session 文件，拦截。
     if (isReadOnly) return;
@@ -2608,8 +2633,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 压缩中）时消息既没进 SDK 引导队列也没回输入框——旧实现只 console.error。
       if (receipt?.status === "rejected") {
         registry.dropLocal(sid, optimisticRecordKey);
+        // 内容退回**原会话**（切走也不丢）；通知只对当前会话可见。
+        restorePayloadToSession(sid, { text: message, images });
         if (sessionIdRef.current === sid) {
-          opts.chatInputRef?.current?.restoreDraft(message, images);
           addNotice({ type: "error", message: queueRejectionMessage(receipt.reason) });
         }
         return;
@@ -2623,13 +2649,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 失败回滚乐观消息：按 stable key 原子移除（不重写整张时间线，
       // 因此不会盖掉较新的 live 消息）；内容退回**原会话**输入框（含图片）。
       registry.dropLocal(sid, optimisticRecordKey);
+      restorePayloadToSession(sid, { text: message, images });
       if (sessionIdRef.current === sid) {
-        opts.chatInputRef?.current?.restoreDraft(message, images);
-        addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+        // 网络/响应异常：结果未知，不能说成「没发出去」而让用户盲重发。
+        addNotice({ type: "error", message: t("input_sendResultUnknown") });
       }
       console.error("Failed to steer:", e);
     }
-  }, [acceptQueuedReceipt, addNotice, ensureEventsConnected, isReadOnly, notifyAutoFollowSend, opts.chatInputRef, queueRejectionMessage]);
+  }, [acceptQueuedReceipt, addNotice, ensureEventsConnected, isReadOnly, notifyAutoFollowSend, opts.chatInputRef, queueRejectionMessage, restorePayloadToSession, t]);
 
   /**
    * SDK 错误：扩展命令（/xxx）不能被 steer/followUp 排队，但 prompt() 在
@@ -2721,11 +2748,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 本次发送的载荷（含图片引用）只算一次，失败回滚与入队都复用它：
     // 重新算一次就可能与已入队的引用漂移（副本被回收后越算越少）。
     const payloads = toQueuePayloads(text, images);
-    const restoreDraft = () => {
-      // 失败恢复只能回到**本会话**输入框：切走会话后不得写当前会话草稿。
-      // 图片一起退：只退正文等于把用户刚贴的图丢掉。
-      if (sessionIdRef.current !== sid) return;
-      opts.chatInputRef?.current?.restoreDraft(text, images);
+    // 内容归属由 sid 决定：切走会话也必须退回**原会话**草稿/输入框（G3）。
+    // 图片一起退：只退正文等于把用户刚贴的图丢掉。
+    const restoreDraft = () => restorePayloadToSession(sid, { text, images });
+    /** 失败通知只对当前会话可见（内容已经退回原会话，切走后不打扰也不误报）。 */
+    const noticeError = (message: string) => {
+      if (sessionIdRef.current === sid) addNotice({ type: "error", message });
     };
     /**
      * 入队（整组替换语义）：条目只带媒体引用。
@@ -2740,7 +2768,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         await updateLocalFollowUp([...payloadsForWrite(entry), ...payloads], sid);
         return { ok: true };
       } catch (error) {
-        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+        const message = error instanceof Error ? error.message : String(error);
+        // 已知的两类「确定结果」用各自文案；其余（网络/响应异常）结果未知：
+        // 不能说成「没发出去」而让用户盲重发（G3）。
+        const known = message === t("input_queueConflict") || message === t("input_queuePersistFailed");
+        console.error("Failed to write follow-up queue:", error);
+        return { ok: false, error: known ? message : t("input_sendResultUnknown") };
       }
     };
     if (images?.length && running) {
@@ -2749,7 +2782,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const written = await writeQueue();
       if (!written.ok) {
         restoreDraft();
-        addNotice({ type: "error", message: written.error });
+        noticeError(written.error);
         return;
       }
       ensureEventsConnected(sid);
@@ -2779,20 +2812,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // 图片随载荷一起入队（Host 落盘 outbox），不再因为「带图」而回退。
           if (!isQueueablePromptReason(receipt.reason)) {
             restoreDraft();
-            addNotice({ type: "error", message: queueRejectionMessage(receipt.reason) });
+            noticeError(queueRejectionMessage(receipt.reason));
             return;
           }
           const written = await writeQueue();
           if (!written.ok) {
             restoreDraft();
-            addNotice({ type: "error", message: written.error });
+            noticeError(written.error);
             return;
           }
           ensureEventsConnected(sid);
         }
       } catch (e) {
+        // 结果未知：内容退回原会话，但不谎称「没发出去」（可能已经发出去了）。
+        console.error("Failed to send prompt:", e);
         restoreDraft();
-        addNotice({ type: "error", message: String(e instanceof Error ? e.message : e) });
+        noticeError(t("input_sendResultUnknown"));
       }
       return;
     }
@@ -2803,11 +2838,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const written = await writeQueue();
     if (!written.ok) {
       restoreDraft();
-      addNotice({ type: "error", message: written.error });
+      noticeError(written.error);
       return;
     }
     ensureEventsConnected(sid);
-  }, [acceptQueuedReceipt, addNotice, ensureEventsConnected, isCompacting, isReadOnly, notifyAutoFollowSend, opts.chatInputRef, queueRejectionMessage, t, updateLocalFollowUp]);
+  }, [acceptQueuedReceipt, addNotice, ensureEventsConnected, isCompacting, isReadOnly, notifyAutoFollowSend, queueRejectionMessage, restorePayloadToSession, t, updateLocalFollowUp]);
 
   // 供 handlePromptWithStreamingBehavior（定义在前）引用最新 handleFollowUp
   handleFollowUpRef.current = handleFollowUp;
@@ -2839,13 +2874,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!sid) return;
     const entry = queueEntry(queueBookRef.current, sid);
-    const items = entry.items.filter((item) => item.state !== "claimed");
-    if (items.length === 0) return;
+    // 取回的内容 = **用户此刻看到的队列**（payloadsForWrite 含在途乐观条目）：只看权威
+    // items 会在「乐观入队还没落盘时召回」把用户刚敲的消息静默丢掉（G2）。
+    const payloads = payloadsForWrite(entry);
+    if (payloads.length === 0) return;
     // 图片按**条目**归属，逐条退回：图不能借用条目边界去配对（F2 的同类问题）。
-    const images = items.flatMap((item) => attachmentsFromQueueMedia(item.media ?? []));
-    const recalled = items.map((item) => item.text).filter((text) => text.trim()).join("\n\n");
-    if (sessionIdRef.current !== sid) return;
+    const images = payloads.flatMap((payload) => attachmentsFromQueueMedia(payload.media ?? []));
+    const recalled = payloads.map((payload) => payload.text).filter((text) => text.trim()).join("\n\n");
     try {
+      // 无论用户当前看哪个会话，都要真的把原会话队列清掉（G3）：旧实现在这里
+      // 先判断 sessionIdRef，切走时连清队都不发，回来还是「已排队」。
       await updateLocalFollowUp([], sid);
       // 清队成功即不可回滚：内容先落到原会话草稿（与用户当前看哪个会话无关）。
       const existing: ChatDraft = getDraft(sid) ?? { value: "", images: [] };
@@ -2861,9 +2899,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 仍在原会话才刷新输入框；否则草稿已是权威副本，下次进入会话会恢复。
       if (sessionIdRef.current === sid) opts.chatInputRef?.current?.reloadDraft();
     } catch (error) {
-      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+      // 清队失败原因未知（未收到确认）：队列可能已经被清，内容先归还原会话。
+      console.error("Failed to recall queued messages:", error);
+      restorePayloadToSession(sid, { text: recalled, images });
+      if (sessionIdRef.current === sid) {
+        addNotice({ type: "error", message: t("input_sendResultUnknown") });
+      }
     }
-  }, [addNotice, isReadOnly, updateLocalFollowUp, opts.chatInputRef]);
+  }, [addNotice, isReadOnly, restorePayloadToSession, t, updateLocalFollowUp, opts.chatInputRef]);
 
   /**
    * 手动转引导：「整队 + 可选输入框内容」合并为一条 steer。
@@ -2896,24 +2939,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         _steerOptimistic: true,
       } as SteerOptimisticMessage)
       : null;
-    const recallItems = () => queueEntry(queueBookRef.current, sid).items
-      .filter((item) => item.state !== "claimed");
+    // 本轮要派发的载荷（payloadsForWrite 含在途乐观条目）：冲突导致它们从权威队列里
+    // 消失时，正文与图片要原样退回输入框（不回退就只剩静默丢失）。
+    const dispatchedPayloads = payloadsForWrite(entry);
+    const dispatchedText = dispatchedPayloads.map((payload) => payload.text).filter((value) => value.trim()).join("\n\n");
+    const dispatchedMedia = dispatchedPayloads.flatMap((payload) => payload.media ?? []);
     let rolledBack = false;
-    const rollback = (remembered: FollowUpItem[] | null) => {
+    /** 失败通知只对当前会话可见（内容已经退回原会话，切走后不打扰也不误报）。 */
+    const noticeError = (message: string) => {
+      if (sessionIdRef.current === sid) addNotice({ type: "error", message });
+    };
+    const rollback = (restorePayload: boolean) => {
       // 只有第一个失败的提交能回滚：后继提交可能已经基于新基线成功，
       // 让旧失败再去写队列会把它抹掉。
       if (rolledBack) return;
       rolledBack = true;
       if (optimisticRecordKey) registry.dropLocal(sid, optimisticRecordKey);
-      if (remembered) {
-        // 冲突：采纳服务端的权威内容与版本，整队退成「可重新取回」状态。
-        adoptRemoteQueue(sid, { revision: queueEntry(queueBookRef.current, sid).serverRevision, items: remembered });
-        if (currentQueueSessionIdRef.current === sid) publishQueue();
+      if (restorePayload && (dispatchedText || dispatchedMedia.length)) {
+        // 权威内容里已经没有这批载荷（被别的标签页/自动投递消费了）：退回**原会话**
+        // 输入框或草稿，而不是伪造一条本地队列去盖掉服务端的权威内容（F11/G3）。
+        restorePayloadToSession(sid, { text: dispatchedText, media: dispatchedMedia });
       }
-      // 输入框里那份（未入队的 extra）必须退回去。
-      if (sessionIdRef.current === sid && extraMessage?.trim()) {
-        opts.chatInputRef?.current?.prependText(extraMessage.trim());
-      }
+      // 输入框里那份（未入队的 extra）必须退回去，与用户当前看哪个会话无关。
+      if (extraMessage?.trim()) restorePayloadToSession(sid, { text: extraMessage.trim() });
     };
     try {
       const receipt = await sendAgentCommand<QueueDispatchReceipt>(sid, {
@@ -2926,18 +2974,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const conflict =
         receipt && typeof receipt === "object" && "conflict" in receipt && (receipt as { conflict?: unknown }).conflict === true;
       if (conflict) {
-        // 另一处改过队列：本地乐观内容已经没有意义，回到回执权威内容（重新取回再重发）。
-        const remembered = recallItems();
+        // 另一处改过队列：本地乐观内容已经没有意义，只采纳回执的权威内容（不得用本地
+        // 近似值回写服务端状态），本轮载荷退回原会话输入框。
         adoptRemoteQueue(sid, snapshotFromQueuePayload(receipt));
         if (currentQueueSessionIdRef.current === sid) publishQueue();
-        rollback(remembered);
-        addNotice({ type: "error", message: queueDispatchErrorMessage(receipt) });
+        rollback(true);
+        noticeError(queueDispatchErrorMessage(receipt));
         return;
       }
       if (!receipt || receipt.ok !== true) {
         // 拒绝且服务端未改动队列：保留本地队列（图文都还在，可以重试）。
-        rollback(null);
-        addNotice({ type: "error", message: queueDispatchErrorMessage(receipt) });
+        rollback(false);
+        noticeError(queueDispatchErrorMessage(receipt));
         return;
       }
       adoptRemoteQueue(sid, snapshotFromQueuePayload(receipt));
@@ -2945,12 +2993,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 发送后连 SSE，确保本轮消息/回复实时投影
       ensureEventsConnected(sid);
     } catch (e) {
-      // 失败：乐观气泡撤回，队列保持原样，输入框内容退回（不静默丢）。
-      rollback(null);
+      // 结果未知：乐观气泡撤回、队列保持原样（可能已经投递出去了），只退回输入框里那份。
+      rollback(false);
       console.error("Failed to send queue as steer:", e);
-      addNotice({ type: "error", message: String(e instanceof Error ? e.message : e) });
+      noticeError(t("input_sendResultUnknown"));
     }
-  }, [adoptRemoteQueue, ensureEventsConnected, isReadOnly, notifyAutoFollowSend, publishQueue, queueDispatchErrorMessage, snapshotFromQueuePayload, addNotice, opts.chatInputRef]);
+  }, [adoptRemoteQueue, ensureEventsConnected, isReadOnly, notifyAutoFollowSend, publishQueue, queueDispatchErrorMessage, restorePayloadToSession, snapshotFromQueuePayload, addNotice, t]);
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     // 只读会话：set_thinking_level 会写会话状态，拦截。
