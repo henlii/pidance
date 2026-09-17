@@ -109,6 +109,9 @@ export type SessionRuntimeSnapshot = {
   finishingRunId: number | null;
   /** 最近一个已收到 agent_end/prompt_done 的 run。 */
   completedRunId: number | null;
+  /** 服务端在事件上带的本轮 run 序号（见 hosting 侧 handleSessionEvent）：
+   * 用来丢弃迟到的上一轮终止事件，避免把新一轮运行中的 UI 判成空闲。 */
+  streamRunSeq: number | null;
   attachCount: number;
   /** 消息 timeline 版本：仅当 messages/streaming 内容变化时递增；
    * connected/agent_start 等运行态事件不递增，避免阻塞初始磁盘 hydrate。 */
@@ -357,6 +360,7 @@ function createSlot(sessionId: string): RuntimeSlot {
       promptRunId: 0,
       finishingRunId: null,
       completedRunId: null,
+      streamRunSeq: null,
       attachCount: 0,
       timelineSeq: 0,
     },
@@ -735,6 +739,9 @@ export function createBrowserSessionRuntimeRegistry(
 
   const applyEventToSlot = (slot: RuntimeSlot, event: AgentStreamEvent) => {
     const type = event.type;
+    // 事件所属的 SDK run 序号（老服务端不带该字段 → null，退化为原行为）。
+    const rawStreamRunSeq = (event as { streamRunSeq?: unknown }).streamRunSeq;
+    const streamRunSeq = typeof rawStreamRunSeq === "number" ? rawStreamRunSeq : null;
     // 服务端权威读数随事件下发（TTFT 首帧 / 每个 step 结束）：直接落到 slot 投影，
     // 客户端不自行累计（口径只有一处）。
     const eventMetrics = (event as { turnMetrics?: TurnMetrics }).turnMetrics;
@@ -746,6 +753,7 @@ export function createBrowserSessionRuntimeRegistry(
       if (!eventMetrics) slot.metrics = {};
       slot.snapshot.promptRunId += 1;
       slot.snapshot.agentRunning = true;
+      if (streamRunSeq !== null) slot.snapshot.streamRunSeq = streamRunSeq;
       slot.snapshot.completedRunId = null;
       // 新 run 到来时，旧 run 的 finish 异步操作失去所有权；其 finally
       // 只能按 runId 条件释放，不能阻塞当前 run。
@@ -753,6 +761,11 @@ export function createBrowserSessionRuntimeRegistry(
       slot.snapshot.streamState = { isStreaming: true, streamingMessage: null };
       slot.metrics = {};
     } else if (type === "agent_end" || type === "prompt_done") {
+      // 迟到的上一轮终止事件：新一轮已经 agent_start（序号前移），不能把它的运行态
+      // 判成结束（复核 G1）。同一轮的终止事件序号相符，照常收尾。
+      if (streamRunSeq !== null && slot.snapshot.streamRunSeq !== null && streamRunSeq !== slot.snapshot.streamRunSeq) {
+        return;
+      }
       slot.snapshot.agentRunning = false;
       slot.snapshot.completedRunId = slot.snapshot.promptRunId;
       slot.snapshot.streamState = emptyStream();

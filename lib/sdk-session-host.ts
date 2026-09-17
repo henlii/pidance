@@ -231,6 +231,8 @@ export class SdkSessionHost {
   private pendingDestroys = new Map<number, Promise<void>>();
   private _alive = true;
   private promptRunning = false;
+  /** 本轮 SDK run 的本地序号（agent_start 递增；随 SSE 事件下发，见 handleSessionEvent）。 */
+  private streamRunSeq = 0;
   /** 最近一次 prompt 结束原因：队列自动投递只认 completed。 */
   private lastStopReason: "completed" | "aborted" | "error" | null = null;
   /**
@@ -1507,6 +1509,11 @@ export class SdkSessionHost {
   private handleSessionEvent(event: SdkAgentEvent): void {
     // 吞吐读数是否变化（真值附加到真正 emit 的对象上，见下方 eventToEmit）
     const metricsChanged = this.accumulateTurnMetrics(event);
+    // 本轮 SDK run 的本地序号：agent_start 开新一轮，同一轮的所有事件（含收尾的
+    // agent_end/prompt_done）带同一个值。客户端据此丢弃迟到的上一轮终止事件——
+    // 没有它的话，上一轮的 agent_end 落在新一轮 agent_start 之后会把运行中的 UI
+    // 判成空闲（复核 G1）。
+    const streamRunSeq = event.type === "agent_start" ? ++this.streamRunSeq : this.streamRunSeq;
     switch (event.type) {
       case "agent_start":
         this.promptRunning = true;
@@ -1524,7 +1531,7 @@ export class SdkSessionHost {
         if (this.realSessionFile) clearLeafSidecar(this.realSessionFile);
         this.maybeAutoNameSession();
         this.notifyRunning();
-        this.emit({ type: "prompt_done" });
+        this.emit({ type: "prompt_done", streamRunSeq: this.streamRunSeq });
         break;
       case "agent_settled":
         this.promptRunning = false;
@@ -1606,7 +1613,7 @@ export class SdkSessionHost {
       default:
         break;
     }
-    let eventToEmit = event;
+    let eventToEmit: SdkAgentEvent = streamRunSeq > 0 ? { ...event, streamRunSeq } : event;
     // 吞吐读数：TTFT 首帧 / 每个 step 结束时下发（服务端为唯一权威，客户端只渲染）。
     // 必须挂到 eventToEmit —— 它是 emit 的目标对象，直接改 event 会被下面的浅拷贝丢掉。
     if (metricsChanged) {
@@ -2192,7 +2199,7 @@ export class SdkSessionHost {
               }
               clearRunningStartedAt(this.realSessionId);
               this.notifyRunning();
-              this.emit({ type: "prompt_done" });
+              this.emit({ type: "prompt_done", streamRunSeq: this.streamRunSeq });
               this.resetIdleTimer();
             };
             void session
@@ -2271,7 +2278,7 @@ export class SdkSessionHost {
           this.notifyRunning();
           const errorMessage = error instanceof Error ? error.message : String(error);
           this.emit({ type: "prompt_error", errorMessage });
-          this.emit({ type: "prompt_done" });
+          this.emit({ type: "prompt_done", streamRunSeq: this.streamRunSeq });
           const receipt: PromptReceipt = {
             submissionId: parsed.submissionId,
             sessionId: this.realSessionId,
