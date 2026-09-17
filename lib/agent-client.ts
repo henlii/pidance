@@ -8,6 +8,7 @@
 // hooks/useAgentSession.ts. This helper collapses that down to one line.
 
 import type { PromptEffectiveAction, PromptReason, PromptReceipt } from "./agent-commands";
+import { promptImageInputs } from "./attachment-upload";
 import { normalizeFollowUpItemList } from "./session-queue";
 import type { AttachedImage, BinaryMessageInput } from "./types";
 
@@ -48,9 +49,10 @@ export async function submitAgentPrompt(
     type: "prompt",
     message: input.message,
     submissionId: input.submissionId,
-    ...(input.images?.length ? {
-      images: input.images.map((img) => ({ type: "image", data: img.data, mimeType: img.mimeType })),
-    } : {}),
+    // 附件在选图时已上传：优先发**引用**（附件目录路径），而不是内联 base64。
+    // 旧实现在这里无条件读 img.data，从队列取回/恢复的草稿图没有内联字节，
+    // 于是发出 `data: undefined` 的图片，Host 解析时整条 prompt 报 "invalid image"。
+    ...(input.images?.length ? { images: promptImageInputs(input.images) } : {}),
     ...(input.binaryBlocks?.length ? { binaryBlocks: input.binaryBlocks } : {}),
   }, options);
   if (!data || typeof data !== "object") {

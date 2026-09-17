@@ -4,6 +4,7 @@
  */
 
 import { setDraft } from "./draft-store";
+import { promptImageInputs } from "./attachment-upload";
 import {
   createEventStreamManager,
   type AgentStreamEvent,
@@ -1396,9 +1397,7 @@ function createBrowserFetchDeps(): BrowserSessionRuntimeRegistryDeps {
           type: "prompt",
           message: input.message,
           submissionId: input.submissionId,
-          ...(input.images?.length
-            ? { images: input.images.map((img) => ({ type: "image", data: img.data, mimeType: img.mimeType })) }
-            : {}),
+          ...(input.images?.length ? { images: promptImageInputs(input.images) } : {}),
           ...(input.binaryBlocks?.length ? { binaryBlocks: input.binaryBlocks } : {}),
           ...(input.provider && input.modelId ? { provider: input.provider, modelId: input.modelId } : {}),
           ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}),

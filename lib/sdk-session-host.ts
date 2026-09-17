@@ -86,6 +86,7 @@ import {
 } from "./thinking-levels";
 import {
   classifyPromptRejection,
+  isQueueablePromptReason,
   parseDispatchFollowUpQueueCommand,
   parseFollowUpCommand,
   parsePromptCommand,
@@ -96,6 +97,7 @@ import {
   type PromptImageInput,
   type PromptReason,
   type PromptReceipt,
+  type SteerCommand,
   type QueueDispatchReceipt,
   type QueueItemPayload,
   type QueueWriteReceipt,
@@ -300,6 +302,11 @@ export class SdkSessionHost {
   private promptReceipts = new Map<string, PromptReceipt>();
   /** submissionId → in-flight prompt promise（单飞；结算后删除） */
   private promptInFlight = new Map<string, Promise<PromptReceipt>>();
+  /**
+   * 同一 submissionId 的在途 steer：并发重发（浏览器重试/双标签同 id）时
+   * 只能让 SDK 收到一次。命令回执缓存只管已完成的请求，拦不住同一批并发请求。
+   */
+  private steerFlights = new Map<string, Promise<PromptReceipt>>();
   /** 已接受 prompt 的二进制块；user message 落盘后追加 UI-only custom entry。 */
   private pendingBinaryBatches: Array<{ submissionId: string; blocks: BinaryMessageData[] }> = [];
   /** 共享 destroy 完成信号：destroyAsync 并发重入时 await 同一 dispose */
@@ -362,6 +369,96 @@ export class SdkSessionHost {
       s.isStreaming ||
       s.isCompacting
     );
+  }
+
+  /**
+   * steer 命令的实际执行体（从 send() 的 switch 里抽出：同一 submissionId 的
+   * 并发请求必须共享同一个在途 promise，不能给 SDK 发两次）。
+   */
+  private async runSteerCommand(parsed: SteerCommand): Promise<PromptReceipt> {
+    const session = this.session;
+    if (this.bashRunning) {
+      // 结构化回执而非抛异常：客户端要按原因提示并回草稿（R8/A8），
+      // 抛异常只会变成无法归类的 HTTP 错误。
+      const receipt = this.reject(parsed.submissionId, "bash");
+      this.commandReceipts.set(parsed.submissionId, receipt);
+      return receipt;
+    }
+    // 压缩中且没有活跃 agent loop：原生 steer 只进 SDK 的 steering queue，
+    // 要等到下一次 prompt 才被消费，UI 上看不到这条消息。放进产品队列，
+    // compaction_end 会按正常流程投递。
+    if (session.isCompacting && !session.isStreaming && !this.promptRunning) {
+      // 压缩中：正文与图片一起入队（条目只持引用），压缩结束自动投递。
+      const queuedMedia = this.queueMediaFromPromptImages(parsed.images);
+      if (!queuedMedia.ok) {
+        const failed = this.reject(parsed.submissionId, "media");
+        this.commandReceipts.set(parsed.submissionId, failed);
+        return failed;
+      }
+      const receipt = this.enqueuePayloads(
+        parsed.submissionId,
+        [{ text: parsed.message, ...(queuedMedia.media?.length ? { media: queuedMedia.media } : {}) }],
+        "compacting",
+      );
+      this.commandReceipts.set(parsed.submissionId, receipt);
+      return receipt;
+    }
+    // 浏览器运行态可能因 SSE 收尾/重连竞态落后于 host。Pi SDK 在空闲时
+    // steer() 只入 steering queue、不会启动 LLM，消息会静默挂起；由 host
+    // 以权威运行态决定：运行中保留原生 steer，空闲时转成下一轮 prompt。
+    // flushingFollowUp 也视为 busy：让引导进入即将投递的下一轮，而不是
+    // 和 Host 的队列 flush 并发启动两个 prompt。
+    const resolvedSteerImages = this.resolvePromptImages(parsed.images);
+    if (resolvedSteerImages.missing.length) {
+      console.error("[pidance] steer image missing on disk:", resolvedSteerImages.missing);
+      const failed = this.reject(parsed.submissionId, "media");
+      this.commandReceipts.set(parsed.submissionId, failed);
+      return failed;
+    }
+    if (!this.isRunning() && !this.flushingFollowUp) {
+      const inner = await this.send({
+        type: "prompt",
+        message: parsed.message,
+        images: parsed.images,
+        streamingBehavior: "steer",
+      }) as PromptReceipt;
+      // 空闲引导实际生效动作是 prompt（含压缩中自动入队的情形）：
+      // 必须回给客户端，否则 UI 会按「已引导」显示实际已入队/未发出的消息。
+      const receipt: PromptReceipt = {
+        ...inner,
+        submissionId: parsed.submissionId,
+        action: inner.status === "accepted" ? "prompt" : "queued",
+      };
+      this.commandReceipts.set(parsed.submissionId, receipt);
+      return receipt;
+    }
+    // 没有**可消费的活跃 run**（例如 prompt 还在 preflight：promptRunning 为真但
+    // SDK 尚未 streaming）时，原生 steer 只写进谁都不会读的 steering queue：
+    // 既不落盘也不投递，UI 上这条引导永远等不到。这种情形必须转为持久队列（F7）。
+    if (!session.isStreaming) {
+      const queuedMedia = this.queueMediaFromPromptImages(parsed.images);
+      if (!queuedMedia.ok) {
+        const failed = this.reject(parsed.submissionId, "media");
+        this.commandReceipts.set(parsed.submissionId, failed);
+        return failed;
+      }
+      const receipt = this.enqueuePayloads(
+        parsed.submissionId,
+        [{ text: parsed.message, ...(queuedMedia.media?.length ? { media: queuedMedia.media } : {}) }],
+        "busy",
+      );
+      this.commandReceipts.set(parsed.submissionId, receipt);
+      return receipt;
+    }
+    await session.steer(parsed.message, resolvedSteerImages.images as never);
+    const receipt: PromptReceipt = {
+      submissionId: parsed.submissionId,
+      sessionId: this.realSessionId,
+      status: "accepted",
+      action: "steer",
+    };
+    this.commandReceipts.set(parsed.submissionId, receipt);
+    return receipt;
   }
 
   /**
@@ -531,6 +628,17 @@ export class SdkSessionHost {
    * 调用方必须用返回值判断，失败时不得声称已受理。
    */
   private commitFollowUpQueue(items: FollowUpItem[], reason: string): boolean {
+    // 写出的东西必须满足自身 decoder 的 round-trip：单条目媒体引用超过上限时
+    // 解码会整条丢弃（重启后 claimed 条目连同它的图一起消失）。这里 fail-closed
+    // 而不是写出自己读不懂的数据（F10）。
+    for (const item of items) {
+      if ((item.media?.length ?? 0) > MAX_QUEUED_ITEM_MEDIA) {
+        console.error(
+          `[pidance] refusing to persist follow-up queue (${reason}): item media exceeds ${MAX_QUEUED_ITEM_MEDIA}`,
+        );
+        return false;
+      }
+    }
     const nextRevision = this.followUpQueueRevision + 1;
     try {
       updatePidancePref(
@@ -815,7 +923,7 @@ export class SdkSessionHost {
     }
     // 整批合并为唯一副本：正文与媒体一起带上（少一张就是静默丢内容，
     // 多一张就是投递了用户已经取回的内容）。
-    const { text, media } = mergeFollowUpPayload(queued, extra);
+    const { text } = mergeFollowUpPayload(queued, extra);
     // 认领之前先验证媒体可读：认领之后才发现图丢了，就只能要么丢图、要么留下一个
     // 永远发不出去的 claimed 条目。
     const precheck = this.readQueueModelImages(queued);
@@ -824,15 +932,20 @@ export class SdkSessionHost {
       return { ok: false, status: "rejected", reason: "media", ...this.queueReceiptBase() };
     }
     const dispatchBinaryBlocks = this.queueBinaryBlocks(queued);
-    // 认领：把整批 waiting 换成一个 claimed 条目，正文是**合并后的完整载荷**
-    // （含输入框 extra）。一次落盘同时完成「移除原条目」与「保存唯一副本」，
-    // 因此投递前进程死掉也不会丢内容（重启后按 unknown 呈现，不自动重发）。
-    const claim = media.length
-      ? newFollowUpItem(text, "claimed", media)
-      : newFollowUpItem(text, "claimed");
-    // 只把本批 waiting 换成唯一副本：**未参与派发的条目（claimed / unknown）必须原样保留**。
+    // 认领：把本批 waiting 换成**逐条的 claimed 副本**（正文/媒体都是原条目自己的）。
+    // 不合并成一条：合并后的媒体引用数可以超过 decoder 的单条上限，于是认领写下的
+    // 东西自己读不回来——重启时那条 durable claim 整个消失（F10）。逐条认领同时
+    // 保留条目边界，投递失败归还时不会把多张图挤进同一条。
+    const claims = queued.map((item) => (item.media?.length
+      ? newFollowUpItem(item.text, "claimed", item.media)
+      : newFollowUpItem(item.text, "claimed")));
+    // extra（输入框并入队尾的那段）也单独成条，同属本次投递。
+    if (extra) claims.push(newFollowUpItem(extra, "claimed"));
+    const claimIds = claims.map((item) => item.id);
+    const claimIdSet = new Set(claimIds);
+    // 只把本批 waiting 换成副本：**未参与派发的条目（claimed / unknown）必须原样保留**。
     // 旧实现只保留 claimed，会把 unknown（上次崩溃前已发出、结果未知）连同它的图一起删掉。
-    const next = [...this.followUpQueue.filter((item) => item.state !== "waiting"), claim];
+    const next = [...this.followUpQueue.filter((item) => item.state !== "waiting"), ...claims];
     if (!this.commitFollowUpQueue(next, "dispatch-claim")) {
       return { ok: false, status: "rejected", reason: "error", ...this.queueReceiptBase() };
     }
@@ -865,7 +978,7 @@ export class SdkSessionHost {
           // 由队列里的新副本负责投递。不能既算已派发又留在队列（重复投递）。
           action = "queued";
           this.commitFollowUpQueue(
-            this.followUpQueue.filter((item) => item.id !== claim.id),
+            this.followUpQueue.filter((item) => !claimIdSet.has(item.id)),
             "dispatch-queued",
           );
           this.emitQueueChanged();
@@ -874,7 +987,7 @@ export class SdkSessionHost {
         }
         if (receipt?.status !== "accepted") {
           // 结构化拒绝：认领回队列（内容不消失），由用户重试。
-          this.commitFollowUpQueue(this.withFollowUpState([claim.id], "waiting"), "dispatch-release");
+          this.commitFollowUpQueue(this.withFollowUpState(claimIds, "waiting"), "dispatch-release");
           this.emitQueueChanged();
           return {
             ok: false,
@@ -887,7 +1000,7 @@ export class SdkSessionHost {
     } catch (error) {
       // 未被受理 / 网络失败：归还认领（内容不得消失）。归还落盘失败时条目留 claimed：
       // 它不会被自动重投，重启后转 unknown 由用户处置。
-      const released = this.commitFollowUpQueue(this.withFollowUpState([claim.id], "waiting"), "dispatch-release");
+      const released = this.commitFollowUpQueue(this.withFollowUpState(claimIds, "waiting"), "dispatch-release");
       this.emitQueueChanged();
       if (!released) {
         this.emit({
@@ -906,9 +1019,9 @@ export class SdkSessionHost {
       this.dispatchingFollowUpQueue = false;
     }
     // 已受理：删除认领条目并落盘。
-    const dispatchedMedia = followUpItemMedia([claim]);
+    const dispatchedMedia = followUpItemMedia(claims);
     const removed = this.commitFollowUpQueue(
-      this.followUpQueue.filter((item) => item.id !== claim.id),
+      this.followUpQueue.filter((item) => !claimIdSet.has(item.id)),
       "dispatch-deliver",
     );
     if (removed) this.discardDeliveredModelMedia(dispatchedMedia);
@@ -2045,9 +2158,13 @@ export class SdkSessionHost {
           this.promptReceipts.set(parsed.submissionId, busy);
           return busy;
         }
-        // 没有活跃 SDK run 但有 prompt 在途（preflight 窗口）：并发 prompt 同样
-        // 会抢 SessionManager。结构化回绝，且发生在任何运行态变更之前。
-        if (this.promptRunning && !session.isStreaming) {
+        // 已有活跃 run（或我们自己有 prompt 在途）：再起一个 prompt 会抢同一个
+        // SessionManager，SDK 也会抛「already processing」。必须在**任何运行态变更之前**
+        // 结构化回绝：旧实现把它当普通异常走到 catch，那里会把**别人的** run 状态回滚
+        // （promptRunning=false、lastStopReason="error"、emit prompt_done、setFollowUpHeld），
+        // UI 上本轮运行被误判为已结束（F8）。
+        // streamingBehavior="steer" 是投递路径自己用的（SDK 会转向而不是报错），放行。
+        if ((this.promptRunning || session.isStreaming) && command.streamingBehavior !== "steer") {
           const busy = this.reject(parsed.submissionId, "busy");
           this.promptReceipts.set(parsed.submissionId, busy);
           return busy;
@@ -2133,6 +2250,20 @@ export class SdkSessionHost {
           return receipt;
           } catch (error) {
           this.removePendingBinaryBatch(key);
+          // 别人的 run 还在跑（SDK 报 already processing 等入队语义的原因）：
+          // 这个 prompt 从未拥有运行态，**不得**回滚它——只回结构化拒绝，
+          // 由客户端按 reason 入队。（上面已有前置门禁，此处是兜底。）
+          const reason = classifyPromptRejection(error);
+          if (session.isStreaming && isQueueablePromptReason(reason)) {
+            const busy: PromptReceipt = {
+              submissionId: parsed.submissionId,
+              sessionId: this.realSessionId,
+              status: "rejected",
+              reason,
+            };
+            this.promptReceipts.set(key, busy);
+            return busy;
+          }
           this.promptRunning = false;
           this.lastStopReason = this.lastStopReason === "aborted" ? "aborted" : "error";
           this.setFollowUpHeld(true);
@@ -2215,70 +2346,18 @@ export class SdkSessionHost {
         const parsed = parseSteerCommand(command);
         const cached = this.commandReceipts.get(parsed.submissionId);
         if (cached) return cached;
-        if (this.bashRunning) {
-          // 结构化回执而非抛异常：客户端要按原因提示并回草稿（R8/A8），
-          // 抛异常只会变成无法归类的 HTTP 错误。
-          const receipt = this.reject(parsed.submissionId, "bash");
-          this.commandReceipts.set(parsed.submissionId, receipt);
-          return receipt;
-        }
-        // 压缩中且没有活跃 agent loop：原生 steer 只进 SDK 的 steering queue，
-        // 要等到下一次 prompt 才被消费，UI 上看不到这条消息。放进产品队列，
-        // compaction_end 会按正常流程投递。
-        if (session.isCompacting && !session.isStreaming && !this.promptRunning) {
-          // 压缩中：正文与图片一起入队（条目只持引用），压缩结束自动投递。
-          const queuedMedia = this.queueMediaFromPromptImages(parsed.images);
-          if (!queuedMedia.ok) {
-            const failed = this.reject(parsed.submissionId, "media");
-            this.commandReceipts.set(parsed.submissionId, failed);
-            return failed;
+        // 同一 submissionId 的并发 steer 共享同一个在途 promise（F9）。
+        const inFlight = this.steerFlights.get(parsed.submissionId);
+        if (inFlight) return inFlight;
+        const flight = this.runSteerCommand(parsed);
+        this.steerFlights.set(parsed.submissionId, flight);
+        try {
+          return await flight;
+        } finally {
+          if (this.steerFlights.get(parsed.submissionId) === flight) {
+            this.steerFlights.delete(parsed.submissionId);
           }
-          const receipt = this.enqueuePayloads(
-            parsed.submissionId,
-            [{ text: parsed.message, ...(queuedMedia.media?.length ? { media: queuedMedia.media } : {}) }],
-            "compacting",
-          );
-          this.commandReceipts.set(parsed.submissionId, receipt);
-          return receipt;
         }
-        // 浏览器运行态可能因 SSE 收尾/重连竞态落后于 host。Pi SDK 在空闲时
-        // steer() 只入 steering queue、不会启动 LLM，消息会静默挂起；由 host
-        // 以权威运行态决定：运行中保留原生 steer，空闲时转成下一轮 prompt。
-        // flushingFollowUp 也视为 busy：让引导进入即将投递的下一轮，而不是
-        // 和 Host 的队列 flush 并发启动两个 prompt。
-        const resolvedSteerImages = this.resolvePromptImages(parsed.images);
-        if (resolvedSteerImages.missing.length) {
-          console.error("[pidance] steer image missing on disk:", resolvedSteerImages.missing);
-          const failed = this.reject(parsed.submissionId, "media");
-          this.commandReceipts.set(parsed.submissionId, failed);
-          return failed;
-        }
-        if (!this.isRunning() && !this.flushingFollowUp) {
-          const inner = await this.send({
-            type: "prompt",
-            message: parsed.message,
-            images: parsed.images,
-            streamingBehavior: "steer",
-          }) as PromptReceipt;
-          // 空闲引导实际生效动作是 prompt（含压缩中自动入队的情形）：
-          // 必须回给客户端，否则 UI 会按「已引导」显示实际已入队/未发出的消息。
-          const receipt: PromptReceipt = {
-            ...inner,
-            submissionId: parsed.submissionId,
-            action: inner.status === "accepted" ? "prompt" : "queued",
-          };
-          this.commandReceipts.set(parsed.submissionId, receipt);
-          return receipt;
-        }
-        await session.steer(parsed.message, resolvedSteerImages.images as never);
-        const receipt: PromptReceipt = {
-          submissionId: parsed.submissionId,
-          sessionId: this.realSessionId,
-          status: "accepted",
-          action: "steer",
-        };
-        this.commandReceipts.set(parsed.submissionId, receipt);
-        return receipt;
       }
 
       case "dispatch_follow_up_queue": {

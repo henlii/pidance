@@ -12,12 +12,7 @@
 import { existsSync, readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { getAgentDir } from "./pi-paths";
-import {
-  CHAT_ATTACHMENTS_DIR_NAME,
-  deleteChatAttachmentMedia,
-  getChatAttachmentsDir,
-  listChatAttachmentFiles,
-} from "./chat-attachments";
+import { deleteChatAttachmentMedia, listChatAttachmentFiles } from "./chat-attachments";
 import { getPidancePrefsPath, isPlainRecord, type PidancePrefs } from "./pidance-prefs-file";
 
 /**
@@ -39,22 +34,38 @@ export interface AttachmentGcResult {
 }
 
 /**
- * 仍被引用的附件路径集合；引用集合不完整时返回 null（调用方必须放弃回收）。
+ * 仍被引用的附件路径（在 candidates 里选出仍被引用的那些）。
  *
- * 引用来源不跟具体 schema 走：偏好文件里任何指向附件目录的字符串都算引用
- * （队列条目、草稿，以及以后新增的引用位置），会话 JSONL 里同理。
+ * 判定反过来做：对每个候选文件，直接在「偏好文件 + 所有会话 JSONL」里找它的
+ * **完整路径子串**。比「先收集引用再比对」稳得多：按分隔符切词在文件名含空格、
+ * 引号、括号、逗号时只会得到半截路径，随后把仍被历史消息引用的文件误判为无引用
+ * 删掉（F6）；子串搜索不依赖任何分隔约定，也不需要完整 JSON（半截行照样能匹配）。
+ *
+ * Windows 路径在 JSON 里是反斜杠转义形式，所以两种写法都搜。
+ * 引用集合不完整（偏好读不出、会话列不出/读不出）时返回 null：调用方必须放弃
+ * 本轮回收（宁可留垃圾，不得误删）。
  */
-export function collectReferencedAttachmentPaths(agentDir: string = getAgentDir()): Set<string> | null {
-  const root = getChatAttachmentsDir(agentDir);
+export function collectReferencedAttachmentPaths(
+  candidates: readonly string[],
+  agentDir: string = getAgentDir(),
+): Set<string> | null {
   const prefs = readPrefsStrict(agentDir);
   if (prefs === null) return null;
-
-  const referenced = new Set<string>();
-  collectReferences(prefs, root, referenced);
-
   const sessionFiles = listSessionFiles(join(agentDir, "sessions"));
   if (sessionFiles === null) return null;
+
+  const found = new Set<string>();
+  const needles = candidates.map((path) => ({ path, escaped: escapeJsonPath(path) }));
+  const search = (text: string): void => {
+    for (const needle of needles) {
+      if (found.has(needle.path)) continue;
+      if (text.includes(needle.path) || text.includes(needle.escaped)) found.add(needle.path);
+    }
+  };
+
+  search(JSON.stringify(prefs));
   for (const file of sessionFiles) {
+    if (found.size === needles.length) break;
     let content: string;
     try {
       content = readFileSync(file, "utf8");
@@ -62,9 +73,14 @@ export function collectReferencedAttachmentPaths(agentDir: string = getAgentDir(
       // 读不出一个会话就可能在漏引用：整轮放弃
       return null;
     }
-    if (content.includes(CHAT_ATTACHMENTS_DIR_NAME)) collectReferencesFromText(content, root, referenced);
+    search(content);
   }
-  return referenced;
+  return found;
+}
+
+/** JSON 字符串里的写法：POSIX 路径不变，Windows 反斜杠会被转义。 */
+function escapeJsonPath(path: string): string {
+  return JSON.stringify(path).slice(1, -1);
 }
 
 /** 删除超过保留期且无人引用的附件文件。 */
@@ -84,7 +100,7 @@ export function sweepUnreferencedAttachments(options: {
     return { scanned: files.length, candidates: 0, deleted: 0, bytes: 0, complete: true };
   }
 
-  const referenced = collectReferencedAttachmentPaths(agentDir);
+  const referenced = collectReferencedAttachmentPaths(candidates.map((file) => file.path), agentDir);
   if (referenced === null) {
     return { scanned: files.length, candidates: candidates.length, deleted: 0, bytes: 0, complete: false };
   }
@@ -109,37 +125,6 @@ function readPrefsStrict(agentDir: string): PidancePrefs | null {
     return isPlainRecord(parsed) ? parsed : null;
   } catch {
     return null;
-  }
-}
-
-function collectReferences(value: unknown, root: string, out: Set<string>, depth = 0): void {
-  if (depth > 16) return;
-  if (typeof value === "string") {
-    if (value.startsWith(root)) out.add(value.trim());
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) collectReferences(item, root, out, depth + 1);
-    return;
-  }
-  if (isPlainRecord(value)) {
-    for (const item of Object.values(value)) collectReferences(item, root, out, depth + 1);
-  }
-}
-
-/**
- * 从会话 JSONL 文本里提取附件路径。
- *
- * 落盘名不含引号/反斜杠（sanitizeAttachmentFileName 保证），所以取到分隔符即可；
- * 多认几个终止符是保守做法：漏认只会多留文件，不会多删。
- */
-function collectReferencesFromText(content: string, root: string, out: Set<string>): void {
-  let index = content.indexOf(root);
-  while (index >= 0) {
-    let end = index;
-    while (end < content.length && !/["'\\\s,)\]]/.test(content[end]!)) end += 1;
-    out.add(content.slice(index, end));
-    index = content.indexOf(root, end);
   }
 }
 

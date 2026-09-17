@@ -56,6 +56,8 @@ type PendingAttachment = {
   previewUrl: string;
   status: "uploading" | "failed";
   error?: string;
+  /** 发起上传时的草稿 key：完成时若已不在该草稿，附件作废并回收文件。 */
+  draftKey: string | null;
 };
 
 function isRasterImageFile(file: File): boolean {
@@ -410,6 +412,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
    * ——那正是 issue #42 要消灭的行为。
    */
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const pendingAttachmentsRef = useRef(pendingAttachments);
+  pendingAttachmentsRef.current = pendingAttachments;
   const trimmedValue = value.trimStart();
   const bashMode = attachedImages.length === 0 && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
@@ -631,11 +635,36 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     });
   }, [value]);
 
+  /** 从当前 draftKey 的草稿重建输入框（外部写入草稿后刷新显示）。 */
+  const reloadDraftLocal = useCallback(() => {
+    const key = draftKeyRef.current;
+    const draft = key ? getDraft(key) : null;
+    setValue(draft?.value ?? "");
+    setAttachedImages((prev) => {
+      prev.forEach(revokeImagePreview);
+      return draft?.images.map(draftImageToAttachedImage) ?? [];
+    });
+    setAtQuery(null);
+  }, []);
+
   useImperativeHandle(ref, () => ({
     insertIfEmpty: insertIfEmptyLocal,
     prependText: prependDraftText,
-    restoreDraft(text: string, failedImages?: AttachedImage[]) {
-      // 失败回滚：正文与图片一起回原位（调用方保证只在原会话上调用）。
+    reloadDraft: reloadDraftLocal,
+    restoreDraft(text: string, failedImages?: AttachedImage[], ownerKey?: string) {
+      // 内容已归属别的会话（用户切走后再回来）：写它自己的草稿，**不动**当前输入框。
+      // 旧实现只在「仍在原会话」时才恢复，切走后内容既不回输入框也不进草稿 →
+      // 队列已清、内容消失（F4）。
+      if (ownerKey && ownerKey !== draftKeyRef.current) {
+        const existing = getDraft(ownerKey) ?? { value: "", images: [] };
+        const restored = (failedImages ?? []).map(imageToDraftImage);
+        setDraft(ownerKey, {
+          value: [text, existing.value].filter((part) => part.trim()).join("\n\n"),
+          images: [...restored, ...existing.images],
+        });
+        return;
+      }
+      // 失败回滚：正文与图片一起回原位。
       appendAttachedImages(failedImages);
       prependDraftText(text);
     },
@@ -690,12 +719,24 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
    *
    * 成功才进入已附加列表：失败保留在 pending 里，由用户重试或移除——不静默
    * 丢掉用户刚选的图，也不带着半个附件发送。
+   *
+   * 完成时必须校验归属：上传期间用户可能移除了该附件、或切到了别的会话/草稿。
+   * 旧实现在回调里无条件 append + 只删 pending 项，于是「已经移掉的图」会重新
+   * 出现在输入框，而它引用的文件成为没人引用的孤儿（F5）。
    */
   const startAttachmentUpload = useCallback(async (entry: PendingAttachment) => {
     setPendingAttachments((prev) =>
       prev.map((item) => (item.id === entry.id ? { ...item, status: "uploading", error: undefined } : item)));
     try {
       const image = await uploadImageAttachment(entry.file, entry.previewUrl);
+      const stillOwned = draftKeyRef.current === entry.draftKey
+        && pendingAttachmentsRef.current.some((item) => item.id === entry.id);
+      if (!stillOwned) {
+        // 已不归属当前输入框：刚上传的文件没人引用，直接删（不靠 GC 兜底）。
+        URL.revokeObjectURL(entry.previewUrl);
+        void deleteAttachmentMedia(imageMediaRefs(image).flatMap(mediaRefPaths));
+        return;
+      }
       setAttachedImages((prev) => [...prev, image]);
       // 预览 URL 已交给已附加的图片，不再回收。
       setPendingAttachments((prev) => prev.filter((item) => item.id !== entry.id));
@@ -712,11 +753,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const imageFiles = files.filter(isRasterImageFile);
     if (!imageFiles.length) return;
     setImageAttachError(null);
+    const draftKey = draftKeyRef.current ?? null;
     const entries: PendingAttachment[] = imageFiles.map((file) => ({
       id: makeUploadId(),
       file,
       previewUrl: URL.createObjectURL(file),
       status: "uploading",
+      draftKey,
     }));
     setPendingAttachments((prev) => [...prev, ...entries]);
     await Promise.all(entries.map((entry) => startAttachmentUpload(entry)));
@@ -864,6 +907,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     draftKeyRef.current = draftKey;
     setValue(draft?.value ?? "");
     setAtQuery(null);
+    // 切草稿时丢掉未完成的上传：它们属于旧草稿（完成回调会自行作废并回收文件）。
+    setPendingAttachments((prev) => {
+      prev.forEach((item) => URL.revokeObjectURL(item.previewUrl));
+      return [];
+    });
     setAttachedImages((prev) => {
       prev.forEach(revokeImagePreview);
       return draft?.images.map(draftImageToAttachedImage) ?? [];

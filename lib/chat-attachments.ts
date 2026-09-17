@@ -150,7 +150,7 @@ export interface ChatAttachmentFile {
 function withChatAttachmentFile<T>(
   candidate: string,
   agentDir: string,
-  use: (realPath: string) => T,
+  apply: (realPath: string) => T,
 ): T | null {
   const trimmed = candidate.trim();
   if (!trimmed) return null;
@@ -159,7 +159,7 @@ function withChatAttachmentFile<T>(
     const real = normalizeSlashes(realpathSync(trimmed));
     if (real !== root && !real.startsWith(`${root}/`)) return null;
     if (!statSync(real).isFile()) return null;
-    return use(real);
+    return apply(real);
   } catch {
     // 文件或目录不存在：不是有效引用（删除/读取都按幂等处理）
     return null;

@@ -6,12 +6,12 @@
  *
  * - `items`：服务端最近一次权威快照里**可见**的条目（waiting + unknown）；
  * - `inFlight`：已提交给 Pi、尚未确认的正文（claimed）；
- * - `pending`：本地乐观待提交值（尚未拿到回执）；
+ * - `pending`：本地乐观**提交链**（每个提交带自己的整包快照，最旧的在前）；
  * - `serverRevision`：CAS 基线，下一次写入的 expectedRevision 就是它。
  *
- * 四条不变量，各对应一个已发生过的缺陷：
+ * 五条不变量，各对应一个已发生过的缺陷：
  *
- * 1. **显示 = pending ?? items**。回滚是清掉 pending 退回权威条目，而不是
+ * 1. **显示 = 最新 pending ?? items**。回滚是清掉 pending 退回权威条目，而不是
  *    「恢复上一份乐观值」——空队列连续写 [A]、[A,B] 都失败时仍显示 []。
  * 2. **内容与版本一次写入**。冲突回执必须同时采纳权威 items 与 revision；
  *    只更新版本（旧行为）会形成「新版本 + 旧内容」，下一次合法 CAS 就删掉别人
@@ -20,6 +20,10 @@
  *    过期版本被 CAS 拒绝，表现为「入队成功但转引导失败」，只能靠后续轮询偶然
  *    恢复（R1）。
  * 4. **按 sessionId 分账**。切走会话后失败也只能修正原会话条目。
+ * 5. **链上的后继不得升到新基线**（F11）。每个提交发自己的快照；一旦某个提交
+ *    失败（尤其 CAS 冲突），它与其后继一起作废并让调用方回滚草稿——旧行为是
+ *    后继在实际执行时才读「最新 pending」，冲突后直接拿新版本把旧整包写上去，
+ *    把另一标签页刚入队的消息删掉。
  */
 
 import type { QueueItemPayload } from "./agent-commands";
@@ -39,14 +43,20 @@ function toPayload(value: string | QueueItemPayload): QueueItemPayload {
   return typeof value === "string" ? { text: value } : value;
 }
 
+/** 一次乐观提交：整包快照 + 本地代次（结算 CAS 用）。 */
+export type QueueProposal = {
+  revision: number;
+  payloads: QueueItemPayload[];
+};
+
 export type QueueEntry = {
   /** 权威可见条目（waiting + unknown），含身份、状态与图片引用。 */
   items: FollowUpItem[];
   /** 已提交未确认的正文（claimed）。 */
   inFlight: string[];
-  /** 乐观待提交载荷（正文 + 新图 base64 / 已有图引用）；null = 没有在途本地改动。 */
-  pending: QueueItemPayload[] | null;
-  /** 本地代次：每次提出 pending 或采纳快照 +1。 */
+  /** 乐观提交链（最旧在前）。显示用最后一个，写入逐个发各自的快照。 */
+  pending: QueueProposal[];
+  /** 本地代次：每次提出提交 +1。 */
   revision: number;
   /** 服务端 CAS 基线；null = 未知（旧数据），此时不带 expectedRevision。 */
   serverRevision: number | null;
@@ -63,7 +73,7 @@ export type QueueSnapshot = {
 const EMPTY: QueueEntry = {
   items: [],
   inFlight: [],
-  pending: null,
+  pending: [],
   revision: 0,
   serverRevision: null,
 };
@@ -82,11 +92,25 @@ export function sendableItemTexts(items: readonly FollowUpItem[]): string[] {
   return items.filter((item) => item.state !== "claimed").map((item) => item.text);
 }
 
-/** 显示投影：优先乐观待提交值，否则回落到权威条目。 */
+/** 提交链里最新的一次（显示与「下一个要写什么」都以它为准）。 */
+export function latestPending(entry: QueueEntry): QueueProposal | null {
+  return entry.pending.length ? entry.pending[entry.pending.length - 1] : null;
+}
+
+/**
+ * 这次提交是否还在链上（没被结算、也没被前一个提交的失败连带作废）。
+ *
+ * 写入前必须问一次：前一个提交冲突时，后继整包是基于旧权威基线的，发送就会
+ * 把另一标签页的条目覆盖掉（F11）。
+ */
+export function isQueueProposalLive(entry: QueueEntry, revision: number): boolean {
+  return entry.pending.some((proposal) => proposal.revision === revision);
+}
+
+/** 显示投影：优先最新乐观提交，否则回落到权威条目。 */
 export function projection(entry: QueueEntry): string[] {
-  return entry.pending
-    ? entry.pending.map((payload) => payload.text)
-    : sendableItemTexts(entry.items);
+  const latest = latestPending(entry);
+  return latest ? latest.payloads.map((payload) => payload.text) : sendableItemTexts(entry.items);
 }
 
 /**
@@ -94,9 +118,17 @@ export function projection(entry: QueueEntry): string[] {
  *
  * 有乐观值时以它为准（它就是用户想看到的目标状态），否则从权威条目重建；
  * 两者都必须把图片带上，否则一次「只传正文」的写入会让 Host 丢掉队列里的图。
+ * 注意：真正写入时用的是**该次提交自己的快照**（proposeQueue 的返回值），
+ * 不是这个函数——链上的每个提交各发各的。
  */
 export function payloadsForWrite(entry: QueueEntry): QueueItemPayload[] {
-  return entry.pending ?? entry.items.filter((item) => item.state !== "claimed").map(itemToPayload);
+  const latest = latestPending(entry);
+  return latest ? latest.payloads : entry.items.filter((item) => item.state !== "claimed").map(itemToPayload);
+}
+
+/** 权威条目 → 写入载荷（正文 + 该条目的媒体引用，逐条保留配对）。 */
+export function queueItemPayloads(items: readonly FollowUpItem[]): QueueItemPayload[] {
+  return items.filter((item) => item.state !== "claimed").map(itemToPayload);
 }
 
 /** 权威条目里的媒体引用按顺序摊平（取回时按图片分组重建附件）。 */
@@ -121,8 +153,9 @@ export function queueRows(entry: QueueEntry): {
     const originals = media.filter((ref) => ref.role === "original").length;
     return originals || media.length;
   };
-  if (entry.pending) {
-    return entry.pending.map((payload, index) => ({
+  if (entry.pending.length) {
+    const payloads = entry.pending[entry.pending.length - 1].payloads;
+    return payloads.map((payload, index) => ({
       id: `pending-${index}`,
       text: payload.text,
       state: "waiting" as const,
@@ -147,24 +180,30 @@ export function queueRows(entry: QueueEntry): {
 
 /** 是否有在途本地改动（仅影响显示，不影响权威快照落地）。 */
 export function hasPendingLocalChange(entry: QueueEntry): boolean {
-  return entry.pending !== null;
+  return entry.pending.length > 0;
 }
 
 function put(book: QueueBook, sessionId: string, entry: QueueEntry): QueueBook {
   return { ...book, [sessionId]: entry };
 }
 
-/** 提出新的乐观载荷；返回本次代次供结算 CAS。 */
+/** 提出新的乐观提交；返回本次代次与快照供结算/写入。 */
 export function proposeQueue(
   book: QueueBook,
   sessionId: string,
   items: readonly (string | QueueItemPayload)[],
-): { book: QueueBook; revision: number } {
+): { book: QueueBook; revision: number; payloads: QueueItemPayload[] } {
   const entry = queueEntry(book, sessionId);
   const revision = entry.revision + 1;
+  const payloads = items.map(toPayload);
   return {
-    book: put(book, sessionId, { ...entry, pending: items.map(toPayload), revision }),
+    book: put(book, sessionId, {
+      ...entry,
+      pending: [...entry.pending, { revision, payloads }],
+      revision,
+    }),
     revision,
+    payloads,
   };
 }
 
@@ -198,7 +237,7 @@ export function adoptServerSnapshot(
   });
 }
 
-/** 提交成功：该代次的 pending 转成回执里的权威条目。 */
+/** 提交成功：该次提交出链，仍未结算的后继保留（基线随回执推进）。 */
 export function settleSyncSuccess(
   book: QueueBook,
   sessionId: string,
@@ -207,12 +246,17 @@ export function settleSyncSuccess(
 ): QueueBook {
   const adopted = adoptServerSnapshot(book, sessionId, snapshot);
   const entry = queueEntry(adopted, sessionId);
-  if (entry.revision !== revision) return adopted;
-  return put(adopted, sessionId, { ...queueEntry(adopted, sessionId), pending: null });
+  const pending = entry.pending.filter((proposal) => proposal.revision !== revision);
+  if (pending.length === entry.pending.length) return adopted;
+  return put(adopted, sessionId, { ...entry, pending });
 }
 
 /**
- * 提交失败：清掉该代次的乐观值，退回权威条目。
+ * 提交失败：该次提交**连同其后继**一起作废，退回权威条目。
+ *
+ * 后继整包是在「这次写入会成功」的前提下算出来的；一次失败（尤其 CAS 冲突）
+ * 之后继续把它们发出去，就是用旧基线的新版本覆盖服务端刚发生的改动（F11）。
+ * 调用方必须因此收到拒绝并把内容退回草稿。
  * 冲突回执同样必须采纳权威内容（否则内容与版本不一致）。
  */
 export function settleSyncFailure(
@@ -223,8 +267,9 @@ export function settleSyncFailure(
 ): QueueBook {
   const adopted = snapshot ? adoptServerSnapshot(book, sessionId, snapshot) : book;
   const entry = queueEntry(adopted, sessionId);
-  if (entry.revision !== revision) return adopted;
-  return put(adopted, sessionId, { ...queueEntry(adopted, sessionId), pending: null });
+  const pending = entry.pending.filter((proposal) => proposal.revision < revision);
+  if (pending.length === entry.pending.length) return adopted;
+  return put(adopted, sessionId, { ...entry, pending });
 }
 
 /** 服务端队列回执的形状（写入与派发共用）。 */

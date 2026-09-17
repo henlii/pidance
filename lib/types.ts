@@ -107,8 +107,13 @@ export interface ChatInputHandle {
    *
    * 与 prependText 的差别：图片必须能回来。失败回滚是「原会话草稿完整恢复」，
    * 只退正文会把用户刚贴的图静默丢掉。
+   *
+   * `ownerKey` = 内容归属的会话；省略时算当前输入框。传了原会话 key 时，即使用户
+   * 已经切走，内容也会落进**原会话草稿**（UI 只决定渲染，不决定保存）。
    */
-  restoreDraft: (text: string, images?: AttachedImage[]) => void;
+  restoreDraft: (text: string, images?: AttachedImage[], ownerKey?: string) => void;
+  /** 从当前 draftKey 的草稿重建输入框内容（队列取回等外部改动后刷新）。 */
+  reloadDraft: () => void;
 }
 
 export interface ThinkingContent {

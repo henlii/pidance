@@ -16,7 +16,7 @@ import { preserveCustomRenderedLines } from "@/lib/custom-rendered-lines";
 import type { SessionActivity } from "@/lib/session-activity";
 import { readAgentLiveFlag, sendAgentCommand } from "@/lib/agent-client";
 import { generateSubmissionId, isQueueablePromptReason, type PromptReason, type PromptReceipt, type QueueDispatchReceipt } from "@/lib/agent-commands";
-import { clearDraft } from "@/lib/draft-store";
+import { clearDraft, getDraft, setDraft, type ChatDraft } from "@/lib/draft-store";
 import { getOrCreateBrowserSessionRuntimeRegistry, type RegistrySubscription } from "@/lib/browser-session-runtime-registry";
 import {
   captureChatTargetToken,
@@ -74,6 +74,7 @@ import {
 import { submissionKey } from "@/lib/session-timeline";
 import {
   adoptServerSnapshot,
+  isQueueProposalLive,
   isQueueWriteConflict,
   itemMediaRefs,
   payloadsForWrite,
@@ -585,23 +586,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Host 同步持久化并在 settled 后投递；浏览器不再并发写同一 queue prefs。
         // 带 expectedRevision：多标签各自基于同一快照整组替换时由服务端 CAS
         // 拒绝过期写入，而不是静默覆盖另一标签页刚入队的消息。
-        // items 带上图片载荷（新图 base64 / 已有图引用）：不传等于把队列里的图删掉。
-        const writeItems = payloadsForWrite(queueEntry(queueBookRef.current, sid));
+        // items 用**本次提交自己的快照**（带图片引用）：前一个提交失败时本次已
+        // 连同作废，不能拿新版本把旧整包写上去（F11）；也不读「最新 pending」，
+        // 那会把两次提交的目标状态搅在一起。
+        const current = queueEntry(queueBookRef.current, sid);
+        if (!isQueueProposalLive(current, proposal.revision)) {
+          throw new Error(t("input_queueConflict"));
+        }
         const receipt = await sendAgentCommand<QueueReceiptView>(sid, {
           type: "set_follow_up_queue",
-          items: writeItems,
-          expectedRevision: queueEntry(queueBookRef.current, sid).serverRevision,
+          items: proposal.payloads,
+          expectedRevision: current.serverRevision,
         });
-        queueBookRef.current = settleSyncSuccess(
-          queueBookRef.current,
-          sid,
-          proposal.revision,
-          snapshotFromQueuePayload(receipt),
-        );
+        const snapshot = snapshotFromQueuePayload(receipt);
+        const conflict = isQueueWriteConflict(receipt);
+        queueBookRef.current = conflict
+          // 冲突：采纳权威内容与版本，并把后继一起作废（它们基于旧基线）。
+          ? settleSyncFailure(queueBookRef.current, sid, proposal.revision, snapshot)
+          : settleSyncSuccess(queueBookRef.current, sid, proposal.revision, snapshot);
         if (currentQueueSessionIdRef.current === sid) publishQueue();
-        if (isQueueWriteConflict(receipt)) throw new Error(t("input_queueConflict"));
+        if (conflict) throw new Error(t("input_queueConflict"));
         // 落盘失败：内容没写进产品队列，不得声称已入队（否则刷新后就没了）。
         if (receipt && typeof receipt === "object" && receipt.persist === true) {
+          queueBookRef.current = settleSyncFailure(queueBookRef.current, sid, proposal.revision);
+          if (currentQueueSessionIdRef.current === sid) publishQueue();
           throw new Error(t("input_queuePersistFailed"));
         }
       });
@@ -2655,8 +2663,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     const piImages = promptImageInputs(images);
     const restore = (reason: PromptReason | undefined, fallback?: string) => {
+      // 内容归属原会话：切走后写它的草稿，而不是直接丢弃。
+      opts.chatInputRef?.current?.restoreDraft(message, images, sid);
       if (sessionIdRef.current !== sid) return;
-      opts.chatInputRef?.current?.restoreDraft(message, images);
       addNotice({ type: "error", message: reason ? queueRejectionMessage(reason) : (fallback ?? t("chat_sendFailed")) });
     };
     try {
@@ -2709,6 +2718,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!text && !images?.length) return;
     const running = getRuntimeAgentRunning() || isCompacting;
     notifyAutoFollowSend();
+    // 本次发送的载荷（含图片引用）只算一次，失败回滚与入队都复用它：
+    // 重新算一次就可能与已入队的引用漂移（副本被回收后越算越少）。
+    const payloads = toQueuePayloads(text, images);
     const restoreDraft = () => {
       // 失败恢复只能回到**本会话**输入框：切走会话后不得写当前会话草稿。
       // 图片一起退：只退正文等于把用户刚贴的图丢掉。
@@ -2722,7 +2734,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
      * 回输入框并报错，也不能入队一条投递时会静默丢图的条目。
      */
     const writeQueue = async (): Promise<{ ok: true } | { ok: false; error: string }> => {
-      const payloads = toQueuePayloads(text, images);
       if (!payloads) return { ok: false, error: t("input_queueMediaMissing") };
       const entry = queueEntry(queueBookRef.current, sid);
       try {
@@ -2815,25 +2826,44 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isCompacting, isReadOnly]);
 
+  /**
+   * 队列召回（取回输入框）：先清队，再把可见条目退回**原会话草稿**。
+   *
+   * 草稿写入按原 sessionId，而不是「当前会话是否可见」：召回请求在途时用户切走
+   * 会话，旧实现只在会话仍可见时才回填，于是内容既不退回输入框也不进草稿，而队列
+   * 已经清了 → 正文与图片一起消失（F4）。用户此刻在看哪个会话只决定渲染。
+   */
   const handleRecallQueue = useCallback(async () => {
     // 只读会话没有队列（state 从不加载），拦截。
     if (isReadOnly) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
     const entry = queueEntry(queueBookRef.current, sid);
-    const items = projection(entry);
+    const items = entry.items.filter((item) => item.state !== "claimed");
     if (items.length === 0) return;
-    // 图片按引用回填（副本就在附件目录里）：清队不再删文件，也不需要先读回字节。
-    const images = attachmentsFromQueueMedia(itemMediaRefs(entry.items));
+    // 图片按**条目**归属，逐条退回：图不能借用条目边界去配对（F2 的同类问题）。
+    const images = items.flatMap((item) => attachmentsFromQueueMedia(item.media ?? []));
+    const recalled = items.map((item) => item.text).filter((text) => text.trim()).join("\n\n");
     if (sessionIdRef.current !== sid) return;
     try {
       await updateLocalFollowUp([], sid);
-      if (sessionIdRef.current !== sid) return;
-      opts.chatInputRef?.current?.prependText(joinQueueForRecall(items), images);
+      // 清队成功即不可回滚：内容先落到原会话草稿（与用户当前看哪个会话无关）。
+      const existing: ChatDraft = getDraft(sid) ?? { value: "", images: [] };
+      const restored = images.map((image) => ({
+        mimeType: image.mimeType,
+        ...(image.media ? { media: image.media } : {}),
+        ...(image.original ? { original: image.original } : {}),
+      }));
+      setDraft(sid, {
+        value: [recalled, existing.value].filter((text) => text.trim()).join("\n\n"),
+        images: [...restored, ...existing.images],
+      });
+      // 仍在原会话才刷新输入框；否则草稿已是权威副本，下次进入会话会恢复。
+      if (sessionIdRef.current === sid) opts.chatInputRef?.current?.reloadDraft();
     } catch (error) {
       addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
     }
-  }, [addNotice, isReadOnly, t, updateLocalFollowUp, opts.chatInputRef]);
+  }, [addNotice, isReadOnly, updateLocalFollowUp, opts.chatInputRef]);
 
   /**
    * 手动转引导：「整队 + 可选输入框内容」合并为一条 steer。
@@ -2846,48 +2876,77 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (isReadOnly) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
-    const merged = mergeFollowUpForSteer(
-      projection(queueEntry(queueBookRef.current, sid)),
-      extraMessage,
-    );
-    if (!merged) return;
+    const entry = queueEntry(queueBookRef.current, sid);
+    // 纯图条目正文为空：不能用纯文本合并的结果当「有没有内容」的判据，
+    // 否则整队只有图时 merged === "" → 直接 return，消息连一条命令都没发（F3）。
+    // 因此同时看本轮派发单元里的媒体引用与输入框 extra。
+    const merged = mergeFollowUpForSteer(projection(entry), extraMessage);
+    const hasMedia = entry.items.some((item) => item.state !== "claimed" && item.media?.length);
+    if (!merged && !hasMedia && !extraMessage?.trim()) return;
     notifyAutoFollowSend();
     // 乐观显示：合并后的引导消息立即写入 timeline；视觉顺序由 compositor
     // 投影（本轮思考/工具之后）。投递时按 key 去重。
-    const optimistic: SteerOptimisticMessage = {
-      role: "user",
-      content: merged,
-      timestamp: Date.now(),
-      _steerOptimistic: true,
-    };
+    // 纯图载荷没有任何正文：不造一个空气泡（真实消息落地时会带上图片）。
     const registry = getOrCreateBrowserSessionRuntimeRegistry();
-    const optimisticRecordKey = registry.appendLocal(sid, optimistic);
+    const optimisticRecordKey = merged
+      ? registry.appendLocal(sid, {
+        role: "user",
+        content: merged,
+        timestamp: Date.now(),
+        _steerOptimistic: true,
+      } as SteerOptimisticMessage)
+      : null;
+    const recallItems = () => queueEntry(queueBookRef.current, sid).items
+      .filter((item) => item.state !== "claimed");
+    let rolledBack = false;
+    const rollback = (remembered: FollowUpItem[] | null) => {
+      // 只有第一个失败的提交能回滚：后继提交可能已经基于新基线成功，
+      // 让旧失败再去写队列会把它抹掉。
+      if (rolledBack) return;
+      rolledBack = true;
+      if (optimisticRecordKey) registry.dropLocal(sid, optimisticRecordKey);
+      if (remembered) {
+        // 冲突：采纳服务端的权威内容与版本，整队退成「可重新取回」状态。
+        adoptRemoteQueue(sid, { revision: queueEntry(queueBookRef.current, sid).serverRevision, items: remembered });
+        if (currentQueueSessionIdRef.current === sid) publishQueue();
+      }
+      // 输入框里那份（未入队的 extra）必须退回去。
+      if (sessionIdRef.current === sid && extraMessage?.trim()) {
+        opts.chatInputRef?.current?.prependText(extraMessage.trim());
+      }
+    };
     try {
       const receipt = await sendAgentCommand<QueueDispatchReceipt>(sid, {
         type: "dispatch_follow_up_queue",
         ...(extraMessage?.trim() ? { extra: extraMessage.trim() } : {}),
         expectedRevision: queueEntry(queueBookRef.current, sid).serverRevision,
       });
-      // 无论接受/拒绝/冲突：先采纳服务端权威队列（内容 + 版本一次落地）。
-      adoptRemoteQueue(sid, snapshotFromQueuePayload(receipt));
-      if (currentQueueSessionIdRef.current === sid) publishQueue();
-      const accepted = Boolean(receipt && typeof receipt === "object" && receipt.ok === true);
-      if (!accepted) {
-        registry.dropLocal(sid, optimisticRecordKey);
-        if (extraMessage?.trim() && sessionIdRef.current === sid) {
-          opts.chatInputRef?.current?.prependText(extraMessage.trim());
-        }
+      // 服务端返回 rejected/conflict 时队列**根本没动**：不得拿回执覆盖本地队列，
+      // 否则一次被拒的投递会把队列（包括别的标签页刚追加的消息）悄悄清掉（F11）。
+      const conflict =
+        receipt && typeof receipt === "object" && "conflict" in receipt && (receipt as { conflict?: unknown }).conflict === true;
+      if (conflict) {
+        // 另一处改过队列：本地乐观内容已经没有意义，回到回执权威内容（重新取回再重发）。
+        const remembered = recallItems();
+        adoptRemoteQueue(sid, snapshotFromQueuePayload(receipt));
+        if (currentQueueSessionIdRef.current === sid) publishQueue();
+        rollback(remembered);
         addNotice({ type: "error", message: queueDispatchErrorMessage(receipt) });
         return;
       }
+      if (!receipt || receipt.ok !== true) {
+        // 拒绝且服务端未改动队列：保留本地队列（图文都还在，可以重试）。
+        rollback(null);
+        addNotice({ type: "error", message: queueDispatchErrorMessage(receipt) });
+        return;
+      }
+      adoptRemoteQueue(sid, snapshotFromQueuePayload(receipt));
+      if (currentQueueSessionIdRef.current === sid) publishQueue();
       // 发送后连 SSE，确保本轮消息/回复实时投影
       ensureEventsConnected(sid);
     } catch (e) {
-      // 失败：乐观气泡撤回，队列按权威快照恢复，输入框内容退回（不静默丢）。
-      registry.dropLocal(sid, optimisticRecordKey);
-      if (extraMessage?.trim() && sessionIdRef.current === sid) {
-        opts.chatInputRef?.current?.prependText(extraMessage.trim());
-      }
+      // 失败：乐观气泡撤回，队列保持原样，输入框内容退回（不静默丢）。
+      rollback(null);
       console.error("Failed to send queue as steer:", e);
       addNotice({ type: "error", message: String(e instanceof Error ? e.message : e) });
     }

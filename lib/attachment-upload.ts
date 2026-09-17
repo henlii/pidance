@@ -250,14 +250,20 @@ export interface QueueMediaGroup {
  */
 export function groupQueueMedia(refs: readonly QueuedMediaRef[]): QueueMediaGroup[] {
   const groups: QueueMediaGroup[] = [];
+  let pendingModel: QueuedMediaRef | null = null;
   for (const ref of refs) {
     if (ref.role === "model") {
-      const current = groups[groups.length - 1];
-      if (current && !current.model) current.model = ref;
+      // 写入方（imageMediaRefs）按「同一张图的 model 紧跟在它的 original 之前」输出。
+      // 旧实现把 model 配到**上一条** original 上：两张图时 B 的模型副本被配到 A 的
+      // 原图上，A 的模型副本丢失；单张图时模型的 original 还没出现，模型直接丢掉（F2）。
+      pendingModel = ref;
       continue;
     }
-    groups.push({ model: null, original: ref });
+    groups.push({ model: pendingModel, original: ref });
+    pendingModel = null;
   }
+  // 仅有 model、没有 original 的引用无法构成一张可显示的图（缺原图元数据）：
+  // 丢弃而不是拿模型副本冒充原图。
   return groups;
 }
 
