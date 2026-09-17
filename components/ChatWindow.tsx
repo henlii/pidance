@@ -499,9 +499,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   useEffect(() => () => { onTurnMetricsChange?.({}); }, [onTurnMetricsChange]);
 
   const onDrop = useCallback((files: File[]) => {
-    if (sessionBusy || writesDisabled) return;
-    chatInputRef?.current?.addImages(files);
-  }, [sessionBusy, writesDisabled, chatInputRef]);
+    // 运行中也可以拖入：图片按入队语义附件，其他文件由 ChatInput 给出提示。
+    if (writesDisabled) return;
+    chatInputRef?.current?.addFiles(files);
+  }, [writesDisabled, chatInputRef]);
 
   const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);
 
@@ -687,7 +688,7 @@ const chatPlan = composeChatPlan({
       {/* 图片查看器：全屏遮罩，只在组件根挂载一次（它自带 portal 到 body，
           与输入区/移动端分支无关）。 */}
       <ImagePreviewOverlay />
-      {isDragOver && !sessionBusy && !writesDisabled && (
+      {isDragOver && !writesDisabled && (
         <div className="pointer-events-none absolute inset-0 z-50 flex animate-[drop-zone-in_0.15s_ease_both] items-center justify-center bg-[color-mix(in_srgb,var(--accent)_6%,transparent)] backdrop-blur-[1px]">
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             {[0, 0.8, 1.6].map((delay) => (

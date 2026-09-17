@@ -101,7 +101,7 @@ export interface ChatInputHandle {
   prependText: (text: string, images?: AttachedImage[]) => void;
   /** 整体替换输入框内容（分支/新会话预填语义，对齐 OC replace）。 */
   replaceText: (text: string) => void;
-  addImages: (files: File[]) => void;
+  addFiles: (files: File[]) => void;
   /**
    * 发送失败后的原样恢复（正文 + 图片一起回输入框）。
    *

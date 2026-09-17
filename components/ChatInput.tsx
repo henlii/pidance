@@ -705,8 +705,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
       });
     },
-    addImages(files: File[]) {
-      void processAttachmentFiles(files);
+    addFiles(files: File[]) {
+      void attachFiles(files);
     },
   }));
 
@@ -807,6 +807,34 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     );
   }, [isStreaming, processImageFiles]);
 
+  /**
+   * 附件唯一入口：粘贴、文件选择器、拖拽都走这里。
+   *
+   * 位图走图片管线（原图+预览+模型副本，运行中也允许，配合入队语义）；其余
+   * 文件走二进制上传，运行中暂不可附件（和以前一样只给出一条错误提示，不静默
+   * 丢掉用户选的文件）。旧实现每条路径各写一份过滤：粘贴与拖拽只认 `image/*`，
+   * 于是「粘/拖一个文件」等于没反应。
+   */
+  const attachFiles = useCallback((files: File[]) => {
+    if (files.length === 0) return;
+    const imageFiles = files.filter(isRasterImageFile);
+    if (imageFiles.length) void processImageFiles(imageFiles);
+    const otherFiles = files.filter((file) => !isRasterImageFile(file));
+    if (otherFiles.length === 0) return;
+    if (isStreaming) {
+      setAttachedUploads((prev) => [...prev, ...otherFiles.map((file) => ({
+        id: makeUploadId(),
+        name: file.name,
+        mimeType: file.type || "application/octet-stream",
+        size: file.size,
+        status: "error" as const,
+        error: t("input_uploadWhileStreaming"),
+      }))]);
+      return;
+    }
+    void processAttachmentFiles(otherFiles);
+  }, [isStreaming, processAttachmentFiles, processImageFiles, t]);
+
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {
       const next = [...prev];
@@ -837,6 +865,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   const removeUpload = useCallback((id: string) => {
+    const removed = attachedUploadsRef.current.find((item) => item.id === id);
+    // 用户主动移除 = 不再需要这些字节：删服务端文件（GC 只是兜底）。
+    // 发送后的 clearInput 不走这里——刚发出去的文件还被消息引用着。
+    if (removed?.status === "ready" && removed.path) void deleteAttachmentMedia([removed.path]);
     setAttachedUploads((prev) => prev.filter((item) => item.id !== id));
   }, []);
 
@@ -1408,13 +1440,16 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
-    const items = Array.from(e.clipboardData?.items ?? []);
-    const imageItems = items.filter((item) => item.type.startsWith("image/"));
-    if (!imageItems.length) return;
+    // 剪贴板里可能是位图（截图/复制的图），也可能是普通文件（从文件管理器复制
+    // 过来的文件带各自 MIME）。旧实现只取 `image/*` 的 item，粘文件等于没反应。
+    const files = Array.from(e.clipboardData?.items ?? [])
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    if (files.length === 0) return;
     e.preventDefault();
-    const files = imageItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
-    processImageFiles(files);
-  }, [processImageFiles]);
+    attachFiles(files);
+  }, [attachFiles]);
 
   useEffect(() => {
     if (slashQuery === null) {
@@ -1618,7 +1653,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         padding: `0 ${isMobile ? 16 : CHAT_GUTTER}px 8px`,
       }}
     >
-      {/* Hidden file input：图片走模型副本；所有原文件作为二进制消息保存 */}
+      {/* Hidden file input：图片走模型副本；所有原文件作为二进制消息保存。
+          不设 `accept`：手机端一旦写死类型，选择器就只剩相册/相机，文档与
+          其他文件根本选不到。运行中也保持可用（图片可入队）。 */}
       <input
         ref={fileInputRef}
         type="file"
@@ -1627,25 +1664,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         style={{ display: "none" }}
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
-          // 运行中只收图片（入队语义），其他文件等空闲：以前整个 input 在流式期被
-          // disabled，图片实际上只能在粘贴路径附件，与「带图入队」对不上。
-          if (isStreaming) {
-            const images = files.filter(isRasterImageFile);
-            if (images.length) void processImageFiles(images);
-            const others = files.filter((file) => !isRasterImageFile(file));
-            if (others.length) {
-              setAttachedUploads((prev) => [...prev, ...others.map((file) => ({
-                id: makeUploadId(),
-                name: file.name,
-                mimeType: file.type || "application/octet-stream",
-                size: file.size,
-                status: "error" as const,
-                error: t("input_uploadWhileStreaming"),
-              }))]);
-            }
-          } else {
-            void processAttachmentFiles(files);
-          }
+          attachFiles(files);
           e.target.value = "";
         }}
       />
@@ -2220,7 +2239,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            disabled={isStreaming}
+            disabled={blocked}
             data-tooltip={t("input_attachFile")}
             className="instant-tooltip tooltip-up"
             aria-label={t("input_attachFile")}
@@ -2236,13 +2255,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               border: "none",
               borderRadius: 9,
               color: hasAttachments ? "var(--accent)" : "var(--text-muted)",
-              cursor: isStreaming ? "not-allowed" : "pointer",
-              opacity: isStreaming ? 0.5 : 1,
+              cursor: blocked ? "not-allowed" : "pointer",
+              opacity: blocked ? 0.5 : 1,
               transition: "background 0.12s, color 0.12s",
               alignSelf: "flex-end",
             }}
             onMouseEnter={(e) => {
-              if (isStreaming) return;
+              if (blocked) return;
               e.currentTarget.style.background = "var(--bg-hover)";
               e.currentTarget.style.color = hasAttachments ? "var(--accent)" : "var(--text)";
             }}
