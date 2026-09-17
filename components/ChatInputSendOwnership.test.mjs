@@ -166,3 +166,30 @@ test("H3-d：纯文本路径保持乐观清空与失败恢复", async () => {
   assert.deepEqual(state.calls.values, [["A", "plain text"]], "失败后按发送时的 draftKey 恢复");
   assert.deepEqual(state.calls.inserted, ["plain text"]);
 });
+
+test("I6：前缀与已发送内容重叠时不动输入框（不删用户刚打的字）", async () => {
+  let resolveSend;
+  const gate = new Promise((resolve) => { resolveSend = resolve; });
+  const sent = image("/sent.png");
+  const state = composer({
+    drafts: { A: { value: "hello", images: [sent] } },
+    draftKey: "A",
+    value: "hello",
+    attachedImages: [sent],
+    onSend: () => gate,
+  });
+  const send = state.env.handleSend();
+  // 回执在途：用户又打了一段与已发送内容相同的前缀，谁在前谁在后无从判断。
+  state.valueRef.current = "hellohello";
+  const writesBefore = state.calls.values.length;
+  resolveSend(true);
+  await send;
+
+  assert.deepEqual(
+    state.calls.values.slice(writesBefore),
+    [],
+    "有歧义就不改写输入框：删错会把用户刚输入的字吃掉",
+  );
+  assert.deepEqual(state.calls.cleared, [], "也不整条清空");
+  assert.deepEqual(state.calls.images.at(-1), [], "已发送的图片仍要移除（否则会重复发送）");
+});

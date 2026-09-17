@@ -796,7 +796,15 @@ export class SdkSessionHost {
     }
     const claimed = this.followUpQueue.filter((item) => item.state === "claimed");
     const pool = this.followUpQueue.filter((item) => item.state !== "claimed");
-    const next = [...claimed, ...reconcileFollowUpItems(pool, payloads)];
+    // 写入载荷里若带着「已经在途（claimed）」的条目身份，说明客户端看到的还是它
+    // 入队前的那份快照：把它当新条目加回等待队列会被投递第二次。身份在途即忽略
+    // （它仍在 inFlight 里如实显示）。
+    const next = [
+      ...claimed,
+      ...reconcileFollowUpItems(pool, payloads, {
+        inFlightIds: claimed.map((item) => item.id),
+      }),
+    ];
     if (!this.commitFollowUpQueue(
       next,
       "set",
@@ -2462,6 +2470,10 @@ export class SdkSessionHost {
         // 先到的入队。客户端带它最后一次见过的服务端 revision；不匹配则拒绝，
         // 并把权威队列回给客户端。
         const write = this.writeFollowUpQueue(parsed.items, parsed.expectedRevision);
+        // 幂等：同一 submissionId 的重发只能拿到第一次的结果。不缓存的话，客户端
+        // 因为回执丢失而重试同一次写入时，整包会被当新写入再应用一次（revision
+        // 已经前进，第二次又生效一次——I1）。成功与冲突都是定论，都要缓存。
+        this.commandReceipts.set(parsed.submissionId, write as unknown as PromptReceipt);
         if (write.ok) {
           // 注意：这里**不**中止正在进行的 flush。清队/改队不得取消已提交的一批
           // （旧实现在这里 abortFollowUpFlush，已投递内容于是从 UI 消失或反被漏发）。

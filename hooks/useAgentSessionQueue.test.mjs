@@ -289,3 +289,108 @@ test("G3：切走会话后入队确定拒绝，内容回到**原会话**草稿",
     );
   });
 });
+
+test("I7：召回被受理后，更早的 unknown 提交由权威快照解决（不再显示、不再写回）", async () => {
+  await withHost(async (host) => {
+    host.promptRunning = true;
+    const written = await host.send({ type: "set_follow_up_queue", items: ["keep"] });
+    const restored = [];
+    let calls = 0;
+    const env = environment(host, written.revision, restored, written.items, {
+      sendAgentCommand: async (_sid, command) => {
+        calls += 1;
+        // 第一次入队请求在途网络失败：客户端无从判断服务端收没收到（unknown）。
+        if (calls === 1) throw new Error("network down");
+        return host.send(command);
+      },
+    });
+    await assert.rejects(env.updateLocalFollowUp([
+      ...queue.payloadsForWrite(queue.queueEntry(env.queueBookRef.current, "A")),
+      { text: "uncertain", attemptId: queue.newQueueAttemptId() },
+    ], "A"));
+    const before = queue.queueEntry(env.queueBookRef.current, "A");
+    assert.equal(queue.hasUncertainWrite(before), true, "网络失败后进入待确认");
+    assert.deepEqual(queue.projection(before), ["keep", "uncertain"]);
+
+    await callback("handleRecallQueue", env)();
+
+    const after = queue.queueEntry(env.queueBookRef.current, "A");
+    assert.deepEqual(host.followUpQueue, [], "服务端队列确实空了");
+    assert.deepEqual(queue.projection(after), [], "投影跟随权威快照，不再显示服务端没有的条目");
+    assert.equal(queue.hasUncertainWrite(after), false, "未决提交不得跨权威快照存活");
+    assert.deepEqual(
+      restoredPayloads(restored).map((payload) => payload.text).sort(),
+      ["keep", "uncertain"],
+      "回执移交的 keep 与从未受理的 uncertain 都回到草稿（没有静默丢消息）",
+    );
+
+    // 再入队：不得把已召回的 keep 或未确认的 uncertain 复活。
+    await env.updateLocalFollowUp([{ text: "next", attemptId: queue.newQueueAttemptId() }], "A");
+    assert.deepEqual(host.followUpQueue.map((item) => item.text), ["next"]);
+  }, { streaming: false });
+});
+
+test("I7-b：后续写入被受理时，未确认载荷不再留在队列侧（内容回草稿，不双份）", async () => {
+  await withHost(async (host) => {
+    host.promptRunning = true;
+    const written = await host.send({ type: "set_follow_up_queue", items: ["keep"] });
+    const restored = [];
+    let calls = 0;
+    const env = environment(host, written.revision, restored, written.items, {
+      sendAgentCommand: async (_sid, command) => {
+        calls += 1;
+        if (calls === 1) throw new Error("network down");
+        return host.send(command);
+      },
+    });
+    await assert.rejects(env.updateLocalFollowUp([
+      ...queue.payloadsForWrite(queue.queueEntry(env.queueBookRef.current, "A")),
+      { text: "uncertain", attemptId: queue.newQueueAttemptId() },
+    ], "A"));
+
+    // 用户改主意，整包替换为 replacement：这次被受理。
+    await env.updateLocalFollowUp([{ text: "replacement", attemptId: queue.newQueueAttemptId() }], "A");
+
+    const entry = queue.queueEntry(env.queueBookRef.current, "A");
+    assert.deepEqual(host.followUpQueue.map((item) => item.text), ["replacement"]);
+    assert.deepEqual(queue.projection(entry), ["replacement"], "队列侧不得再留着没生效的条目");
+    assert.deepEqual(
+      restoredPayloads(restored).map((payload) => payload.text),
+      ["uncertain"],
+      "从未受理的载荷回到草稿，而不是继续显示成排队中",
+    );
+  }, { streaming: false });
+});
+
+test("I7-c：未确认但服务端已受理（回执丢失）的载荷，不得再复制成草稿", async () => {
+  await withHost(async (host) => {
+    host.promptRunning = true;
+    const written = await host.send({ type: "set_follow_up_queue", items: ["keep"] });
+    const restored = [];
+    let calls = 0;
+    const env = environment(host, written.revision, restored, written.items, {
+      sendAgentCommand: async (_sid, command) => {
+        calls += 1;
+        const receipt = await host.send(command);
+        // 服务端受理了，但回执在返回途中丢失：客户端只能按 unknown 处理。
+        if (calls === 1) throw new Error("response lost");
+        return receipt;
+      },
+    });
+    await assert.rejects(env.updateLocalFollowUp([
+      ...queue.payloadsForWrite(queue.queueEntry(env.queueBookRef.current, "A")),
+      { text: "landed", attemptId: queue.newQueueAttemptId() },
+    ], "A"));
+    assert.deepEqual(host.followUpQueue.map((item) => item.text), ["keep", "landed"]);
+
+    await callback("handleRecallQueue", env)();
+
+    const entry = queue.queueEntry(env.queueBookRef.current, "A");
+    assert.deepEqual(
+      restoredPayloads(restored).map((payload) => payload.text).sort(),
+      ["keep"],
+      "已受理过的 landed 归队列（不能再复制成可重发副本）",
+    );
+    assert.deepEqual(queue.projection(entry), ["landed"], "它仍在队列里等待处置");
+  }, { streaming: false });
+});

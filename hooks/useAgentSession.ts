@@ -88,7 +88,6 @@ import {
   queueRows,
   settleQueueWrite,
   settleSyncFailure,
-  settleSyncSuccess,
   type QueueBook,
   type QueueEntry,
   type QueueReceiptView,
@@ -2667,10 +2666,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     );
     queueBookRef.current = settled.book;
     if (settled.restore.length) restorePayloads(sid, settled.restore);
+    // 权威快照解决掉的更早未决提交（I7）：服务端从未受理过它们，内容回草稿。
+    // 不提示就等于默默吞掉一条用户消息（它自身从未在队列里出现过）。
+    if (settled.resolved.length) {
+      restorePayloads(sid, settled.resolved);
+      addNotice({ type: "info", message: t("input_queueUnconfirmedRestored") });
+    }
     if (currentQueueSessionIdRef.current === sid) publishQueue();
     if (outcome.disposition === "accepted") ensureEventsConnected(sid);
     return { ...outcome, error: failure, restored: settled.restore.length };
-  }, [ensureEventsConnected, publishQueue, restorePayloads, snapshotFromQueuePayload]);
+  }, [addNotice, ensureEventsConnected, publishQueue, restorePayloads, snapshotFromQueuePayload, t]);
 
   /**
    * 写入队列并同步给 Host（保留旧签名：入队路径与测试环境都用它）。

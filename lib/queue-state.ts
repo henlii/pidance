@@ -34,6 +34,7 @@ export type { QueueItemPayload };
 /** 权威条目 → 写入载荷（媒体按引用回传，Host 按路径复用同一份文件）。 */
 export function itemToPayload(item: FollowUpItem): QueueItemPayload {
   return {
+    id: item.id,
     text: item.text,
     ...(item.media?.length ? { media: item.media.map((ref) => ({ ...ref })) } : {}),
   };
@@ -197,11 +198,6 @@ export function payloadsForWrite(entry: QueueEntry): QueueItemPayload[] {
   return latest ? latest.payloads : entry.items.filter((item) => item.state !== "claimed").map(itemToPayload);
 }
 
-/** 权威条目 → 写入载荷（正文 + 该条目的媒体引用，逐条保留配对）。 */
-export function queueItemPayloads(items: readonly FollowUpItem[]): QueueItemPayload[] {
-  return items.filter((item) => item.state !== "claimed").map(itemToPayload);
-}
-
 /** 权威条目里的媒体引用按顺序摊平（取回时按图片分组重建附件）。 */
 export function itemMediaRefs(items: readonly FollowUpItem[]): QueuedMediaRef[] {
   return items.flatMap((item) => item.media ?? []);
@@ -345,20 +341,6 @@ export function adoptServerSnapshot(
   });
 }
 
-/** 提交成功：该次提交出链，仍未结算的后继保留（基线随回执推进）。 */
-export function settleSyncSuccess(
-  book: QueueBook,
-  sessionId: string,
-  revision: number,
-  snapshot: QueueSnapshot,
-): QueueBook {
-  const adopted = adoptServerSnapshot(book, sessionId, snapshot);
-  const entry = queueEntry(adopted, sessionId);
-  const pending = entry.pending.filter((proposal) => proposal.revision !== revision);
-  if (pending.length === entry.pending.length) return adopted;
-  return put(adopted, sessionId, { ...entry, pending });
-}
-
 /**
  * 提交失败：该次提交**连同其后继**一起作废，退回权威条目。
  *
@@ -400,6 +382,66 @@ export function isQueueWriteConflict(result: unknown): boolean {
 }
 
 /**
+ * 权威快照解决未决提交（issue #42 / I7）。
+ *
+ * 一次被受理的写入意味着 Host 的队列状态**此刻**已知：所有**不晚于**它的本地提交
+ * 都已经有了定论。旧实现只把「本次提交」出链，于是更早的 unknown 提交会永远留在
+ * 链上——召回之后投影仍在显示服务端已经没有的条目，下一次入队又把它整包写回去
+ * （「队列 + 草稿」各一份）。
+ *
+ * 只用两个服务端事实判定：
+ * - 载荷的 attemptId 在 `admittedAttemptIds` 里 → 队列已持有它（还在队列里就在
+ *   快照的 items 里，已经不在了就是已被投递），**不恢复**；
+ * - 不在里面 → 这次写入从未被受理 → 内容安全地回到草稿（不会复制出重复副本）。
+ *
+ * 其后尚未发送的后继提交按身份重整：引用「已不在队列里的身份」的载荷从写入里
+ * 去掉——否则后继会把已召回的条目又写成新条目，或把在途条目投递第二次。
+ */
+function resolvePendingsAgainstAuthority(
+  book: QueueBook,
+  sessionId: string,
+  settledRevision: number,
+  snapshot: QueueSnapshot,
+): { book: QueueBook; resolved: QueueItemPayload[] } {
+  const adopted = adoptServerSnapshot(book, sessionId, snapshot);
+  const entry = queueEntry(adopted, sessionId);
+  const admitted = new Set(snapshot.admittedAttemptIds ?? entry.admittedAttemptIds);
+  const liveIds = new Set(snapshot.items.map((item) => item.id));
+  const settled = entry.pending.filter((proposal) => proposal.revision <= settledRevision);
+  const later = entry.pending.filter((proposal) => proposal.revision > settledRevision);
+  const seen = new Set<string>();
+  const reclaimed: QueueItemPayload[] = [];
+  for (const proposal of settled) {
+    // 本次提交：队列持有它（规则 1），什么都不恢复。
+    if (proposal.revision === settledRevision) continue;
+    for (const payload of proposal.candidates) {
+      const attemptId = payload.attemptId;
+      if (!attemptId || seen.has(attemptId) || admitted.has(attemptId)) continue;
+      seen.add(attemptId);
+      reclaimed.push(payload);
+    }
+  }
+  const gone = (payload: QueueItemPayload): boolean => {
+    if (payload.attemptId && seen.has(payload.attemptId)) return true;
+    return Boolean(payload.id && !liveIds.has(payload.id));
+  };
+  const pending = later.map((proposal) => {
+    const payloads = proposal.payloads.filter((payload) => !gone(payload));
+    const candidates = proposal.candidates.filter((payload) => !gone(payload));
+    if (payloads.length === proposal.payloads.length && candidates.length === proposal.candidates.length) {
+      return proposal;
+    }
+    return { ...proposal, payloads, candidates };
+  });
+  const untouched = settled.length === 0
+    && pending.every((proposal, index) => proposal === later[index]);
+  return {
+    book: untouched ? adopted : put(adopted, sessionId, { ...entry, pending }),
+    resolved: reclaimed,
+  };
+}
+
+/**
  * 写入结算——**消息所有权的唯一判定处**（issue #42 / H1–H3）。
  *
  * 规则（与 host 侧 `admittedAttemptIds` 配对）：
@@ -412,6 +454,14 @@ export function isQueueWriteConflict(result: unknown): boolean {
  *
  * 失败时连同后继提交一起作废，但恢复集合取「被作废的全部候选」（按令牌去重）：
  * 后继快照里含前一批载荷，只取最后一个会把只出现在前者里的载荷（如派发的 extra）丢掉。
+ *
+ * `accepted` 带权威快照时还会解决**更早**的未决提交，见
+ * `resolvePendingsAgainstAuthority`（I7）：权威快照面前不存在「永远待确认」的
+ * 本地提交，否则召回后它会把服务端已经没有的条目重新写回去。
+ *
+ * 只对「受理回执里的快照」做这件事：拒绝/冲突回执的 items 不保证是一次真实的
+ * 队列读（路由层的 400 空体也会走这条路），拿它反推「服务端没有这条」会把仍在
+ * 队列里的内容复制成草稿——那正是 I7 要消除的「队列 + 草稿」双份。
  */
 export function settleQueueWrite(
   book: QueueBook,
@@ -419,11 +469,17 @@ export function settleQueueWrite(
   revision: number,
   disposition: QueueWriteDisposition,
   snapshot?: QueueSnapshot,
-): { book: QueueBook; restore: QueueItemPayload[]; uncertain: boolean } {
+): {
+  book: QueueBook;
+  restore: QueueItemPayload[];
+  /** 由权威快照解决、从未被受理、需回到草稿的载荷（I7）。 */
+  resolved: QueueItemPayload[];
+  uncertain: boolean;
+} {
   const entry = queueEntry(book, sessionId);
   if (!entry.pending.some((proposal) => proposal.revision === revision)) {
     // 已被更早的失败连带作废（内容那时已经归还）：不再恢复第二次。
-    return { book, restore: [], uncertain: false };
+    return { book, restore: [], resolved: [], uncertain: false };
   }
   if (disposition === "unknown") {
     return {
@@ -434,14 +490,15 @@ export function settleQueueWrite(
         )),
       }),
       restore: [],
+      resolved: [],
       uncertain: true,
     };
   }
   // 「成功」必须带得回权威快照才算数：没有快照就无法证明服务端持有什么，
   // 按结果未知处理比抧测安全（宁可不恢复，也不要复制出重复副本）。
   if (disposition === "accepted" && snapshot && snapshot.revision !== null) {
-    const accepted = settleSyncSuccess(book, sessionId, revision, snapshot);
-    return { book: accepted, restore: [], uncertain: false };
+    const authority = resolvePendingsAgainstAuthority(book, sessionId, revision, snapshot);
+    return { book: authority.book, restore: [], resolved: authority.resolved, uncertain: false };
   }
   if (disposition === "accepted") {
     return {
@@ -452,6 +509,7 @@ export function settleQueueWrite(
         )),
       }),
       restore: [],
+      resolved: [],
       uncertain: true,
     };
   }
@@ -470,6 +528,7 @@ export function settleQueueWrite(
   return {
     book: settleSyncFailure(book, sessionId, revision, snapshot),
     restore,
+    resolved: [],
     uncertain: false,
   };
 }

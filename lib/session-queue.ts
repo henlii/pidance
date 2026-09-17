@@ -60,6 +60,15 @@ export type QueueItemPayload = {
    * 把它当可重发副本；没受理过 → 从未移交，必须归还草稿。
    */
   attemptId?: string;
+  /**
+   * 服务端条目身份（客户端从权威快照里抄回来的）。
+   *
+   * 为什么必须能传：整包写入是「队列应该就是这几条」，而对齐不能让正文充当身份
+   * ——同文无图的两条，省略其中一条时按正文 first-fit 会删掉先匹配到的那条，
+   * 而不是用户指定的那条（I4）。带了 id 就必须命中该条目：命中不了就说明这个
+   * 身份已经不在队列里（被投递/被召回），该条目按新条目处理，不能拿正文去顶。
+   */
+  id?: string;
 };
 
 /** 令牌上限（防御性边界；超出丢最旧的）。 */
@@ -70,6 +79,11 @@ export function parseAttemptId(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return /^[A-Za-z0-9_-]{1,64}$/.test(trimmed) ? trimmed : null;
+}
+
+/** 服务端条目身份的校验（与 attemptId 同为不透明令牌，校验规则一致）。 */
+export function parseFollowUpItemId(value: unknown): string | null {
+  return parseAttemptId(value);
 }
 
 /** 令牌列表清洗（保持顺序、去重、只留最近 MAX_ATTEMPT_IDS 条）。 */
@@ -296,10 +310,10 @@ export function followUpItemTexts(items: readonly FollowUpItem[]): string[] {
 /**
  * 整包写入（`set_follow_up_queue`）与当前条目的对齐。
  *
- * 客户端传的是「正文 + 该条目的图片引用」（它没有服务端条目身份）；服务端按
- * 「正文 + 出现顺序」与当前条目对齐，保留未变化条目的 id 与状态，新出现的正文
- * 成为新 `waiting` 条目。不能用 `Set(正文)` 之类做集合运算：期间新入队的同文
- * 条目会被误删，同文两条也会塌成一条身份。
+ * 客户端传的是「正文 + 该条目的图片引用 +（它已知的）服务端条目身份」；服务端
+ * 优先按身份对齐，其次才是「正文 + 附件」配对，保留未变化条目的 id 与状态，新
+ * 出现的正文成为新 `waiting` 条目。不能用 `Set(正文)` 之类做集合运算：期间新
+ * 入队的同文条目会被误删，同文两条也会塌成一条身份。
  *
  * 图片处置：写载荷没带图的命中原条目→保留原图（旧客户端/旧回执不得静默丢图）；
  * 带了图的以写载荷为准（校验在 Host 侧）。
@@ -307,10 +321,32 @@ export function followUpItemTexts(items: readonly FollowUpItem[]): string[] {
 export function reconcileFollowUpItems(
   current: readonly FollowUpItem[],
   payloads: readonly QueueItemPayload[],
+  options?: { inFlightIds?: readonly string[] },
 ): FollowUpItem[] {
+  const inFlight = new Set(options?.inFlightIds ?? []);
   const used = new Array<boolean>(current.length).fill(false);
+  // 第一遍只认身份：客户端指明的那条就是它，哪怕同文还有别的条目。
+  const byId = new Map<string, number>();
+  current.forEach((item, index) => {
+    if (!byId.has(item.id)) byId.set(item.id, index);
+  });
   const next: FollowUpItem[] = [];
   for (const payload of payloads) {
+    // 身份已在途：忽略而不是重建（重建就是把它投递第二次）。
+    if (payload.id !== undefined && inFlight.has(payload.id)) continue;
+    const declared = payload.id === undefined ? undefined : byId.get(payload.id);
+    if (declared !== undefined && !used[declared]) {
+      used[declared] = true;
+      const existing = current[declared];
+      const media = payload.media?.length ? payload.media : existing.media;
+      next.push({
+        id: existing.id,
+        text: payload.text,
+        state: existing.state,
+        ...(media?.length ? { media: [...media] } : {}),
+      });
+      continue;
+    }
     let match = -1;
     for (let index = 0; index < current.length; index++) {
       const candidate = current[index];

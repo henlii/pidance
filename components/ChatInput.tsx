@@ -955,8 +955,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       return;
     }
     // 等待期间又编辑过：只移除已发送的那部分，保留新输入的内容。
+    // 前缀剥离只在**无歧义**时做：剩余内容又以同一段正文开头时（发 "hello"、
+    // 现在 "hellohello"），无法判断用户新打的那段在已发送内容之前还是之后，
+    // 删错就把用户刚输入的字吃掉。宁可不删（留在输入框里可自行删），也不猜。
     const current = valueRef.current;
-    if (current.startsWith(sent.value)) setValue(current.slice(sent.value.length).trimStart());
+    const rest = current.startsWith(sent.value) ? current.slice(sent.value.length) : null;
+    if (rest !== null && !rest.startsWith(sent.value)) setValue(rest.trimStart());
     setAttachedImages((prev) => prev.filter((image) => !sent.imageKeys.includes(attachmentIdentity(image))));
     setAttachedUploads((prev) => prev.filter((item) => !(item.path && sent.uploadPaths.includes(item.path))));
   }, [clearInput]);

@@ -9,6 +9,7 @@ import {
   MAX_QUEUED_ITEM_MEDIA,
   normalizeFollowUpItems,
   parseAttemptId,
+  parseFollowUpItemId,
   type FollowUpItem,
   type QueueItemPayload,
   type QueuedMediaRef,
@@ -452,10 +453,18 @@ export function parseSetFollowUpQueueCommand(
       clientId = parseAttemptId(record.attemptId) ?? undefined;
       if (!clientId) throw new Error("invalid item attemptId");
     }
+    // 服务端条目身份同理：带了就必须合法。不许用它指向不存在的条目——
+    // 那要么是陈旧快照，要么是伪造，两种都不应该被当成「就是这一条」。
+    let itemId: string | undefined;
+    if (record.id !== undefined) {
+      itemId = parseFollowUpItemId(record.id) ?? undefined;
+      if (!itemId) throw new Error("invalid item id");
+    }
     items.push({
       text: record.text,
       ...(media ? { media } : {}),
       ...(clientId ? { attemptId: clientId } : {}),
+      ...(itemId ? { id: itemId } : {}),
     });
   }
   return {
