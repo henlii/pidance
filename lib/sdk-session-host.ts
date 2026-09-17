@@ -56,6 +56,7 @@ import {
   newFollowUpItem,
   reconcileFollowUpItems,
   serializeFollowUpQueue,
+  withAdmittedAttemptIds,
   MAX_QUEUED_ITEM_MEDIA,
   type FollowUpItem,
   type QueuedMediaRef,
@@ -90,6 +91,7 @@ import {
   parseDispatchFollowUpQueueCommand,
   parseFollowUpCommand,
   parsePromptCommand,
+  parseRecallFollowUpQueueCommand,
   parseSetFollowUpQueueCommand,
   parseSteerCommand,
   type DispatchFollowUpQueueCommand,
@@ -97,6 +99,7 @@ import {
   type PromptImageInput,
   type PromptReason,
   type PromptReceipt,
+  type QueueRecallReceipt,
   type SteerCommand,
   type QueueDispatchReceipt,
   type QueueItemPayload,
@@ -578,6 +581,14 @@ export class SdkSessionHost {
     }
   }
 
+  /**
+   * 已受理写入的尝试令牌（与队列同进同出，见 session-queue 的 admittedAttemptIds）。
+   *
+   * 它是客户端判断「我的写入到底进没进队列」的唯一凭据：受理即记录，客户端拿到
+   * 快照就能区分「队列持有」与「从未移交」，不再靠请求失败/成功或正文推测。
+   */
+  private followUpAdmittedAttemptIds: string[] = [];
+
   private hydrateFollowUpQueue(): void {
     if (this.followUpQueueHydrated) return;
     this.followUpQueueHydrated = true;
@@ -593,6 +604,7 @@ export class SdkSessionHost {
       item.state === "claimed" ? { ...item, state: "unknown" as const } : item
     ));
     this.followUpQueueRevision = decoded.revision;
+    this.followUpAdmittedAttemptIds = decoded.admittedAttemptIds;
     // 引用落地校验：文件没了（用户删过、盘被清）就不能再拿它当"完整载荷"。
     // 丢掉缺失的引用并降级为 unknown：不自动重投，由用户显式取消或重新附图。
     this.followUpQueue = this.followUpQueue.map((item) => {
@@ -629,7 +641,11 @@ export class SdkSessionHost {
    * 于是崩溃/重启后要么丢队列，要么让旧队列复活（已确认送达的内容被再投一次）。
    * 调用方必须用返回值判断，失败时不得声称已受理。
    */
-  private commitFollowUpQueue(items: FollowUpItem[], reason: string): boolean {
+  private commitFollowUpQueue(
+    items: FollowUpItem[],
+    reason: string,
+    admittedAttempts: readonly (string | undefined)[] = [],
+  ): boolean {
     // 写出的东西必须满足自身 decoder 的 round-trip：单条目媒体引用超过上限时
     // 解码会整条丢弃（重启后 claimed 条目连同它的图一起消失）。这里 fail-closed
     // 而不是写出自己读不懂的数据（F10）。
@@ -642,10 +658,12 @@ export class SdkSessionHost {
       }
     }
     const nextRevision = this.followUpQueueRevision + 1;
+    // 令牌与队列在同一次写盘里落地：不能出现「队列受理了、令牌没记住」的窗口。
+    const admittedAttemptIds = withAdmittedAttemptIds(this.followUpAdmittedAttemptIds, admittedAttempts);
     try {
       updatePidancePref(
         `sessionQueue.${this.realSessionId}`,
-        serializeFollowUpQueue({ items, revision: nextRevision }),
+        serializeFollowUpQueue({ items, revision: nextRevision, admittedAttemptIds }),
         this.agentDir,
       );
     } catch (error) {
@@ -654,6 +672,7 @@ export class SdkSessionHost {
     }
     this.followUpQueue = items;
     this.followUpQueueRevision = nextRevision;
+    this.followUpAdmittedAttemptIds = admittedAttemptIds;
     // 落盘成功即重新解锁：一次成功的写入就是对 fail-closed 状态的显式重试。
     this.followUpFlushBlocked = false;
     return true;
@@ -685,6 +704,7 @@ export class SdkSessionHost {
       revision: this.followUpQueueRevision,
       items: this.visibleFollowUp(),
       inFlight: this.inFlightFollowUpTexts(),
+      admittedAttemptIds: [...this.followUpAdmittedAttemptIds],
     };
   }
 
@@ -777,11 +797,56 @@ export class SdkSessionHost {
     const claimed = this.followUpQueue.filter((item) => item.state === "claimed");
     const pool = this.followUpQueue.filter((item) => item.state !== "claimed");
     const next = [...claimed, ...reconcileFollowUpItems(pool, payloads)];
-    if (!this.commitFollowUpQueue(next, "set")) {
+    if (!this.commitFollowUpQueue(
+      next,
+      "set",
+      payloads.map((payload) => payload.attemptId),
+    )) {
       // 落盘失败：内存保持原状，不得声称已入队（否则 UI 认为已保存，重启后不存在）。
       return { ok: false, persist: true, ...this.queueReceiptBase() };
     }
     return { ok: true, ...this.queueReceiptBase() };
+  }
+
+  /**
+   * 条目级召回：把指定条目原子地从等待队列移除并交还给调用方（H2）。
+   *
+   * 为什么不是「清空整队」：清队无法证明「调用方捕获的那几条已移交」——期间被
+   * 别的视图整队投递（claimed）或落盘失败的条目根本不可撤回。这里按 id 取，
+   * 只移除 really 可移交的条目，回执如实回报 recalled / skipped。
+   *
+   * `unknown` 允许取回：它本来就永不自动重投，交回草稿 = 用户显式重新决定；
+   * `claimed` 拒绝：已提交给 Pi，把「撤回」当取消成功是谎话。
+   */
+  private recallFollowUpQueue(itemIds: readonly string[]): QueueRecallReceipt {
+    const recalled: FollowUpItem[] = [];
+    const skipped: { id: string; reason: "claimed" | "missing" }[] = [];
+    for (const id of itemIds) {
+      const item = this.followUpQueue.find((candidate) => candidate.id === id);
+      if (!item) {
+        skipped.push({ id, reason: "missing" });
+        continue;
+      }
+      if (item.state === "claimed") {
+        skipped.push({ id, reason: "claimed" });
+        continue;
+      }
+      recalled.push(item);
+    }
+    if (!recalled.length) {
+      // 没有任何条目可移交：不写盘、不动 revision，如实回报（调用方不得把
+      // 「队列还在」当成取回成功）。
+      return { ok: true, ...this.queueReceiptBase(), recalled: [], skipped };
+    }
+    const recallIds = new Set(recalled.map((item) => item.id));
+    const next = this.followUpQueue.filter((item) => !recallIds.has(item.id));
+    if (!this.commitFollowUpQueue(next, "recall")) {
+      // 落盘失败：内存未变，撤回不得算成功。
+      return { ok: false, persist: true, ...this.queueReceiptBase(), recalled: [], skipped };
+    }
+    this.emitQueueChanged();
+    this.resetIdleTimer();
+    return { ok: true, ...this.queueReceiptBase(), recalled, skipped };
   }
 
   /**
@@ -948,15 +1013,16 @@ export class SdkSessionHost {
     // 只把本批 waiting 换成副本：**未参与派发的条目（claimed / unknown）必须原样保留**。
     // 旧实现只保留 claimed，会把 unknown（上次崩溃前已发出、结果未知）连同它的图一起删掉。
     const next = [...this.followUpQueue.filter((item) => item.state !== "waiting"), ...claims];
-    if (!this.commitFollowUpQueue(next, "dispatch-claim")) {
+    // extra 此时被正式受理（已进队列，接下来才是投递）：记下令牌，客户端不得再
+    // 把它当「未入队」恢复成草稿。
+    if (!this.commitFollowUpQueue(next, "dispatch-claim", [command.extraAttemptId])) {
       return { ok: false, status: "rejected", reason: "error", ...this.queueReceiptBase() };
     }
     this.dispatchingFollowUpQueue = true;
     this.emitQueueChanged();
     // 认领条目已带上合并后的图片引用：从文件回读为 SDK 载荷（整队转引导也不能丢图）。
     const dispatchImages = precheck.images.length ? precheck.images : undefined;
-    let action: "prompt" | "steer" | "queued" = "prompt";
-    try {
+    let action: "prompt" | "steer" | "queued" = "prompt";    try {
       // 可消费 steer 的判据是 SDK 的活跃 run（session.isStreaming），不是 isSettled()：
       // promptRunning 还包含 preflight，compact-only 也不是可消费 run（旧实现会在
       // 这两种情况下把消息发成只入内存的 SDK steer，UI 上永远等不到它）。
@@ -1063,6 +1129,7 @@ export class SdkSessionHost {
       items: base.items,
       revision: base.revision,
       inFlight: base.inFlight,
+      admittedAttemptIds: base.admittedAttemptIds,
     });
   }
 
@@ -2375,6 +2442,16 @@ export class SdkSessionHost {
         // 幂等：同一 submissionId 重发不得再清一次队/再投一次。
         this.commandReceipts.set(parsed.submissionId, dispatched as unknown as PromptReceipt);
         return dispatched;
+      }
+
+      case "recall_follow_up_queue": {
+        const parsed = parseRecallFollowUpQueueCommand(command);
+        const cached = this.commandReceipts.get(parsed.submissionId);
+        if (cached) return cached;
+        const recalled = this.recallFollowUpQueue(parsed.itemIds);
+        // 幂等：同一 submissionId 重发不得再取一次（第二次召回同一批只能拿到 missing）。
+        this.commandReceipts.set(parsed.submissionId, recalled as unknown as PromptReceipt);
+        return recalled;
       }
 
       case "set_follow_up_queue": {

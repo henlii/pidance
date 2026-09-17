@@ -8,6 +8,7 @@ import { normalizeBinaryMimeType } from "./message-binary";
 import {
   MAX_QUEUED_ITEM_MEDIA,
   normalizeFollowUpItems,
+  parseAttemptId,
   type FollowUpItem,
   type QueueItemPayload,
   type QueuedMediaRef,
@@ -84,7 +85,22 @@ export type DispatchFollowUpQueueCommand = {
   type: "dispatch_follow_up_queue";
   /** 输入框内容，并入队尾后一起发送。 */
   extra?: string;
+  /** 上面那段 extra 的写入尝试令牌（未入队时客户端据此恢复，不靠正文猜）。 */
+  extraAttemptId?: string;
   expectedRevision: number | null;
+  submissionId: string;
+};
+
+/**
+ * 条目级召回：把指定条目**原子地**从等待队列取回到草稿（issue #42 / H2）。
+ *
+ * 为什么不是「清空整队」：清队不能证明「我捕获的那几条已经移交」，期间被别的
+ * 视图整队投递（claimed）的条目根本不可撤回。只按 itemIds 取，回执回报实际取回
+ * 的条目，客户端才能只把确认移交的内容放进可重发草稿。
+ */
+export type RecallFollowUpQueueCommand = {
+  type: "recall_follow_up_queue";
+  itemIds: string[];
   submissionId: string;
 };
 
@@ -94,7 +110,8 @@ export type TypedMessageCommand =
   | SteerCommand
   | FollowUpCommand
   | SetFollowUpQueueCommand
-  | DispatchFollowUpQueueCommand;
+  | DispatchFollowUpQueueCommand
+  | RecallFollowUpQueueCommand;
 
 /** 回执状态：`queued` 表示载荷已被可靠持久化到产品队列，不是失败。 */
 export type PromptReceiptStatus = "accepted" | "queued" | "rejected";
@@ -139,7 +156,18 @@ export type PromptReceipt = {
  * items = 客户端可见条目（waiting + unknown，含 id）；inFlight = 已提交给 Pi、
  * 尚未拿到受理结果的正文。清队不会动 inFlight：把在途批次当成取消成功是撒谎。
  */
-type QueueReceiptBase = { revision: number; items: FollowUpItem[]; inFlight: string[] };
+type QueueReceiptBase = {
+  revision: number;
+  items: FollowUpItem[];
+  inFlight: string[];
+  /**
+   * Host 已受理的写入尝试令牌（有界）。
+   *
+   * 客户端用它回答「我这次写入被受理了吗」：在列 → 队列持有内容，一律不得再
+   * 恢复成可重发副本；不在列 → 从未移交，必须归还草稿。请求成功/失败本身不构成证据。
+   */
+  admittedAttemptIds?: string[];
+};
 
 /** 队列写入回执。 */
 export type QueueWriteReceipt =
@@ -157,6 +185,22 @@ export type QueueDispatchReceipt =
   | ({ ok: true; status: "accepted"; action: "prompt" | "steer" | "queued" } & QueueReceiptBase)
   | ({ ok: false; status: "rejected"; reason: PromptReason } & QueueReceiptBase)
   | ({ ok: false; conflict: true; reason: "revision" | "in-flight" } & QueueReceiptBase);
+
+type QueueRecallBase = QueueReceiptBase & {
+  /** 真正从队列移除（成功移交回草稿）的条目。 */
+  recalled: FollowUpItem[];
+  /** 未能取回的条目及原因；`missing` = 已被别的写入移除。 */
+  skipped: { id: string; reason: "claimed" | "unknown" | "missing" }[];
+};
+
+/**
+ * 召回回执：`recalled` 是唯一可以变成可重发草稿的凭据。
+ *
+ * 落盘失败（persist）时内存未变：请求方不得把撤回当成成功。
+ */
+export type QueueRecallReceipt =
+  | ({ ok: true } & QueueRecallBase)
+  | ({ ok: false; persist: true } & QueueRecallBase);
 
 /**
  * 把 Host/SDK 抛出的错误消息归类成结构化原因。
@@ -401,7 +445,18 @@ export function parseSetFollowUpQueueCommand(
     if (!record.text.trim() && !media?.length) {
       throw new Error("items must not be empty");
     }
-    items.push({ text: record.text, ...(media ? { media } : {}) });
+    // 客户端身份是可选的（旧客户端/旧脚本不带）；带了就必须合法，不能静默丢弃——
+    // 丢了会让失败处置重新靠正文猜身份。
+    let clientId: string | undefined;
+    if (record.attemptId !== undefined) {
+      clientId = parseAttemptId(record.attemptId) ?? undefined;
+      if (!clientId) throw new Error("invalid item attemptId");
+    }
+    items.push({
+      text: record.text,
+      ...(media ? { media } : {}),
+      ...(clientId ? { attemptId: clientId } : {}),
+    });
   }
   return {
     type: "set_follow_up_queue",
@@ -416,10 +471,39 @@ export function parseDispatchFollowUpQueueCommand(
   makeId: () => string = defaultSubmissionId,
 ): DispatchFollowUpQueueCommand {
   const extra = typeof body.extra === "string" ? body.extra : undefined;
+  let extraAttemptId: string | undefined;
+  if (body.extraAttemptId !== undefined) {
+    extraAttemptId = parseAttemptId(body.extraAttemptId) ?? undefined;
+    if (!extraAttemptId) throw new Error("invalid extraAttemptId");
+  }
   return {
     type: "dispatch_follow_up_queue",
     ...(extra !== undefined ? { extra } : {}),
+    ...(extraAttemptId ? { extraAttemptId } : {}),
     expectedRevision: parseExpectedRevision(body.expectedRevision),
+    submissionId: submissionIdOf(body, makeId),
+  };
+}
+
+/** 召回条目数上限（防御性边界：一次召回不可能是整队列的无界写入）。 */
+export const MAX_RECALL_ITEM_IDS = 256;
+
+export function parseRecallFollowUpQueueCommand(
+  body: Record<string, unknown>,
+  makeId: () => string = defaultSubmissionId,
+): RecallFollowUpQueueCommand {
+  if (!Array.isArray(body.itemIds)) throw new Error("itemIds must be an array");
+  if (body.itemIds.length === 0) throw new Error("itemIds must not be empty");
+  if (body.itemIds.length > MAX_RECALL_ITEM_IDS) throw new Error("too many itemIds");
+  const itemIds: string[] = [];
+  for (const entry of body.itemIds) {
+    const id = typeof entry === "string" ? entry.trim() : "";
+    if (!id) throw new Error("invalid itemId");
+    if (!itemIds.includes(id)) itemIds.push(id);
+  }
+  return {
+    type: "recall_follow_up_queue",
+    itemIds,
     submissionId: submissionIdOf(body, makeId),
   };
 }
@@ -430,7 +514,8 @@ export function isTypedMessageCommandType(type: string): boolean {
     || type === "steer"
     || type === "follow_up"
     || type === "set_follow_up_queue"
-    || type === "dispatch_follow_up_queue";
+    || type === "dispatch_follow_up_queue"
+    || type === "recall_follow_up_queue";
 }
 
 export function parseTypedMessageCommand(
@@ -448,5 +533,6 @@ export function parseTypedMessageCommand(
   if (type === "follow_up") return parseFollowUpCommand(record, makeId);
   if (type === "set_follow_up_queue") return parseSetFollowUpQueueCommand(record, makeId);
   if (type === "dispatch_follow_up_queue") return parseDispatchFollowUpQueueCommand(record, makeId);
+  if (type === "recall_follow_up_queue") return parseRecallFollowUpQueueCommand(record, makeId);
   throw new Error(`Unsupported message command: ${String(type)}`);
 }

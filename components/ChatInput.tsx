@@ -916,6 +916,51 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     return base.trim() ? `${base.trim()}\n\n${block}` : block;
   }, [t]);
 
+  /**
+   * 带附件发送时捕获的草稿版本（issue #42 / H3）。
+   *
+   * 成功回执只能结算**这一份**内容：发送在途时用户可能已经切到别的会话、
+   * 或在同一会话里继续编辑。旧实现在回执后用 clearInput() 清「当前输入框」，
+   * 于是 A 的附件发完会把 B 未发送的正文/图片/文件一起清掉。
+   */
+  const sentDraftRef = useRef<{
+    key: string | null;
+    value: string;
+    imageKeys: string[];
+    uploadPaths: string[];
+  } | null>(null);
+
+  const settleSentDraft = useCallback(() => {
+    const sent = sentDraftRef.current;
+    sentDraftRef.current = null;
+    if (!sent) return;
+    if (draftKeyRef.current !== sent.key) {
+      // 输入框已经属于别的草稿/会话：只作废**发送的那份**版本（且它未被}
+      // 外部改写时才作废），绝不动当前输入框。
+      if (sent.key) {
+        const draft = getDraft(sent.key);
+        if (draft && draft.value === sent.value) clearDraft(sent.key);
+      }
+      return;
+    }
+    const images = attachedImagesRef.current;
+    const uploads = attachedUploadsRef.current;
+    const sentUploads = uploads.filter((item) => item.path && sent.uploadPaths.includes(item.path));
+    const untouched = valueRef.current === sent.value
+      && images.length === sent.imageKeys.length
+      && images.every((image) => sent.imageKeys.includes(attachmentIdentity(image)))
+      && sentUploads.length === sent.uploadPaths.length;
+    if (untouched) {
+      clearInput();
+      return;
+    }
+    // 等待期间又编辑过：只移除已发送的那部分，保留新输入的内容。
+    const current = valueRef.current;
+    if (current.startsWith(sent.value)) setValue(current.slice(sent.value.length).trimStart());
+    setAttachedImages((prev) => prev.filter((image) => !sent.imageKeys.includes(attachmentIdentity(image))));
+    setAttachedUploads((prev) => prev.filter((item) => !(item.path && sent.uploadPaths.includes(item.path))));
+  }, [clearInput]);
+
   useEffect(() => {
     if (!draftKey || draftKeyRef.current !== draftKey) return;
     setDraft(draftKey, {
@@ -992,6 +1037,16 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const hasAttachment = attachedImages.length > 0 || hasReadyUploads;
     const capturedDraftKey = draftKeyRef.current;
     if (!hasAttachment) clearInput();
+    if (hasAttachment) {
+      sentDraftRef.current = {
+        key: capturedDraftKey ?? null,
+        value: valueRef.current,
+        imageKeys: attachedImages.map(attachmentIdentity),
+        uploadPaths: attachedUploads
+          .filter((item): item is typeof item & { path: string } => item.status === "ready" && typeof item.path === "string")
+          .map((item) => item.path),
+      };
+    }
     if (!attachedImages.length && !hasReadyUploads && base.startsWith("/") && onBuiltinCommand) {
       const result = await onBuiltinCommand(base);
       if (result.handled) {
@@ -1022,8 +1077,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       }
       return;
     }
-    if (hasAttachment) clearInput();
-  }, [value, attachedImages, attachedUploads, hasReadyUploads, hasUploading, hasFailedAttachments, isStreaming, onBuiltinCommand, onPromptWithStreamingBehavior, onSend, clearInput, insertIfEmptyLocal, onAudioUnlock, composeMessageWithUploads, t]);
+    settleSentDraft();
+  }, [value, attachedImages, attachedUploads, hasReadyUploads, hasUploading, hasFailedAttachments, isStreaming, onBuiltinCommand, onPromptWithStreamingBehavior, onSend, clearInput, insertIfEmptyLocal, onAudioUnlock, composeMessageWithUploads, settleSentDraft, t]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()

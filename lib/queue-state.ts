@@ -39,14 +39,64 @@ export function itemToPayload(item: FollowUpItem): QueueItemPayload {
   };
 }
 
+/** 客户端新写入的载荷（带本次尝试令牌，失败时可判定是否受理过）。 */
+export function newPayload(
+  text: string,
+  options?: { media?: QueuedMediaRef[]; attemptId?: string },
+): QueueItemPayload {
+  return {
+    text,
+    ...(options?.media?.length ? { media: options.media } : {}),
+    attemptId: options?.attemptId ?? newQueueAttemptId(),
+  };
+}
+
+/** 写入结果处置分类（唯一判定点：成功/失败本身不足以判定移交）。 */
+export type QueueWriteDisposition = "accepted" | "conflict" | "rejected" | "unknown";
+
+/**
+ * 把「回执或错误」归入四类处置。
+ *
+ * - `accepted`：Host 确认受理并落盘（唯一能证明内容已入队列的回执）；
+ * - `conflict`：权威状态已知且本次未生效（CAS 冲突/在途冲突/已认领不可撤回）；
+ * - `rejected`：确定未受理（结构性拒绝、落盘失败、4xx）；
+ * - `unknown`：网络/超时等无定论——既不能当成功也不能当失败。
+ */
+export function classifyQueueOutcome(
+  result: unknown,
+  options?: { error?: unknown; definitiveRejection?: (error: unknown) => boolean },
+): QueueWriteDisposition {
+  if (options?.error !== undefined) {
+    return options.definitiveRejection?.(options.error) ? "rejected" : "unknown";
+  }
+  if (!result || typeof result !== "object") return "unknown";
+  const view = result as QueueReceiptView;
+  if (view.conflict === true) return "conflict";
+  if (view.ok === true) return "accepted";
+  if (typeof view.ok === "boolean") return "rejected";
+  return "unknown";
+}
+
 function toPayload(value: string | QueueItemPayload): QueueItemPayload {
   return typeof value === "string" ? { text: value } : value;
 }
 
-/** 一次乐观提交：整包快照 + 本地代次（结算 CAS 用）。 */
+/** 一次乐观提交：显示投影 + 可恢复候选 + 本地代次（结算 CAS 用）。 */
 export type QueueProposal = {
   revision: number;
+  /** 该操作完成后用户应看到的队列条目（纯显示/回退目标）。 */
   payloads: QueueItemPayload[];
+  /**
+   * 本次操作中「客户端新写入、队列尚未确认持有」的载荷——失败恢复的**唯一**候选集。
+   *
+   * 从队列拷回来的载荷没有 attemptId，永远不会出现在这里：它们是队列自己持有的
+   * 内容，不能又变成一份可重发副本（H1）。
+   */
+  candidates: QueueItemPayload[];
+  /** `sending` = 在途；`uncertain` = 结果未知、待确认（内容仍归队列侧）。 */
+  state: "sending" | "uncertain";
+  /** 提交幂等键：重试同一次提交（结果未知时）必须复用它，Host 才能给出已缓存的定论。 */
+  submissionId: string;
 };
 
 export type QueueEntry = {
@@ -60,6 +110,8 @@ export type QueueEntry = {
   revision: number;
   /** 服务端 CAS 基线；null = 未知（旧数据），此时不带 expectedRevision。 */
   serverRevision: number | null;
+  /** Host 已受理的写入尝试令牌（判断「我的写入进没进队列」的唯一凭据）。 */
+  admittedAttemptIds: string[];
 };
 
 export type QueueBook = Readonly<Record<string, QueueEntry>>;
@@ -68,6 +120,7 @@ export type QueueSnapshot = {
   items: FollowUpItem[];
   revision: number | null;
   inFlight?: string[];
+  admittedAttemptIds?: string[];
 };
 
 const EMPTY: QueueEntry = {
@@ -76,7 +129,20 @@ const EMPTY: QueueEntry = {
   pending: [],
   revision: 0,
   serverRevision: null,
+  admittedAttemptIds: [],
 };
+
+/**
+ * 写入尝试令牌：每次写入尝试新生成一个，**绝不重用**。
+ *
+ * 重用会让「这个令牌受理过吗」失去意义：召回后再重发会拿到旧令牌的受理记录，
+ * 于是一次真正失败的写入被当成绩已受理，内容就永远不会回到草稿。
+ */
+export function newQueueAttemptId(): string {
+  const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
+  if (cryptoObj && typeof cryptoObj.randomUUID === "function") return cryptoObj.randomUUID();
+  return `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 export function queueEntry(book: QueueBook, sessionId: string): QueueEntry {
   return book[sessionId] ?? EMPTY;
@@ -111,6 +177,11 @@ export function isQueueProposalLive(entry: QueueEntry, revision: number): boolea
 export function projection(entry: QueueEntry): string[] {
   const latest = latestPending(entry);
   return latest ? latest.payloads.map((payload) => payload.text) : sendableItemTexts(entry.items);
+}
+
+/** 队列是否处于「上一次写入结果未知、等确认」状态。 */
+export function hasUncertainWrite(entry: QueueEntry): boolean {
+  return entry.pending.some((proposal) => proposal.state === "uncertain");
 }
 
 /**
@@ -154,11 +225,12 @@ export function queueRows(entry: QueueEntry): {
     return originals || media.length;
   };
   if (entry.pending.length) {
-    const payloads = entry.pending[entry.pending.length - 1].payloads;
-    return payloads.map((payload, index) => ({
+    const latest = entry.pending[entry.pending.length - 1];
+    return latest.payloads.map((payload, index) => ({
       id: `pending-${index}`,
       text: payload.text,
-      state: "waiting" as const,
+      // 结果未知的提交在 UI 上就是「待确认」：既不装作已排队，也不假装内容已丢。
+      state: latest.state === "uncertain" ? ("unknown" as const) : ("waiting" as const),
       imageCount: count(payload.media),
     }));
   }
@@ -193,17 +265,50 @@ export function proposeQueue(
   sessionId: string,
   items: readonly (string | QueueItemPayload)[],
 ): { book: QueueBook; revision: number; payloads: QueueItemPayload[] } {
+  const write = proposeQueueWrite(book, sessionId, {
+    payloads: items,
+    candidates: items.filter((item): item is QueueItemPayload => typeof item !== "string"),
+  });
+  return { book: write.book, revision: write.revision, payloads: write.payloads };
+}
+
+/**
+ * 提出一次任意队列操作（入队 / 派发 / 召回）。
+ *
+ * `payloads` 是显示投影，`candidates` 是本次可能被写入队列的客户端载荷。
+ * 两者分开：派发操作要显示「这批条目正在投递」，但只可能把输入框里的 extra
+ * 留在队列里；召回的候选集为空（取回内容以回执为准）。
+ */
+export function proposeQueueWrite(
+  book: QueueBook,
+  sessionId: string,
+  options: {
+    payloads: readonly (string | QueueItemPayload)[];
+    candidates?: readonly QueueItemPayload[];
+    submissionId?: string;
+  },
+): {
+  book: QueueBook;
+  revision: number;
+  payloads: QueueItemPayload[];
+  candidates: QueueItemPayload[];
+  submissionId: string;
+} {
   const entry = queueEntry(book, sessionId);
   const revision = entry.revision + 1;
-  const payloads = items.map(toPayload);
+  const payloads = options.payloads.map(toPayload);
+  const candidates = [...(options.candidates ?? [])];
+  const submissionId = options.submissionId ?? newQueueAttemptId();
   return {
     book: put(book, sessionId, {
       ...entry,
-      pending: [...entry.pending, { revision, payloads }],
+      pending: [...entry.pending, { revision, payloads, candidates, state: "sending", submissionId }],
       revision,
     }),
     revision,
     payloads,
+    candidates,
+    submissionId,
   };
 }
 
@@ -234,6 +339,9 @@ export function adoptServerSnapshot(
     items: [...snapshot.items],
     inFlight: [...(snapshot.inFlight ?? [])],
     serverRevision: typeof incoming === "number" ? incoming : entry.serverRevision,
+    admittedAttemptIds: snapshot.admittedAttemptIds
+      ? [...snapshot.admittedAttemptIds]
+      : entry.admittedAttemptIds,
   });
 }
 
@@ -280,6 +388,7 @@ export type QueueReceiptView = {
   revision?: number;
   items?: unknown;
   inFlight?: unknown;
+  admittedAttemptIds?: unknown;
 };
 
 export function isQueueWriteConflict(result: unknown): boolean {
@@ -288,4 +397,79 @@ export function isQueueWriteConflict(result: unknown): boolean {
     && typeof result === "object"
     && (result as QueueReceiptView).conflict === true,
   );
+}
+
+/**
+ * 写入结算——**消息所有权的唯一判定处**（issue #42 / H1–H3）。
+ *
+ * 规则（与 host 侧 `admittedAttemptIds` 配对）：
+ * 1. `accepted`：队列持有全部载荷 → 什么都不恢复（否则草稿与队列各一份）；
+ * 2. `conflict`：权威快照已知且本次未生效 → 只归还**从未被受理过**的候选载荷
+ *    （从队列拷回来的载荷没有令牌，不进候选集），并采纳权威内容与版本；
+ * 3. `rejected`：确定未受理 → 同上（候选载荷中未受理的那些归还草稿）；
+ * 4. `unknown`：结果未知——内容留在队列侧并标记待确认，**绝不**同时复制成草稿
+ *    （那是重复发送的入口，也可能把已投递的消息又发一遍）。
+ *
+ * 失败时连同后继提交一起作废，但恢复集合取「被作废的全部候选」（按令牌去重）：
+ * 后继快照里含前一批载荷，只取最后一个会把只出现在前者里的载荷（如派发的 extra）丢掉。
+ */
+export function settleQueueWrite(
+  book: QueueBook,
+  sessionId: string,
+  revision: number,
+  disposition: QueueWriteDisposition,
+  snapshot?: QueueSnapshot,
+): { book: QueueBook; restore: QueueItemPayload[]; uncertain: boolean } {
+  const entry = queueEntry(book, sessionId);
+  if (!entry.pending.some((proposal) => proposal.revision === revision)) {
+    // 已被更早的失败连带作废（内容那时已经归还）：不再恢复第二次。
+    return { book, restore: [], uncertain: false };
+  }
+  if (disposition === "unknown") {
+    return {
+      book: put(book, sessionId, {
+        ...entry,
+        pending: entry.pending.map((proposal) => (
+          proposal.revision === revision ? { ...proposal, state: "uncertain" as const } : proposal
+        )),
+      }),
+      restore: [],
+      uncertain: true,
+    };
+  }
+  // 「成功」必须带得回权威快照才算数：没有快照就无法证明服务端持有什么，
+  // 按结果未知处理比抧测安全（宁可不恢复，也不要复制出重复副本）。
+  if (disposition === "accepted" && snapshot && snapshot.revision !== null) {
+    const accepted = settleSyncSuccess(book, sessionId, revision, snapshot);
+    return { book: accepted, restore: [], uncertain: false };
+  }
+  if (disposition === "accepted") {
+    return {
+      book: put(book, sessionId, {
+        ...entry,
+        pending: entry.pending.map((proposal) => (
+          proposal.revision === revision ? { ...proposal, state: "uncertain" as const } : proposal
+        )),
+      }),
+      restore: [],
+      uncertain: true,
+    };
+  }
+  const dropped = entry.pending.filter((proposal) => proposal.revision >= revision);
+  const admitted = new Set(snapshot?.admittedAttemptIds ?? entry.admittedAttemptIds);
+  const seen = new Set<string>();
+  const restore: QueueItemPayload[] = [];
+  for (const proposal of dropped) {
+    for (const payload of proposal.candidates) {
+      const attemptId = payload.attemptId;
+      if (!attemptId || seen.has(attemptId) || admitted.has(attemptId)) continue;
+      seen.add(attemptId);
+      restore.push(payload);
+    }
+  }
+  return {
+    book: settleSyncFailure(book, sessionId, revision, snapshot),
+    restore,
+    uncertain: false,
+  };
 }

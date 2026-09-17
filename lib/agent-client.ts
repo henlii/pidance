@@ -18,6 +18,26 @@ const PROMPT_REASONS: PromptReason[] = [
   "busy", "compacting", "bash", "media", "locked", "model", "auth", "extension", "error",
 ];
 
+export type AgentCommandError = Error & { agentCommandStatus?: number };
+
+/** 标记 HTTP 状态：调用方需要区分「服务端确定拒绝」与「网络结果未知」。 */
+export function markAgentCommandError(error: unknown, status: number): unknown {
+  if (error && typeof error === "object") {
+    try {
+      (error as AgentCommandError).agentCommandStatus = status;
+    } catch {
+      /* 只读错误对象：保持原样 */
+    }
+  }
+  return error;
+}
+
+/** HTTP 状态是否代表「服务端已确定拒绝」（请求没有进入业务写入）。 */
+export function isDefinitiveRejection(error: unknown): boolean {
+  const status = (error as AgentCommandError | undefined)?.agentCommandStatus;
+  return typeof status === "number" && status >= 400 && status < 500;
+}
+
 export async function sendAgentCommand<T = unknown>(
   sessionId: string,
   command: Record<string, unknown>,
@@ -35,7 +55,7 @@ export async function sendAgentCommand<T = unknown>(
     error?: string;
   };
   if (!res.ok || body.error) {
-    throw new Error(body.error ?? `HTTP ${res.status}`);
+    throw markAgentCommandError(new Error(body.error ?? `HTTP ${res.status}`), res.status);
   }
   return body.data as T;
 }

@@ -1,10 +1,10 @@
 /**
- * 客户端队列路径的「切走后不得丢内容」回归（issue #42 第三轮复核 G1–G3）。
+ * 「内容归谁」的交错回归（issue #42 第四轮复核 H1–H3）。
  *
- * 三条都源自同一个缺陷族：失败/召回路径用「用户当前看哪个会话」决定内容归属，
- * 于是切走会话时正文与图片被静默丢弃、或者用本地过期条目盖住服务端权威状态。
- * 这里用真实 Host（set_follow_up_queue/dispatch，不调用模型）驱动，断言的是
- * 修复后的行为：权威快照优先、载荷退回**原会话**。
+ * 判定规则只有一条：**只有从未被队列受理过的载荷**才能在失败时变成可重发的
+ * 草稿；队列仍持有的条目、结果未知的写入都不复制成草稿（宁可不恢复，也不要
+ * 复制出重复副本）。这里用真实 Host（只走 set/dispatch/recall，不调用模型）
+ * 驱动 hook 里的真实回调，每条交错一个用例。
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -18,6 +18,7 @@ const jiti = createJiti(import.meta.url);
 const queue = await jiti.import("../lib/queue-state.ts");
 const { normalizeFollowUpItemList } = await jiti.import("../lib/session-queue.ts");
 const { mergeFollowUpForSteer } = await jiti.import("../lib/queue-merge.ts");
+const { isDefinitiveRejection } = await jiti.import("../lib/agent-client.ts");
 const { startSdkSessionHost } = await jiti.import("../lib/sdk-session-host.ts");
 
 /** 从 hook 源码里取出一个 useCallback 定义（与 docs 里的复核探针同一手法）。 */
@@ -40,7 +41,14 @@ function callback(name, env) {
   return new Function(...Object.keys(env), `${js}; return extracted;`)(...Object.values(env));
 }
 
-async function withHost(run) {
+/**
+ * 真实 Host + 最小 hook 环境。
+ *
+ * `overrides` 在抽取回调**之前**合并：回调体里的标识符是 new Function 的形参，
+ * 抽取之后再改 env 上的属性不会影响已提取的函数。`streaming: false` 用来让
+ * 队列条目停留在等待态（不被自动投递认领）。
+ */
+async function withHost(run, options = {}) {
   const dir = mkdtempSync(join(tmpdir(), "pidance-hook-queue-"));
   const previous = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
@@ -48,8 +56,10 @@ async function withHost(run) {
   try {
     host = await startSdkSessionHost({ sessionId: "__new__hookqueue", sessionFile: "", cwd: dir, agentDir: dir, toolNames: [], idleTimeoutMs: 60_000 });
     host.agentDir = dir;
-    Object.defineProperty(host.runtime.session, "isStreaming", { configurable: true, get: () => true });
-    await run(host, dir);
+    if (options.streaming !== false) {
+      Object.defineProperty(host.runtime.session, "isStreaming", { configurable: true, get: () => true });
+    }
+    await run(host);
   } finally {
     if (host) {
       host.promptRunning = false;
@@ -62,13 +72,17 @@ async function withHost(run) {
   }
 }
 
-/** 构造一个最小的 hook 环境：会话 A 已有一批本地条目，服务端版本由调用方给出。 */
-function environment(host, revision, restored) {
-  const env = { ...queue, normalizeFollowUpItemList, mergeFollowUpForSteer,
+/** `restored` 收集「归还到草稿/输入框」的调用（会话 id + 载荷），是断言内容归属的出口。 */
+function environment(host, revision, restored = [], items = [], overrides = {}) {
+  const env = {
+    ...queue,
+    normalizeFollowUpItemList,
+    mergeFollowUpForSteer,
+    isDefinitiveRejection,
     isReadOnly: false,
     sessionIdRef: { current: "A" },
     currentQueueSessionIdRef: { current: "A" },
-    queueBookRef: { current: { A: { items: [{ id: "x", text: "x", state: "waiting" }], inFlight: [], pending: [], revision: 0, serverRevision: revision } } },
+    queueBookRef: { current: { A: { items, inFlight: [], pending: [], revision: 0, serverRevision: revision, admittedAttemptIds: [] } } },
     followUpSyncRef: { current: Promise.resolve() },
     publishQueue() {},
     t: (key) => key,
@@ -80,94 +94,198 @@ function environment(host, revision, restored) {
     addNotice() {},
     attachmentsFromQueueMedia: () => [],
     opts: { chatInputRef: { current: { prependText() {}, reloadDraft() {} } } },
-    // 内容归还的出口：断言「退回到哪个会话、退回什么载荷」。
     restorePayloadToSession: (...args) => restored.push(args),
+    ...overrides,
   };
   env.snapshotFromQueuePayload = callback("snapshotFromQueuePayload", env);
   env.adoptRemoteQueue = (sid, snapshot) => {
     env.queueBookRef.current = queue.adoptServerSnapshot(env.queueBookRef.current, sid, snapshot);
   };
+  env.restorePayloads = callback("restorePayloads", env);
+  env.syncQueueWrite = callback("syncQueueWrite", env);
   env.updateLocalFollowUp = callback("updateLocalFollowUp", env);
   return env;
 }
 
-test("G1: 派发冲突必须采纳权威快照，并把本轮载荷退回原会话", async () => {
+/** 归还记录 → 可断言的扁平载荷（正文 + 媒体路径）。 */
+function restoredPayloads(restored) {
+  return restored.map(([sid, payload]) => ({
+    sid,
+    text: (payload.text ?? "").trim(),
+    media: (payload.media ?? []).map((ref) => ref.path),
+  }));
+}
+
+/** 模拟「服务端确定拒绝」（4xx）与「结果未知」（网络错误）。 */
+function definitiveRejectionError() {
+  const error = new Error("bad request");
+  error.agentCommandStatus = 400;
+  return error;
+}
+
+test("H1-a：派发冲突时队列条目留在队列，只有未受理的 extra 回到输入框", async () => {
   await withHost(async (host) => {
-    await host.send({ type: "set_follow_up_queue", items: ["x", "other-tab"] });
+    const written = await host.send({ type: "set_follow_up_queue", items: ["x", "other-tab"] });
     const restored = [];
-    // 本地认为服务端还是版本 0（另一个标签页刚在版本 1 追加了 other-tab）。
-    const env = environment(host, 0, restored);
-    await callback("handleSendQueueAsSteer", env)();
+    // 本地基线停在版本 0（另一个标签页已在版本 1 追加了 other-tab）。
+    const env = environment(host, 0, restored, written.items);
+    await callback("handleSendQueueAsSteer", env)("extra-text");
 
     const entry = queue.queueEntry(env.queueBookRef.current, "A");
-    assert.equal(entry.serverRevision, 1, "必须前移到权威版本");
+    assert.equal(entry.serverRevision, 1, "必须采纳权威版本");
     assert.deepEqual(
       entry.items.map((item) => item.text),
       ["x", "other-tab"],
-      "不得用本地过期条目覆盖权威内容（否则下一次写入会删掉别人的消息）",
+      "不得用本地过期条目覆盖权威内容",
     );
-    assert.equal(restored.length, 1, "冲突导致本轮载荷离开队列：必须退回原会话");
-    assert.equal(restored[0][0], "A");
-    assert.equal(restored[0][1].text, "x");
-
-    // 后续写入基于新基线：另一标签页的条目必须还在。
-    await env.updateLocalFollowUp([...queue.payloadsForWrite(entry), { text: "mine" }], "A");
-    assert.deepEqual(host.followUpQueue.map((item) => item.text), ["x", "other-tab", "mine"]);
+    assert.deepEqual(
+      restoredPayloads(restored),
+      [{ sid: "A", text: "extra-text", media: [] }],
+      "冲突后队列条目仍归队列：只能退回从未入队的 extra，不得复制成草稿（H1）",
+    );
   });
 });
 
-test("G2: 乐观入队在途时召回，必须把用户看到的内容全部退回", async () => {
+test("H1-b：入队确定拒绝且载荷从未受理 → 退回原会话草稿", async () => {
   await withHost(async (host) => {
-    const initial = await host.send({ type: "set_follow_up_queue", items: ["x"] });
+    await host.send({ type: "set_follow_up_queue", items: ["x", "other-tab"] });
     const restored = [];
-    const env = environment(host, initial.revision, restored);
-    const drafts = {};
-    env.getDraft = (sid) => drafts[sid];
-    env.setDraft = (sid, value) => { drafts[sid] = value; };
-
-    const enqueue = env.updateLocalFollowUp(["x", "new-message"], "A");
-    const recall = callback("handleRecallQueue", env)();
-    await Promise.all([enqueue, recall]);
-
-    assert.deepEqual(host.followUpQueue, [], "召回必须真的清空队列");
-    assert.equal(drafts.A.value.includes("x"), true);
-    assert.equal(
-      drafts.A.value.includes("new-message"),
-      true,
-      "乐观入队里用户刚敲的内容不能被静默丢掉",
+    const env = environment(host, 0, restored, [], {
+      sendAgentCommand: async () => {
+        throw definitiveRejectionError();
+      },
+    });
+    const payload = { text: "mine", attemptId: queue.newQueueAttemptId() };
+    await assert.rejects(env.updateLocalFollowUp([{ text: "mine" }, payload], "A"));
+    assert.deepEqual(
+      restoredPayloads(restored),
+      [{ sid: "A", text: "mine", media: [] }],
+      "服务端确定拒绝且从未受理：内容必须回到原会话草稿",
     );
+    assert.deepEqual(host.followUpQueue.map((item) => item.text), ["x", "other-tab"]);
   });
 });
 
-test("G3: 切走会话后入队失败，内容必须退回原会话（不依赖当前会话）", async () => {
-  let reject;
-  const gate = new Promise((_resolve, reject_) => { reject = reject_; });
-  const restored = [];
-  const drafts = {};
-  const env = { ...queue,
-    isReadOnly: false,
-    isCompacting: false,
-    sessionIdRef: { current: "A" },
-    currentQueueSessionIdRef: { current: "A" },
-    queueBookRef: { current: {} },
-    getRuntimeAgentRunning: () => true,
-    notifyAutoFollowSend() {},
-    toQueuePayloads: (text) => [{ text }],
-    updateLocalFollowUp: () => gate,
-    getDraft: (sid) => drafts[sid],
-    setDraft: (sid, value) => { drafts[sid] = value; },
-    restorePayloadToSession: (...args) => restored.push(args),
-    opts: { chatInputRef: null },
-    addNotice() {},
-    ensureEventsConnected() {},
-    t: (key) => key,
-  };
-  const flight = callback("handleFollowUp", env)("original-A");
-  // 请求在途时用户切到会话 B：内容属于 A，必须落进 A 的草稿。
-  env.sessionIdRef.current = "B";
-  reject(new Error("queue conflict"));
-  await flight;
-  assert.equal(restored.length, 1);
-  assert.equal(restored[0][0], "A");
-  assert.equal(restored[0][1].text, "original-A");
+test("H1-c：入队结果未知 → 留在队列侧待确认，不复制成草稿", async () => {
+  await withHost(async (host) => {
+    const written = await host.send({ type: "set_follow_up_queue", items: ["x"] });
+    const restored = [];
+    const env = environment(host, written.revision, restored, written.items, {
+      sendAgentCommand: async () => {
+        throw new Error("network down");
+      },
+    });
+    const payload = { text: "mine", attemptId: queue.newQueueAttemptId() };
+    await assert.rejects(env.updateLocalFollowUp([...queue.payloadsForWrite(queue.queueEntry(env.queueBookRef.current, "A")), payload], "A"));
+
+    assert.deepEqual(restoredPayloads(restored), [], "结果未知不得恢复（否则可能重复发送）");
+    const entry = queue.queueEntry(env.queueBookRef.current, "A");
+    assert.equal(queue.hasUncertainWrite(entry), true, "内容留在队列侧标记待确认");
+    assert.equal(
+      queue.queueRows(entry).some((row) => row.text === "mine" && row.state === "unknown"),
+      true,
+      "待确认条目必须仍对用户可见",
+    );
+    assert.deepEqual(host.followUpQueue.map((item) => item.text), ["x"], "网络失败：服务端队列保持原样");
+  });
+});
+
+test("H1-d：冲突但载荷早已被队列受理 → 不恢复（队列里那份就是它的）", async () => {
+  await withHost(async (host) => {
+    const attemptId = queue.newQueueAttemptId();
+    const admitted = await host.send({ type: "set_follow_up_queue", items: [{ text: "mine", attemptId }] });
+    const restored = [];
+    // 本地基线过期：服务端已经版本 1，本地还以为 0。
+    const env = environment(host, 0, restored, admitted.items);
+    await assert.rejects(env.updateLocalFollowUp([{ text: "mine", attemptId }], "A"));
+
+    assert.deepEqual(restoredPayloads(restored), [], "已受理的载荷不得再变成草稿副本（H1 核心）");
+    assert.deepEqual(host.followUpQueue.map((item) => item.text), ["mine"]);
+  });
+});
+
+test("H2-a：召回只退回回执确认移交的条目，已认领的跳过", async () => {
+  await withHost(async (host) => {
+    const written = await host.send({ type: "set_follow_up_queue", items: ["x", "y"] });
+    const restored = [];
+    const env = environment(host, written.revision, restored, written.items);
+    let resolveSteer;
+    const gate = new Promise((resolve) => { resolveSteer = resolve; });
+    const session = host.runtime.session;
+    const originalSteer = session.steer;
+    session.steer = () => gate;
+    let dispatch;
+    try {
+      // 另一个视图整队投递：x/y 被认领交给 Pi（steer 挂起，尚未真的投递）。
+      dispatch = host.send({ type: "dispatch_follow_up_queue", expectedRevision: written.revision });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      env.adoptRemoteQueue("A", env.snapshotFromQueuePayload(host.queueReceiptBase()));
+      await callback("handleRecallQueue", env)();
+
+      assert.deepEqual(restoredPayloads(restored), [], "已认领的条目不得退回草稿（H2）");
+      assert.deepEqual(
+        host.followUpQueue.map((item) => [item.text, item.state]),
+        [["x", "claimed"], ["y", "claimed"]],
+        "已提交给 Agent 的内容无法撤回",
+      );
+    } finally {
+      resolveSteer();
+      if (dispatch) await dispatch;
+      session.steer = originalSteer;
+    }
+  });
+});
+
+test("H2-b：召回确认移交后才退回草稿，服务端队列真的被清空", async () => {
+  await withHost(async (host) => {
+    // Agent 运行中：入队不会被立即自动投递，条目留在等待态（否则会被认领）。
+    host.promptRunning = true;
+    const written = await host.send({ type: "set_follow_up_queue", items: ["x", "y"] });
+    const restored = [];
+    const env = environment(host, written.revision, restored, written.items);
+    await callback("handleRecallQueue", env)();
+
+    assert.deepEqual(
+      restoredPayloads(restored),
+      [{ sid: "A", text: "x\n\ny", media: [] }],
+      "回执确认移交的两条一起回到原会话草稿",
+    );
+    assert.deepEqual(host.followUpQueue, [], "队列确实被清空");
+    assert.deepEqual(queue.queueEntry(env.queueBookRef.current, "A").items, []);
+  }, { streaming: false });
+});
+
+test("H2-c：召回落盘失败（确定拒绝）→ 一条也不退回草稿", async () => {
+  await withHost(async (host) => {
+    const written = await host.send({ type: "set_follow_up_queue", items: ["x"] });
+    const restored = [];
+    const env = environment(host, written.revision, restored, written.items, {
+      sendAgentCommand: async () => {
+        throw definitiveRejectionError();
+      },
+    });
+    await callback("handleRecallQueue", env)();
+    assert.deepEqual(restoredPayloads(restored), [], "没有确认移交就不能把内容变成可重发副本");
+    assert.deepEqual(host.followUpQueue.map((item) => item.text), ["x"], "服务端队列未被动过");
+  }, { streaming: false });
+});
+
+test("G3：切走会话后入队确定拒绝，内容回到**原会话**草稿", async () => {
+  await withHost(async (host) => {
+    const restored = [];
+    const env = environment(host, 0, restored, [], {
+      sendAgentCommand: async () => {
+        throw definitiveRejectionError();
+      },
+    });
+    env.sessionIdRef.current = "B";
+    env.currentQueueSessionIdRef.current = "B";
+    const payload = { text: "original-A", attemptId: queue.newQueueAttemptId() };
+    await assert.rejects(env.updateLocalFollowUp([payload], "A"));
+    assert.deepEqual(
+      restoredPayloads(restored),
+      [{ sid: "A", text: "original-A", media: [] }],
+      "归属由会话 id 决定，与用户当前看哪个会话无关",
+    );
+  });
 });

@@ -50,7 +50,51 @@ export type QueuedMediaRef = {
 export type QueueItemPayload = {
   text: string;
   media?: QueuedMediaRef[];
+  /**
+   * 本次**写入尝试**的身份令牌（客户端生成，不复用）。
+   *
+   * 为什么需要：客户端必须能无歧义地回答「我刚提交的这次写入到底被受理了没」。
+   * 正文相等不能当身份（同文两条是两条），而请求失败/超时本身不提供任何信息。
+   * Host 把受理过的令牌记进队列状态（`admittedAttemptIds`，与队列同一条记录、
+   * 同一次落盘），快照回传后客户端就能精确判定：受理过 → 队列持有它，不得再有人
+   * 把它当可重发副本；没受理过 → 从未移交，必须归还草稿。
+   */
+  attemptId?: string;
 };
+
+/** 令牌上限（防御性边界；超出丢最旧的）。 */
+export const MAX_ATTEMPT_IDS = 128;
+
+/** 写入尝试令牌的结构校验（路由/Host 的信任边界共用）。 */
+export function parseAttemptId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return /^[A-Za-z0-9_-]{1,64}$/.test(trimmed) ? trimmed : null;
+}
+
+/** 令牌列表清洗（保持顺序、去重、只留最近 MAX_ATTEMPT_IDS 条）。 */
+export function normalizeAttemptIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const ids: string[] = [];
+  for (const entry of value) {
+    const id = parseAttemptId(entry);
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  return ids.length > MAX_ATTEMPT_IDS ? ids.slice(ids.length - MAX_ATTEMPT_IDS) : ids;
+}
+
+/** 记录一批新受理的令牌（超出上限时丢最旧的）。 */
+export function withAdmittedAttemptIds(
+  current: readonly string[],
+  accepted: readonly (string | undefined)[],
+): string[] {
+  const ids = [...current];
+  for (const entry of accepted) {
+    if (!entry || ids.includes(entry)) continue;
+    ids.push(entry);
+  }
+  return ids.length > MAX_ATTEMPT_IDS ? ids.slice(ids.length - MAX_ATTEMPT_IDS) : ids;
+}
 
 /**
  * 解码器容忍上限（防御性边界，写入侧另有更严的限额）。
@@ -66,6 +110,8 @@ export type FollowUpItem = {
   state: FollowUpItemState;
   /** 仅在有媒体时存在；空数组一律不写（保持回执/持久化形状老实）。 */
   media?: QueuedMediaRef[];
+  /** 该条目消费过的客户端身份（合并投递会累积多条）。 */
+  clientIds?: string[];
 };
 
 export function parseQueuedMediaRefs(value: unknown): QueuedMediaRef[] | null {
@@ -111,6 +157,13 @@ export function sameQueuedMedia(
 export type FollowUpQueueState = {
   items: FollowUpItem[];
   revision: number;
+  /**
+   * 已受理的写入尝试令牌（最近的在后，上限 MAX_ATTEMPT_IDS）。
+   *
+   * 与队列**同一条记录、同一次落盘**：受理写入与记录令牌不得出现一个成功、
+   * 另一个丢失的窗口——那正是客户端无法判定「我的写入究竟进没进队列」的根源。
+   */
+  admittedAttemptIds: string[];
 };
 
 /**
@@ -198,20 +251,27 @@ export function parseFollowUpQueue(raw: unknown): FollowUpQueueState {
     && Number.isFinite((raw as { revision: number }).revision)
     ? (raw as { revision: number }).revision
     : 0;
-  if (!Array.isArray(list)) return { items: [], revision };
+  const admittedAttemptIds = normalizeAttemptIds(
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? (raw as { admittedAttemptIds?: unknown }).admittedAttemptIds
+      : undefined,
+  );
+  if (!Array.isArray(list)) return { items: [], revision, admittedAttemptIds };
   const items: FollowUpItem[] = [];
   for (let index = 0; index < list.length; index++) {
     const item = parseItem(list[index], index);
     if (item) items.push(item);
   }
-  return { items, revision };
+  return { items, revision, admittedAttemptIds };
 }
 
 /** 持久化形状（写入方与恢复扫描共享，避免两边漂移）。 */
 export function serializeFollowUpQueue(state: FollowUpQueueState): {
   items: FollowUpItem[];
   revision: number;
+  admittedAttemptIds?: string[];
 } {
+  const admittedAttemptIds = normalizeAttemptIds(state.admittedAttemptIds);
   return {
     items: state.items.map((item) => ({
       id: item.id,
@@ -220,6 +280,7 @@ export function serializeFollowUpQueue(state: FollowUpQueueState): {
       ...(item.media?.length ? { media: item.media.map((ref) => ({ ...ref })) } : {}),
     })),
     revision: state.revision,
+    ...(admittedAttemptIds.length ? { admittedAttemptIds } : {}),
   };
 }
 
