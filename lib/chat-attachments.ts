@@ -4,8 +4,8 @@
  * /api/files 预览需把该目录加入 allow-list。
  */
 
-import { createWriteStream, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
+import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { join } from "path";
 import { randomUUID } from "crypto";
 import { Readable, Transform } from "stream";
 import { pipeline } from "stream/promises";
@@ -130,174 +130,116 @@ export function saveChatAttachmentBytes(
 }
 
 /**
- * 排队消息的图片暂存区：`pidance-attachments/queue-outbox/<sessionId>/`。
- *
- * 队列条目要活到投递时（可能跨重启/跨标签），而浏览器只把安全尺寸图片的 base64
- * 交给 Host；把字节落成文件、条目里只存引用，才是可序列化且不撞偏好文件体积的做法。
- * 按会话分目录：提交队列时只扫本会话目录，别的会话的条目不受影响。
+ * 单份附件读回内存的上限（安全尺寸模型副本远小于此；超出即拒绝读进内存）。
  */
-export const QUEUE_OUTBOX_DIR_NAME = "queue-outbox";
+export const CHAT_MEDIA_READ_MAX_BYTES = 25 * 1024 * 1024;
 
-/** 会话目录名白名单：pi 的 session id 是 uuid v7；反例（`..`、分隔符）直接拒绝。 */
-function assertSafeSessionKey(sessionId: string): string {
-  const key = sessionId.trim();
-  if (!/^[A-Za-z0-9_-]{1,128}$/.test(key)) {
-    throw new Error("invalid session id for queue media");
-  }
-  return key;
-}
-
-export function getQueueOutboxDir(sessionId: string, agentDir: string = getAgentDir()): string {
-  return normalizeSlashes(join(ensureChatAttachmentsDir(agentDir), QUEUE_OUTBOX_DIR_NAME, assertSafeSessionKey(sessionId)));
-}
-
-export function ensureQueueOutboxDir(sessionId: string, agentDir: string = getAgentDir()): string {
-  const dir = getQueueOutboxDir(sessionId, agentDir);
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-  }
-  allowFileRoot(dir);
-  return dir;
-}
-
-export interface QueueMediaRef {
-  /** 稳定身份 = 落盘文件名；客户端回传时按它复现同一份字节。 */
-  id: string;
+/** 附件目录内的常规文件（GC 扫描用）。 */
+export interface ChatAttachmentFile {
   path: string;
-  mimeType: string;
-  name: string;
+  size: number;
+  mtimeMs: number;
 }
-
-function extensionForMimeType(mimeType: string): string {
-  const subtype = mimeType.slice("image/".length).replace(/[^A-Za-z0-9.+-]/g, "");
-  if (subtype === "jpeg") return "jpg";
-  return subtype || "img";
-}
-
-/** 写入一份排队图片（自动原子落盘；调用方负责 MIME 与大小校验）。 */
-export function saveQueueMediaBytes(
-  sessionId: string,
-  bytes: Buffer,
-  mimeType: string,
-  name = `image.${extensionForMimeType(mimeType)}`,
-  agentDir: string = getAgentDir(),
-): QueueMediaRef {
-  const dir = ensureQueueOutboxDir(sessionId, agentDir);
-  const storedName = uniqueAttachmentFileName(name);
-  const target = join(dir, storedName);
-  // 同目录临时文件 + rename：条目一旦可见就要求图已经完整存在（投递时回读到
-  // 半截文件会把损坏的图发给模型），而直接 writeFileSync 在进程被杀时留下半截。
-  const temp = join(dir, `.${storedName}.${randomUUID()}.part`);
-  try {
-    writeFileSync(temp, bytes, { flag: "wx", mode: 0o600 });
-    renameSync(temp, target);
-  } catch (error) {
-    try {
-      unlinkSync(temp);
-    } catch {
-      // 临时文件没落下或已被清掉:目标达成
-    }
-    throw error;
-  }
-  return {
-    id: storedName,
-    path: normalizeSlashes(target),
-    mimeType,
-    name: sanitizeAttachmentFileName(name),
-  };
-}
-
-/** 单张排队图片的最大字节数（安全尺寸副本；超出即客户端违约，拒绝而不是读进来）。 */
-export const QUEUE_MEDIA_MAX_BYTES = 16 * 1024 * 1024;
 
 /**
- * 路径是否属于本会话的 outbox（防「客户端给个路径就发任意文件给模型」）。
+ * 把候选路径解析为附件目录内的真实文件；越界/不存在/非普通文件一律 null。
  *
- * 字面前缀不够：outbox 里一个指向别处的 symlink 会把任意文件变成「本会话的排队图」。
- * 真实父目录必须就是 outbox 本身。
+ * 字面前缀不够：目录里一个指向别处的 symlink 会把任意文件变成「附件」，于是变成
+ * 「客户端给个路径就能读/删任意文件」。realpath 解析后仍须落在附件目录内。
  */
-export function isQueueMediaPath(sessionId: string, path: string, agentDir: string = getAgentDir()): boolean {
-  const dir = getQueueOutboxDir(sessionId, agentDir);
-  const candidate = normalizeSlashes(path.trim());
-  if (!candidate.startsWith(`${dir}/`)) return false;
-  if (candidate.slice(dir.length + 1).includes("/")) return false;
+function withChatAttachmentFile<T>(
+  candidate: string,
+  agentDir: string,
+  use: (realPath: string) => T,
+): T | null {
+  const trimmed = candidate.trim();
+  if (!trimmed) return null;
   try {
-    const realDir = realpathSync(dir);
-    return dirname(realpathSync(candidate)) === realDir;
+    const root = normalizeSlashes(realpathSync(ensureChatAttachmentsDir(agentDir)));
+    const real = normalizeSlashes(realpathSync(trimmed));
+    if (real !== root && !real.startsWith(`${root}/`)) return null;
+    if (!statSync(real).isFile()) return null;
+    return use(real);
   } catch {
-    // 文件不存在（或目录不存在）：不是有效引用
-    return false;
-  }
-}
-
-/** 回读排队图片为 base64；文件不存在/越界/非普通文件/过大返回 null。 */
-export function readQueueMediaBase64(
-  sessionId: string,
-  path: string,
-  agentDir: string = getAgentDir(),
-): string | null {
-  if (!isQueueMediaPath(sessionId, path, agentDir)) return null;
-  try {
-    const target = normalizeSlashes(path);
-    // 只读普通文件，且限制尺寸：ref 路径来自持久化数据，不应无上限读进内存。
-    if (!lstatSync(target).isFile()) return null;
-    if (statSync(target).size > QUEUE_MEDIA_MAX_BYTES) return null;
-    return readFileSync(target).toString("base64");
-  } catch {
+    // 文件或目录不存在：不是有效引用（删除/读取都按幂等处理）
     return null;
   }
 }
 
-/** 删除单份排队图片（已投递/被清出队列）。 */
-export function deleteQueueMedia(sessionId: string, path: string, agentDir: string = getAgentDir()): void {
-  if (!isQueueMediaPath(sessionId, path, agentDir)) return;
-  try {
-    unlinkSync(normalizeSlashes(path));
-  } catch {
-    // 已经不存在即目标达成：清理是幂等的，不因竞态报错打断队列写入。
-  }
+/** 路径是否是附件目录内的常规文件（引用校验、删除前的守卫）。 */
+export function isChatAttachmentMediaPath(path: string, agentDir: string = getAgentDir()): boolean {
+  return withChatAttachmentFile(path, agentDir, () => true) ?? false;
 }
 
-/**
- * 清理本会话 outbox 中不再被队列引用的文件。
- *
- * 覆盖：取回/清队/投递完成/崩溃遗留（hydrate 时队列已无该条目）。识别不了的
- * 目录（别的会话）不碰。
- */
-export function sweepQueueOutbox(
-  sessionId: string,
-  keepPaths: Iterable<string>,
+/** 附件文件的字节数；越界/不存在/非普通文件返回 null。 */
+export function chatAttachmentMediaSize(path: string, agentDir: string = getAgentDir()): number | null {
+  return withChatAttachmentFile(path, agentDir, (real) => statSync(real).size);
+}
+
+/** 读回附件为 base64；越界/非普通文件/超过上限返回 null。 */
+export function readChatAttachmentBase64(
+  path: string,
   agentDir: string = getAgentDir(),
-): number {
-  const dir = getQueueOutboxDir(sessionId, agentDir);
-  if (!existsSync(dir)) return 0;
-  const keep = new Set([...keepPaths].map((path) => normalizeSlashes(path)));
-  let removed = 0;
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return 0;
-  }
-  for (const entry of entries) {
-    const target = normalizeSlashes(join(dir, entry));
-    if (keep.has(target)) continue;
-    try {
-      unlinkSync(target);
-      removed += 1;
-    } catch {
-      // 目录项删除失败（权限/竞态）：留给下一次 sweep，不抛出打断提交。
-    }
-  }
-  return removed;
+  maxBytes: number = CHAT_MEDIA_READ_MAX_BYTES,
+): string | null {
+  return withChatAttachmentFile(path, agentDir, (real) => {
+    if (statSync(real).size > maxBytes) return null;
+    return readFileSync(real).toString("base64");
+  });
 }
 
-/** 会话删除：整目录清掉。 */
-export function removeQueueOutboxDir(sessionId: string, agentDir: string = getAgentDir()): void {
-  const dir = getQueueOutboxDir(sessionId, agentDir);
-  try {
-    rmSync(dir, { recursive: true, force: true });
-  } catch {
-    // 尽力而为：会话已删，残留文件由下次 sweep 处理。
+/** 是否超过读回上限（投递前的可读性检查，避免把大文件读进内存才发现）。 */
+export function isChatAttachmentReadable(
+  path: string,
+  agentDir: string = getAgentDir(),
+  maxBytes: number = CHAT_MEDIA_READ_MAX_BYTES,
+): boolean {
+  const size = chatAttachmentMediaSize(path, agentDir);
+  return size !== null && size <= maxBytes;
+}
+
+/** 删除一份附件（幂等）。返回是否确实删掉了文件。 */
+export function deleteChatAttachmentMedia(path: string, agentDir: string = getAgentDir()): boolean {
+  return withChatAttachmentFile(path, agentDir, (real) => {
+    try {
+      unlinkSync(real);
+      return true;
+    } catch {
+      // 已经被删（竞态）：目标达成
+      return false;
+    }
+  }) ?? false;
+}
+
+/** 列出附件目录内的所有常规文件（递归；symlink 与目录不列）。 */
+export function listChatAttachmentFiles(agentDir: string = getAgentDir()): ChatAttachmentFile[] {
+  const files: ChatAttachmentFile[] = [];
+  walkChatAttachments(getChatAttachmentsDir(agentDir), files);
+  return files;
+}
+
+function walkChatAttachments(dir: string, out: ChatAttachmentFile[]): void {
+  const entries = (() => {
+    try {
+      return readdirSync(dir, { withFileTypes: true });
+    } catch {
+      // 目录不存在/不可读：没有可扫描的文件
+      return [];
+    }
+  })();
+  for (const entry of entries) {
+    const target = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      walkChatAttachments(target, out);
+      continue;
+    }
+    // 只处理目录里的真实文件：symlink 可能指向附件目录之外，交给引用校验拒绝。
+    if (!entry.isFile()) continue;
+    try {
+      const info = statSync(target);
+      out.push({ path: normalizeSlashes(target), size: info.size, mtimeMs: info.mtimeMs });
+    } catch {
+      // 扫描期间被删：跳过
+    }
   }
 }

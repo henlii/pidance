@@ -75,7 +75,7 @@ import { submissionKey } from "@/lib/session-timeline";
 import {
   adoptServerSnapshot,
   isQueueWriteConflict,
-  itemImageRefs,
+  itemMediaRefs,
   payloadsForWrite,
   projection,
   proposeQueue,
@@ -88,9 +88,15 @@ import {
   type QueueReceiptView,
   type QueueSnapshot,
 } from "@/lib/queue-state";
-import { normalizeFollowUpItemList, type FollowUpItem, type QueuedImageRef } from "@/lib/session-queue";
+import { normalizeFollowUpItemList, type FollowUpItem, type QueuedMediaRef } from "@/lib/session-queue";
+import {
+  attachedImageFromQueueMedia,
+  attachmentPreviewUrl,
+  groupQueueMedia,
+  imageMediaRefs,
+  promptImageInputs,
+} from "@/lib/attachment-upload";
 import type { QueueItemPayload } from "@/lib/agent-commands";
-import { encodeFilePathForApi } from "@/lib/file-paths";
 import { canApplyProjection } from "@/lib/session-projection";
 import type { TimelineHydrateMode, TurnMetrics } from "@/lib/browser-session-runtime-registry";
 import {
@@ -127,51 +133,23 @@ type StreamAction =
   | { type: "end" }
   | { type: "reset" };
 
-/** 输入框图片 → 队列载荷（安全尺寸 base64 直传，Host 落盘到会话 outbox）。 */
-function toQueuePayloads(text: string, images?: AttachedImage[]): QueueItemPayload[] {
+/**
+ * 输入框图片 → 队列载荷。
+ *
+ * 附件在选图时已经上传，条目只写引用；返回 null = 有图但没有任何可引用副本
+ * （上传失败/条目损坏），调用方必须回退草稿而不是入队：入队一条读不出图的
+ * 条目，投递时只能静默丢图。
+ */
+function toQueuePayloads(text: string, images?: AttachedImage[]): QueueItemPayload[] | null {
   if (!images?.length) return text ? [{ text }] : [];
-  return [{
-    text,
-    images: images.map((image) => ({ source: "data" as const, data: image.data, mimeType: image.mimeType })),
-  }];
+  const media = images.flatMap((image) => imageMediaRefs(image));
+  if (media.length === 0) return null;
+  return [{ text, media }];
 }
 
-/**
- * 队列取回：把 Host outbox 里的图片字节读回输入框。
- *
- * 不写 `original`：outbox 副本会随队列条目一起删除，原图信息会让回填的消息
- * 指向一个很快就不存在的文件。read 失败计入 `failed`（调用方必须据此决定能否
- * 清队：读不回来又清掉队列，图就真的没了）。
- */
-async function fetchQueueImages(
-  refs: readonly QueuedImageRef[],
-): Promise<{ images: AttachedImage[]; failed: number }> {
-  const loaded = await Promise.all(refs.map(async (ref): Promise<AttachedImage | null> => {
-    try {
-      // 必须带 type=read：不带 type 的 GET 默认是目录列表，对文件返回 400。
-      const response = await fetch(
-        `/api/files/${encodeFilePathForApi(ref.path)}?type=read&mime=${encodeURIComponent(ref.mimeType)}`,
-        { cache: "no-store" },
-      );
-      if (!response.ok) return null;
-      const blob = await response.blob();
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
-        reader.onerror = () => reject(reader.error ?? new Error("读取排队图片失败"));
-        reader.readAsDataURL(blob);
-      });
-      const data = dataUrl.slice(dataUrl.indexOf(",") + 1);
-      if (!data) return null;
-      return { data, mimeType: ref.mimeType, previewUrl: dataUrl };
-    } catch {
-      return null;
-    }
-  }));
-  return {
-    images: loaded.filter((image): image is AttachedImage => image !== null),
-    failed: loaded.filter((image) => image === null).length,
-  };
+/** 队列条目的媒体引用 → 输入框图片（取回/草稿恢复；不需要回读字节）。 */
+function attachmentsFromQueueMedia(refs: readonly QueuedMediaRef[]): AttachedImage[] {
+  return groupQueueMedia(refs).map((group) => attachedImageFromQueueMedia(group));
 }
 
 function streamReducer(state: StreamingState, action: StreamAction): StreamingState {
@@ -2611,7 +2589,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 本地 key 由 registry 生成：同文两条引导必须能各自回滚，
     // 因此不能用正文派生 key。
     const optimisticRecordKey = registry.appendLocal(sid, optimistic);
-    const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+    const piImages = promptImageInputs(images);
     try {
       const receipt = await sendAgentCommand<PromptReceipt>(sid, {
         type: "steer",
@@ -2675,7 +2653,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await handleFollowUpRef.current(message, images);
       return;
     }
-    const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+    const piImages = promptImageInputs(images);
     const restore = (reason: PromptReason | undefined, fallback?: string) => {
       if (sessionIdRef.current !== sid) return;
       opts.chatInputRef?.current?.restoreDraft(message, images);
@@ -2737,25 +2715,38 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (sessionIdRef.current !== sid) return;
       opts.chatInputRef?.current?.restoreDraft(text, images);
     };
+    /**
+     * 入队（整组替换语义）：条目只带媒体引用。
+     *
+     * 有图但没有任何可引用副本（上传未完成/条目损坏）时不写队列：宁可把消息退
+     * 回输入框并报错，也不能入队一条投递时会静默丢图的条目。
+     */
+    const writeQueue = async (): Promise<{ ok: true } | { ok: false; error: string }> => {
+      const payloads = toQueuePayloads(text, images);
+      if (!payloads) return { ok: false, error: t("input_queueMediaMissing") };
+      const entry = queueEntry(queueBookRef.current, sid);
+      try {
+        await updateLocalFollowUp([...payloadsForWrite(entry), ...payloads], sid);
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    };
     if (images?.length && running) {
       // 运行中带图：不再整条回绝（旧行为让用户只能等结束后手动重发），
-      // 统一入队：图片安全尺寸字节由 Host 先落到会话 outbox，投递时再回读。
-      try {
-        const entry = queueEntry(queueBookRef.current, sid);
-        await updateLocalFollowUp([...payloadsForWrite(entry), ...toQueuePayloads(text, images)], sid);
-        ensureEventsConnected(sid);
-      } catch (error) {
+      // 统一入队：附件引用在条目里，字节已经在附件目录（选图时上传）。
+      const written = await writeQueue();
+      if (!written.ok) {
         restoreDraft();
-        addNotice({
-          type: "error",
-          message: error instanceof Error ? error.message : String(error),
-        });
+        addNotice({ type: "error", message: written.error });
+        return;
       }
+      ensureEventsConnected(sid);
       return;
     }
     if (images?.length || !running) {
       // 有图（空闲）或空闲：直接 prompt（空闲时无"结束后投递"语义）。
-      const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+      const piImages = promptImageInputs(images);
       try {
         const receipt = await sendAgentCommand<PromptReceipt>(sid, {
           type: "prompt",
@@ -2780,8 +2771,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             addNotice({ type: "error", message: queueRejectionMessage(receipt.reason) });
             return;
           }
-          const entry = queueEntry(queueBookRef.current, sid);
-          await updateLocalFollowUp([...payloadsForWrite(entry), ...toQueuePayloads(text, images)], sid);
+          const written = await writeQueue();
+          if (!written.ok) {
+            restoreDraft();
+            addNotice({ type: "error", message: written.error });
+            return;
+          }
           ensureEventsConnected(sid);
         }
       } catch (e) {
@@ -2791,20 +2786,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return;
     }
     // 运行中入队：Host 同步落盘并返回权威队列；失败时退回本会话草稿。
-    try {
-      const entry = queueEntry(queueBookRef.current, sid);
-      await updateLocalFollowUp([...payloadsForWrite(entry), ...toQueuePayloads(text, images)], sid);
-      // 入队即把本会话 SSE 连上（Host 空闲时 set_follow_up_queue 已 wake host）；
-      // 否则 Host 稍后自动 flush 的 agent_start/message 事件没有订阅源 → UI 不更新，
-      // 直到刷新才看见队列消息真正执行。
-      ensureEventsConnected(sid);
-    } catch (error) {
+    // 入队即把本会话 SSE 连上（Host 空闲时 set_follow_up_queue 已 wake host）；
+    // 否则 Host 稍后自动 flush 的 agent_start/message 事件没有订阅源 → UI 不更新，
+    // 直到刷新才看见队列消息真正执行。
+    const written = await writeQueue();
+    if (!written.ok) {
       restoreDraft();
-      addNotice({
-        type: "error",
-        message: error instanceof Error ? error.message : String(error),
-      });
+      addNotice({ type: "error", message: written.error });
+      return;
     }
+    ensureEventsConnected(sid);
   }, [acceptQueuedReceipt, addNotice, ensureEventsConnected, isCompacting, isReadOnly, notifyAutoFollowSend, opts.chatInputRef, queueRejectionMessage, t, updateLocalFollowUp]);
 
   // 供 handlePromptWithStreamingBehavior（定义在前）引用最新 handleFollowUp
@@ -2832,22 +2823,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const entry = queueEntry(queueBookRef.current, sid);
     const items = projection(entry);
     if (items.length === 0) return;
-    // 图片先读回（Host 的 outbox 副本会随清队一起删掉），再确认清队，
-    // 避免清除失败时同一消息同时留在两处。
-    const refs = itemImageRefs(entry.items);
-    let images: AttachedImage[] = [];
-    try {
-      const loaded = await fetchQueueImages(refs);
-      if (loaded.failed > 0) {
-        // 图没全读回来就不能清队：清队会删掉 outbox 副本，读失败的那张就真没了。
-        addNotice({ type: "error", message: t("input_recallImagesFailed") });
-        return;
-      }
-      images = loaded.images;
-    } catch (error) {
-      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
-      return;
-    }
+    // 图片按引用回填（副本就在附件目录里）：清队不再删文件，也不需要先读回字节。
+    const images = attachmentsFromQueueMedia(itemMediaRefs(entry.items));
     if (sessionIdRef.current !== sid) return;
     try {
       await updateLocalFollowUp([], sid);

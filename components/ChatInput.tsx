@@ -18,7 +18,15 @@ import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useAnchoredOverlay } from "@/hooks/useAnchoredOverlay";
 import { useI18n } from "@/lib/i18n";
-import { prepareImageForModel, prepareImagePreview } from "@/lib/image-input";
+import {
+  attachmentBinaryBlocks,
+  attachmentPreviewUrl,
+  deleteAttachmentMedia,
+  imageMediaRefs,
+  mediaRefPaths,
+  uploadImageAttachment,
+  uploadMessageMedia,
+} from "@/lib/attachment-upload";
 import type { AttachedImage, BinaryMessageInput, ChatInputHandle } from "@/lib/types";
 import {
   loadStreamingEnterAction,
@@ -41,47 +49,21 @@ type AttachedUpload = {
   error?: string;
 };
 
+/** 选图后先上传的附件：未完成/失败时阻塞发送，可重试或移除。 */
+type PendingAttachment = {
+  id: string;
+  file: File;
+  previewUrl: string;
+  status: "uploading" | "failed";
+  error?: string;
+};
+
 function isRasterImageFile(file: File): boolean {
   return file.type.startsWith("image/") && file.type !== "image/svg+xml";
 }
 
 function makeUploadId(): string {
   return `up-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-/** 上传到 Pidance 附件目录（不依赖项目 cwd）。 */
-async function uploadMessageMedia(
-  body: Blob,
-  name: string,
-  mimeType: string,
-): Promise<{ path: string; name: string; storedName: string; size: number; mimeType: string }> {
-  const contentType = mimeType || body.type || "application/octet-stream";
-  const res = await fetch("/api/message-media", {
-    method: "POST",
-    headers: {
-      "Content-Type": contentType,
-      "X-Pidance-Filename": encodeURIComponent(name || "file"),
-    },
-    body,
-  });
-  const data = (await res.json().catch(() => ({}))) as {
-    path?: string;
-    name?: string;
-    storedName?: string;
-    size?: number;
-    mimeType?: string;
-    error?: string;
-  };
-  if (!res.ok || typeof data.path !== "string" || typeof data.storedName !== "string" || typeof data.size !== "number") {
-    throw new Error(data.error ?? `HTTP ${res.status}`);
-  }
-  return {
-    path: data.path,
-    name: data.name || name || "file",
-    storedName: data.storedName,
-    size: data.size,
-    mimeType: data.mimeType || contentType,
-  };
 }
 
 interface ModelOption {
@@ -236,21 +218,36 @@ function slashMatchRank(command: SlashCommandPaletteItem, query: string): number
 
 function imageToDraftImage(image: AttachedImage): ChatDraftImage {
   return {
-    data: image.data,
     mimeType: image.mimeType,
+    ...(image.media ? { media: image.media } : {}),
     ...(image.original ? { original: image.original } : {}),
+    // 兼容路径：既没有引用也没有原图元数据时（旧扩展直调）只能存内联字节
+    ...(!image.media && !image.original && image.data ? { data: image.data } : {}),
   };
 }
 
 function draftImageToAttachedImage(image: ChatDraftImage): AttachedImage {
-  return {
-    ...image,
-    previewUrl: `data:${image.mimeType};base64,${image.data}`,
+  const attached: AttachedImage = {
+    mimeType: image.mimeType,
+    ...(image.data ? { data: image.data } : {}),
+    ...(image.media ? { media: image.media } : {}),
+    ...(image.original ? { original: image.original } : {}),
   };
+  // 草稿只存引用：缩略图走附件读取 URL，不再拿 base64 拼 data URL。
+  attached.previewUrl = image.data
+    ? `data:${image.mimeType};base64,${image.data}`
+    : attachmentPreviewUrl(attached);
+  return attached;
+}
+
+/** 附件身份：优先引用路径（取回/草稿恢复都会重建 previewUrl）。 */
+function attachmentIdentity(image: AttachedImage): string {
+  const path = image.media?.original.path ?? image.original?.path;
+  return path ?? `${image.mimeType}:${image.data?.slice(0, 64) ?? ""}`;
 }
 
 function revokeImagePreview(image: AttachedImage): void {
-  if (image.previewUrl.startsWith("blob:")) {
+  if (image.previewUrl?.startsWith("blob:")) {
     URL.revokeObjectURL(image.previewUrl);
   }
 }
@@ -404,8 +401,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? getDraft(draftKey)?.images.map(draftImageToAttachedImage) ?? [] : []
   ));
-  const [imageUploading, setImageUploading] = useState(false);
   const [imageAttachError, setImageAttachError] = useState<string | null>(null);
+  /**
+   * 选图后正在上传的附件。
+   *
+   * 附件进输入框就先上传：条目/草稿只持引用，删除附件才能真的回收字节。
+   * 上传未完成或失败时**阻塞发送**（可重试/移除），不得静默降级成纯文本
+   * ——那正是 issue #42 要消灭的行为。
+   */
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const trimmedValue = value.trimStart();
   const bashMode = attachedImages.length === 0 && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
@@ -600,10 +604,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
    */
   const appendAttachedImages = useCallback((images?: AttachedImage[]) => {
     if (!images?.length) return;
-    const restored = images.map((image) => draftImageToAttachedImage(imageToDraftImage(image)));
+    // 已有 previewUrl 的条目原样保留（本地 blob 预览不必重建）
+    const restored = images.map((image) => image.previewUrl ? image : draftImageToAttachedImage(imageToDraftImage(image)));
     setAttachedImages((previous) => {
-      const known = new Set(previous.map((image) => `${image.mimeType}:${image.data}`));
-      return [...previous, ...restored.filter((image) => !known.has(`${image.mimeType}:${image.data}`))];
+      const known = new Set(previous.map(attachmentIdentity));
+      return [...previous, ...restored.filter((image) => !known.has(attachmentIdentity(image)))];
     });
   }, []);
 
@@ -680,57 +685,42 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const attachedUploadsRef = useRef(attachedUploads);
   attachedUploadsRef.current = attachedUploads;
 
+  /**
+   * 上传一个待附加图片（原图 + 缩小预览 + 模型副本）。
+   *
+   * 成功才进入已附加列表：失败保留在 pending 里，由用户重试或移除——不静默
+   * 丢掉用户刚选的图，也不带着半个附件发送。
+   */
+  const startAttachmentUpload = useCallback(async (entry: PendingAttachment) => {
+    setPendingAttachments((prev) =>
+      prev.map((item) => (item.id === entry.id ? { ...item, status: "uploading", error: undefined } : item)));
+    try {
+      const image = await uploadImageAttachment(entry.file, entry.previewUrl);
+      setAttachedImages((prev) => [...prev, image]);
+      // 预览 URL 已交给已附加的图片，不再回收。
+      setPendingAttachments((prev) => prev.filter((item) => item.id !== entry.id));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPendingAttachments((prev) =>
+        prev.map((item) => (item.id === entry.id ? { ...item, status: "failed", error: message } : item)));
+    }
+  }, []);
+
   const processImageFiles = useCallback(async (files: File[]) => {
     // 运行中同样允许附带图片：steer / follow-up 都支持图片（host 直接发 prompt），
     // 原先这里直接 return 会让粘贴/拖入静默失效。
     const imageFiles = files.filter(isRasterImageFile);
     if (!imageFiles.length) return;
-    setImageUploading(true);
     setImageAttachError(null);
-    try {
-      const newImages = await Promise.all(
-        imageFiles.map(async (file): Promise<AttachedImage> => {
-          // 原图走二进制流，模型副本才进入 JSON prompt，避免 8MB 图片被
-          // Base64 放大后撞上 Next.js 的请求体截断。
-          const [prepared, original] = await Promise.all([
-            prepareImageForModel(file),
-            uploadMessageMedia(file, file.name, file.type),
-          ]);
-          // 内联预览必须小：原图直接当预览会按原图下载（实测 1.9 MB 截图
-          // 在历史里拉满 1.9 MB）。给「原图即预览」加字节上限，超过则另存缩小副本。
-          const shrink = prepared.blob === file ? await prepareImagePreview(file) : null;
-          const previewBlob = shrink?.blob ?? prepared.blob;
-          const previewMime = shrink?.mimeType ?? prepared.mimeType;
-          // 预览文件名的扩展名决定服务端下发的 Content-Type，必须与编码一致。
-          const previewExt = previewMime === "image/webp" ? "webp" : previewMime === "image/png" ? "png" : "jpg";
-          const preview = prepared.blob === file && !shrink
-            ? original
-            : await uploadMessageMedia(
-              previewBlob,
-              `${file.name}.preview.${previewExt}`,
-              previewMime,
-            );
-          return {
-            data: prepared.data,
-            mimeType: prepared.mimeType,
-            previewUrl: URL.createObjectURL(file),
-            original: {
-              path: original.path,
-              name: original.name,
-              mimeType: original.mimeType,
-              size: original.size,
-              previewPath: preview.path,
-            },
-          };
-        }),
-      );
-      setAttachedImages((prev) => [...prev, ...newImages]);
-    } catch {
-      setImageAttachError(t("input_imagePrepareFailed"));
-    } finally {
-      setImageUploading(false);
-    }
-  }, [isStreaming, t]);
+    const entries: PendingAttachment[] = imageFiles.map((file) => ({
+      id: makeUploadId(),
+      file,
+      previewUrl: URL.createObjectURL(file),
+      status: "uploading",
+    }));
+    setPendingAttachments((prev) => [...prev, ...entries]);
+    await Promise.all(entries.map((entry) => startAttachmentUpload(entry)));
+  }, [startAttachmentUpload]);
 
   /**
    * 附件策略：
@@ -778,9 +768,29 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     setAttachedImages((prev) => {
       const next = [...prev];
       const [removed] = next.splice(index, 1);
-      if (removed) revokeImagePreview(removed);
+      if (removed) {
+        revokeImagePreview(removed);
+        // 用户主动移除附件 = 不再需要这些字节：删服务端文件（GC 只是兜底）。
+        // 发送后的 clearInput 不走这里——刚发出去的图还被消息引用着。
+        void deleteAttachmentMedia(imageMediaRefs(removed).flatMap(mediaRefPaths));
+      }
       return next;
     });
+  }, []);
+
+  const retryAttachment = useCallback((id: string) => {
+    const entry = pendingAttachments.find((item) => item.id === id);
+    if (entry) void startAttachmentUpload(entry);
+  }, [pendingAttachments, startAttachmentUpload]);
+
+  const removePendingAttachment = useCallback((id: string) => {
+    setPendingAttachments((prev) => {
+      const removed = prev.find((item) => item.id === id);
+      if (removed) URL.revokeObjectURL(removed.previewUrl);
+      return prev.filter((item) => item.id !== id);
+    });
+    // 阻塞发送的提示说的是「重试或移除」：移除后就不该再挂着它。
+    setImageAttachError(null);
   }, []);
 
   const removeUpload = useCallback((id: string) => {
@@ -790,6 +800,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const clearImages = useCallback(() => {
     setAttachedImages((prev) => {
       prev.forEach(revokeImagePreview);
+      return [];
+    });
+  }, []);
+
+  /** 清空待上传附件（上传还没完成的那些没有引用者，直接回收预览 URL）。 */
+  const clearPendingAttachments = useCallback(() => {
+    setPendingAttachments((prev) => {
+      prev.forEach((item) => URL.revokeObjectURL(item.previewUrl));
       return [];
     });
   }, []);
@@ -806,10 +824,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     setImageAttachError(null);
     clearImages();
     clearUploads();
+    clearPendingAttachments();
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [clearImages, clearUploads, draftKey]);
+  }, [clearImages, clearUploads, clearPendingAttachments, draftKey]);
 
   /** 把已就绪上传路径拼进消息正文，供 agent 用工具读取。 */
   const composeMessageWithUploads = useCallback((base: string): string => {
@@ -865,7 +884,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   const hasReadyUploads = attachedUploads.some((u) => u.status === "ready" && u.path);
-  const hasUploading = imageUploading || attachedUploads.some((u) => u.status === "uploading");
+  const hasUploading = pendingAttachments.some((item) => item.status === "uploading")
+    || attachedUploads.some((u) => u.status === "uploading");
+  const hasFailedAttachments = pendingAttachments.some((item) => item.status === "failed");
   const hasAttachments = attachedImages.length > 0 || hasReadyUploads;
 
   const handleSend = useCallback(async () => {
@@ -880,7 +901,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       return;
     }
     if (isStreaming) return;
-    if (hasUploading) return; // 等上传完成
+    // 附件还在上传或上传失败：阻塞发送（用户可以重试/移除），不静默丢掉图。
+    if (hasUploading || hasFailedAttachments) {
+      if (hasFailedAttachments) setImageAttachError(t("input_imageUploadBlocked"));
+      return;
+    }
     // 纯文本/命令：点击即乐观清空（外部 pi 预检/冷启动可能数秒，不必等确认）；
     // 失败路径由 useAgentSession 经 insertIfEmpty 恢复（此处覆盖同步 false 返回）。
     // 有附件时不乐观清空：发送失败恢复图片成本高，保持确认后清空。
@@ -895,12 +920,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       }
     }
     const msg = composeMessageWithUploads(base);
-    const binaryBlocks = [
-      ...attachedImages.map((image) => image.original).filter((value): value is BinaryMessageInput => value !== undefined),
-      ...attachedUploads
+    // 原图卡片、队列媒体、删除回收都从 media 引用派生（不再看兼容字段 original）。
+    const binaryBlocks = attachmentBinaryBlocks(
+      attachedImages,
+      attachedUploads
         .filter((item): item is typeof item & { path: string } => item.status === "ready" && typeof item.path === "string")
         .map((item) => ({ path: item.path, name: item.name, mimeType: item.mimeType, size: item.size })),
-    ];
+    );
     const submitted = await onSend(
       msg,
       attachedImages.length ? attachedImages : undefined,
@@ -917,7 +943,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       return;
     }
     if (hasAttachment) clearInput();
-  }, [value, attachedImages, attachedUploads, hasReadyUploads, hasUploading, isStreaming, onBuiltinCommand, onPromptWithStreamingBehavior, onSend, clearInput, insertIfEmptyLocal, onAudioUnlock, composeMessageWithUploads]);
+  }, [value, attachedImages, attachedUploads, hasReadyUploads, hasUploading, hasFailedAttachments, isStreaming, onBuiltinCommand, onPromptWithStreamingBehavior, onSend, clearInput, insertIfEmptyLocal, onAudioUnlock, composeMessageWithUploads, t]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -962,7 +988,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   // 旧定义漏了 attachedImages：纯图消息（不写正文）时发送按钮直接禁用，
   // 用户点了没反应，也无任何提示。
   const hasInputText = Boolean(value.trim()) || attachedImages.length > 0 || hasReadyUploads;
-  const canQueueStreamingMessage = hasInputText && !hasUploading;
+  const canQueueStreamingMessage = hasInputText && !hasUploading && !hasFailedAttachments;
 
   // ── @ file autocomplete ──────────────────────────────────────────────────
   // Recomputed from the text before the caret on every change/caret move.
@@ -1120,6 +1146,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const base = value.trim();
     if (!base && !hasReadyUploads && attachedImages.length === 0) return;
     if (hasUploading) return;
+    // 附件没传完/传失败时不入队：只把正文排进去 = 静默丢图（用户已明确拒绝这种降级）。
+    if (hasFailedAttachments) {
+      setImageAttachError(t("input_imageUploadBlocked"));
+      return;
+    }
     onAudioUnlock?.();
     const msg = composeMessageWithUploads(base);
     const images = attachedImages.length ? attachedImages : undefined;
@@ -1137,7 +1168,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (!deliver) return;
     deliver(msg, images);
     clearInput();
-  }, [value, attachedImages.length, hasReadyUploads, hasUploading, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, composeMessageWithUploads]);
+  }, [value, attachedImages.length, hasReadyUploads, hasUploading, hasFailedAttachments, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, composeMessageWithUploads, t]);
 
   /** 引导发送队列：若输入框有内容则并入队尾后整队以 steer 发送。 */
   const flushQueueAsSteer = useCallback(() => {
@@ -1744,13 +1775,68 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           </div>
         )}
         {/* 图片缩略图 + 已上传文件芯片 */}
-        {(attachedImages.length > 0 || attachedUploads.length > 0 || imageAttachError) && (
+        {(attachedImages.length > 0 || pendingAttachments.length > 0 || attachedUploads.length > 0 || imageAttachError) && (
           <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap", alignItems: "center" }}>
             {imageAttachError && (
               <div role="alert" style={{ flexBasis: "100%", color: "var(--status-danger)", fontSize: 11 }}>
                 {imageAttachError}
               </div>
             )}
+            {pendingAttachments.map((item) => (
+              <div key={item.id} style={{ position: "relative", flexShrink: 0 }} title={item.error}>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={item.previewUrl}
+                  alt=""
+                  style={{
+                    width: 56, height: 56, objectFit: "cover", borderRadius: 6,
+                    border: `1px solid ${item.status === "failed" ? "var(--status-danger)" : "var(--border)"}`,
+                    display: "block", opacity: item.status === "uploading" ? 0.45 : 1,
+                  }}
+                />
+                {item.status === "failed" ? (
+                  <button
+                    type="button"
+                    onClick={() => retryAttachment(item.id)}
+                    style={{
+                      position: "absolute", inset: 0, borderRadius: 6, border: "none",
+                      background: "color-mix(in srgb, var(--bg-panel) 82%, transparent)",
+                      color: "var(--status-danger)", fontSize: 11, cursor: "pointer", padding: 0,
+                    }}
+                  >
+                    {t("input_imageRetry")}
+                  </button>
+                ) : (
+                  <div
+                    aria-hidden="true"
+                    style={{
+                      position: "absolute", inset: 0, borderRadius: 6,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      background: "color-mix(in srgb, var(--bg-panel) 70%, transparent)",
+                      color: "var(--text-muted)", fontSize: 10,
+                    }}
+                  >
+                    {t("input_imageUploading")}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => removePendingAttachment(item.id)}
+                  aria-label={t("input_removeAttachment")}
+                  style={{
+                    position: "absolute", top: -4, right: -4,
+                    width: 16, height: 16, borderRadius: "50%",
+                    background: "var(--bg-panel)", border: "1px solid var(--border)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    cursor: "pointer", padding: 0, color: "var(--text-muted)",
+                  }}
+                >
+                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                    <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
+                  </svg>
+                </button>
+              </div>
+            ))}
             {attachedImages.map((img, i) => (
               <div key={`img-${i}`} style={{ position: "relative", flexShrink: 0 }}>
                 {/* eslint-disable-next-line @next/next/no-img-element */}

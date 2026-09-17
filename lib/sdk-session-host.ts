@@ -27,6 +27,12 @@ import {
  * 命令仍在进行、无法安全交出 writer 时的失败消息。
  * SessionService 把它映射为 409：宁可让离线写 fail closed，也不并发写同一个 JSONL。
  */
+/**
+ * 队列模型副本的单文件上限。安全尺寸副本远小于此（base64 上限 4MB），留一倍余量
+ * 即可，避免客户端拿一个巨大的「模型副本」让 Host 读进内存。
+ */
+const QUEUE_MODEL_MEDIA_MAX_BYTES = 8 * 1024 * 1024;
+
 export const SESSION_WRITER_BUSY_MESSAGE =
   "Session writer is busy: a command is still in flight";
 import {
@@ -34,23 +40,25 @@ import {
   recordRunningStartedAt,
 } from "./running-state";
 import {
-  deleteQueueMedia,
-  isQueueMediaPath,
-  readQueueMediaBase64,
-  saveQueueMediaBytes,
-  sweepQueueOutbox,
+  CHAT_ATTACHMENT_MAX_BYTES,
+  CHAT_ATTACHMENT_MAX_TOTAL_BYTES,
+  chatAttachmentMediaSize,
+  deleteChatAttachmentMedia,
+  readChatAttachmentBase64,
+  saveChatAttachmentBytes,
+  type SavedChatAttachment,
 } from "./chat-attachments";
 import {
-  followUpItemImages,
+  followUpItemMedia,
   followUpItemTexts,
   mergeFollowUpPayload,
   parseFollowUpQueue,
   newFollowUpItem,
   reconcileFollowUpItems,
   serializeFollowUpQueue,
-  MAX_QUEUED_ITEM_IMAGES,
+  MAX_QUEUED_ITEM_MEDIA,
   type FollowUpItem,
-  type QueuedImageRef,
+  type QueuedMediaRef,
 } from "./session-queue";
 import {
   normalizeActivityInput,
@@ -85,10 +93,10 @@ import {
   parseSteerCommand,
   type DispatchFollowUpQueueCommand,
   type PromptImage,
+  type PromptImageInput,
   type PromptReason,
   type PromptReceipt,
   type QueueDispatchReceipt,
-  type QueueItemImagePayload,
   type QueueItemPayload,
   type QueueWriteReceipt,
 } from "./agent-commands";
@@ -165,6 +173,14 @@ function asString(value: unknown): string | undefined {
 
 /** 自动命名用：从消息 content 提取首条用户输入（string 或 text 块），折叠空白并截断。 */
 const AUTO_NAME_MAX_LENGTH = 60;
+/** 内联图片落盘时的扩展名（只影响文件名，Content-Type 由引用自带）。 */
+function imageExtension(mimeType: string): string {
+  const normalized = mimeType.split(";")[0]!.trim().toLowerCase();
+  if (normalized === "image/jpeg") return "jpg";
+  if (normalized === "image/svg+xml") return "svg";
+  return normalized.startsWith("image/") ? normalized.slice(6).replace(/[^a-z0-9]/g, "") || "png" : "bin";
+}
+
 function firstUserText(content: unknown): string | undefined {
   let text = "";
   if (typeof content === "string") {
@@ -478,9 +494,15 @@ export class SdkSessionHost {
       item.state === "claimed" ? { ...item, state: "unknown" as const } : item
     ));
     this.followUpQueueRevision = decoded.revision;
-    // 崩溃遗留：图已落盘但队列写入未完成（或队列在别的进程里被改过）时，
-    // outbox 里会留下无人引用的文件。恢复即对账。
-    this.sweepQueueMedia();
+    // 引用落地校验：文件没了（用户删过、盘被清）就不能再拿它当"完整载荷"。
+    // 丢掉缺失的引用并降级为 unknown：不自动重投，由用户显式取消或重新附图。
+    this.followUpQueue = this.followUpQueue.map((item) => {
+      if (!item.media?.length) return item;
+      const alive = item.media.filter((ref) => this.isQueueMediaRefAlive(ref));
+      if (alive.length === item.media.length) return item;
+      const dropped: FollowUpItem = alive.length ? { ...item, media: alive } : { text: item.text, id: item.id, state: item.state };
+      return { ...dropped, state: "unknown" as const };
+    });
   }
 
   /** 等待投递的条目：`unknown` 绝不自动投递，`claimed` 已认领（在途）。 */
@@ -524,23 +546,21 @@ export class SdkSessionHost {
     this.followUpQueueRevision = nextRevision;
     // 落盘成功即重新解锁：一次成功的写入就是对 fail-closed 状态的显式重试。
     this.followUpFlushBlocked = false;
-    // 离队即回收：取回/清队/投递完成后，不再被引用的图片立即删除（图片不属于
-    // 会话正文，留在磁盘上只会变成无人管理的垃圾）。
-    this.sweepQueueMedia();
     return true;
   }
 
-  /** outbox GC：删除本会话不再被队列引用的图片文件。 */
-  private sweepQueueMedia(): void {
-    try {
-      sweepQueueOutbox(
-        this.realSessionId,
-        this.followUpQueue.flatMap((item) => (item.images ?? []).map((ref) => ref.path)),
-        this.agentDir,
-      );
-    } catch (error) {
-      // GC 失败不能影响队列语义（留下孤儿文件而已，下次提交再扫）。
-      console.error("[pidance] failed to sweep queue media:", error);
+  /**
+   * 投递完成后回收本次的模型副本。
+   *
+   * 模型副本的用途是「投递时回读成内联图片」；已受理后内联字节在会话 JSONL 里，
+   * 文件不再被任何人引用。原图/预览**不删**：二进制消息卡片指向它们，删了下载
+   * 就 404。仍在队列里的引用（如另一次投递失败）同样不动。
+   */
+  private discardDeliveredModelMedia(media: readonly QueuedMediaRef[]): void {
+    const stillReferenced = new Set(followUpItemMedia(this.followUpQueue).map((ref) => ref.path));
+    for (const ref of media) {
+      if (ref.role !== "model" || stillReferenced.has(ref.path)) continue;
+      deleteChatAttachmentMedia(ref.path, this.agentDir);
     }
   }
 
@@ -563,78 +583,45 @@ export class SdkSessionHost {
   }
 
   /**
-   * 图片载荷 → outbox 引用（`data` 落盘；`ref` 必须属于本会话 outbox）。
+   * 媒体引用是否可用且可信（附件目录内的可读常规文件 + 尺寸限额）。
    *
-   * 失败返回 null，调用方必须拒绝本次写入：不能让「图没存住」变成「文本已入队」
-   * （用户看到成功、图静默消失）。`ref` 路径校验是信任边界：客户端不能拿任意
-   * 路径让 Host 读来发给模型。
+   * 路径校验是信任边界：客户端不能拿任意路径让 Host 读来发给模型。引用必须先
+   * 过这里才允许入队——入队后再发现读不出来，整批投递就被阻塞了。
    */
-  private resolveQueueItemImages(
-    images: readonly QueueItemImagePayload[] | undefined,
-  ): { refs: QueuedImageRef[]; created: QueuedImageRef[] } | null {
-    if (!images?.length) return { refs: [], created: [] };
-    if (images.length > MAX_QUEUED_ITEM_IMAGES) return null;
-    const refs: QueuedImageRef[] = [];
-    const created: QueuedImageRef[] = [];
-    // 任何一张失败都回滚本次已写出的文件：半途而废的写入没人引用，
-    // 不清理就是永久泄漏（且不会出现在任何条目的清扫范围里）。
-    const fail = (): null => {
-      this.discardQueueMedia(created);
-      return null;
-    };
-    for (const image of images) {
-      if (image.source === "ref") {
-        // 只接受本会话 outbox 里的路径，并且必须真的存在（否则投递时会静默变纯文本）。
-        if (!isQueueMediaPath(this.realSessionId, image.path, this.agentDir)) return fail();
-        if (!readQueueMediaBase64(this.realSessionId, image.path, this.agentDir)) return fail();
-        refs.push({
-          id: image.id,
-          path: image.path,
-          mimeType: image.mimeType,
-          name: image.name,
-        });
-        continue;
-      }
-      try {
-        const bytes = Buffer.from(image.data, "base64");
-        if (bytes.length === 0) return fail();
-        const ref = saveQueueMediaBytes(
-          this.realSessionId,
-          bytes,
-          image.mimeType,
-          image.name,
-          this.agentDir,
-        );
-        refs.push(ref);
-        created.push(ref);
-      } catch (error) {
-        console.error("[pidance] failed to persist queued image:", error);
-        return fail();
-      }
-    }
-    return { refs, created };
+  private isQueueMediaRefAlive(ref: QueuedMediaRef): boolean {
+    const max = ref.role === "model" ? QUEUE_MODEL_MEDIA_MAX_BYTES : CHAT_ATTACHMENT_MAX_BYTES;
+    const size = chatAttachmentMediaSize(ref.path, this.agentDir);
+    return size !== null && size <= max;
   }
 
-  /** 清理一次失败写入产生的图片（未被任何条目引用）。 */
-  private discardQueueMedia(refs: readonly QueuedImageRef[]): void {
-    for (const ref of refs) {
-      deleteQueueMedia(this.realSessionId, ref.path, this.agentDir);
+  private validateQueueMedia(media: readonly QueuedMediaRef[] | undefined): boolean {
+    if (!media?.length) return true;
+    if (media.length > MAX_QUEUED_ITEM_MEDIA) return false;
+    let total = 0;
+    for (const ref of media) {
+      const size = chatAttachmentMediaSize(ref.path, this.agentDir);
+      if (size === null) return false;
+      const max = ref.role === "model" ? QUEUE_MODEL_MEDIA_MAX_BYTES : CHAT_ATTACHMENT_MAX_BYTES;
+      if (size > max) return false;
+      total += size;
+      if (ref.previewPath && chatAttachmentMediaSize(ref.previewPath, this.agentDir) === null) return false;
     }
+    return total <= CHAT_ATTACHMENT_MAX_TOTAL_BYTES;
   }
 
   /**
-   * 从 outbox 回读整批图片。
+   * 从附件目录回读整批模型副本（内联给 SDK 的图片）。
    *
    * 返回缺失列表而不是「静默降级成纯文本」：图片读不出来意味着这段内容没被
    * 完整保存，调用方必须 fail-closed（不投递、条目留在队列），否则用户的消息
    * 会在无人知觉的情况下少了一半。
    */
-  private readQueueImages(items: readonly FollowUpItem[]): { images: PromptImage[]; missing: string[] } {
-    const refs = followUpItemImages(items);
+  private readQueueModelImages(items: readonly FollowUpItem[]): { images: PromptImage[]; missing: string[] } {
     const images: PromptImage[] = [];
     const missing: string[] = [];
-    for (const ref of refs) {
-      const data = readQueueMediaBase64(this.realSessionId, ref.path, this.agentDir);
+    for (const ref of followUpItemMedia(items)) {
+      if (ref.role !== "model") continue;
+      const data = readChatAttachmentBase64(ref.path, this.agentDir, QUEUE_MODEL_MEDIA_MAX_BYTES);
       if (!data) {
         missing.push(ref.path);
         continue;
@@ -642,6 +629,19 @@ export class SdkSessionHost {
       images.push({ type: "image", data, mimeType: ref.mimeType });
     }
     return { images, missing };
+  }
+
+  /** 原图引用 → 二进制消息卡片（与直接发送的 binaryBlocks 同一形状）。 */
+  private queueBinaryBlocks(items: readonly FollowUpItem[]): BinaryMessageInput[] {
+    return followUpItemMedia(items)
+      .filter((ref) => ref.role === "original")
+      .map((ref) => ({
+        path: ref.path,
+        name: ref.name,
+        mimeType: ref.mimeType,
+        size: ref.size,
+        ...(ref.previewPath ? { previewPath: ref.previewPath } : {}),
+      }));
   }
 
   /**
@@ -657,28 +657,17 @@ export class SdkSessionHost {
     if (expectedRevision !== null && expectedRevision !== this.followUpQueueRevision) {
       return { ok: false, conflict: true, reason: "revision", ...this.queueReceiptBase() };
     }
-    // 图片先落盘再入队：条目一旦可见，它的图就必须已经存在（否则投递时静默丢图）。
-    const resolved: Array<{ text: string; images?: QueuedImageRef[] }> = [];
-    const created: QueuedImageRef[] = [];
+    // 引用先校验再入队：条目一旦可见，它的文件就必须可读且可信（路径在附件目录
+    // 内、尺寸在限额内）。入队后再发现读不出来，会让整批投递被阻塞。
     for (const payload of payloads) {
-      const images = this.resolveQueueItemImages(payload.images);
-      if (images === null) {
-        this.discardQueueMedia(created);
-        // 图片没能落盘 = 内容没被可靠保存（与队列落盘失败同一种回执）。
+      if (!this.validateQueueMedia(payload.media)) {
         return { ok: false, persist: true, ...this.queueReceiptBase() };
       }
-      created.push(...images.created);
-      resolved.push({
-        text: payload.text,
-        ...(images.refs.length ? { images: images.refs } : {}),
-      });
     }
     const claimed = this.followUpQueue.filter((item) => item.state === "claimed");
     const pool = this.followUpQueue.filter((item) => item.state !== "claimed");
-    const next = [...claimed, ...reconcileFollowUpItems(pool, resolved)];
+    const next = [...claimed, ...reconcileFollowUpItems(pool, payloads)];
     if (!this.commitFollowUpQueue(next, "set")) {
-      // 落盘失败：新写的图没人引用，立即回收（内存与磁盘都保持原状）。
-      this.discardQueueMedia(created);
       // 落盘失败：内存保持原状，不得声称已入队（否则 UI 认为已保存，重启后不存在）。
       return { ok: false, persist: true, ...this.queueReceiptBase() };
     }
@@ -719,16 +708,79 @@ export class SdkSessionHost {
     };
   }
 
-  /** 客户端直传的 base64 图片 → 队列写入载荷（compacting/follow_up 路径）。 */
-  private inlineQueueImages(
-    images: readonly PromptImage[] | undefined,
-  ): QueueItemImagePayload[] | undefined {
-    if (!images?.length) return undefined;
-    return images.map((image) => ({
-      source: "data" as const,
-      data: image.data,
-      mimeType: image.mimeType,
-    }));
+  /**
+   * 客户端提交的图片输入（内联 base64 或附件引用）→ 队列媒体引用。
+   *
+   * 引用直接透传（字节已在盘上）；内联 base64 只可能来自旧客户端或扩展直调，
+   * 此时落盘成模型副本，队列条目同样只持引用。`ok: false` = 有条目没能落盘/
+   * 不可读，调用方必须回绝而不是入队：入队一个读不出图的条目，投递时只能
+   * 静默丢图。
+   */
+  private queueMediaFromPromptImages(
+    images: readonly PromptImageInput[] | undefined,
+  ): { media: QueuedMediaRef[] | undefined; ok: boolean } {
+    if (!images?.length) return { media: undefined, ok: true };
+    const media: QueuedMediaRef[] = [];
+    for (const [index, image] of images.entries()) {
+      if (image.type === "ref") {
+        const size = chatAttachmentMediaSize(image.path, this.agentDir);
+        if (size === null || size > QUEUE_MODEL_MEDIA_MAX_BYTES) return { media: undefined, ok: false };
+        media.push({
+          role: "model",
+          path: image.path,
+          name: image.path.split(/[\\/]/).pop() ?? `image-${index}`,
+          mimeType: image.mimeType,
+          size,
+        });
+        continue;
+      }
+      let saved: SavedChatAttachment;
+      try {
+        saved = saveChatAttachmentBytes(
+          `prompt-image-${index}.${imageExtension(image.mimeType)}`,
+          Buffer.from(image.data, "base64"),
+          this.agentDir,
+        );
+      } catch (error) {
+        console.error("[pidance] inline prompt image could not be stored:", error);
+        return { media: undefined, ok: false };
+      }
+      media.push({
+        role: "model",
+        path: saved.path,
+        name: saved.name,
+        mimeType: image.mimeType,
+        size: saved.size,
+      });
+    }
+    return { media, ok: true };
+  }
+
+  /**
+   * 提交给 SDK 的内联图片：引用从附件目录回读为 base64。
+   *
+   * 读不出来就报 missing（调用方按结构化回绝处理）——静默降级成纯文本会让用户
+   * 以为图发出去了。
+   */
+  private resolvePromptImages(
+    images: readonly PromptImageInput[] | undefined,
+  ): { images: PromptImage[] | undefined; missing: string[] } {
+    if (!images?.length) return { images: undefined, missing: [] };
+    const resolved: PromptImage[] = [];
+    const missing: string[] = [];
+    for (const image of images) {
+      if (image.type !== "ref") {
+        resolved.push(image);
+        continue;
+      }
+      const data = readChatAttachmentBase64(image.path, this.agentDir, QUEUE_MODEL_MEDIA_MAX_BYTES);
+      if (!data) {
+        missing.push(image.path);
+        continue;
+      }
+      resolved.push({ type: "image", data, mimeType: image.mimeType });
+    }
+    return { images: resolved.length ? resolved : undefined, missing };
   }
 
   /**
@@ -761,21 +813,22 @@ export class SdkSessionHost {
     if (queued.length === 0 && !extra) {
       return { ok: false, status: "rejected", reason: "error", ...this.queueReceiptBase() };
     }
-    // 整批合并为唯一副本：正文与图片一起带上（图片少一张就是静默丢内容，
+    // 整批合并为唯一副本：正文与媒体一起带上（少一张就是静默丢内容，
     // 多一张就是投递了用户已经取回的内容）。
-    const { text, images } = mergeFollowUpPayload(queued, extra);
-    // 认领之前先验证图片可读：认领之后才发现图丢了，就只能要么丢图、要么留下一个
+    const { text, media } = mergeFollowUpPayload(queued, extra);
+    // 认领之前先验证媒体可读：认领之后才发现图丢了，就只能要么丢图、要么留下一个
     // 永远发不出去的 claimed 条目。
-    const precheck = this.readQueueImages(queued);
+    const precheck = this.readQueueModelImages(queued);
     if (precheck.missing.length) {
-      console.error("[pidance] queued image missing, dispatch rejected:", precheck.missing);
+      console.error("[pidance] queued media missing, dispatch rejected:", precheck.missing);
       return { ok: false, status: "rejected", reason: "media", ...this.queueReceiptBase() };
     }
+    const dispatchBinaryBlocks = this.queueBinaryBlocks(queued);
     // 认领：把整批 waiting 换成一个 claimed 条目，正文是**合并后的完整载荷**
     // （含输入框 extra）。一次落盘同时完成「移除原条目」与「保存唯一副本」，
     // 因此投递前进程死掉也不会丢内容（重启后按 unknown 呈现，不自动重发）。
-    const claim = images.length
-      ? newFollowUpItem(text, "claimed", images)
+    const claim = media.length
+      ? newFollowUpItem(text, "claimed", media)
       : newFollowUpItem(text, "claimed");
     // 只把本批 waiting 换成唯一副本：**未参与派发的条目（claimed / unknown）必须原样保留**。
     // 旧实现只保留 claimed，会把 unknown（上次崩溃前已发出、结果未知）连同它的图一起删掉。
@@ -802,6 +855,7 @@ export class SdkSessionHost {
             type: "prompt",
             message: text,
             ...(dispatchImages?.length ? { images: dispatchImages } : {}),
+            ...(dispatchBinaryBlocks.length ? { binaryBlocks: dispatchBinaryBlocks } : {}),
             streamingBehavior: "steer",
           },
           this.internalPromptTicket,
@@ -852,10 +906,12 @@ export class SdkSessionHost {
       this.dispatchingFollowUpQueue = false;
     }
     // 已受理：删除认领条目并落盘。
-    this.commitFollowUpQueue(
+    const dispatchedMedia = followUpItemMedia([claim]);
+    const removed = this.commitFollowUpQueue(
       this.followUpQueue.filter((item) => item.id !== claim.id),
       "dispatch-deliver",
     );
+    if (removed) this.discardDeliveredModelMedia(dispatchedMedia);
     this.emitQueueChanged();
     this.resetIdleTimer();
     return { ok: true, status: "accepted", action, ...this.queueReceiptBase() };
@@ -946,10 +1002,11 @@ export class SdkSessionHost {
       return;
     }
     const ids = live.map((item) => item.id);
-    // 正文与图片一同取出：队列条目现在可以带图（A11），逐条投递时也不能丢图。
+    // 正文与媒体一同取出：队列条目可以带图（A11），逐条投递时也不能丢图。
     const payload = mergeFollowUpPayload(live);
     const text = payload.text;
-    const { images, missing } = this.readQueueImages(live);
+    const { images, missing } = this.readQueueModelImages(live);
+    const binaryBlocks = this.queueBinaryBlocks(live);
     if (missing.length) {
       // 图片读不出来 = 载荷不完整：不得只发正文把用户的图静静丢掉。
       // 条目保持 waiting，用户可在 UI 里看到它仍排队并自行处置（召回/清队）。
@@ -995,7 +1052,13 @@ export class SdkSessionHost {
     try {
       // 内部票据：只有 flush 自己发起的 prompt 能穿过「投递在途」门禁。
       receipt = await this.send(
-        { type: "prompt", message: text, ...(promptImages ? { images: promptImages } : {}) },
+        {
+          type: "prompt",
+          message: text,
+          ...(promptImages ? { images: promptImages } : {}),
+          // 原图随载荷带上：投递后的消息才有「下载原图」卡片（与直接发送一致）。
+          ...(binaryBlocks.length ? { binaryBlocks } : {}),
+        },
         this.internalPromptTicket,
       ) as PromptReceipt;
     } catch (error) {
@@ -1035,10 +1098,14 @@ export class SdkSessionHost {
     }
     // 2) 已受理：删除本次单元（按 id）并落盘。
     const delivered = new Set(ids);
+    const deliveredMedia = followUpItemMedia(live);
     const removed = this.commitFollowUpQueue(
       this.followUpQueue.filter((item) => !delivered.has(item.id)),
       "deliver",
     );
+    // 已受理就回收模型副本（内联字节已在 JSONL 里）；队列删除未落盘时条目仍是
+    // claimed，discardDeliveredModelMedia 的「仍被引用」判定会放过这批文件。
+    if (removed) this.discardDeliveredModelMedia(deliveredMedia);
     this.emit({
       type: "follow_up_flushed",
       sessionId: this.realSessionId,
@@ -1932,6 +1999,16 @@ export class SdkSessionHost {
         const inFlight = this.promptInFlight.get(key);
         if (inFlight) return inFlight;
         const binaryBlocks = normalizeBinaryMessageInputs(parsed.binaryBlocks, this.agentDir);
+        // 图片输入只在这里解析一次：下面每条路径（直接 prompt、压缩中入队、空闲
+        // 引导）都拿同一份结果，避免某一分支忘了回读而静默丢图。
+        const promptImagesInput = parsed.images ?? command.images as PromptImageInput[] | undefined;
+        const resolvedImages = this.resolvePromptImages(promptImagesInput);
+        if (resolvedImages.missing.length) {
+          console.error("[pidance] prompt image missing on disk:", resolvedImages.missing);
+          const failed = this.reject(parsed.submissionId, "media");
+          this.promptReceipts.set(parsed.submissionId, failed);
+          return failed;
+        }
         if (this.bashRunning) {
           // 结构化回绝：客户端按 reason=shell 提示并回草稿，不能靠 HTTP 错误猜。
           const busy = this.reject(parsed.submissionId, "bash");
@@ -1942,12 +2019,18 @@ export class SdkSessionHost {
         // running. Preserve the user's message in the existing Pidance follow-up
         // queue; compaction_end will schedule the normal prompt flush.
         if (session.isCompacting) {
-          // 压缩中不能起 run：正文与图片一起进产品队列（图片先落 outbox 再入队），
+          // 压缩中不能起 run：正文与图片一起进产品队列（条目只持引用），
           // compaction_end 会按正常流程投递。旧实现把带图消息整条回绝，用户只能
           // 等压缩结束再手动重发。
+          const queuedMedia = this.queueMediaFromPromptImages(promptImagesInput);
+          if (!queuedMedia.ok) {
+            const failed = this.reject(parsed.submissionId, "media");
+            this.promptReceipts.set(parsed.submissionId, failed);
+            return failed;
+          }
           const queuedReceipt = this.enqueuePayloads(
             parsed.submissionId,
-            [{ text: parsed.message, images: this.inlineQueueImages(parsed.images) }],
+            [{ text: parsed.message, ...(queuedMedia.media?.length ? { media: queuedMedia.media } : {}) }],
             "compacting",
           );
           this.promptReceipts.set(parsed.submissionId, queuedReceipt);
@@ -1997,7 +2080,7 @@ export class SdkSessionHost {
             };
             void session
               .prompt(parsed.message, {
-                images: (parsed.images ?? command.images) as never,
+                images: resolvedImages.images as never,
                 streamingBehavior: command.streamingBehavior as never,
                 source: "rpc",
                 preflightResult: (ok) => {
@@ -2143,10 +2226,16 @@ export class SdkSessionHost {
         // 要等到下一次 prompt 才被消费，UI 上看不到这条消息。放进产品队列，
         // compaction_end 会按正常流程投递。
         if (session.isCompacting && !session.isStreaming && !this.promptRunning) {
-          // 压缩中：正文与图片一起入队（图片先落 outbox），压缩结束自动投递。
+          // 压缩中：正文与图片一起入队（条目只持引用），压缩结束自动投递。
+          const queuedMedia = this.queueMediaFromPromptImages(parsed.images);
+          if (!queuedMedia.ok) {
+            const failed = this.reject(parsed.submissionId, "media");
+            this.commandReceipts.set(parsed.submissionId, failed);
+            return failed;
+          }
           const receipt = this.enqueuePayloads(
             parsed.submissionId,
-            [{ text: parsed.message, images: this.inlineQueueImages(parsed.images) }],
+            [{ text: parsed.message, ...(queuedMedia.media?.length ? { media: queuedMedia.media } : {}) }],
             "compacting",
           );
           this.commandReceipts.set(parsed.submissionId, receipt);
@@ -2157,6 +2246,13 @@ export class SdkSessionHost {
         // 以权威运行态决定：运行中保留原生 steer，空闲时转成下一轮 prompt。
         // flushingFollowUp 也视为 busy：让引导进入即将投递的下一轮，而不是
         // 和 Host 的队列 flush 并发启动两个 prompt。
+        const resolvedSteerImages = this.resolvePromptImages(parsed.images);
+        if (resolvedSteerImages.missing.length) {
+          console.error("[pidance] steer image missing on disk:", resolvedSteerImages.missing);
+          const failed = this.reject(parsed.submissionId, "media");
+          this.commandReceipts.set(parsed.submissionId, failed);
+          return failed;
+        }
         if (!this.isRunning() && !this.flushingFollowUp) {
           const inner = await this.send({
             type: "prompt",
@@ -2174,7 +2270,7 @@ export class SdkSessionHost {
           this.commandReceipts.set(parsed.submissionId, receipt);
           return receipt;
         }
-        await session.steer(parsed.message, parsed.images as never);
+        await session.steer(parsed.message, resolvedSteerImages.images as never);
         const receipt: PromptReceipt = {
           submissionId: parsed.submissionId,
           sessionId: this.realSessionId,
@@ -2218,15 +2314,18 @@ export class SdkSessionHost {
         const parsed = parseFollowUpCommand(command);
         const cached = this.commandReceipts.get(parsed.submissionId);
         if (cached) return cached;
-        // 队列条目现在能携带图片载荷（先落 outbox 再入队），因此带图不再回绝：
-        // 回绝的历史原因是「产品队列只能存文本」，那正是 A11 要改掉的。
+        // 队列条目能携带媒体引用，因此带图不再回绝：回绝的历史原因是「产品队列
+        // 只能存文本」，那正是 A11 要改掉的。
+        const queuedMedia = this.queueMediaFromPromptImages(parsed.images);
         const receipt: PromptReceipt = this.bashRunning
           ? this.reject(parsed.submissionId, "bash")
-          : !parsed.message.trim() && !parsed.images?.length
-            ? this.reject(parsed.submissionId, "error")
-            : this.enqueuePayloads(parsed.submissionId, [
-              { text: parsed.message, images: this.inlineQueueImages(parsed.images) },
-            ]);
+          : !queuedMedia.ok
+            ? this.reject(parsed.submissionId, "media")
+            : !parsed.message.trim() && !queuedMedia.media?.length
+              ? this.reject(parsed.submissionId, "error")
+              : this.enqueuePayloads(parsed.submissionId, [
+                { text: parsed.message, ...(queuedMedia.media?.length ? { media: queuedMedia.media } : {}) },
+              ]);
         this.commandReceipts.set(parsed.submissionId, receipt);
         return receipt;
       }

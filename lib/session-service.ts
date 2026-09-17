@@ -2,7 +2,7 @@ import { existsSync, readdirSync, unlinkSync } from "fs";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "path";
 import { allowFileRoot } from "./file-access";
-import { removeQueueOutboxDir } from "./chat-attachments";
+import { sweepUnreferencedAttachments } from "./attachment-gc";
 import { getAgentDir } from "./pi-paths";
 import {
   openSessionView,
@@ -772,12 +772,13 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         } catch (error) {
           console.error("[pidance] failed to clear queue prefs after delete:", error);
         }
-        // 队列删除后，带图条目的 outbox 副本没有任何引用者了（图片入队方案），
-        // 随会话一起清掉；失败只告警，不影响删除结果。
+        // 会话删除后，它引用过的附件可能没人再引用：跑一次兜底回收（引用集合
+        // 不完整时该函数自身会放弃，不会误删其他会话的文件）；失败只告警，
+        // 不影响删除结果。
         try {
-          removeQueueOutboxDir(sessionId);
+          sweepUnreferencedAttachments();
         } catch (error) {
-          console.error("[pidance] failed to remove queue outbox dir:", error);
+          console.error("[pidance] failed to sweep attachments:", error);
         }
 
         invalidateSessionPathCache(sessionId);

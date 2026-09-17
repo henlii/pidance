@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   MESSAGE_MEDIA_MAX_BYTES,
+  deleteChatAttachmentMedia,
   saveChatAttachmentStream,
 } from "@/lib/chat-attachments";
 import { normalizeBinaryMimeType } from "@/lib/message-binary";
@@ -47,4 +48,30 @@ export async function POST(request: NextRequest) {
       { status: responseStatus(error) },
     );
   }
+}
+
+/** 单次删除的路径数上限：客户端只在移除输入框附件/清草稿时调用。 */
+const MEDIA_DELETE_MAX_PATHS = 64;
+
+/**
+ * DELETE /api/message-media
+ *
+ * 输入框里的附件被移除后回收服务端文件（图片含原图/预览/模型副本）。只允许删
+ * 附件目录内的常规文件：越界路径与 symlink 由 deleteChatAttachmentMedia 拒绝，
+ * 删除本身幂等（已消失的返回未删）。
+ */
+export async function DELETE(request: NextRequest) {
+  const body = (await request.json().catch(() => null)) as { paths?: unknown } | null;
+  const paths = body?.paths;
+  if (!Array.isArray(paths) || paths.some((path) => typeof path !== "string")) {
+    return NextResponse.json({ error: "paths must be an array of strings" }, { status: 400 });
+  }
+  if (paths.length > MEDIA_DELETE_MAX_PATHS) {
+    return NextResponse.json({ error: `at most ${MEDIA_DELETE_MAX_PATHS} paths per request` }, { status: 400 });
+  }
+  let deleted = 0;
+  for (const path of paths) {
+    if (deleteChatAttachmentMedia(path as string)) deleted += 1;
+  }
+  return NextResponse.json({ deleted });
 }

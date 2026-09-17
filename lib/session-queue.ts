@@ -24,59 +24,88 @@
 export type FollowUpItemState = "waiting" | "claimed" | "unknown";
 
 /**
- * 队列条目携带的图片引用（issue #42 / A11）。
+ * 队列条目的媒体引用（issue #42 / A11）。
  *
- * 字节落在产品自己的 outbox 目录里（见 lib/chat-attachments.ts），条目只持引用：
- * 偏好文件保持小而可读，且不必把 base64 在 prefs/SSE/回执里反复搬运。path 的
- * 合法性（属于本会话 outbox）由 Host 在受理写入时校验，本模块只做结构解码。
+ * 字节落在附件目录里（见 lib/chat-attachments.ts），条目只持引用：偏好文件保持
+ * 小而可读，且不必把 base64 在 prefs/SSE/回执里反复搬运。path 的合法性（附件
+ * 目录内的可读常规文件）由 Host 在受理写入时校验，本模块只做结构解码。
+ *
+ * 一张图有两份副本，各自独立消费：
+ * - `model`：安全尺寸副本，投递时回读为内联图片交给 SDK；
+ * - `original`：用户上传的原文件，投递时生成二进制消息卡片（下载/预览）。
  */
-export type QueuedImageRef = {
-  /** 稳定身份 = 落盘文件名；客户端回传时按它复现同一份字节。 */
-  id: string;
+export type QueuedMediaRole = "model" | "original";
+
+export type QueuedMediaRef = {
+  role: QueuedMediaRole;
   path: string;
-  mimeType: string;
   name: string;
+  mimeType: string;
+  size: number;
+  /** 仅 role=original：内联预览文件；与原图同一路径时省略。 */
+  previewPath?: string;
 };
 
-/** 解码器容忍上限：超出部分丢弃（防御性边界，写入侧另有拒绝）。 */
-export const MAX_QUEUED_ITEM_IMAGES = 16;
+/** 整包写入（`set_follow_up_queue`）的条目载荷：正文 + 该条目的媒体引用。 */
+export type QueueItemPayload = {
+  text: string;
+  media?: QueuedMediaRef[];
+};
+
+/**
+ * 解码器容忍上限（防御性边界，写入侧另有更严的限额）。
+ *
+ * 这里**不能截断**：截掉引用会让被截掉的副本变成无人引用的垃圾（甚至被清扫
+ * 当成孤儿删掉）。超出上限的条目整条丢弃，由 Host 在受理时拒绝。
+ */
+export const MAX_QUEUED_ITEM_MEDIA = 32;
 
 export type FollowUpItem = {
   id: string;
   text: string;
   state: FollowUpItemState;
-  /** 仅在有图时存在；空数组一律不写（保持回执/持久化形状老实）。 */
-  images?: QueuedImageRef[];
+  /** 仅在有媒体时存在；空数组一律不写（保持回执/持久化形状老实）。 */
+  media?: QueuedMediaRef[];
 };
 
-export function parseQueuedImageRefs(value: unknown): QueuedImageRef[] {
-  if (!Array.isArray(value)) return [];
-  const refs: QueuedImageRef[] = [];
+export function parseQueuedMediaRefs(value: unknown): QueuedMediaRef[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return null;
+  if (value.length > MAX_QUEUED_ITEM_MEDIA) return null;
+  const refs: QueuedMediaRef[] = [];
   for (const entry of value) {
-    if (refs.length >= MAX_QUEUED_ITEM_IMAGES) break;
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
     const record = entry as Record<string, unknown>;
+    const role = record.role === "model" || record.role === "original" ? record.role : null;
     const path = typeof record.path === "string" ? record.path.trim() : "";
     const mimeType = typeof record.mimeType === "string" ? record.mimeType.trim() : "";
-    if (!path || !mimeType.startsWith("image/")) continue;
-    const fallbackId = path.split("/").pop() ?? "";
-    const id = typeof record.id === "string" && record.id.trim() ? record.id.trim() : fallbackId;
-    if (!id) continue;
-    const name = typeof record.name === "string" && record.name.trim() ? record.name.trim() : id;
-    refs.push({ id, path, mimeType, name });
+    const name = typeof record.name === "string" ? record.name.trim() : "";
+    const size = record.size;
+    const previewPath = typeof record.previewPath === "string" ? record.previewPath.trim() : undefined;
+    if (!role || !path || !mimeType || !name) return null;
+    if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) return null;
+    if (record.previewPath !== undefined && !previewPath) return null;
+    refs.push({
+      role,
+      path,
+      name,
+      mimeType,
+      size,
+      ...(previewPath && previewPath !== path ? { previewPath } : {}),
+    });
   }
   return refs;
 }
 
-/** 两份引用的身份是否一致（id 即落盘名，不需要比 path）。 */
-export function sameQueuedImages(
-  a: readonly QueuedImageRef[] | undefined,
-  b: readonly QueuedImageRef[] | undefined,
+/** 两份媒体引用是否同一批文件（按路径列表比较；投递/对齐只看文件。） */
+export function sameQueuedMedia(
+  a: readonly QueuedMediaRef[] | undefined,
+  b: readonly QueuedMediaRef[] | undefined,
 ): boolean {
   const left = a ?? [];
   const right = b ?? [];
   if (left.length !== right.length) return false;
-  return left.every((ref, index) => ref.id === right[index].id);
+  return left.every((ref, index) => ref.path === right[index].path);
 }
 
 export type FollowUpQueueState = {
@@ -115,10 +144,10 @@ function randomId(): string {
 export function newFollowUpItem(
   text: string,
   state: FollowUpItemState = "waiting",
-  images?: readonly QueuedImageRef[],
+  media?: readonly QueuedMediaRef[],
 ): FollowUpItem {
   const item: FollowUpItem = { id: randomId(), text, state };
-  if (images?.length) item.images = [...images];
+  if (media?.length) item.media = [...media];
   return item;
 }
 
@@ -143,17 +172,18 @@ function parseItem(value: unknown, index: number): FollowUpItem | null {
     return text ? { id: legacyItemId(index, value), text, state: "waiting" } : null;
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as { id?: unknown; text?: unknown; state?: unknown; images?: unknown };
+  const record = value as { id?: unknown; text?: unknown; state?: unknown; media?: unknown };
   if (typeof record.text !== "string") return null;
-  const images = parseQueuedImageRefs(record.images);
+  const media = parseQueuedMediaRefs(record.media);
+  if (media === null) return null;
   // 纯图条目（正文为空但有图）必须能恢复：旧实现在这里丢掉它，条目的图
   // 随即被清扫——用户排的纯图消息就在刷新/重启后无声消失。
-  if (!record.text.trim() && images.length === 0) return null;
+  if (!record.text.trim() && media.length === 0) return null;
   return {
     id: typeof record.id === "string" && record.id.trim() ? record.id : legacyItemId(index, record.text),
     text: record.text,
     state: normalizeFollowUpItemState(record.state),
-    ...(images.length ? { images } : {}),
+    ...(media.length ? { media } : {}),
   };
 }
 
@@ -187,7 +217,7 @@ export function serializeFollowUpQueue(state: FollowUpQueueState): {
       id: item.id,
       text: item.text,
       state: item.state,
-      ...(item.images?.length ? { images: item.images.map((ref) => ({ ...ref })) } : {}),
+      ...(item.media?.length ? { media: item.media.map((ref) => ({ ...ref })) } : {}),
     })),
     revision: state.revision,
   };
@@ -215,7 +245,7 @@ export function followUpItemTexts(items: readonly FollowUpItem[]): string[] {
  */
 export function reconcileFollowUpItems(
   current: readonly FollowUpItem[],
-  payloads: readonly { text: string; images?: readonly QueuedImageRef[] }[],
+  payloads: readonly QueueItemPayload[],
 ): FollowUpItem[] {
   const used = new Array<boolean>(current.length).fill(false);
   const next: FollowUpItem[] = [];
@@ -224,8 +254,8 @@ export function reconcileFollowUpItems(
     for (let index = 0; index < current.length; index++) {
       const candidate = current[index];
       if (used[index] || candidate.text !== payload.text) continue;
-      // 同文的多个条目：优先命中图片也一致的那个，否则同文两条会互换图片。
-      if (sameQueuedImages(candidate.images, payload.images)) {
+      // 同文的多个条目：优先命中媒体也一致的那个，否则同文两条会互换附件。
+      if (sameQueuedMedia(candidate.media, payload.media)) {
         match = index;
         break;
       }
@@ -234,34 +264,34 @@ export function reconcileFollowUpItems(
     if (match >= 0) {
       used[match] = true;
       const existing = current[match];
-      const images = payload.images?.length ? payload.images : existing.images;
+      const media = payload.media?.length ? payload.media : existing.media;
       next.push({
         id: existing.id,
         text: payload.text,
         state: existing.state,
-        ...(images?.length ? { images: [...images] } : {}),
+        ...(media?.length ? { media: [...media] } : {}),
       });
       continue;
     }
-    next.push(payload.images?.length
-      ? newFollowUpItem(payload.text, "waiting", payload.images)
+    next.push(payload.media?.length
+      ? newFollowUpItem(payload.text, "waiting", payload.media)
       : newFollowUpItem(payload.text, "waiting"));
   }
   return next;
 }
 
-/** 多条条目合并为一条投递载荷（整队转引导/自动投递）：正文与图片都要带上。 */
+/** 多条条目合并为一条投递载荷（整队转引导/自动投递）：正文与媒体都要带上。 */
 export function mergeFollowUpPayload(
   items: readonly FollowUpItem[],
   extra?: string,
-): { text: string; images: QueuedImageRef[] } {
+): { text: string; media: QueuedMediaRef[] } {
   const texts = [...followUpItemTexts(items), ...(extra?.trim() ? [extra.trim()] : [])]
     .map((text) => text.trim())
     .filter((text) => text.length > 0);
-  return { text: texts.join("\n"), images: followUpItemImages(items) };
+  return { text: texts.join("\n"), media: followUpItemMedia(items) };
 }
 
-/** 条目图片按顺序摊平（投递时与正文一同交给 SDK）。 */
-export function followUpItemImages(items: readonly FollowUpItem[]): QueuedImageRef[] {
-  return items.flatMap((item) => item.images ?? []);
+/** 条目媒体按顺序摊平（投递时按 role 分别交给 SDK 与二进制卡片）。 */
+export function followUpItemMedia(items: readonly FollowUpItem[]): QueuedMediaRef[] {
+  return items.flatMap((item) => item.media ?? []);
 }

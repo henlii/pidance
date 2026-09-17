@@ -56,14 +56,42 @@ export interface BinaryMessageData extends BinaryMessageInput {
   messageEntryId?: string;
 }
 
-export interface AttachedImage {
-  /** 发送给模型的安全尺寸图片 Base64，不是原图。 */
-  data: string;
+/** 上传到 Pidance 附件目录后返回的引用（字节在盘上，输入框/队列只存引用）。 */
+export interface UploadedMedia {
+  path: string;
+  name: string;
+  /** 落盘文件名（附件目录内唯一）。 */
+  storedName: string;
+  size: number;
   mimeType: string;
-  /** 当前输入框缩略图 URL；仅浏览器临时态。 */
-  previewUrl: string;
-  /** 原图上传后的 UI-only 元数据，不写入 Pi ImageContent。 */
+}
+
+export interface AttachedImage {
+  /**
+   * 发送给模型的安全尺寸图片 Base64。
+   *
+   * 只在没有 `media` 引用时作为兼容路径内联给 SDK；正常流程里字节在附件
+   * 目录（media.model），Host 按引用回读，浏览器不保留 base64。
+   */
+  data?: string;
+  mimeType: string;
+  /** 当前输入框缩略图 URL（本地 blob 或附件读取 URL）。 */
+  previewUrl?: string;
+  /**
+   * 进入输入框时上传好的媒体引用：模型副本 + 原图（+ 内联预览）。
+   *
+   * 队列、二进制消息卡片与「删除输入框附件即回收」都以它为唯一来源。
+   */
+  media?: AttachedImageMedia;
+  /** 兼容：历史消息/旧草稿只带原图元数据（无 media 时的引用来源）。 */
   original?: BinaryMessageInput;
+}
+
+/** 一张图的全部已上传副本。preview 与 original 同一路径时表示直接用原图做预览。 */
+export interface AttachedImageMedia {
+  model: UploadedMedia;
+  original: UploadedMedia;
+  preview: UploadedMedia;
 }
 
 export interface ChatInputHandle {

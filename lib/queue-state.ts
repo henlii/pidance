@@ -22,24 +22,16 @@
  * 4. **按 sessionId 分账**。切走会话后失败也只能修正原会话条目。
  */
 
-import type { QueueItemImagePayload, QueueItemPayload } from "./agent-commands";
-import type { FollowUpItem, FollowUpItemState, QueuedImageRef } from "./session-queue";
+import type { QueueItemPayload } from "./agent-commands";
+import type { FollowUpItem, FollowUpItemState, QueuedMediaRef } from "./session-queue";
 
 export type { QueueItemPayload };
 
-/** 权威条目 → 写入载荷（图片按引用回传，Host 按 id 复用同一份文件）。 */
+/** 权威条目 → 写入载荷（媒体按引用回传，Host 按路径复用同一份文件）。 */
 export function itemToPayload(item: FollowUpItem): QueueItemPayload {
   return {
     text: item.text,
-    ...(item.images?.length
-      ? { images: item.images.map((ref): QueueItemImagePayload => ({
-        source: "ref",
-        id: ref.id,
-        path: ref.path,
-        mimeType: ref.mimeType,
-        name: ref.name,
-      })) }
-      : {}),
+    ...(item.media?.length ? { media: item.media.map((ref) => ({ ...ref })) } : {}),
   };
 }
 
@@ -107,25 +99,34 @@ export function payloadsForWrite(entry: QueueEntry): QueueItemPayload[] {
   return entry.pending ?? entry.items.filter((item) => item.state !== "claimed").map(itemToPayload);
 }
 
-/** 权威条目里的图片引用按顺序摊平（取回时逐张回读）。 */
-export function itemImageRefs(items: readonly FollowUpItem[]): QueuedImageRef[] {
-  return items.flatMap((item) => item.images ?? []);
+/** 权威条目里的媒体引用按顺序摊平（取回时按图片分组重建附件）。 */
+export function itemMediaRefs(items: readonly FollowUpItem[]): QueuedMediaRef[] {
+  return items.flatMap((item) => item.media ?? []);
 }
 
-/** UI 行投影：权威条目 + 在途行，供队列面板显示状态与图片数量。 */
+/**
+ * UI 行投影：权威条目 + 在途行，供队列面板显示状态与图片数量。
+ *
+ * 图片数量只数原图：一张图在条目里有两份副本（模型/原图），数量要对得上
+ * 用户看见的图。
+ */
 export function queueRows(entry: QueueEntry): {
   id: string;
   text: string;
   state: FollowUpItemState;
   imageCount: number;
 }[] {
-  const count = (images?: readonly unknown[]) => (images?.length ?? 0);
+  const count = (media?: readonly QueuedMediaRef[]): number => {
+    if (!media?.length) return 0;
+    const originals = media.filter((ref) => ref.role === "original").length;
+    return originals || media.length;
+  };
   if (entry.pending) {
     return entry.pending.map((payload, index) => ({
       id: `pending-${index}`,
       text: payload.text,
       state: "waiting" as const,
-      imageCount: count(payload.images),
+      imageCount: count(payload.media),
     }));
   }
   return [
@@ -133,7 +134,7 @@ export function queueRows(entry: QueueEntry): {
       id: item.id,
       text: item.text,
       state: item.state,
-      imageCount: count(item.images),
+      imageCount: count(item.media),
     })),
     ...entry.inFlight.map((text, index) => ({
       id: `inflight-${index}`,

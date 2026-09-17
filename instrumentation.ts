@@ -33,6 +33,20 @@ export async function register(): Promise<void> {
     console.error("[pidance] 回收运行租约失败（已忽略）:", error);
   }
 
+  // 附件兜底回收：超过保留期且已被任何队列/会话引用不到的文件才会删（引用集合
+  // 读不完整时自身会放弃）。主要针对崩溃残留与已投递消息的模型副本：
+  // 「删除附件即回收」走客户端主动 DELETE，这里是长尾兜底。
+  try {
+    const { sweepUnreferencedAttachments } = await import("@/lib/attachment-gc");
+    const swept = sweepUnreferencedAttachments();
+    if (swept.deleted > 0) {
+      console.log(`[pidance] 已回收 ${swept.deleted} 个无引用附件（${Math.round(swept.bytes / 1024)} KB）`);
+    }
+  } catch (error) {
+    // 回收失败不得影响服务启动（下次启动再清）。
+    console.error("[pidance] 回收无引用附件失败（已忽略）:", error);
+  }
+
   // 恢复服务端重启前未投递的 follow-up 队列（后台消息投递）。
   try {
     const { recoverFollowUpQueues } = await import("@/lib/live-session-registry");

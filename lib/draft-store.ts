@@ -1,9 +1,12 @@
-import type { BinaryMessageInput } from "./types";
+import type { AttachedImageMedia, BinaryMessageInput } from "./types";
 
 export interface ChatDraftImage {
-  data: string;
+  /** 兼容旧草稿：安全尺寸 base64（新草稿只存引用，不再写它）。 */
+  data?: string;
   mimeType: string;
-  /** 原图已上传时保留引用；draft 不保存原始二进制。 */
+  /** 已上传附件（原图/预览/模型副本）：草稿只存引用，prefs 保持小。 */
+  media?: AttachedImageMedia;
+  /** 兼容：历史草稿只带原图元数据。 */
   original?: BinaryMessageInput;
 }
 
@@ -70,7 +73,15 @@ export function hydrateDraftFromServer(key: string): ChatDraft | null {
   const images = Array.isArray(remote.images)
     ? remote.images.filter(
         (img): img is ChatDraftImage =>
-          typeof img === "object" && img !== null && typeof (img as ChatDraftImage).data === "string",
+          typeof img === "object" &&
+          img !== null &&
+          typeof (img as ChatDraftImage).mimeType === "string" &&
+          // 有引用或有内联字节才算有效图；两者都没有的条目无法发送
+          Boolean(
+            (img as ChatDraftImage).media ||
+            (img as ChatDraftImage).original ||
+            typeof (img as ChatDraftImage).data === "string",
+          ),
       )
     : [];
   const draft: ChatDraft = { value: remote.value, images };

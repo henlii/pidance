@@ -5,9 +5,29 @@
 
 import type { BinaryMessageInput } from "./types";
 import { normalizeBinaryMimeType } from "./message-binary";
-import { normalizeFollowUpItems, type FollowUpItem } from "./session-queue";
+import {
+  MAX_QUEUED_ITEM_MEDIA,
+  normalizeFollowUpItems,
+  type FollowUpItem,
+  type QueueItemPayload,
+  type QueuedMediaRef,
+} from "./session-queue";
+
+export type { QueueItemPayload, QueuedMediaRef } from "./session-queue";
 
 export const PROMPT_IMAGE_MAX_BASE64_BYTES = 4 * 1024 * 1024;
+
+/**
+ * 模型图片引用：字节已经在 Pidance 附件目录里（输入框选图即上传）。
+ *
+ * 引入它的原因：草稿/队列/取回都只持引用，客户端不必为了再发一次而重新
+ * 读回 base64；内联图片只用于旧客户端与扩展直调。
+ */
+export type PromptImageRef = {
+  type: "ref";
+  path: string;
+  mimeType: string;
+};
 
 export type PromptImage = {
   type: "image";
@@ -15,13 +35,16 @@ export type PromptImage = {
   mimeType: string;
 };
 
+/** 提交给 Host 的图片输入：内联 base64，或附件目录里的引用。 */
+export type PromptImageInput = PromptImage | PromptImageRef;
+
 export type PromptBinaryBlock = BinaryMessageInput;
 
 export type PromptCommand = {
   type: "prompt";
   message: string;
   submissionId: string;
-  images?: PromptImage[];
+  images?: PromptImageInput[];
   binaryBlocks?: PromptBinaryBlock[];
 };
 
@@ -33,17 +56,17 @@ export type SteerCommand = {
   type: "steer";
   message: string;
   submissionId: string;
-  images?: PromptImage[];
+  images?: PromptImageInput[];
 };
 
 export type FollowUpCommand = {
   type: "follow_up";
   message: string;
   submissionId: string;
-  images?: PromptImage[];
+  images?: PromptImageInput[];
 };
 
-/** 整包写入等待队列：客户端传正文（可带图片引用/新图 base64），条目身份由 Host 对齐。 */
+/** 整包写入等待队列：客户端传正文 + 该条目的媒体引用，条目身份由 Host 对齐。 */
 export type SetFollowUpQueueCommand = {
   type: "set_follow_up_queue";
   items: QueueItemPayload[];
@@ -165,17 +188,26 @@ function defaultSubmissionId(): string {
   return `sub-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function parsePromptImages(value: unknown): PromptImage[] | undefined {
+export function parsePromptImages(value: unknown): PromptImageInput[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) {
     throw new Error("images must be an array");
   }
-  const images: PromptImage[] = [];
+  const images: PromptImageInput[] = [];
   for (const item of value) {
     if (!item || typeof item !== "object") {
       throw new Error("invalid image");
     }
     const record = item as Record<string, unknown>;
+    if (record.type === "ref") {
+      const path = typeof record.path === "string" ? record.path.trim() : "";
+      const refMime = normalizeBinaryMimeType(
+        typeof record.mimeType === "string" ? record.mimeType : undefined,
+      );
+      if (!path || !refMime?.startsWith("image/")) throw new Error("invalid image");
+      images.push({ type: "ref", path, mimeType: refMime });
+      continue;
+    }
     const data = typeof record.data === "string" ? record.data : undefined;
     const rawMimeType = typeof record.mimeType === "string"
       ? record.mimeType
@@ -286,48 +318,53 @@ export function parseFollowUpCommand(
   };
 }
 
-/** 队列条目的图片载荷：新图走 base64，已入库的图按引用回传。 */
-export type QueueItemImagePayload =
-  | { source: "data"; data: string; mimeType: string; name?: string }
-  | { source: "ref"; id: string; path: string; mimeType: string; name: string };
-
-export type QueueItemPayload = {
-  text: string;
-  images?: QueueItemImagePayload[];
-};
-
-function parseQueueItemImages(value: unknown): QueueItemImagePayload[] | undefined {
+/**
+ * 队列条目的媒体引用解码：条目只持引用（字节在附件目录里）。
+ *
+ * 结构不合格就报错，而不是静默丢掉几条引用：丢掉会让被丢的副本变成孤儿
+ * （接着被回收），也会让投递少发用户排队的内容。
+ */
+function parseQueueItemMedia(value: unknown): QueuedMediaRef[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value)) throw new Error("invalid queue image");
+  if (!Array.isArray(value)) throw new Error("invalid queue media");
   if (value.length === 0) return undefined;
-  const images: QueueItemImagePayload[] = [];
+  if (value.length > MAX_QUEUED_ITEM_MEDIA) throw new Error("invalid queue media: too many refs");
+  const media: QueuedMediaRef[] = [];
   for (const entry of value) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new Error("invalid queue image");
+      throw new Error("invalid queue media");
     }
     const record = entry as Record<string, unknown>;
+    const role = record.role === "model" || record.role === "original" ? record.role : null;
+    const path = typeof record.path === "string" ? record.path.trim() : "";
+    if (!role || !path) throw new Error("invalid queue media");
     const mimeType = normalizeBinaryMimeType(
       typeof record.mimeType === "string" ? record.mimeType : undefined,
     );
-    if (!mimeType?.startsWith("image/")) throw new Error("invalid queue image");
-    const name = typeof record.name === "string" && record.name.trim() ? record.name.trim() : undefined;
-    if (typeof record.data === "string" && record.data.length > 0) {
-      if (record.data.length > PROMPT_IMAGE_MAX_BASE64_BYTES) {
-        throw new Error("invalid queue image: payload too large");
-      }
-      images.push({ source: "data", data: record.data, mimeType, ...(name ? { name } : {}) });
-      continue;
+    if (!mimeType) throw new Error("invalid queue media");
+    // 模型副本必须是图片：投递时它会被当作内联图片交给 SDK，其他类型只可能是误传。
+    if (role === "model" && !mimeType.startsWith("image/")) throw new Error("invalid queue media");
+    const name = typeof record.name === "string" && record.name.trim() ? record.name.trim() : "";
+    const size = record.size;
+    if (!name || typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) {
+      throw new Error("invalid queue media");
     }
-    const path = typeof record.path === "string" ? record.path.trim() : "";
-    const id = typeof record.id === "string" ? record.id.trim() : "";
-    if (!path || !id) throw new Error("invalid queue image");
-    images.push({ source: "ref", id, path, mimeType, name: name ?? id });
+    const previewPath = typeof record.previewPath === "string" ? record.previewPath.trim() : undefined;
+    if (record.previewPath !== undefined && !previewPath) throw new Error("invalid queue media");
+    media.push({
+      role,
+      path,
+      name,
+      mimeType,
+      size,
+      ...(previewPath && previewPath !== path ? { previewPath } : {}),
+    });
   }
-  return images.length ? images : undefined;
+  return media.length ? media : undefined;
 }
 
 /**
- * 队列条目解码：字符串是旧格式（只有正文），对象可带图片。
+ * 队列条目解码：字符串是旧格式（只有正文），对象可带媒体引用。
  *
  * 非字符串且非对象的条目一律拒绝：旧行为是静默丢弃，于是「发错了格式」变成一次
  * **空队列写入**，把用户未投递的消息悄悄清掉（issue #42 关注的正是这类静默丢失）。
@@ -347,18 +384,18 @@ export function parseSetFollowUpQueueCommand(
       continue;
     }
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new Error("items must be strings or { text, images? } objects");
+      throw new Error("items must be strings or { text, media? } objects");
     }
     const record = entry as Record<string, unknown>;
     if (typeof record.text !== "string") {
-      throw new Error("items must be strings or { text, images? } objects");
+      throw new Error("items must be strings or { text, media? } objects");
     }
-    const images = parseQueueItemImages(record.images);
-    // 纯图消息（正文为空）是合法的：UI 允许只发图；空正文且无图才是空条目。
-    if (!record.text.trim() && !images?.length) {
+    const media = parseQueueItemMedia(record.media);
+    // 纯图消息（正文为空）是合法的：UI 允许只发图；空正文且无媒体才是空条目。
+    if (!record.text.trim() && !media?.length) {
       throw new Error("items must not be empty");
     }
-    items.push({ text: record.text, ...(images ? { images } : {}) });
+    items.push({ text: record.text, ...(media ? { media } : {}) });
   }
   return {
     type: "set_follow_up_queue",
