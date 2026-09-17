@@ -27,7 +27,7 @@
  */
 
 import type { QueueItemPayload } from "./agent-commands";
-import type { FollowUpItem, FollowUpItemState, QueuedMediaRef } from "./session-queue";
+import { sameQueuedMedia, type FollowUpItem, type FollowUpItemState, type QueuedMediaRef } from "./session-queue";
 
 export type { QueueItemPayload };
 
@@ -330,14 +330,44 @@ export function adoptServerSnapshot(
   ) {
     return book;
   }
+  const items = [...snapshot.items];
   return put(book, sessionId, {
     ...entry,
-    items: [...snapshot.items],
+    items,
     inFlight: [...(snapshot.inFlight ?? [])],
     serverRevision: typeof incoming === "number" ? incoming : entry.serverRevision,
     admittedAttemptIds: snapshot.admittedAttemptIds
       ? [...snapshot.admittedAttemptIds]
       : entry.admittedAttemptIds,
+    // 未结算提交的整包载荷**以刚采纳的权威队列为底**重建（见 rebasePendingPayloads）：
+    // 冻结在提出时的列表一旦落后于服务端（别的标签页改了队列、条目被投递），
+    // 照它整包写出去就是「新版本 + 旧内容」，会删掉别人刚入队的条目。
+    pending: rebasePendingPayloads(entry.pending, items),
+  });
+}
+
+/**
+ * 把「未结算提交」的整包载荷重整到新的权威条目上。
+ *
+ * 每个提交保留自己新增的载荷（正文 + 附件不在权威条目里的那些），其余以权威条目
+ * 为底——提交的语义是「队列应该就是这几条」，而它当时看到的那几条现在可能已经变了。
+ * 已在途（claimed）的条目不再写回去（那会变成投递第二次）。
+ */
+function rebasePendingPayloads(
+  pending: readonly QueueProposal[],
+  items: readonly FollowUpItem[],
+): QueueProposal[] {
+  const base = items.filter((item) => item.state !== "claimed").map(itemToPayload);
+  const represented = (payload: QueueItemPayload): boolean => items.some((item) => (
+    payload.id
+      ? item.id === payload.id
+      : item.text === payload.text && sameQueuedMedia(item.media, payload.media)
+  ));
+  return pending.map((proposal) => {
+    const payloads = [...base, ...proposal.payloads.filter((payload) => !represented(payload))];
+    const same = payloads.length === proposal.payloads.length
+      && payloads.every((payload, index) => payload === proposal.payloads[index]);
+    return same ? proposal : { ...proposal, payloads };
   });
 }
 
@@ -426,16 +456,29 @@ function resolvePendingsAgainstAuthority(
   const seen = new Set<string>();
   // 更早的未决提交（本次之外的）：它们的效果已经含在快照里。
   const reclaimed = settleUnsettledByAuthority(entry, settledRevision, admitted, seen).resolved;
-  const gone = (payload: QueueItemPayload): boolean => {
-    if (payload.attemptId && seen.has(payload.attemptId)) return true;
-    return Boolean(payload.id && !liveIds.has(payload.id));
-  };
+  // 后继提交的整包载荷要**以刚采纳的权威队列为底**重建：它的旧载荷列表是在
+  // 「不知道别的标签页改了什么」的前提下算出来的，带着一份不含这些条目的旧列表去
+  // 写，就是用新版本执行旧内容——别的标签页刚入队的条目会被整包删掉。
+  // 客户端新增的载荷（无服务端身份）保留，已被定论/已不在队列里的丢掉。
+  const authorityPayloads = snapshot.items
+    .filter((item) => item.state !== "claimed")
+    .map(itemToPayload);
+  // 「已在权威队列里」的（身份命中，或同文同附件）不再重复列进去；其余是本次
+  // 提交自己新增的内容，保留。
+  const represented = (payload: QueueItemPayload): boolean => snapshot.items.some((item) => (
+    payload.id
+      ? item.id === payload.id
+      : item.text === payload.text && sameQueuedMedia(item.media, payload.media)
+  ));
+  const own = (payload: QueueItemPayload): boolean => (
+    !represented(payload) && !stale(payload, seen, liveIds)
+  );
   const pending = later.map((proposal) => {
-    const payloads = proposal.payloads.filter((payload) => !gone(payload));
-    const candidates = proposal.candidates.filter((payload) => !gone(payload));
-    if (payloads.length === proposal.payloads.length && candidates.length === proposal.candidates.length) {
-      return proposal;
-    }
+    const payloads = [...authorityPayloads, ...proposal.payloads.filter(own)];
+    const candidates = proposal.candidates.filter(own);
+    const same = payloads.length === proposal.payloads.length
+      && payloads.every((payload, index) => payload === proposal.payloads[index]);
+    if (same && candidates.length === proposal.candidates.length) return proposal;
     return { ...proposal, payloads, candidates };
   });
   const untouched = entry.pending.every((proposal) => proposal.revision > settledRevision)
@@ -444,6 +487,16 @@ function resolvePendingsAgainstAuthority(
     book: untouched ? adopted : put(adopted, sessionId, { ...entry, pending }),
     resolved: reclaimed,
   };
+}
+
+/** 写载荷是否已经确定不在队列里（已定论 / 身份已消失）。 */
+function stale(
+  payload: QueueItemPayload,
+  seen: ReadonlySet<string>,
+  liveIds: ReadonlySet<string>,
+): boolean {
+  if (payload.attemptId && seen.has(payload.attemptId)) return true;
+  return Boolean(payload.id && !liveIds.has(payload.id));
 }
 
 /**

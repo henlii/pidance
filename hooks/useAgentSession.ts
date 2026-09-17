@@ -2623,10 +2623,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // 前一个提交已经失败并连带作废（内容那时已归还）：本次一个字节都没发出去。
           return { disposition: "rejected" as QueueWriteDisposition, receipt: undefined as (QueueReceiptView | undefined) };
         }
+        // 整包写入的载荷以**账本里当前的这份提交**为准（而不是调用时抓的那份）：
+        // 上一个提交的权威快照可能已经把它重整过（去掉已不在队列里的旧载荷、
+        // 把权威条目补成底），用旧列表发出去等于用新版本执行旧内容。
+        const liveProposal = current.pending.find((item) => item.revision === proposal.revision);
         const command: Record<string, unknown> = request.kind === "set"
           ? {
             type: "set_follow_up_queue",
-            items: request.payloads,
+            items: liveProposal ? liveProposal.payloads : request.payloads,
             expectedRevision: current.serverRevision,
           }
           : request.kind === "dispatch"
