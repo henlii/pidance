@@ -27,7 +27,7 @@
  */
 
 import type { QueueItemPayload } from "./agent-commands";
-import { sameQueuedMedia, type FollowUpItem, type FollowUpItemState, type QueuedMediaRef } from "./session-queue";
+import type { FollowUpItem, FollowUpItemState, QueuedMediaRef } from "./session-queue";
 
 export type { QueueItemPayload };
 
@@ -331,43 +331,64 @@ export function adoptServerSnapshot(
     return book;
   }
   const items = [...snapshot.items];
+  const admittedAttemptIds = snapshot.admittedAttemptIds
+    ? [...snapshot.admittedAttemptIds]
+    : entry.admittedAttemptIds;
   return put(book, sessionId, {
     ...entry,
     items,
     inFlight: [...(snapshot.inFlight ?? [])],
     serverRevision: typeof incoming === "number" ? incoming : entry.serverRevision,
-    admittedAttemptIds: snapshot.admittedAttemptIds
-      ? [...snapshot.admittedAttemptIds]
-      : entry.admittedAttemptIds,
+    admittedAttemptIds: admittedAttemptIds,
     // 未结算提交的整包载荷**以刚采纳的权威队列为底**重建（见 rebasePendingPayloads）：
     // 冻结在提出时的列表一旦落后于服务端（别的标签页改了队列、条目被投递），
     // 照它整包写出去就是「新版本 + 旧内容」，会删掉别人刚入队的条目。
-    pending: rebasePendingPayloads(entry.pending, items),
+    pending: rebasePendingPayloads(entry.pending, items, new Set(admittedAttemptIds)),
   });
 }
 
 /**
- * 把「未结算提交」的整包载荷重整到新的权威条目上。
+ * 把「未结算提交」的整包载荷重整到当前权威条目上。
  *
- * 每个提交保留自己新增的载荷（正文 + 附件不在权威条目里的那些），其余以权威条目
- * 为底——提交的语义是「队列应该就是这几条」，而它当时看到的那几条现在可能已经变了。
- * 已在途（claimed）的条目不再写回去（那会变成投递第二次）。
+ * 每个提交的载荷 = **当前权威条目 + 它自己新增的内容**。提交的语义是「队列应该
+ * 就是这几条」，而它当时看到的那几条现在可能已经变了（别的标签页改过、条目被投递），
+ * 拿着冻结在提出时的旧列表整包写出去就是「新版本 + 旧内容」，会删掉别人刚入队的条目。
+ *
+ * 一条载荷算「已由权威条目表达」（不再重复列进去）只看**身份**：
+ * - 带 id：命中当前条目；
+ * - 不带 id（客户端新增内容）：它的写入令牌已被受理（attemptId 在 admittedAttemptIds 里）。
+ *
+ * 不看正文：正文相同不等于同一条——用户完全可以接着入队第二条同文消息（K1），
+ * 用正文消重会把刚发的那条从待发送列表里悄悄拿掉、又不走「本次提交」的恢复路径。
+ *
+ * `handled` 是「已定论且内容已回草稿」的令牌（从未被受理的那些）：这些载荷也不能
+ * 再写回去，否则同一份内容会同时存在于队列与草稿。
  */
 function rebasePendingPayloads(
   pending: readonly QueueProposal[],
   items: readonly FollowUpItem[],
+  admitted: ReadonlySet<string>,
+  handled?: ReadonlySet<string>,
 ): QueueProposal[] {
   const base = items.filter((item) => item.state !== "claimed").map(itemToPayload);
-  const represented = (payload: QueueItemPayload): boolean => items.some((item) => (
-    payload.id
-      ? item.id === payload.id
-      : item.text === payload.text && sameQueuedMedia(item.media, payload.media)
-  ));
+  const keep = (payload: QueueItemPayload): boolean => {
+    // 带服务端身份的载荷一律由权威那份表达：还在队列里就由 base 重建，已经不在
+    // 队列里（被召回/已投递）就随它消失——写回去等于把已取回的内容又塞回队列。
+    if (payload.id) return false;
+    // 客户端新增内容（attemptId）：已被受理 → 服务端已经有它；已定论且回了草稿 →
+    // 再写一遍就是「队列 + 草稿」各一份。其余（含正文与别的条目相同的那条）保留。
+    if (payload.attemptId && (admitted.has(payload.attemptId) || handled?.has(payload.attemptId))) {
+      return false;
+    }
+    return true;
+  };
   return pending.map((proposal) => {
-    const payloads = [...base, ...proposal.payloads.filter((payload) => !represented(payload))];
+    const payloads = [...base, ...proposal.payloads.filter(keep)];
+    const candidates = proposal.candidates.filter(keep);
     const same = payloads.length === proposal.payloads.length
       && payloads.every((payload, index) => payload === proposal.payloads[index]);
-    return same ? proposal : { ...proposal, payloads };
+    if (same && candidates.length === proposal.candidates.length) return proposal;
+    return { ...proposal, payloads, candidates };
   });
 }
 
@@ -451,53 +472,19 @@ function resolvePendingsAgainstAuthority(
   const adopted = adoptServerSnapshot(book, sessionId, snapshot);
   const entry = queueEntry(adopted, sessionId);
   const admitted = new Set(snapshot.admittedAttemptIds ?? entry.admittedAttemptIds);
-  const liveIds = new Set(snapshot.items.map((item) => item.id));
-  const later = entry.pending.filter((proposal) => proposal.revision > settledRevision);
   const seen = new Set<string>();
   // 更早的未决提交（本次之外的）：它们的效果已经含在快照里。
   const reclaimed = settleUnsettledByAuthority(entry, settledRevision, admitted, seen).resolved;
-  // 后继提交的整包载荷要**以刚采纳的权威队列为底**重建：它的旧载荷列表是在
-  // 「不知道别的标签页改了什么」的前提下算出来的，带着一份不含这些条目的旧列表去
-  // 写，就是用新版本执行旧内容——别的标签页刚入队的条目会被整包删掉。
-  // 客户端新增的载荷（无服务端身份）保留，已被定论/已不在队列里的丢掉。
-  const authorityPayloads = snapshot.items
-    .filter((item) => item.state !== "claimed")
-    .map(itemToPayload);
-  // 「已在权威队列里」的（身份命中，或同文同附件）不再重复列进去；其余是本次
-  // 提交自己新增的内容，保留。
-  const represented = (payload: QueueItemPayload): boolean => snapshot.items.some((item) => (
-    payload.id
-      ? item.id === payload.id
-      : item.text === payload.text && sameQueuedMedia(item.media, payload.media)
-  ));
-  const own = (payload: QueueItemPayload): boolean => (
-    !represented(payload) && !stale(payload, seen, liveIds)
-  );
-  const pending = later.map((proposal) => {
-    const payloads = [...authorityPayloads, ...proposal.payloads.filter(own)];
-    const candidates = proposal.candidates.filter(own);
-    const same = payloads.length === proposal.payloads.length
-      && payloads.every((payload, index) => payload === proposal.payloads[index]);
-    if (same && candidates.length === proposal.candidates.length) return proposal;
-    return { ...proposal, payloads, candidates };
-  });
-  const untouched = entry.pending.every((proposal) => proposal.revision > settledRevision)
-    && pending.every((proposal, index) => proposal === later[index]);
+  const later = entry.pending.filter((proposal) => proposal.revision > settledRevision);
+  // 采纳时已经重整过一次；这次额外把「刚被定论、内容已回草稿」的令牌摘掉，
+  // 并摘掉本次及其之前的所有提交（权威快照就是它们的定论）。
+  const pending = rebasePendingPayloads(later, snapshot.items, admitted, seen);
   return {
-    book: untouched ? adopted : put(adopted, sessionId, { ...entry, pending }),
+    book: put(adopted, sessionId, { ...entry, pending }),
     resolved: reclaimed,
   };
 }
 
-/** 写载荷是否已经确定不在队列里（已定论 / 身份已消失）。 */
-function stale(
-  payload: QueueItemPayload,
-  seen: ReadonlySet<string>,
-  liveIds: ReadonlySet<string>,
-): boolean {
-  if (payload.attemptId && seen.has(payload.attemptId)) return true;
-  return Boolean(payload.id && !liveIds.has(payload.id));
-}
 
 /**
  * 写入结算——**消息所有权的唯一判定处**（issue #42 / H1–H3）。
