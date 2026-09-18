@@ -516,3 +516,65 @@ test("K2：热 state 投影带上受理令牌，回执丢失但已落地的写�
     );
   }, { streaming: false });
 });
+
+test("K2：热投影缺令牌时不覆盖账本，空数组才覆盖（plumbing）", async () => {
+  await withHost(async (host) => {
+    host.promptRunning = true;
+    const written = await host.send({ type: "set_follow_up_queue", items: ["hello"] });
+    const env = environment(host, written.revision, [], written.items, { setQueuedMessages() {} });
+    env.normalizeQueuedMessages = functionSource("normalizeQueuedMessages", env);
+    env.applyProjectedQueues = callback("applyProjectedQueues", env);
+
+    assert.equal(
+      env.normalizeQueuedMessages({ followUpItems: written.items, followUpRevision: written.revision })
+        .admittedAttemptIds,
+      undefined,
+      "缺字段 → undefined（调用方靠它保持账本原值）",
+    );
+    assert.deepEqual(
+      env.normalizeQueuedMessages({
+        followUpItems: written.items,
+        followUpRevision: written.revision,
+        admittedAttemptIds: ["t1", 7],
+      }).admittedAttemptIds,
+      ["t1"],
+      "非字符串令牌丢掉",
+    );
+    assert.deepEqual(
+      env.normalizeQueuedMessages({
+        followUpItems: written.items,
+        followUpRevision: written.revision,
+        admittedAttemptIds: [],
+      }).admittedAttemptIds,
+      [],
+      "显式空数组照原样带下去",
+    );
+
+    // 账本先有令牌（模拟一次正常回执），再走「旧 Host 形态」的热投影：不得被清空。
+    env.adoptRemoteQueue("A", {
+      items: written.items,
+      revision: written.revision,
+      admittedAttemptIds: ["try-a"],
+    });
+    env.applyProjectedQueues("A", {
+      followUpItems: written.items,
+      followUpRevision: written.revision + 1,
+    });
+    assert.deepEqual(
+      queue.queueEntry(env.queueBookRef.current, "A").admittedAttemptIds,
+      ["try-a"],
+      "缺字段的热投影不得把账本令牌清成空",
+    );
+
+    env.applyProjectedQueues("A", {
+      followUpItems: written.items,
+      followUpRevision: written.revision + 2,
+      admittedAttemptIds: [],
+    });
+    assert.deepEqual(
+      queue.queueEntry(env.queueBookRef.current, "A").admittedAttemptIds,
+      [],
+      "显式空数组才清空",
+    );
+  }, { streaming: false });
+});
