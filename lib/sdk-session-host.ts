@@ -887,7 +887,12 @@ export class SdkSessionHost {
       status: "queued",
       action: "queued",
       ...(reason ? { reason } : {}),
-      queue: { items: write.items, inFlight: write.inFlight, revision: write.revision },
+      queue: {
+        items: write.items,
+        inFlight: write.inFlight,
+        revision: write.revision,
+        admittedAttemptIds: [...this.followUpAdmittedAttemptIds],
+      },
     };
   }
 
@@ -2091,6 +2096,10 @@ export class SdkSessionHost {
       followUpItems: this.visibleFollowUp(),
       followUpRevision: this.followUpQueueRevision,
       inFlight: this.inFlightFollowUpTexts(),
+      // 已受理的写入令牌：热投影必须与 SSE / 写入回执带同一份凭据。少了它，
+      // 「回执丢失但服务端已受理」的那次写入会被客户端当成新增内容再列一遍，
+      // 下一次整包写入就多出一条同文条目（K2）。
+      admittedAttemptIds: [...this.followUpAdmittedAttemptIds],
     };
     try {
       const usage = session.getContextUsage();

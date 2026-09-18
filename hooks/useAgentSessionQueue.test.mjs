@@ -41,6 +41,25 @@ function callback(name, env) {
   return new Function(...Object.keys(env), `${js}; return extracted;`)(...Object.values(env));
 }
 
+/** 从 hook 源码里取出一个模块级函数声明（callback 只处理 useCallback 形式）。 */
+function functionSource(name, env) {
+  const text = readFileSync(new URL("./useAgentSession.ts", import.meta.url), "utf8");
+  const tree = ts.createSourceFile("hook.tsx", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let source;
+  function visit(node) {
+    if (ts.isFunctionDeclaration(node) && node.name && node.name.getText(tree) === name && node.body) {
+      source = node.getText(tree);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(tree);
+  assert.ok(source, `Missing function: ${name}`);
+  const js = ts.transpileModule(`${source}`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+  }).outputText;
+  return new Function(...Object.keys(env), `${js}; return ${name};`)(...Object.values(env));
+}
+
 /**
  * 真实 Host + 最小 hook 环境。
  *
@@ -449,6 +468,51 @@ test("J1：CAS 冲突后更早的 unknown 提交被定论，后续入队不得�
       host.followUpQueue.map((entry) => entry.text),
       ["keep", "other-tab", "foo"],
       "另一标签页的条目必须还在",
+    );
+  }, { streaming: false });
+});
+
+test("K2：热 state 投影带上受理令牌，回执丢失但已落地的写入不得再列一遍", async () => {
+  await withHost(async (host) => {
+    host.promptRunning = true;
+    const restored = [];
+    let calls = 0;
+    const env = environment(host, 0, restored, [], {
+      setQueuedMessages() {},
+      sendAgentCommand: async (_sid, command) => {
+        calls += 1;
+        const receipt = await host.send(command);
+        // 服务端已经受理，回执在返回途中丢失：客户端只能按 unknown 处理。
+        if (calls === 1) throw new Error("response lost");
+        return receipt;
+      },
+    });
+    env.normalizeQueuedMessages = functionSource("normalizeQueuedMessages", env);
+    env.applyProjectedQueues = callback("applyProjectedQueues", env);
+
+    await assert.rejects(env.updateLocalFollowUp([{ text: "hello", attemptId: "try-a" }], "A"));
+
+    assert.deepEqual(host.followUpQueue.map((item) => item.text), ["hello"], "服务端确实已经受理");
+    const before = queue.queueEntry(env.queueBookRef.current, "A");
+    assert.equal(queue.hasUncertainWrite(before), true, "客户端只知道结果未知");
+
+    // 热投影（get_state）走一遍：令牌必须跟着快照过来，否则已落地的那次写入会被当成新增。
+    env.applyProjectedQueues("A", host.projectState().queuedMessages);
+    const after = queue.queueEntry(env.queueBookRef.current, "A");
+    assert.deepEqual(
+      queue.payloadsForWrite(after).map((payload) => payload.text),
+      ["hello"],
+      "已落地的写入由权威条目表达，不再列一遍",
+    );
+
+    await env.updateLocalFollowUp([
+      ...queue.payloadsForWrite(after),
+      { text: "next", attemptId: "try-next" },
+    ], "A");
+    assert.deepEqual(
+      host.followUpQueue.map((item) => item.text),
+      ["hello", "next"],
+      "服务端不得多出一条同文条目",
     );
   }, { streaming: false });
 });

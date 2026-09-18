@@ -166,7 +166,13 @@ export type SubmitPromptResult = {
   status: "accepted" | "rejected" | "unknown" | "queued";
   error?: string;
   /** status = queued：服务端权威队列快照（乐观气泡改为队列面板表现）。 */
-  queue?: { items: FollowUpItem[]; revision: number; inFlight: string[] };
+  queue?: {
+    items: FollowUpItem[];
+    revision: number;
+    inFlight: string[];
+    /** 缺字段 = 旧 Host：保持账本里已有的令牌，不要当成「没有受理过」。 */
+    admittedAttemptIds?: string[];
+  };
 };
 
 export type BrowserSessionRuntimeRegistryDeps = {

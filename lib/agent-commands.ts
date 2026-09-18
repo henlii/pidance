@@ -148,7 +148,13 @@ export type PromptReceipt = {
   action?: PromptEffectiveAction;
   reason?: PromptReason;
   /** 权威队列快照（入队/冲突时附带），含条目身份与在途正文。 */
-  queue?: { items: FollowUpItem[]; revision: number; inFlight: string[] };
+  queue?: {
+    items: FollowUpItem[];
+    revision: number;
+    inFlight: string[];
+    /** 缺字段 = 旧 Host：保持账本里已有的令牌，不要当成「没有受理过」。 */
+    admittedAttemptIds?: string[];
+  };
 };
 
 /**

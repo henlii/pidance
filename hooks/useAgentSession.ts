@@ -208,7 +208,15 @@ type AgentStateResponse = {
   lockedByOther?: boolean;
   extensionStatuses?: ExtensionStatusItem[];
   extensionWidgets?: ExtensionWidgetItem[];
-  queuedMessages?: { steering?: string[]; followUp?: string[]; followUpRevision?: number | null } | null;
+  queuedMessages?: {
+    steering?: string[];
+    followUp?: string[];
+    followUpItems?: QueuedMessageRow[];
+    followUpRevision?: number | null;
+    inFlight?: string[];
+    /** 已完成受理的写入令牌（缺字段 = 旧 Host，保持账本里已有的令牌） */
+    admittedAttemptIds?: string[];
+  } | null;
   pendingExtensionRequests?: AgentEvent[];
   /**
    * 活动 custom 面板的快照（由 host 保存的最后一次渲染行）。
@@ -244,8 +252,16 @@ function normalizeQueuedMessages(
     followUpItems?: QueuedMessageRow[];
     followUpRevision?: number | null;
     inFlight?: string[];
+    admittedAttemptIds?: string[];
   } | null,
-): { steering: string[]; items: FollowUpItem[]; inFlight: string[]; revision: number | null } {
+): {
+  steering: string[];
+  items: FollowUpItem[];
+  inFlight: string[];
+  revision: number | null;
+  /** 缺字段时返回 undefined：调方不得用空数组覆盖账本里已知的令牌。 */
+  admittedAttemptIds?: string[];
+} {
   const inFlight = Array.isArray(q?.inFlight)
     ? q.inFlight.filter((text): text is string => typeof text === "string")
     : [];
@@ -258,6 +274,9 @@ function normalizeQueuedMessages(
     items,
     inFlight,
     revision: typeof q?.followUpRevision === "number" ? q.followUpRevision : null,
+    admittedAttemptIds: Array.isArray(q?.admittedAttemptIds)
+      ? q.admittedAttemptIds.filter((id): id is string => typeof id === "string")
+      : undefined,
   };
 }
 
@@ -536,7 +555,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    */
   const applyProjectedQueues = useCallback((sid: string, value?: AgentStateResponse["queuedMessages"]) => {
     const next = normalizeQueuedMessages(value);
-    adoptRemoteQueue(sid, { items: next.items, inFlight: next.inFlight, revision: next.revision });
+    adoptRemoteQueue(sid, {
+      items: next.items,
+      inFlight: next.inFlight,
+      revision: next.revision,
+      // 令牌是「这次写入到底进没进队列」的唯一凭据，热投影必须带上；旧 Host
+      // 不带这个字段时保持账本原值（不能把它当成「没有受理过」）。
+      ...(next.admittedAttemptIds ? { admittedAttemptIds: next.admittedAttemptIds } : {}),
+    });
     if (currentQueueSessionIdRef.current !== sid) return;
     setQueuedMessages({
       steering: next.steering,
@@ -573,10 +599,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   /** 采纳 prompt/follow_up 回执里的入队快照（同一个会话，内容已持久化）。 */
   const acceptQueuedReceipt = useCallback((
     sid: string,
-    queue?: { items: FollowUpItem[]; revision: number; inFlight: string[] },
+    queue?: {
+      items: FollowUpItem[];
+      revision: number;
+      inFlight: string[];
+      admittedAttemptIds?: string[];
+    },
   ) => {
     if (!queue) return;
-    adoptRemoteQueue(sid, { items: queue.items, inFlight: queue.inFlight, revision: queue.revision });
+    adoptRemoteQueue(sid, {
+      items: queue.items,
+      inFlight: queue.inFlight,
+      revision: queue.revision,
+      // 与热投影同理：受理令牌是「这次写入进没进队列」的唯一凭据。
+      ...(Array.isArray(queue.admittedAttemptIds)
+        ? { admittedAttemptIds: queue.admittedAttemptIds.filter((id) => typeof id === "string") }
+        : {}),
+    });
     if (currentQueueSessionIdRef.current === sid) publishQueue();
   }, [adoptRemoteQueue, publishQueue]);
   // 分支切换/总结进行中：树节点、发送与再次导航全部暂停，避免与 navigateTree 并发写。
