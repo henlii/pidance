@@ -54,4 +54,19 @@ export async function register(): Promise<void> {
   } catch (error) {
     console.error("[pidance] recover follow-up queues failed:", error);
   }
+
+  // 项目信任对齐：主 Agent 走同进程 SDK，本来就不做信任判定；subagent 走 pi CLI
+  // 子进程，会真的判定 —— 不写条目时 ask + 无 UI = false，子代理里项目技能/扩展
+  // 会缺失。启动时按侧栏现状把信任面拉齐（打开的写 true、关闭的撤销），顺带补齐
+  // 本功能上线前就已加入的项目。
+  try {
+    const { readPidancePrefs } = await import("@/lib/pidance-prefs-file");
+    const { syncProjectTrustBackfill } = await import("@/lib/project-trust");
+    const result = syncProjectTrustBackfill(readPidancePrefs());
+    if (result.trusted > 0 || result.revoked > 0) {
+      console.log(`[pidance] 项目信任已对齐：新增 ${result.trusted}，撤销 ${result.revoked}`);
+    }
+  } catch (error) {
+    console.error("[pidance] 项目信任对齐失败（已忽略）:", error);
+  }
 }

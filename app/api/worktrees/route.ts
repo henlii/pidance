@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { existsSync } from "fs";
 import { addWorktree, listWorktrees, removeWorktree, resolveProject } from "@/lib/worktree";
 import { allowFileRoot, getAllowedFileRoots, isFilePathAllowed } from "@/lib/file-access";
+import { revokeProjectTrust, trustProjectRoot } from "@/lib/project-trust";
 
 /** Same gate as /api/files: only session cwds / project roots / explicitly
  *  allowed dirs may be inspected or mutated through this endpoint. */
@@ -65,6 +66,14 @@ export async function POST(req: Request) {
     }
 
     const result = await addWorktree(body.cwd, body.branch);
+    // 工作树建在仓库旁（<repo>-worktrees/<branch>），拿不到项目根的信任条目；
+    // subagent 在那个 cwd 下走 pi CLI，会因未受信而加载不到项目技能/扩展。
+    // 信任写入失败不影响工作树创建，只记日志。
+    try {
+      trustProjectRoot(result.path);
+    } catch (error) {
+      console.warn(`[pidance] failed to trust worktree ${result.path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -86,6 +95,12 @@ export async function DELETE(req: Request) {
     if (denied) return denied;
 
     await removeWorktree(body.cwd, body.path, body.force === true);
+    // 工作树没了，信任也一并撤销（对称于创建时写入）。
+    try {
+      revokeProjectTrust(body.path);
+    } catch (error) {
+      console.warn(`[pidance] failed to revoke worktree trust ${body.path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
     return NextResponse.json({ success: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

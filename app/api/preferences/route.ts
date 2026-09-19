@@ -4,6 +4,7 @@ import {
   readPidancePrefs,
   stripHostOwnedQueuePrefs,
 } from "@/lib/pidance-prefs-file";
+import { syncProjectTrustFromPrefs } from "@/lib/project-trust";
 
 export const dynamic = "force-dynamic";
 
@@ -47,7 +48,9 @@ export async function PUT(req: Request) {
     if (dropped.length > 0) {
       console.warn(`[pidance] ignored host-owned queue preferences from client: ${dropped.join(", ")}`);
     }
-    mergeAndWritePidancePrefs(patch);
+    const before = readPidancePrefs();
+    const after = mergeAndWritePidancePrefs(patch);
+    syncProjectTrustFromPrefs(before, after);
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json(

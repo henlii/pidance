@@ -204,9 +204,11 @@ export function stripHostOwnedQueuePrefs(patch: PidancePrefs): { patch: PidanceP
 export function mergeAndWritePidancePrefs(
   patch: PidancePrefs,
   agentDir: string = getAgentDir(),
-): void {
-  withPrefsLock(agentDir, () => {
+): PidancePrefs {
+  return withPrefsLock(agentDir, () => {
     const current = readPidancePrefs(agentDir);
-    writePidancePrefsUnlocked(mergePidancePrefs(current, patch), agentDir);
+    const merged = mergePidancePrefs(current, patch);
+    writePidancePrefsUnlocked(merged, agentDir);
+    return merged;
   });
 }
