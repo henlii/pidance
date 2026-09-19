@@ -17,6 +17,7 @@ import { useCallback, useEffect, useRef, useState, RefObject } from "react";
 import { resolveActiveOutlineEntry, type UserMessageOutlineItem } from "@/lib/session-outline";
 import { useI18n } from "@/lib/i18n";
 import { CHAT_GUTTER } from "@/lib/chat-column";
+import { getBottomZoneSize } from "@/lib/chat-auto-follow";
 import {
   applyViewportScrollAnchor,
   captureViewportScrollAnchor,
@@ -187,6 +188,11 @@ export function MessageNavRail({
       loadedEntryIds: entryIds,
       topVisibleEntryId: topVisibleEntryId ?? nearestAboveEntryId,
       isAtLiveTail,
+      // 贴底（与回到底部/恢复跟随同一区域）：当前提问就是最后一条。
+      // 不这样判的话，末轮很短时视口顶部落在更早的轮次里，导航条会停在倒数第二格。
+      isAtScrollBottom:
+        scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
+        <= getBottomZoneSize(scrollEl.clientHeight, false),
     });
     if (resolved !== null) setActiveEntryId(resolved);
   }, [entryIds, isAtLiveTail, outline, renderKey, scrollContainer]);
@@ -208,11 +214,14 @@ export function MessageNavRail({
 
   /** 正在运行的导航条滚动动画（rAF）；新动画开始或卸载时必须取消。 */
   const railTweenRef = useRef<number | null>(null);
+  /** 当前动画的目标位置：动画进行中重复请求同一目标要跳过，不能每帧重启动画。 */
+  const railTweenTargetRef = useRef<number | null>(null);
   const cancelRailTween = useCallback(() => {
     if (railTweenRef.current !== null) {
       cancelAnimationFrame(railTweenRef.current);
       railTweenRef.current = null;
     }
+    railTweenTargetRef.current = null;
   }, []);
 
   /**
@@ -221,6 +230,7 @@ export function MessageNavRail({
    */
   const scrollRailTo = useCallback((list: HTMLElement, targetTop: number) => {
     cancelRailTween();
+    railTweenTargetRef.current = targetTop;
     const from = list.scrollTop;
     const behavior = railScrollBehavior({
       reducedMotion: reducedMotionRef.current,
@@ -229,6 +239,7 @@ export function MessageNavRail({
     });
     if (behavior === "auto") {
       list.scrollTop = targetTop;
+      railTweenTargetRef.current = null;
       return;
     }
     const delta = targetTop - from;
@@ -236,13 +247,17 @@ export function MessageNavRail({
     const step = (now: number) => {
       const progress = Math.min(1, (now - startedAt) / RAIL_SCROLL_DURATION_MS);
       list.scrollTop = from + delta * easeInOutCubic(progress);
-      railTweenRef.current = progress < 1 ? requestAnimationFrame(step) : null;
+      if (progress < 1) {
+        railTweenRef.current = requestAnimationFrame(step);
+        return;
+      }
+      railTweenRef.current = null;
+      railTweenTargetRef.current = null;
     };
     railTweenRef.current = requestAnimationFrame(step);
   }, [cancelRailTween]);
 
   useEffect(() => cancelRailTween, [cancelRailTween]);
-
   useEffect(() => {
     const el = scrollContainer.current;
     if (!el) return;
@@ -274,14 +289,44 @@ export function MessageNavRail({
 
   // 让当前项始终停在轨道中部（长会话里导航条自己也会溢出）。
   // 用即时定位而非平滑动画：它是对滚动的跟随，不是一次性跳转。
-  useEffect(() => {
+  //
+  // 用 ref 读「最新值」而不是闭包捕获：这一步要能被布局观察者（内容/尺寸变化）
+  // 重复调用，不能只靠 props 身份变化。之前只在 activeEntryId/outline 身份变时跑，
+  // 首帧列表还没布局（或格子还没挂上）就再也没有第二次 —— 导航条便停在旧位置，
+  // 直到某次偶然的大纲重取才补上（用户报的「有时候不会自动滚到最后一条」）。
+  const activeEntryIdRef = useRef<string | null>(null);
+  activeEntryIdRef.current = activeEntryId;
+  const outlineRef = useRef(outline);
+  outlineRef.current = outline;
+  /** 首帧未布局时的一次性补测（rAF），同一个 key 只补一次，不无限重试。 */
+  const followRetryRef = useRef<number | null>(null);
+  const followAttemptKeyRef = useRef<string>("");
+  const centerActiveInRail = useCallback(() => {
     const list = listRef.current;
-    if (!list || activeEntryId === null) return;
-    const position = outline.findIndex((item) => item.entryId === activeEntryId);
-    if (position < 0) return;
-    const el = dashRefs.current[position];
-    if (!el) return;
-    // 用 rect 差值换算项偏移（不依赖 offsetParent）
+    const currentOutline = outlineRef.current;
+    const active = activeEntryIdRef.current;
+    const position = active === null ? -1 : currentOutline.findIndex((item) => item.entryId === active);
+    const el = position >= 0 ? dashRefs.current[position] ?? null : null;
+    const plan = railFollowPlan({
+      hasActive: position >= 0,
+      hasItem: el !== null,
+      clientHeight: list?.clientHeight ?? 0,
+      contentHeight: list?.scrollHeight ?? 0,
+    });
+    if (plan === "skip") return;
+    if (plan === "retry") {
+      const key = `${active ?? ""}|${position}|${currentOutline.length}`;
+      if (followAttemptKeyRef.current === key) return;
+      followAttemptKeyRef.current = key;
+      if (followRetryRef.current === null) {
+        followRetryRef.current = requestAnimationFrame(() => {
+          followRetryRef.current = null;
+          centerActiveInRail();
+        });
+      }
+      return;
+    }
+    if (!list || !el) return;
     const listRect = list.getBoundingClientRect();
     const itemRect = el.getBoundingClientRect();
     const next = centeredRailScrollTop({
@@ -292,28 +337,51 @@ export function MessageNavRail({
       itemHeight: itemRect.height,
     });
     if (Math.abs(next - list.scrollTop) < 1) return;
+    // 动画进行中且目标未变：不能重启（每帧重启动画会让它永远走不到位）。
+    if (
+      railTweenRef.current !== null
+      && railTweenTargetRef.current !== null
+      && Math.abs(railTweenTargetRef.current - next) < 1
+    ) {
+      return;
+    }
     // 自己插值而不是用原生 smooth：后者的时长不可控且偏快。
     // 大位移→动画；跟随的微小校正 / reduced-motion→瞬时。
     scrollRailTo(list, next);
     // 居中后滚动位置变了，指示器需同步（scroll 事件也会到，这里保证首帧就对）
     syncRailScrollHints();
-  }, [activeEntryId, outline, syncRailScrollHints, scrollRailTo]);
+  }, [scrollRailTo, syncRailScrollHints]);
 
-  // 上下指示器的显隐跟随轨道的实际可滚状态（滚动 / 内容高度变化 / 尺寸变化）。
+  useEffect(() => {
+    centerActiveInRail();
+  }, [activeEntryId, outline, railHeight, centerActiveInRail]);
+
+  useEffect(() => () => {
+    if (followRetryRef.current !== null) cancelAnimationFrame(followRetryRef.current);
+  }, []);
+
+  // 上下指示器的显隐跟随轨道的实际可滚状态（内容高度变化 / 尺寸变化）；
+  // 同时是「补上跟随」的第二个入口：列表内容/尺寸变了就重新居中一次。
+  // 注意：**不在列表 scroll 事件里重居中** —— 重居中自身会写 scrollTop，
+  // 那会每帧取消并重启动画（实测永远走不到位）。
   useEffect(() => {
     const list = listRef.current;
     if (!list) return;
     const onScroll = () => syncRailScrollHints();
+    const onResize = () => {
+      syncRailScrollHints();
+      centerActiveInRail();
+    };
     list.addEventListener("scroll", onScroll, { passive: true });
-    const ro = new ResizeObserver(onScroll);
+    const ro = new ResizeObserver(onResize);
     ro.observe(list);
     if (list.firstElementChild) ro.observe(list.firstElementChild);
-    syncRailScrollHints();
+    onResize();
     return () => {
       list.removeEventListener("scroll", onScroll);
       ro.disconnect();
     };
-  }, [syncRailScrollHints, outline.length, railHeight]);
+  }, [syncRailScrollHints, centerActiveInRail, outline.length, railHeight]);
 
   // 轨道高度用于把横线换算成像素（悬浮卡定位的前提）
   useEffect(() => {
@@ -788,6 +856,26 @@ export function railScrollHints(input: {
   const max = Math.max(0, input.contentHeight - input.viewportHeight);
   if (max <= 1) return { up: false, down: false };
   return { up: input.scrollTop > 1, down: input.scrollTop < max - 1 };
+}
+
+/**
+ * 导航条自身跟随当前格的决策。
+ *
+ * - `skip`：没有当前项（或已高亮但找不到位置），不动。
+ * - `retry`：格子还没挂上 / 轨道还没布局（首帧 clientHeight 为 0），
+ *   下一帧再测一次；调用方必须限定「同一个 key 只补一次」，否则会变成无限重试。
+ * - `scroll`：可测量，直接居中。
+ */
+export function railFollowPlan(input: {
+  hasActive: boolean;
+  hasItem: boolean;
+  clientHeight: number;
+  contentHeight: number;
+}): "scroll" | "retry" | "skip" {
+  if (!input.hasActive) return "skip";
+  if (!input.hasItem) return "retry";
+  if (!(input.clientHeight > 0) || !(input.contentHeight > 0)) return "retry";
+  return "scroll";
 }
 
 /**

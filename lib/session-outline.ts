@@ -69,6 +69,107 @@ export function buildUserMessageOutline(entries: readonly OutlineEntry[]): UserM
 }
 
 /**
+ * 已加载窗口里最后一条用户消息的 entryId（无则 null）。
+ *
+ * 为什么不能用 `messages.length` 当刷新键：乐观用户气泡先用本地 id 显示，
+ * 落盘后条数不变但 entryId 换了 —— 只绑长度就永远不会重新拉大纲，
+ * 导航条便一直指着旧的那条（「有时不跳到最后一格」的成因之一）。
+ */
+export function lastUserEntryId(
+  messages: readonly { role?: string }[],
+  entryIds: readonly string[],
+): string | null {
+  for (let i = Math.min(messages.length, entryIds.length) - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role !== "user") continue;
+    const id = entryIds[i];
+    if (id) return id;
+  }
+  return null;
+}
+
+/**
+ * 把「已加载且是用户消息」的窗口条目抽成大纲种子。
+ *
+ * 服务端大纲是异步的：新提问落盘前 / 请求在途时，导航条只能靠窗口里的这些条目
+ * 先把最后一格画出来，否则末项要等下一次 fetch 才出现。
+ */
+export function loadedUserOutlineSeeds(
+  messages: readonly { role?: string; content?: unknown; timestamp?: number }[],
+  entryIds: readonly string[],
+): UserMessageOutlineItem[] {
+  const seeds: UserMessageOutlineItem[] = [];
+  const count = Math.min(messages.length, entryIds.length);
+  for (let i = 0; i < count; i += 1) {
+    const message = messages[i];
+    const entryId = entryIds[i];
+    if (message?.role !== "user" || !entryId) continue;
+    seeds.push({
+      entryId,
+      ordinal: seeds.length,
+      text: entryUserText(message.content),
+      ...(typeof message.timestamp === "number" ? { timestamp: message.timestamp } : {}),
+    });
+  }
+  return seeds;
+}
+
+/**
+ * 把窗口里「大纲还没有、且紧跟在最后一条已知提问之后」的提问补到末尾。
+ *
+ * 只接尾部连续段：窗口可能是更早的一页（定位历史中间），那时缺的中间项若接到末尾
+ * 就会冒充「最后一条提问」，高亮与居中都会跑偏。
+ */
+export function extendOutlineWithLoadedUsers(input: {
+  outline: readonly UserMessageOutlineItem[];
+  loadedUsers: readonly UserMessageOutlineItem[];
+  /** 当前窗口是否就是最新一段（后面没有更新历史） */
+  isAtLiveTail: boolean;
+}): UserMessageOutlineItem[] {
+  const { outline, loadedUsers, isAtLiveTail } = input;
+  // 定位到历史中间时没法判定顺序：窗口后面的更新提问不在窗口里，
+  // 把窗口里的未知项接到末尾会冒充「最后一条提问」。
+  if (!isAtLiveTail) return outline.slice();
+  if (loadedUsers.length === 0) return outline.slice();
+  const known = new Set(outline.map((item) => item.entryId));
+  const seeds = loadedUsers.filter((item) => item.entryId);
+  if (outline.length === 0) {
+    return seeds.map((item, index) => ({ ...item, ordinal: index }));
+  }
+  // 窗口里最后一条「大纲已知」之后的都是更新且尚未进大纲的提问；
+  // 一条都不在窗口里（大纲整体成旧）时，窗口里的提问全都更新。
+  let tailStart = -1;
+  for (let i = seeds.length - 1; i >= 0; i -= 1) {
+    if (known.has(seeds[i].entryId)) {
+      tailStart = i;
+      break;
+    }
+  }
+  const tail = (tailStart >= 0 ? seeds.slice(tailStart + 1) : seeds)
+    .filter((item) => !known.has(item.entryId));
+  if (tail.length === 0) return outline.slice();
+  return [
+    ...outline,
+    ...tail.map((item, index) => ({ ...item, ordinal: outline.length + index })),
+  ];
+}
+
+/**
+ * 取出属于当前会话的大纲。
+ *
+ * 大纲是异步到达的，切会话后旧响应或旧 state 若被沿用，导航条会按上一会话的提问
+ * 末项去滚动 —— 表现为「停在倒数第几格」。owner 对不上就返回空，让新会话从零开始。
+ */
+export function outlineForSession(input: {
+  sessionId: string | null;
+  ownerId: string | null;
+  items: readonly UserMessageOutlineItem[];
+}): UserMessageOutlineItem[] {
+  const { sessionId, ownerId, items } = input;
+  if (!sessionId || sessionId !== ownerId) return [];
+  return items.slice();
+}
+
+/**
  * 解析「当前所在提问」的 entryId。
  *
  * 不能只看已渲染的用户消息元素：渲染窗口只渲染末尾若干条计划项，长会话里大多数
@@ -90,9 +191,20 @@ export function resolveActiveOutlineEntry(input: {
    * 无法判断窗口之前是哪条，返回 null 由调用方保持原高亮。
    */
   isAtLiveTail: boolean;
+  /**
+   * 滚动容器是否已贴底（“真实底部”区域，与回到底部/恢复跟随同一口径）。
+   *
+   * 贴底时**当前提问就是最后一条**：末轮很短时视口顶部会落在更早的轮次里，
+   * 只按「视口顶部之前最后一条」推会得到上一条提问 —— 导航条于是停在倒数第二格
+   * （用户报的「有时候不跳到最后一格」，随末轮长短时好时坏）。
+   * 只有窗口就在最新一段时这么推：定位到历史中间时贴的是旧页底部，不是会话末尾。
+   */
+  isAtScrollBottom?: boolean;
 }): string | null {
-  const { outline, loadedEntryIds, topVisibleEntryId, isAtLiveTail } = input;
-  if (outline.length === 0 || loadedEntryIds.length === 0) return null;
+  const { outline, loadedEntryIds, topVisibleEntryId, isAtLiveTail, isAtScrollBottom = false } = input;
+  if (outline.length === 0) return null;
+  if (isAtScrollBottom && isAtLiveTail) return outline[outline.length - 1].entryId;
+  if (loadedEntryIds.length === 0) return null;
   const loadedIndexById = new Map<string, number>();
   loadedEntryIds.forEach((id, index) => {
     if (id && !loadedIndexById.has(id)) loadedIndexById.set(id, index);

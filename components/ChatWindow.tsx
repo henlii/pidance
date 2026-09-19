@@ -12,6 +12,12 @@ import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { MessageNavRail } from "./MessageNavRail";
 import type { UserMessageOutlineItem } from "@/lib/session-outline";
+import {
+  extendOutlineWithLoadedUsers,
+  lastUserEntryId,
+  loadedUserOutlineSeeds,
+  outlineForSession,
+} from "@/lib/session-outline";
 import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE, CHAT_COLUMN_MAX_WIDTH, CHAT_GUTTER } from "@/lib/chat-column";
 
 /**
@@ -316,7 +322,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
    * 只读接口：直接读完整 entry 列表，不受首屏懒加载窗口限制。
    * 刷新时机：切会话、消息数变化（新提问落盘）、agent 结束。
    */
-  const [userOutline, setUserOutline] = useState<UserMessageOutlineItem[]>([]);
+  const [userOutline, setUserOutline] = useState<{ sessionId: string; items: UserMessageOutlineItem[] } | null>(null);
   /**
    * entryId → 消息 DOM 的解析器（由渲染层提供）。
    * 导航条跳转必须走这里：槽位映射（visibleRefIndexByMessage + 分页平移 + process
@@ -330,9 +336,16 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
    */
   const expandRenderWindowToEntryRef = useRef<((entryId: string) => boolean) | null>(null);
   const outlineSessionId = session?.id ?? null;
+  /**
+   * 窗口里最后一条用户消息的 entryId。
+   *
+   * 刷新键不能只看 `messages.length`：乐观气泡落盘时条数不变、entryId 从空变成真值，
+   * 只绑长度就不会重取大纲，导航条于是少掉最新那一格。
+   */
+  const lastUserId = lastUserEntryId(messages, entryIds);
   useEffect(() => {
     if (!outlineSessionId) {
-      setUserOutline([]);
+      setUserOutline(null);
       return;
     }
     const controller = new AbortController();
@@ -343,13 +356,33 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
       .then((res) => (res.ok ? res.json() : null))
       .then((data: { userMessages?: UserMessageOutlineItem[] } | null) => {
         if (controller.signal.aborted || !data) return;
-        setUserOutline(Array.isArray(data.userMessages) ? data.userMessages : []);
+        // 连 sessionId 一起存：切会话后旧响应/旧 state 不能用在新会话上。
+        setUserOutline({
+          sessionId: outlineSessionId,
+          items: Array.isArray(data.userMessages) ? data.userMessages : [],
+        });
       })
       .catch(() => {
         // 只读投影失败：保持上一次大纲，不清空（避免导航条闪没）
       });
     return () => controller.abort();
-  }, [outlineSessionId, messages.length, agentRunning]);
+  }, [outlineSessionId, messages.length, lastUserId, agentRunning]);
+  /**
+   * 导航条真正用的大纲：服务端投影 + 当前窗口里还没进投影的新提问。
+   * 后者让新发的提问立刻成为末格（否则要等下一次投影回来）。
+   */
+  const railOutline = useMemo(
+    () => extendOutlineWithLoadedUsers({
+      outline: outlineForSession({
+        sessionId: outlineSessionId,
+        ownerId: userOutline?.sessionId ?? null,
+        items: userOutline?.items ?? [],
+      }),
+      loadedUsers: loadedUserOutlineSeeds(messages, entryIds),
+      isAtLiveTail: !hasMoreAfter,
+    }),
+    [outlineSessionId, userOutline, messages, entryIds, hasMoreAfter],
+  );
 
   const writesDisabled = isReadOnly || lockedByOther;
   const sessionBusy = agentRunning || bashRunning || isCompacting;
@@ -897,7 +930,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
               // 渲染批次标识：只在消息/已加载条数变化时重建导航条的元素缓存
               renderKey={`${messages.length}|${entryIds.length}`}
               scrollContainer={scrollContainerRef}
-              outline={userOutline}
+              outline={railOutline}
               entryIds={entryIds}
               resolveMessageElementRef={resolveMessageElementRef}
               expandRenderWindowToEntryRef={expandRenderWindowToEntryRef}

@@ -6,7 +6,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { messageNavPreview, centeredRailScrollTop, railScrollHints, railScrollBehavior, easeInOutCubic, RAIL_SCROLL_DURATION_MS } = await jiti.import("./MessageNavRail.tsx");
+const { messageNavPreview, centeredRailScrollTop, railFollowPlan, railScrollHints, railScrollBehavior, easeInOutCubic, RAIL_SCROLL_DURATION_MS } = await jiti.import("./MessageNavRail.tsx");
 
 // 说明：导航条改为「服务端完整大纲 + 懒加载跳转」后，节点不再由 DOM 测量得出
 // （见 lib/session-outline.ts 与 MessageNavRail 的 outline 驱动）。
@@ -55,6 +55,32 @@ test("centeredRailScrollTop：非法输入保持当前滚动位置", () => {
   assert.equal(
     centeredRailScrollTop({ scrollTop: 42, viewportHeight: 200, contentHeight: 1000, itemTop: Number.NaN, itemHeight: 14 }),
     42,
+  );
+});
+
+
+// ---------------------------------------------------------------------------
+// Bug：导航条不跟随当前项 —— 首帧未布局/格子未挂载时再也不补测
+// ---------------------------------------------------------------------------
+
+test("railFollowPlan：没有当前项不动，未布局或格子未挂载则下一帧补测", () => {
+  assert.equal(
+    railFollowPlan({ hasActive: false, hasItem: false, clientHeight: 0, contentHeight: 0 }),
+    "skip",
+  );
+  // 格子还没挂上（大纲刚换、列表同帧重建）
+  assert.equal(
+    railFollowPlan({ hasActive: true, hasItem: false, clientHeight: 320, contentHeight: 1076 }),
+    "retry",
+  );
+  // 首帧还没布局：clientHeight 为 0，此时算出的目标是错的
+  assert.equal(
+    railFollowPlan({ hasActive: true, hasItem: true, clientHeight: 0, contentHeight: 0 }),
+    "retry",
+  );
+  assert.equal(
+    railFollowPlan({ hasActive: true, hasItem: true, clientHeight: 320, contentHeight: 1076 }),
+    "scroll",
   );
 });
 
