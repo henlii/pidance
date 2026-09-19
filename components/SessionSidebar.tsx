@@ -14,7 +14,6 @@ import {
   buildSidebarTree,
   collectAllCollapseIds,
   collectSubagentParentIdsFromSidebarTree,
-  filterClosedProjects,
   filterSidebarTree,
   locateSessionInSidebarTree,
   moveProjectInOrder,
@@ -345,7 +344,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     if (remote === undefined) return;
     setPrefs((prev) => {
       const next = applySyncedSidebarUi(prev, remote);
-      if (JSON.stringify(sidebarUiFromPrefs(prev)) === JSON.stringify(sidebarUiFromPrefs(next))) {
+      // projectRootsMigrated 不在同步载荷里，但它的变化要放行：否则「远端仍是旧模型」
+      // 这条迁移信号会被当成无变化丢掉，项目区就永远等不到种子。
+      const samePayload = JSON.stringify(sidebarUiFromPrefs(prev)) === JSON.stringify(sidebarUiFromPrefs(next));
+      if (samePayload && prev.projectRootsMigrated === next.projectRootsMigrated) {
         return prev;
       }
       saveSidebarPreferences({ ...next, sidebarWidth: loadSidebarPreferences().sidebarWidth });
@@ -360,8 +362,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   const collapsedProjectRoots = useMemo(() => new Set(prefs.collapsedProjectRoots), [prefs.collapsedProjectRoots]);
   const collapsedWorktreePaths = useMemo(() => new Set(prefs.collapsedWorktreePaths), [prefs.collapsedWorktreePaths]);
-  // 已关闭项目集合：仅影响侧栏可见性与自动选择，绝不触碰会话/目录/Git 数据
-  const closedRoots = useMemo(() => new Set(prefs.closedProjectRoots), [prefs.closedProjectRoots]);
 
   // Catalog 订阅：store 内任何变更同步触发本组件重渲（依赖 tick 触发 memo）。
   useEffect(() => {
@@ -458,6 +458,28 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, []);
 
   const allSessions = serverSessions;
+
+  /**
+   * 一次性迁移：旧模型用 added/closed 两个数组，没有单一项目列表。用「当前可见的
+   * 项目」作为种子写进列表，避免升级后项目区突然空掉（之后按需增删即可）。
+   * 等会话列表拉完再种，否则空列表会种出空项目区。
+   */
+  useEffect(() => {
+    if (!prefs.projectRootsMigrated) return;
+    // 会话列表还没到就别种：否则会把「部分列表」当成全部项目写死。
+    if (allSessions.length === 0 && !serverListLoaded) return;
+    const roots = getRecentProjects(allSessions);
+    updatePrefs((prev) => {
+      if (!prev.projectRootsMigrated) return prev;
+      const merged = [...prev.projectRoots];
+      for (const root of roots) {
+        if (!merged.includes(root)) merged.push(root);
+      }
+      // 列表权威加载完成才收尾；否则保持「待迁移」，等更完整的列表继续补齐
+      // （列表是分页/逐步到位的，第一次就清标记会只剩部分项目）。
+      return { ...prev, projectRoots: merged, projectRootsMigrated: !serverListLoaded };
+    });
+  }, [prefs.projectRootsMigrated, serverListLoaded, allSessions, updatePrefs]);
 
   const {
     worktreeSnapshots,
@@ -659,39 +681,28 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }
     if (allSessions.length === 0) return;
     if (selectedCwd === null) {
-      // 已关闭项目不参与自动选择：全部关闭时保持空工作区，而不是复活已关闭项目。
-      const projects = getRecentProjects(allSessions);
-      const next = projects.find((root) => !closedRoots.has(root));
-      if (next) selectCwd(next);
+      // 只从项目列表里自动选择：列表为空时保持空工作区，不复活未加入的项目。
+      const projects = getRecentProjects(allSessions).filter((root) => prefs.projectRoots.includes(root));
+      if (projects[0]) selectCwd(projects[0]);
     }
-  }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, selectCwd, closedRoots, serverListLoaded, error, restoreNonce]);
+  }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, selectCwd, prefs.projectRoots, serverListLoaded, error, restoreNonce]);
 
   const closeCustomPathPanel = useCallback(() => {
     setCustomPathOpen(false);
   }, []);
 
-  /** 重新打开已关闭项目：仅移除关闭标记，不触碰任何项目数据。 */
-  const restoreClosedProject = useCallback((root: string) => {
-    updatePrefs((prev) => prev.closedProjectRoots.includes(root)
-      ? { ...prev, closedProjectRoots: prev.closedProjectRoots.filter((item) => item !== root) }
-      : prev);
-  }, [updatePrefs]);
-
   const handleProjectAdded = useCallback((cwd: string, root: string) => {
-    // 追加项目列表并恢复关闭态；然后把当前项目切到刚添加的项目并进入新会话
-    // 空态（引导页）——引导页与侧栏共用同一 identity，避免「显示 A、实际建到 B」。
+    // 追加进项目列表（列表是项目区唯一来源）；然后把当前项目切到刚添加的项目并进入
+    // 新会话空态（引导页）——引导页与侧栏共用同一 identity，避免「显示 A、实际建到 B」。
     updatePrefs((prev) =>
-      prev.addedProjectRoots.includes(root)
-        ? prev
-        : { ...prev, addedProjectRoots: [...prev.addedProjectRoots, root] },
+      prev.projectRoots.includes(root) ? prev : { ...prev, projectRoots: [...prev.projectRoots, root] },
     );
-    restoreClosedProject(root);
     closeCustomPathPanel();
     onProjectAdded?.(cwd);
     // 显式给出 root，不从会话列表反推（刚添加的项目可能还没有任何会话）。
     selectCwd(cwd, root);
     onNewSession?.(cwd);
-  }, [updatePrefs, restoreClosedProject, closeCustomPathPanel, onProjectAdded, selectCwd, onNewSession]);
+  }, [updatePrefs, closeCustomPathPanel, onProjectAdded, selectCwd, onNewSession]);
 
   const openAddProjectDialog = useCallback(() => {
     setCustomPathOpen(true);
@@ -789,8 +800,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   /** 置顶会话：按置顶顺序（最新置顶在前）；仅显示仍存在、可见的会话。 */
   const pinnedSessions = useMemo(
-    () => derivePinnedSessions({ sessions: allSessions, pinnedSessionIds: prefs.pinnedSessionIds, closedProjectRoots: closedRoots }),
-    [allSessions, prefs.pinnedSessionIds, closedRoots],
+    () => derivePinnedSessions({ sessions: allSessions, pinnedSessionIds: prefs.pinnedSessionIds }),
+    [allSessions, prefs.pinnedSessionIds],
   );
 
   /** 置顶/取消置顶：唯一写入入口经偏好 seam；新置顶插到最前。 */
@@ -805,8 +816,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   /** 最近会话：按 modified 降序取 top 20 候选；UI 默认展示 5、每次加载更多 5。 */
   const recentSessions = useMemo(
-    () => deriveRecentSessions({ sessions: allSessions, closedProjectRoots: closedRoots, excludeIds: pinnedIds, limit: RECENT_SESSIONS_LIMIT }),
-    [allSessions, closedRoots, pinnedIds],
+    () => deriveRecentSessions({ sessions: allSessions, excludeIds: pinnedIds, limit: RECENT_SESSIONS_LIMIT }),
+    [allSessions, pinnedIds],
   );
   // 池变短时收敛可见条数，避免 slice 空档
   useEffect(() => {
@@ -906,8 +917,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     [worktreeSnapshots],
   );
   const sidebarTree = useMemo(
-    () => buildSidebarTree(allSessions, { selectedCwd, selectedProjectRoot: selectedProject, knownWorktreesByProject, addedProjectRoots: prefs.addedProjectRoots }),
-    [allSessions, selectedCwd, selectedProject, knownWorktreesByProject, prefs.addedProjectRoots],
+    () => buildSidebarTree(allSessions, { selectedCwd, selectedProjectRoot: selectedProject, knownWorktreesByProject, projectRoots: prefs.projectRoots }),
+    [allSessions, selectedCwd, selectedProject, knownWorktreesByProject, prefs.projectRoots],
   );
   // 会话 id → 树节点映射（含 children）：最近区行用与项目树相同的
   // SessionTreeItem 渲染，折叠/展开行为完全一致（共享 collapsedSessionIds）。
@@ -925,11 +936,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }
     return map;
   }, [sidebarTree]);
-  // 已关闭项目先从树中隐藏（纯 UI 过滤，不删数据），再进入搜索管线。
-  const openTree = useMemo(
-    () => filterClosedProjects(sidebarTree, closedRoots),
-    [sidebarTree, closedRoots],
-  );
+  // 项目区已只包含列表内项目（buildSidebarTree 负责），搜索管线直接用树。
+  const openTree = sidebarTree;
   const normalizedSessionQuery = normalizeSessionQuery(sessionQuery);
   const fulltextModeActive = searchMode === "fulltext" && normalizedSessionQuery.length > 0;
   const fulltextMatchIds = useMemo(
@@ -1065,8 +1073,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [updatePrefs]);
 
   /**
-   * 关闭项目：仅把 root 写入 UI 偏好并从侧栏隐藏——绝不删除目录、会话、
-   * AgentSession、worktree 或 Git 数据；重新添加同路径项目即可恢复。
+   * 关闭项目：只把 root 从项目列表移除（项目区与项目信任都据此收敛）——绝不删除
+   * 目录、会话、AgentSession、worktree 或 Git 数据；重新添加同路径项目即恢复。
    */
   const handleCloseProject = useCallback((root: string) => {
     setOpenProjectMenuRoot(null);
@@ -1075,15 +1083,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       setWtError(t("sidebar_closeProjectRunning"));
       return;
     }
-    const nextClosedRoots = new Set(prefs.closedProjectRoots);
-    nextClosedRoots.add(root);
-    updatePrefs((prev) => (prev.closedProjectRoots.includes(root)
-      ? prev
-      : { ...prev, closedProjectRoots: [...prev.closedProjectRoots, root] }));
-    // 关闭当前项目：切换到下一个未关闭项目；无剩余则置空 cwd 并回到
+    updatePrefs((prev) => (prev.projectRoots.includes(root)
+      ? { ...prev, projectRoots: prev.projectRoots.filter((item) => item !== root) }
+      : prev));
+    // 关闭当前项目：切换到列表里的下一个项目；无剩余则置空 cwd 并回到
     // 新会话/空工作区，避免继续显示已关闭项目的当前会话。
     if (selectedProject === root) {
-      const next = pickProjectRootAfterClose(sidebarTree, root, nextClosedRoots);
+      const next = pickProjectRootAfterClose(sidebarTree, root, new Set());
       if (next) {
         selectCwd(next, next);
       } else {
@@ -1091,7 +1097,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         onNewSession?.();
       }
     }
-  }, [prefs.closedProjectRoots, selectedProject, sidebarTree, updatePrefs, selectCwd, onNewSession, allSessions, effectiveRunningSessionIds, t]);
+  }, [selectedProject, sidebarTree, updatePrefs, selectCwd, onNewSession, allSessions, effectiveRunningSessionIds, t]);
 
   /** 打开编辑项目弹窗：名称初值为 alias 或路径显示名。 */
   const handleOpenEditProject = useCallback((root: string) => {

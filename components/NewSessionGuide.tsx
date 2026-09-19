@@ -103,7 +103,7 @@ export function NewSessionGuide({ targetCwd, onTargetChange, addedProjectsToken 
   }, []);
 
   // 项目下拉合并「主动添加的项目」（无会话也展示，可直接发起会话）。
-  const addedProjectRoots = useMemo(() => loadSidebarPreferences().addedProjectRoots, []);
+  const projectRoots = useMemo(() => loadSidebarPreferences().projectRoots, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -111,7 +111,7 @@ export function NewSessionGuide({ targetCwd, onTargetChange, addedProjectsToken 
     // 后台 fetch 刷新后覆盖（stale-while-revalidate）；拉取失败保留旧列表。
     const cached = loadCachedSessionList();
     if (cached && cached.length > 0) {
-      const sorted = aggregateGuideProjects(cached, 12, addedProjectRoots);
+      const sorted = aggregateGuideProjects(cached, 12, projectRoots);
       setProjects(sorted);
       setLoadingProjects(false);
     }
@@ -122,7 +122,7 @@ export function NewSessionGuide({ targetCwd, onTargetChange, addedProjectsToken 
         const sessions = data.sessions ?? [];
         saveCachedSessionList(sessions);
         // 响应回来时重读偏好：挂载后才添加的项目不能在覆盖列表时又被冲掉。
-        const sorted = aggregateGuideProjects(sessions, 12, loadSidebarPreferences().addedProjectRoots);
+        const sorted = aggregateGuideProjects(sessions, 12, loadSidebarPreferences().projectRoots);
         if (!cancelled) {
           setProjects(sorted);
         }
@@ -136,13 +136,13 @@ export function NewSessionGuide({ targetCwd, onTargetChange, addedProjectsToken 
       cancelled = true;
     };
     // 仅 mount 时执行（项目列表只加载一次；targetCwd 变化由下方同步 effect 收敛）
-  }, [addedProjectRoots]);
+  }, [projectRoots]);
 
   // 侧栏新增项目（可能尚无任何会话，不会出现在 /api/sessions 聚合里）：
   // 必须并入项目下拉，否则 resolveGuideTargetSync 归属不到项目、刚切过去的目标被清空。
   useEffect(() => {
     if (addedProjectsToken === undefined) return;
-    const roots = loadSidebarPreferences().addedProjectRoots;
+    const roots = loadSidebarPreferences().projectRoots;
     setProjects((prev) => mergeAddedProjectRoots(prev, roots));
   }, [addedProjectsToken]);
 

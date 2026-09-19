@@ -245,8 +245,6 @@ export function planSubagentDiscoveryRefresh(input: {
 export interface DeriveRecentSessionsInput {
   /** 全量会话列表（服务端 + 乐观合并后）；排序语义由本函数内部保证。 */
   sessions: readonly SessionInfo[];
-  /** 已关闭项目根集合：这些项目内的会话不进入最近区（用户已隐藏）。 */
-  closedProjectRoots?: ReadonlySet<string>;
   /** 附加排除 id（如已删除、仅显示占位等）。 */
   excludeIds?: ReadonlySet<string>;
   /** 展示条数上限；损坏/负数回退默认 RECENT_SESSIONS_LIMIT（20）。 */
@@ -259,24 +257,17 @@ export interface DeriveRecentSessionsInput {
  *
  * 排除规则：
  * - subagent 子会话（`session.subagent` 存在）——子会话只读、不参与最近区
- * - 已关闭项目（`closedProjectRoots`）内的会话——用户已从侧栏隐藏
+ * - 项目是否在侧栏项目列表里不影响最近区（未加入项目的会话也要有地方可去）
  * - `excludeIds` 显式排除的 id
  *
  * 本函数不修改输入数组；输入是否已排序不影响结果（内部先稳定排序）。
  */
 export function deriveRecentSessions(input: DeriveRecentSessionsInput): SessionInfo[] {
-  const {
-    sessions,
-    closedProjectRoots,
-    excludeIds,
-    limit = RECENT_SESSIONS_LIMIT,
-  } = input;
+  const { sessions, excludeIds, limit = RECENT_SESSIONS_LIMIT } = input;
   const n = Math.max(0, Math.floor(limit));
   const filtered = sessions.filter((s) => {
     if (s.subagent) return false;
     if (excludeIds?.has(s.id)) return false;
-    const projectRoot = s.projectRoot ?? s.cwd;
-    if (projectRoot && closedProjectRoots?.has(projectRoot)) return false;
     return true;
   });
   const sorted = filtered.slice().sort(compareSessionsByActivity);
@@ -288,8 +279,6 @@ export interface DerivePinnedSessionsInput {
   sessions: readonly SessionInfo[];
   /** 置顶 id 顺序（最新置顶在前）；结果按此顺序输出。 */
   pinnedSessionIds: readonly string[];
-  /** 已关闭项目根集合：这些项目内的会话不显示（用户已隐藏）。 */
-  closedProjectRoots?: ReadonlySet<string>;
 }
 
 /**
@@ -298,17 +287,15 @@ export interface DerivePinnedSessionsInput {
  * 排除规则：
  * - 已不在 sessions 中的 id（会话已删除/归档）——静默跳过
  * - subagent 子会话（只读、不参与置顶）
- * - 已关闭项目（closedProjectRoots）内的会话
  *
+ * 项目是否在侧栏项目列表里不影响置顶（置顶是用户显式指定，项目区才受列表控制）。
  * 本函数不修改输入数组；不存在/被排除的 id 不报错。
  */
 export function derivePinnedSessions(input: DerivePinnedSessionsInput): SessionInfo[] {
-  const { sessions, pinnedSessionIds, closedProjectRoots } = input;
+  const { sessions, pinnedSessionIds } = input;
   const byId = new Map<string, SessionInfo>();
   for (const s of sessions) {
     if (s.subagent) continue;
-    const projectRoot = s.projectRoot ?? s.cwd;
-    if (projectRoot && closedProjectRoots?.has(projectRoot)) continue;
     byId.set(s.id, s);
   }
   const result: SessionInfo[] = [];

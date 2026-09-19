@@ -407,11 +407,9 @@ test("最近会话：排除 subagent 子会话与已关闭项目内的会话", a
     session("closed-project", { modified: "2026-07-11T00:00:00.000Z", projectRoot: "/repo-closed" }),
     session("closed-fallback-cwd", { modified: "2026-07-10T00:00:00.000Z", cwd: "/repo-closed-2" }),
   ];
-  const recent = m.deriveRecentSessions({
-    sessions: list,
-    closedProjectRoots: new Set(["/repo-closed", "/repo-closed-2"]),
-  });
-  assert.deepEqual(recent.map((s) => s.id), ["root-recent"]);
+  // 项目区由侧栏项目列表控制；最近区不再按项目过滤（未加入项目的会话也要有去处）
+  const recent = m.deriveRecentSessions({ sessions: list });
+  assert.deepEqual(recent.map((s) => s.id), ["root-recent", "closed-project", "closed-fallback-cwd"]);
 });
 
 test("最近会话：显示更多后可收到默认条数", async () => {
@@ -489,14 +487,13 @@ test("置顶会话：按 pinnedSessionIds 顺序输出仍存在、可见的会�
       subagent: { parentSessionId: "p", runId: "r1", runIndex: 1 },
     }),
   ];
-  // 顺序 = pinnedSessionIds 顺序（最新置顶在前）；已删除/归档（不在 sessions）、
-  // subagent、关闭项目内的跳过
+  // 顺序 = pinnedSessionIds 顺序（最新置顶在前）；已删除/归档（不在 sessions）与
+  // subagent 跳过；项目是否在侧栏列表里不影响置顶
   const pinned = m.derivePinnedSessions({
     sessions: list,
     pinnedSessionIds: ["second", "gone", "first", "closed", "sub"],
-    closedProjectRoots: new Set(["/repo-closed"]),
   });
-  assert.deepEqual(pinned.map((s) => s.id), ["second", "first"]);
+  assert.deepEqual(pinned.map((s) => s.id), ["second", "first", "closed"]);
   // 不修改输入数组
   assert.equal(list.length, 4);
 });

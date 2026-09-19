@@ -112,10 +112,17 @@ export interface SidebarPreferences {
   collapsedWorktreePaths: string[];
   /** 项目显示名 alias（projectRoot → 名称）；项目行与搜索共用。 */
   projectAliases: ProjectAliases;
-  /** 已关闭项目根路径：仅从侧栏隐藏，不删除任何目录/会话/Git 数据。 */
-  closedProjectRoots: string[];
-  /** 用户主动添加的项目根路径：无会话也持续显示（空项目可新建会话）。 */
-  addedProjectRoots: string[];
+  /**
+   * 侧栏项目根列表（唯一来源）：只有列表里的项目会显示在侧栏（无会话也显示为
+   * 空项目行），也只有它们写入项目信任（subagent 走 pi CLI 时需要）。
+   * 关闭项目 = 从列表移除；重新添加同路径即恢复。不删除任何目录/会话/Git 数据。
+   */
+  projectRoots: string[];
+  /**
+   * 是否由旧模型迁移而来（存储里只有 added/closed 两个数组）。调用方据此做一次性
+   * 种子：把当前可见的项目写进列表，避免升级后项目区突然空掉。
+   */
+  projectRootsMigrated: boolean;
   /** 桌面侧栏宽度（px）；损坏/越界值解析时 clamp。 */
   sidebarWidth: number;
   /** 右侧内容面板开/关；图标栏不受此偏好影响并始终常驻。 */
@@ -142,8 +149,8 @@ export const DEFAULT_SIDEBAR_PREFERENCES: SidebarPreferences = {
   collapsedProjectRoots: [],
   collapsedWorktreePaths: [],
   projectAliases: {},
-  closedProjectRoots: [],
-  addedProjectRoots: [],
+  projectRoots: [],
+  projectRootsMigrated: false,
   sidebarWidth: SIDEBAR_WIDTH_DEFAULT,
   rightPanelOpen: false,
   rightPanelWidth: RIGHT_PANEL_WIDTH_DEFAULT,
@@ -197,7 +204,6 @@ export function parseSidebarPreferences(raw: unknown): SidebarPreferences {
     return {
       ...DEFAULT_SIDEBAR_PREFERENCES,
       projectAliases: {},
-      closedProjectRoots: [],
       collapsedProjectRoots: [],
       collapsedWorktreePaths: [],
     };
@@ -210,9 +216,7 @@ export function parseSidebarPreferences(raw: unknown): SidebarPreferences {
     collapsedProjectRoots: parsePathList(record.collapsedProjectRoots),
     collapsedWorktreePaths: parsePathList(record.collapsedWorktreePaths),
     projectAliases: parseProjectAliases(record.projectAliases),
-    closedProjectRoots: parsePathList(record.closedProjectRoots),
-    // 用户主动添加的项目：旧数据无该字段 → 空列表。
-    addedProjectRoots: parsePathList(record.addedProjectRoots),
+    ...parseProjectRoots(record),
     // 旧数据缺字段时 clamp 非数字 → 默认 300；越界/损坏一律钳入 [min, max]。
     sidebarWidth: clampSidebarWidth(record.sidebarWidth),
     // 旧数据无右栏字段：右栏默认关闭、宽度默认。
@@ -231,6 +235,45 @@ export function parseSidebarPreferences(raw: unknown): SidebarPreferences {
   };
 }
 
+/**
+ * 项目根列表解析（含旧模型迁移）。
+ *
+ * 旧模型是两个数组：addedProjectRoots（显式加入）+ closedProjectRoots（隐藏），
+ * 可见集合 = added − closed；合并成一个列表后就等于它。迁移只在存储里**没有**
+ * `projectRoots` 时发生，并置 migrated 标记交调用方做一次性种子。
+ */
+function parseProjectRoots(
+  record: Record<string, unknown>,
+): Pick<SidebarPreferences, "projectRoots" | "projectRootsMigrated"> {
+  if (record.projectRoots !== undefined) {
+    return { projectRoots: sanitizeProjectRoots(parsePathList(record.projectRoots)), projectRootsMigrated: false };
+  }
+  const added = parsePathList(record.addedProjectRoots);
+  const closed = new Set(parsePathList(record.closedProjectRoots));
+  const hadLegacyKeys = record.addedProjectRoots !== undefined || record.closedProjectRoots !== undefined;
+  return {
+    projectRoots: sanitizeProjectRoots(added.filter((root) => !closed.has(root))),
+    projectRootsMigrated: hadLegacyKeys,
+  };
+}
+
+/**
+ * 项目列表清洗：trim、去空、去重（保序）。
+ * 它是侧栏项目区与项目信任的共同来源，一条重复或空串会直接变成一行空项目 / 一条
+ * 无意义的信任条目，所以在这里就收敛掉。
+ */
+function sanitizeProjectRoots(roots: readonly string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const root of roots) {
+    const trimmed = root.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
 function parseProjectSortMode(value: unknown): ProjectSortMode {
   return value === "az" || value === "za" || value === "fixed" || value === "recent"
     ? value
@@ -243,8 +286,7 @@ export function serializeSidebarPreferences(prefs: SidebarPreferences): string {
     collapsedProjectRoots: prefs.collapsedProjectRoots,
     collapsedWorktreePaths: prefs.collapsedWorktreePaths,
     projectAliases: prefs.projectAliases,
-    closedProjectRoots: prefs.closedProjectRoots,
-    addedProjectRoots: prefs.addedProjectRoots,
+    projectRoots: prefs.projectRoots,
     sidebarWidth: clampSidebarWidth(prefs.sidebarWidth),
     rightPanelOpen: parseRightPanelOpen(prefs.rightPanelOpen),
     rightPanelWidth: clampRightPanelWidth(prefs.rightPanelWidth),
@@ -295,8 +337,7 @@ export type SyncedSidebarUi = {
   displayMode: SidebarDisplayMode;
   collapsedProjectRoots: string[];
   collapsedWorktreePaths: string[];
-  closedProjectRoots: string[];
-  addedProjectRoots: string[];
+  projectRoots: string[];
   showRecentSessions: boolean;
   pinnedSessionIds: string[];
   projectSort: ProjectSortMode;
@@ -308,8 +349,7 @@ export function sidebarUiFromPrefs(prefs: SidebarPreferences): SyncedSidebarUi {
     displayMode: prefs.displayMode,
     collapsedProjectRoots: prefs.collapsedProjectRoots,
     collapsedWorktreePaths: prefs.collapsedWorktreePaths,
-    closedProjectRoots: prefs.closedProjectRoots,
-    addedProjectRoots: prefs.addedProjectRoots,
+    projectRoots: prefs.projectRoots,
     showRecentSessions: prefs.showRecentSessions,
     pinnedSessionIds: prefs.pinnedSessionIds,
     projectSort: prefs.projectSort,
@@ -319,14 +359,20 @@ export function sidebarUiFromPrefs(prefs: SidebarPreferences): SyncedSidebarUi {
 
 export function applySyncedSidebarUi(prefs: SidebarPreferences, remote: unknown): SidebarPreferences {
   if (typeof remote !== "object" || remote === null || Array.isArray(remote)) return prefs;
+  const remoteRecord = remote as Record<string, unknown>;
   const parsed = parseSidebarPreferences({ ...prefs, ...remote });
   return {
     ...prefs,
     displayMode: parsed.displayMode,
     collapsedProjectRoots: parsed.collapsedProjectRoots,
     collapsedWorktreePaths: parsed.collapsedWorktreePaths,
-    closedProjectRoots: parsed.closedProjectRoots,
-    addedProjectRoots: parsed.addedProjectRoots,
+    projectRoots: parsed.projectRoots,
+    // 服务端仍是旧模型（载荷里没有 projectRoots 键）且本地也还没有项目列表时，
+    // 继续保持「待迁移」：这台浏览器（新设备/清过缓存）也要做一次性种子，
+    // 否则项目区会空着。远端已经带上 projectRoots 时迁移结束。
+    projectRootsMigrated: remoteRecord.projectRoots === undefined
+      ? parsed.projectRoots.length === 0
+      : false,
     showRecentSessions: parsed.showRecentSessions,
     pinnedSessionIds: parsed.pinnedSessionIds,
     projectSort: parsed.projectSort,

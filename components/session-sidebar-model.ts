@@ -58,8 +58,12 @@ export interface BuildSidebarTreeOptions {
   knownWorktrees?: KnownWorktree[];
   /** 全部已知项目的 worktree 快照；用于补齐未选中项目的空 worktree 分组。 */
   knownWorktreesByProject?: Readonly<Record<string, readonly KnownWorktree[]>>;
-  /** 用户主动添加的项目根（持久化）：无会话也持续显示为空项目行。 */
-  addedProjectRoots?: readonly string[];
+  /**
+   * 侧栏项目根列表（持久化，唯一来源）：只有列表里的项目出现在侧栏，无会话也显示
+   * 为空项目行。不在列表内的项目即使有会话也不显示——当前选中的项目例外，
+   * 正在看的上下文不能凭空消失。
+   */
+  projectRoots?: readonly string[];
 }
 
 interface SessionBucket {
@@ -140,11 +144,16 @@ export function buildSidebarTree(
   if (selectedRoot && !projectBuckets.has(selectedRoot)) {
     projectBuckets.set(selectedRoot, { main: [], worktrees: new Map() });
   }
-  // 用户主动添加的项目：即使无会话、未被选中也持续显示（项目独立于会话存在）。
-  for (const root of options.addedProjectRoots ?? []) {
+  // 项目列表里的项目：即使无会话、未被选中也持续显示（项目独立于会话存在）。
+  for (const root of options.projectRoots ?? []) {
     if (!projectBuckets.has(root)) {
       projectBuckets.set(root, { main: [], worktrees: new Map() });
     }
+  }
+  // 项目列表是项目区的唯一来源：会话发现的、不在列表里的项目不显示。
+  const listedRoots = new Set([...(options.projectRoots ?? []), ...(selectedRoot ? [selectedRoot] : [])]);
+  for (const root of [...projectBuckets.keys()]) {
+    if (!listedRoots.has(root)) projectBuckets.delete(root);
   }
 
   const projects: SidebarProjectNode[] = [];
@@ -259,20 +268,8 @@ export function projectHasRunningSession(
 }
 
 /**
- * 从项目树中过滤已关闭项目。closedRoots 为空时原样返回（引用相等）。
- * 只读过滤：返回新数组，项目节点本身复用引用，绝不变异输入。
- */
-export function filterClosedProjects(
-  projects: SidebarProjectNode[],
-  closedRoots: ReadonlySet<string>,
-): SidebarProjectNode[] {
-  if (closedRoots.size === 0) return projects;
-  return projects.filter((project) => !closedRoots.has(project.root));
-}
-
-/**
  * 关闭当前项目后的候选项目根：按树的展示顺序取第一个既非被关闭项目、
- * 也不在已关闭集合中的项目；无剩余项目返回 null（调用方据此置空 cwd）。
+ * 也不在排除集合中的项目；无剩余项目返回 null（调用方据此置空 cwd）。
  */
 export function pickProjectRootAfterClose(
   projects: SidebarProjectNode[],

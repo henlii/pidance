@@ -19,36 +19,42 @@ function session(id, overrides = {}) {
   };
 }
 
+const modelModule = jiti.import("./session-sidebar-model.ts");
+
+/** 列表默认取「全部会话的项目根」：这些用例测的是分组/排序，不是列表过滤规则。 */
+async function treeOf(sessions, options = {}) {
+  const { buildSidebarTree } = await modelModule;
+  const roots = [...new Set(sessions.map((s) => s.projectRoot ?? s.cwd))];
+  return buildSidebarTree(sessions, { projectRoots: roots, ...options });
+}
+
 test("多项目：按 projectRoot ?? cwd 分项目，按最近活动降序", async () => {
-  const { buildSidebarTree } = await jiti.import("./session-sidebar-model.ts");
-  const a = session("a1", { cwd: "/repo-a", projectRoot: "/repo-a", modified: "2026-07-01T00:00:00.000Z" });
+    const a = session("a1", { cwd: "/repo-a", projectRoot: "/repo-a", modified: "2026-07-01T00:00:00.000Z" });
   const b = session("b1", { cwd: "/repo-b", projectRoot: "/repo-b", modified: "2026-07-09T00:00:00.000Z" });
   // 无 projectRoot 的会话回退 cwd 作为项目根。
   const c = session("c1", { cwd: "/plain-dir", projectRoot: undefined, modified: "2026-07-05T00:00:00.000Z" });
-  const tree = buildSidebarTree([a, b, c]);
+  const tree = await treeOf([a, b, c]);
   assert.deepEqual(tree.map((p) => p.root), ["/repo-b", "/plain-dir", "/repo-a"]);
   assert.equal(tree.length, 3);
 });
 
 test("主 worktree 隐式：主仓会话直接挂项目下，不产生 worktree 分组", async () => {
-  const { buildSidebarTree } = await jiti.import("./session-sidebar-model.ts");
-  const main1 = session("m1", { cwd: "/repo", projectRoot: "/repo" });
+    const main1 = session("m1", { cwd: "/repo", projectRoot: "/repo" });
   const main2 = session("m2", { cwd: "/repo", projectRoot: "/repo" });
-  const tree = buildSidebarTree([main1, main2]);
+  const tree = await treeOf([main1, main2]);
   assert.equal(tree.length, 1);
   assert.equal(tree[0].worktrees.length, 0);
   assert.deepEqual(tree[0].mainTree.map((n) => n.session.id).sort(), ["m1", "m2"]);
 });
 
 test("非主 worktree 分组：cwd !== projectRoot 的会话归入分组并带分支名", async () => {
-  const { buildSidebarTree } = await jiti.import("./session-sidebar-model.ts");
-  const main = session("m", { cwd: "/repo", projectRoot: "/repo" });
+    const main = session("m", { cwd: "/repo", projectRoot: "/repo" });
   const wt = session("w1", {
     cwd: "/repo-worktrees/feat-login",
     projectRoot: "/repo",
     worktreeBranch: "feat/login",
   });
-  const tree = buildSidebarTree([main, wt]);
+  const tree = await treeOf([main, wt]);
   assert.equal(tree.length, 1);
   assert.equal(tree[0].mainTree.length, 1);
   assert.equal(tree[0].worktrees.length, 1);
@@ -58,8 +64,7 @@ test("非主 worktree 分组：cwd !== projectRoot 的会话归入分组并带�
 });
 
 test("fork child 语义在项目树分组内保留；subagent 子会话不展示", async () => {
-  const { buildSidebarTree } = await jiti.import("./session-sidebar-model.ts");
-  const parent = session("p", { cwd: "/repo", projectRoot: "/repo", modified: "2026-07-09T00:00:00.000Z" });
+    const parent = session("p", { cwd: "/repo", projectRoot: "/repo", modified: "2026-07-09T00:00:00.000Z" });
   const fork = session("f", { cwd: "/repo", projectRoot: "/repo", parentSessionId: "p", modified: "2026-07-08T00:00:00.000Z" });
   const sub = session("s", {
     cwd: "/repo", projectRoot: "/repo",
@@ -69,7 +74,7 @@ test("fork child 语义在项目树分组内保留；subagent 子会话不展示
   // worktree 组内同样保留嵌套关系。
   const wtParent = session("wp", { cwd: "/repo-worktrees/feat", projectRoot: "/repo", worktreeBranch: "feat", modified: "2026-07-09T00:00:00.000Z" });
   const wtChild = session("wc", { cwd: "/repo-worktrees/feat", projectRoot: "/repo", worktreeBranch: "feat", parentSessionId: "wp" });
-  const tree = buildSidebarTree([parent, fork, sub, wtParent, wtChild]);
+  const tree = await treeOf([parent, fork, sub, wtParent, wtChild]);
   const mainTree = tree[0].mainTree;
   assert.equal(mainTree.length, 1);
   // subagent 子会话被过滤，仅 fork 子会话保留。
@@ -81,18 +86,17 @@ test("fork child 语义在项目树分组内保留；subagent 子会话不展示
 });
 
 test("subagent 会话不展示：worktree 组内不留孤儿根项", async () => {
-  const { buildSidebarTree } = await jiti.import("./session-sidebar-model.ts");
-  const orphan = session("o", {
+    const orphan = session("o", {
     cwd: "/repo-worktrees/feat", projectRoot: "/repo", worktreeBranch: "feat",
     subagent: { parentSessionId: "ghost", runId: "r1", runIndex: 1 },
     readOnly: true,
   });
-  const tree = buildSidebarTree([orphan]);
+  const tree = await treeOf([orphan]);
   assert.equal(tree[0].worktrees[0].tree.length, 0);
 });
 
 test("搜索命中 fork child 时保留完整 project → worktree → session 祖先链；subagent 不参与", async () => {
-  const { buildSidebarTree, filterSidebarTree } = await jiti.import("./session-sidebar-model.ts");
+  const { filterSidebarTree } = await jiti.import("./session-sidebar-model.ts");
   const parent = session("p", { cwd: "/repo", projectRoot: "/repo", name: "main work" });
   const fork = session("f", { cwd: "/repo", projectRoot: "/repo", parentSessionId: "p", firstMessage: "investigate flaky" });
   const wtParent = session("wp", { cwd: "/repo-worktrees/feat", projectRoot: "/repo", worktreeBranch: "feat", name: "wt root" });
@@ -108,7 +112,7 @@ test("搜索命中 fork child 时保留完整 project → worktree → session �
     readOnly: true,
   });
   const otherProject = session("x", { cwd: "/other", projectRoot: "/other", name: "unrelated" });
-  const tree = buildSidebarTree([parent, fork, wtParent, wtChild, wtSub, otherProject]);
+  const tree = await treeOf([parent, fork, wtParent, wtChild, wtSub, otherProject]);
   // subagent 的 agent 名不再可命中（节点不展示）。
   assert.deepEqual(filterSidebarTree(tree, "explore"), []);
   // 命中 fork child 的 firstMessage：保留 project 与命中 worktree 组的祖先链。
@@ -124,10 +128,10 @@ test("搜索命中 fork child 时保留完整 project → worktree → session �
 });
 
 test("搜索命中项目根路径保留整个项目；命中分支名保留整个分组", async () => {
-  const { buildSidebarTree, filterSidebarTree } = await jiti.import("./session-sidebar-model.ts");
+  const { filterSidebarTree } = await jiti.import("./session-sidebar-model.ts");
   const main = session("m", { cwd: "/repo", projectRoot: "/repo", name: "zzz" });
   const wt = session("w", { cwd: "/repo-worktrees/feat", projectRoot: "/repo", worktreeBranch: "feat/login", name: "zzz" });
-  const tree = buildSidebarTree([main, wt]);
+  const tree = await treeOf([main, wt]);
   // 命中项目根：整棵树原样（引用相等，未做无谓克隆）。
   assert.equal(filterSidebarTree(tree, "repo")[0], tree[0]);
   // 命中分支名：分组原样保留，主仓未命中被剪掉。
@@ -141,9 +145,8 @@ test("搜索命中项目根路径保留整个项目；命中分支名保留整�
 });
 
 test("无会话的 selectedCwd 也必须显示为可用项目项（置顶）", async () => {
-  const { buildSidebarTree } = await jiti.import("./session-sidebar-model.ts");
-  const existing = session("a", { cwd: "/repo-a", projectRoot: "/repo-a" });
-  const tree = buildSidebarTree([existing], { selectedCwd: "/new-project", selectedProjectRoot: "/new-project" });
+    const existing = session("a", { cwd: "/repo-a", projectRoot: "/repo-a" });
+  const tree = await treeOf([existing], { selectedCwd: "/new-project", selectedProjectRoot: "/new-project" });
   assert.equal(tree.length, 2);
   assert.equal(tree[0].root, "/new-project");
   assert.equal(tree[0].mainTree.length, 0);
@@ -151,13 +154,12 @@ test("无会话的 selectedCwd 也必须显示为可用项目项（置顶）", a
   assert.equal(tree[0].latestActivity, "");
 });
 
-test("addedProjectRoots：无会话且未被选中的项目也持续显示（项目独立于会话）", async () => {
-  const { buildSidebarTree } = await jiti.import("./session-sidebar-model.ts");
-  const existing = session("a", { cwd: "/repo-a", projectRoot: "/repo-a" });
-  const tree = buildSidebarTree([existing], {
+test("projectRoots：列表里的项目即使无会话也显示；不在列表里的（含已有会话）不显示", async () => {
+    const existing = session("a", { cwd: "/repo-a", projectRoot: "/repo-a" });
+  const tree = await treeOf([existing], {
     selectedCwd: "/repo-a",
     selectedProjectRoot: "/repo-a",
-    addedProjectRoots: ["/empty-project", "/repo-a"],
+    projectRoots: ["/empty-project", "/repo-a"],
   });
   // 两个项目都显示：有会话的 /repo-a + 空项目 /empty-project
   assert.equal(tree.length, 2);
@@ -166,16 +168,15 @@ test("addedProjectRoots：无会话且未被选中的项目也持续显示（项
   assert.equal(empty.mainTree.length, 0);
   assert.equal(empty.worktrees.length, 0);
   assert.equal(empty.latestActivity, "");
-  // 与 selectedCwd 无关：切走选中后空项目仍在
-  const other = buildSidebarTree([existing], { addedProjectRoots: ["/empty-project"] });
-  assert.equal(other.length, 2);
-  assert.ok(other.find((p) => p.root === "/empty-project"));
+  // 空项目在列表里就持续显示（与选中状态无关）；不在列表里的项目连会话一起隐藏
+  const other = await treeOf([existing], { projectRoots: ["/empty-project"] });
+  assert.deepEqual(other.map((p) => p.root), ["/empty-project"]);
+  assert.equal(other[0].mainTree.length, 0);
 });
 
 test("selectedCwd 属于已有项目的空 worktree：knownWorktrees 补齐空分组", async () => {
-  const { buildSidebarTree } = await jiti.import("./session-sidebar-model.ts");
-  const main = session("m", { cwd: "/repo", projectRoot: "/repo" });
-  const tree = buildSidebarTree([main], {
+    const main = session("m", { cwd: "/repo", projectRoot: "/repo" });
+  const tree = await treeOf([main], {
     selectedCwd: "/repo-worktrees/empty",
     selectedProjectRoot: "/repo",
     knownWorktrees: [
@@ -192,18 +193,18 @@ test("selectedCwd 属于已有项目的空 worktree：knownWorktrees 补齐空�
 });
 
 test("Collapse all 收集全部项目根与 worktree 路径；Expand all 即清空集合", async () => {
-  const { buildSidebarTree, collectAllCollapseIds } = await jiti.import("./session-sidebar-model.ts");
+  const { collectAllCollapseIds } = await jiti.import("./session-sidebar-model.ts");
   const main = session("m", { cwd: "/repo", projectRoot: "/repo" });
   const wt = session("w", { cwd: "/repo-worktrees/feat", projectRoot: "/repo", worktreeBranch: "feat" });
   const other = session("o", { cwd: "/other", projectRoot: "/other" });
-  const tree = buildSidebarTree([main, wt, other]);
+  const tree = await treeOf([main, wt, other]);
   const ids = collectAllCollapseIds(tree);
   assert.deepEqual(ids.projectRoots.sort(), ["/other", "/repo"]);
   assert.deepEqual(ids.worktreePaths, ["/repo-worktrees/feat"]);
 });
 
 test("会话定位：返回项目根、非主 worktree 分组与会话级祖先链", async () => {
-  const { buildSidebarTree, locateSessionInSidebarTree } = await jiti.import("./session-sidebar-model.ts");
+  const { locateSessionInSidebarTree } = await jiti.import("./session-sidebar-model.ts");
   const parent = session("p", { cwd: "/repo", projectRoot: "/repo" });
   const child = session("c", { cwd: "/repo", projectRoot: "/repo", parentSessionId: "p" });
   const wtParent = session("wp", { cwd: "/repo-worktrees/feat", projectRoot: "/repo", worktreeBranch: "feat" });
@@ -211,36 +212,20 @@ test("会话定位：返回项目根、非主 worktree 分组与会话级祖先�
     cwd: "/repo-worktrees/feat", projectRoot: "/repo", worktreeBranch: "feat",
     parentSessionId: "wp",
   });
-  const tree = buildSidebarTree([parent, child, wtParent, wtGrand]);
+  const tree = await treeOf([parent, child, wtParent, wtGrand]);
   assert.deepEqual(locateSessionInSidebarTree(tree, "p"), { projectRoot: "/repo", worktreePath: null, ancestors: [] });
   assert.deepEqual(locateSessionInSidebarTree(tree, "c"), { projectRoot: "/repo", worktreePath: null, ancestors: ["p"] });
   assert.deepEqual(locateSessionInSidebarTree(tree, "wg"), { projectRoot: "/repo", worktreePath: "/repo-worktrees/feat", ancestors: ["wp"] });
   assert.equal(locateSessionInSidebarTree(tree, "missing"), null);
 });
 
-test("关闭项目过滤：从树中隐藏已关闭项目，空集合原样返回", async () => {
-  const { buildSidebarTree, filterClosedProjects } = await jiti.import("./session-sidebar-model.ts");
-  const a = session("a", { cwd: "/repo-a", projectRoot: "/repo-a" });
-  const b = session("b", { cwd: "/repo-b", projectRoot: "/repo-b" });
-  const tree = buildSidebarTree([a, b]);
-  // 空集合：引用相等，零开销。
-  assert.equal(filterClosedProjects(tree, new Set()), tree);
-  const filtered = filterClosedProjects(tree, new Set(["/repo-a"]));
-  assert.deepEqual(filtered.map((p) => p.root), ["/repo-b"]);
-  // 项目节点复用引用，输入树不被修改。
-  assert.equal(filtered[0], tree.find((p) => p.root === "/repo-b"));
-  assert.equal(tree.length, 2);
-  // 全部关闭 → 空数组。
-  assert.deepEqual(filterClosedProjects(tree, new Set(["/repo-a", "/repo-b"])), []);
-});
-
 test("关闭当前项目候选：按展示顺序取下一个未关闭项目，无剩余返回 null", async () => {
-  const { buildSidebarTree, pickProjectRootAfterClose } = await jiti.import("./session-sidebar-model.ts");
+  const { pickProjectRootAfterClose } = await jiti.import("./session-sidebar-model.ts");
   // modified 由 session() 序号派生：a1 最新在前。
   const a = session("a1", { cwd: "/repo-a", projectRoot: "/repo-a", modified: "2026-07-09T00:00:00.000Z" });
   const b = session("b1", { cwd: "/repo-b", projectRoot: "/repo-b", modified: "2026-07-08T00:00:00.000Z" });
   const c = session("c1", { cwd: "/repo-c", projectRoot: "/repo-c", modified: "2026-07-07T00:00:00.000Z" });
-  const tree = buildSidebarTree([a, b, c]);
+  const tree = await treeOf([a, b, c]);
   assert.deepEqual(tree.map((p) => p.root), ["/repo-a", "/repo-b", "/repo-c"]);
   // 关闭最前的当前项目 → 取顺序上的下一个。
   assert.equal(pickProjectRootAfterClose(tree, "/repo-a", new Set(["/repo-a"])), "/repo-b");
@@ -254,11 +239,11 @@ test("关闭当前项目候选：按展示顺序取下一个未关闭项目，�
 });
 
 test("alias 搜索：命中项目 alias 保留整个项目，与根路径命中语义一致", async () => {
-  const { buildSidebarTree, filterSidebarTree } = await jiti.import("./session-sidebar-model.ts");
+  const { filterSidebarTree } = await jiti.import("./session-sidebar-model.ts");
   const main = session("m", { cwd: "/repo", projectRoot: "/repo", name: "zzz" });
   const wt = session("w", { cwd: "/repo-worktrees/feat", projectRoot: "/repo", worktreeBranch: "feat", name: "zzz" });
   const other = session("o", { cwd: "/other", projectRoot: "/other", name: "zzz" });
-  const tree = buildSidebarTree([main, wt, other]);
+  const tree = await treeOf([main, wt, other]);
   const aliases = { "/repo": "支付中台" };
   // 命中 alias：整棵树原样保留（引用相等），未命中项目被过滤。
   const byAlias = filterSidebarTree(tree, "支付", aliases);
@@ -275,10 +260,10 @@ test("alias 搜索：命中项目 alias 保留整个项目，与根路径命中�
 });
 
 test("搜索与折叠偏好隔离：过滤不触碰折叠集合，搜索期强制展开只读不写", async () => {
-  const { buildSidebarTree, filterSidebarTree } = await jiti.import("./session-sidebar-model.ts");
+  const { filterSidebarTree } = await jiti.import("./session-sidebar-model.ts");
   const { isSessionNodeEffectivelyCollapsed } = await jiti.import("./session-tree.ts");
   const main = session("m", { cwd: "/repo", projectRoot: "/repo", name: "hit me" });
-  const tree = buildSidebarTree([main]);
+  const tree = await treeOf([main]);
   const collapsedProjects = new Set(["/repo"]);
   const collapsedWorktrees = new Set(["/repo-worktrees/feat"]);
   // 搜索过滤是纯函数：两个折叠集合原样不动。
@@ -295,7 +280,6 @@ test("搜索与折叠偏好隔离：过滤不触碰折叠集合，搜索期强�
 
 test("collectSubagentParentIdsFromSidebarTree：含子节点的父会话默认收起", async () => {
   const {
-    buildSidebarTree,
     collectSubagentParentIdsFromSidebarTree,
   } = await jiti.import("./session-sidebar-model.ts");
   const mainParent = session("mp", { cwd: "/repo", projectRoot: "/repo" });
@@ -321,7 +305,7 @@ test("collectSubagentParentIdsFromSidebarTree：含子节点的父会话默认�
     projectRoot: "/repo",
     parentSessionId: "fo",
   });
-  const tree = buildSidebarTree(
+  const tree = await treeOf(
     [mainParent, mainSub, wtParent, wtSub, forkOnly, forkChild],
     { knownWorktrees: [{ path: "/repo-worktrees/feat", branch: "feat", isMain: false }] },
   );
@@ -330,13 +314,13 @@ test("collectSubagentParentIdsFromSidebarTree：含子节点的父会话默认�
 });
 
 test("全文模式：按 session id 集合保留祖先链，不按 name/alias 整树匹配", async () => {
-  const { buildSidebarTree, filterSidebarTree } = await jiti.import("./session-sidebar-model.ts");
+  const { filterSidebarTree } = await jiti.import("./session-sidebar-model.ts");
   const parent = session("p", { cwd: "/repo", projectRoot: "/repo", name: "main work" });
   const child = session("c", {
     cwd: "/repo", projectRoot: "/repo", parentSessionId: "p", firstMessage: "leaf body",
   });
   const other = session("o", { cwd: "/other", projectRoot: "/other", name: "repo alias bait" });
-  const tree = buildSidebarTree([parent, child, other]);
+  const tree = await treeOf([parent, child, other]);
   // 仅命中 child：保留 p → c 祖先链，不保留 other（即使 name 含 repo）。
   const filtered = filterSidebarTree(tree, "", { "/other": "repo" }, new Set(["c"]));
   assert.equal(filtered.length, 1);
@@ -349,10 +333,10 @@ test("全文模式：按 session id 集合保留祖先链，不按 name/alias �
 });
 
 test("项目排序：az/za 按显示名，fixed 按指定顺序，拖动改序", async () => {
-  const { buildSidebarTree, sortSidebarProjects, moveProjectInOrder } = await jiti.import("./session-sidebar-model.ts");
+  const { sortSidebarProjects, moveProjectInOrder } = await jiti.import("./session-sidebar-model.ts");
   const a = session("a1", { cwd: "/alpha", projectRoot: "/alpha", modified: "2026-07-01T00:00:00.000Z" });
   const b = session("b1", { cwd: "/beta", projectRoot: "/beta", modified: "2026-07-09T00:00:00.000Z" });
-  const tree = buildSidebarTree([a, b]);
+  const tree = await treeOf([a, b]);
   assert.deepEqual(sortSidebarProjects(tree, { mode: "az" }).map((p) => p.root), ["/alpha", "/beta"]);
   assert.deepEqual(sortSidebarProjects(tree, { mode: "za" }).map((p) => p.root), ["/beta", "/alpha"]);
   assert.deepEqual(
@@ -374,4 +358,21 @@ test("projectHasRunningSession：worktree 归主 projectRoot，running 命中阻
   assert.equal(projectHasRunningSession(sessions, new Set(["s3"]), "/repo"), false);
   assert.equal(projectHasRunningSession(sessions, ["s2"], "/repo"), true);
   assert.equal(projectHasRunningSession(sessions, [], "/repo"), false);
+});
+
+test("projectRoots：不在列表里的项目即使有会话也不显示；当前选中的项目例外", async () => {
+  const { buildSidebarTree } = await jiti.import("./session-sidebar-model.ts");
+  const existing = session("x", { cwd: "/existing", projectRoot: "/existing" });
+  assert.deepEqual(
+    buildSidebarTree([existing], { projectRoots: ["/listed"] }).map((p) => p.root),
+    ["/listed"],
+  );
+  assert.deepEqual(
+    buildSidebarTree([existing], {
+      projectRoots: ["/listed"],
+      selectedCwd: "/existing",
+      selectedProjectRoot: "/existing",
+    }).map((p) => p.root).sort(),
+    ["/existing", "/listed"],
+  );
 });
