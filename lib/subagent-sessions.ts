@@ -17,7 +17,11 @@ const MAX_SCAN_ENTRIES = 2048;
 const MAX_METADATA_BYTES = 2 * 1024 * 1024;
 const MAX_METADATA_LINE_BYTES = 128 * 1024;
 const MAX_METADATA_CANDIDATES = 512;
-const HEX_RUN = /^[0-9a-f]{8}$/i;
+/**
+ * run 目录名：旧版（0.46.0）是 8 位 hex，0.68.0 起是完整 UUID
+ * （同步 run 的目录名 == toolResult details.runId）。
+ */
+const RUN_ID_DIR = /^(?:[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 const RUN_DIR = /^run-(\d+)$/;
 
 const ASYNC_RUN = /^async-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -87,16 +91,20 @@ function runIndex(file: string): number | null {
 
 function isDiscoveredLayout(file: string, root: string): boolean {
   const parts = relative(resolve(root), resolve(file)).split(/[\\/]/);
-  // 同步/前台 run 布局：<root>/<hex>/run-<N>/session.jsonl
-  if (parts.length === 3 && HEX_RUN.test(parts[0]) && RUN_DIR.test(parts[1]) && parts[2] === "session.jsonl") return true;
+  // 同步/前台 run 布局：<root>/<runId>/run-<N>/session.jsonl
+  if (parts.length === 3 && RUN_ID_DIR.test(parts[0]) && RUN_DIR.test(parts[1]) && parts[2] === "session.jsonl") return true;
   // async 布局（pi-subagents sessionDir）：<root>/async-<uuid>/*.jsonl（扁平）
   return parts.length === 2 && ASYNC_RUN.test(parts[0]) && parts[1].endsWith(".jsonl");
 }
 
 type MetadataCandidate = { path: string; runId?: string; agent?: string };
+type MetadataScan = { candidates: MetadataCandidate[]; agents: Map<string, string> };
 
-function metadataPaths(parentFile: string): MetadataCandidate[] {
+function metadataPaths(parentFile: string): MetadataScan {
   const candidates: MetadataCandidate[] = [];
+  // 0.68.0 的 toolResult 不再给 results[].sessionFile，但 details.runId 与同步 run
+  // 的目录名一致，用它把 agent 标签补回来（异步 run 目录名是另一个 UUID，走 activity）。
+  const agents = new Map<string, string>();
   let fd = -1;
   try {
     fd = openSync(parentFile, "r");
@@ -112,14 +120,14 @@ function metadataPaths(parentFile: string): MetadataCandidate[] {
       carry = lines.pop() ?? "";
       for (const line of lines) {
         if (line.length > MAX_METADATA_LINE_BYTES) continue;
-        parseMetadataLine(line, candidates);
+        parseMetadataLine(line, candidates, agents);
         if (candidates.length >= MAX_METADATA_CANDIDATES) break;
       }
     }
-    if (carry.length <= MAX_METADATA_LINE_BYTES && candidates.length < MAX_METADATA_CANDIDATES) parseMetadataLine(carry, candidates);
+    if (carry.length <= MAX_METADATA_LINE_BYTES && candidates.length < MAX_METADATA_CANDIDATES) parseMetadataLine(carry, candidates, agents);
   } catch { /* 损坏的父文件不会阻断其它会话 */ }
   finally { if (fd >= 0) closeSync(fd); }
-  return candidates;
+  return { candidates, agents };
 }
 
 export function validateSubagentFileForDeletion(file: string, parentRoot: string, expectedId: string): boolean {
@@ -165,7 +173,7 @@ export function deleteValidatedSubagents(
   return skipped;
 }
 
-function parseMetadataLine(line: string, candidates: MetadataCandidate[]): void {
+function parseMetadataLine(line: string, candidates: MetadataCandidate[], agents: Map<string, string>): void {
   let value: unknown;
   try { value = JSON.parse(line); } catch { return; }
   if (!record(value) || value.type !== "message" || !record(value.message) ||
@@ -173,14 +181,12 @@ function parseMetadataLine(line: string, candidates: MetadataCandidate[]): void 
     !record(value.message.details) || !Array.isArray(value.message.details.results)) return;
   const details = value.message.details as Record<string, unknown>;
   const results = details.results as unknown[];
+  const runId = typeof details.runId === "string" ? details.runId : undefined;
   for (const result of results) {
-    if (record(result) && typeof result.sessionFile === "string") {
-      candidates.push({
-        path: result.sessionFile,
-        runId: typeof details.runId === "string" ? details.runId : undefined,
-        agent: typeof result.agent === "string" ? result.agent : typeof details.agent === "string" ? details.agent : undefined,
-      });
-      }
+    if (!record(result)) continue;
+    const agent = typeof result.agent === "string" ? result.agent : typeof details.agent === "string" ? details.agent : undefined;
+    if (runId && agent) agents.set(runId, agent);
+    if (typeof result.sessionFile === "string") candidates.push({ path: result.sessionFile, runId, agent });
   }
 }
 
@@ -190,7 +196,7 @@ function fallbackPaths(parentFile: string): string[] {
   if (!root) return result;
   try {
     for (const runId of readdirSync(root, { withFileTypes: true })) {
-      if (!runId.isDirectory() || runId.isSymbolicLink() || !HEX_RUN.test(runId.name)) continue;
+      if (!runId.isDirectory() || runId.isSymbolicLink() || !RUN_ID_DIR.test(runId.name)) continue;
       const runRoot = join(root, runId.name);
       for (const run of readdirSync(runRoot, { withFileTypes: true })) {
         if (!run.isDirectory() || run.isSymbolicLink() || !RUN_DIR.test(run.name)) continue;
@@ -221,7 +227,8 @@ export function discoverSubagentSessions(parentFile: string, parentId: string): 
   const seenPaths = new Set<string>();
   const seenIds = new Set<string>();
   const found: DiscoveredSubagent[] = [];
-  const candidates: MetadataCandidate[] = [...metadataPaths(parentFile), ...fallbackPaths(parentFile).map((path) => ({ path }))];
+  const scan = metadataPaths(parentFile);
+  const candidates: MetadataCandidate[] = [...scan.candidates, ...fallbackPaths(parentFile).map((path) => ({ path }))];
   for (const candidate of candidates) {
     if (found.length >= MAX_CHILDREN) break;
     const absolute = resolve(candidate.path);
@@ -237,7 +244,7 @@ export function discoverSubagentSessions(parentFile: string, parentId: string): 
     const runId = asyncLayout ? rel[0].slice("async-".length) : candidate.runId ?? basename(dirname(dirname(file)));
     seenPaths.add(file);
     seenIds.add(header.id);
-    found.push({ path: file, header, runIndex: index, parentSessionId: parentId, runId, agent: candidate.agent });
+    found.push({ path: file, header, runIndex: index, parentSessionId: parentId, runId, agent: candidate.agent ?? scan.agents.get(runId) });
   }
   return found;
 }

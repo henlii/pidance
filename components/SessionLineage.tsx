@@ -7,25 +7,62 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useSubagentActivity } from "@/hooks/useSubagentActivity";
 import type { SubagentActivityEntry } from "@/lib/subagent-activity";
 import { useI18n } from "@/lib/i18n";
+// 弹窗里的运行状态与会话列表共用同一套指示器（旋转圆环 + 实时耗时 + 等待黄点）。
+import {
+  RunningDurationText,
+  RunningSessionIndicator,
+  WaitingSessionIndicator,
+} from "@/components/session-sidebar/display";
 import type { SessionCatalogStore } from "@/lib/session-catalog-store";
 import {
   buildLineageIndex,
   collectLineageDescendants,
   lineagePath,
   shortSessionTitle,
+  truncateTitle,
+  visibleCrumbEntries,
   visibleLineageNodes,
 } from "@/lib/session-lineage";
 import type { SessionInfo } from "@/lib/types";
 
 /**
- * 顶栏子会话谱系：`主会话 / 子会话 / N 个子会话 ▾`。
+ * 顶栏子会话谱系。对齐 dsh 的 `conversation.session.header.lineage` 槽位语义：
+ * 面包屑的其它层级由宿主渲染，槽位只替换「当前会话那一段标题」。
  *
- * 侧栏刻意隐藏子代理会话（session-tree 的展示过滤），主会话页头因此是它们的
- * 导航入口：面包屑每段可点（回到上层），斜线后的触发器打开该谱系的后代目录。
+ * 主会话页：`主会话标题 / [N 个子会话 ▾]`（面包屑 + 数量触发器）。
+ * 子会话页：`父标题 / [子标题 ▾]`——末段标题与展开按钮合成一个按钮（dsh 的
+ * switcher 形态），前面的父层标题可点返回；子会话自己还有后代时，后面再接一个
+ * `/ [N ▾]` 数量触发器。
+ *
+ * 侧栏刻意隐藏子代理会话（session-tree 的展示过滤），页头因此是它们的导航入口。
+ * 面板每行按会话列表同一套语言显示运行状态：运行中 = 旋转圆环 + 实时耗时，
+ * 需要关注 = 等待黄点 + 文字。
  * 只读——切换会话复用 handleSelectSession，不在这里提供任何写入动作。
  */
 
 const TREE_ROW_SELECTOR = '[role="treeitem"]';
+
+/** 打开的菜单：switcher = 末段标题按钮（父层作用域），directory = 数量触发器（自身作用域）。 */
+type LineageMenuKind = "switcher" | "directory";
+
+function Chevron({ open }: { open: boolean }) {
+  return (
+    <svg
+      width="10"
+      height="10"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      style={open ? { transform: "rotate(180deg)" } : undefined}
+    >
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  );
+}
 
 type Props = {
   catalogStore: SessionCatalogStore;
@@ -72,12 +109,15 @@ export function SessionLineage({ catalogStore, session, onSelectSession }: Props
   const isMobile = useIsMobile();
   const activity = useSubagentActivity();
   const [catalogTick, setCatalogTick] = useState(0);
-  const [open, setOpen] = useState(false);
+  const [menu, setMenu] = useState<LineageMenuKind | null>(null);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set<string>());
-  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<LineageMenuKind | null>(null);
+  const switcherRef = useRef<HTMLButtonElement>(null);
+  const directoryRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const pendingFocusRef = useRef<string | null>(null);
   const treeId = useId();
+  const open = menu !== null;
 
   // Catalog 订阅：会话列表（含 subagent 子会话）变化时同步重算谱系。
   useEffect(() => catalogStore.subscribe(() => setCatalogTick((tick) => tick + 1)), [catalogStore]);
@@ -94,41 +134,69 @@ export function SessionLineage({ catalogStore, session, onSelectSession }: Props
     return path.length > 0 ? path : [session];
   }, [sessions, session]);
   const root = crumbs[0];
-  // 目录始终挂在谱系根上：从任意深度都能一步跳到兄弟子会话，计数也稳定。
-  const directory = useMemo(() => collectLineageDescendants(index, root.id), [index, root.id]);
-  const rows = useMemo(() => visibleLineageNodes(index, root.id, collapsed), [index, root.id, collapsed]);
+  // 标题菜单挂在父会话上（一步跳到兄弟子会话），数量菜单挂在当前会话自己身上：
+  // 两个作用域各自计数、各自展开。
+  const switcherScopeId = session.subagent?.parentSessionId ?? root.id;
+  const rows = useMemo(
+    () => visibleLineageNodes(index, menu === "switcher" ? switcherScopeId : session.id, collapsed),
+    [index, menu, switcherScopeId, session.id, collapsed],
+  );
 
   const runningIds = activity.runningChildIds;
+  const directory = useMemo(() => collectLineageDescendants(index, session.id), [index, session.id]);
   const runningCount = useMemo(
     () => directory.filter((node) => runningIds.has(node.session.id)).length,
     [directory, runningIds],
   );
   const selfRunning = runningIds.has(session.id);
 
-  const overlay = useAnchoredOverlay({
-    open,
-    anchorRef: triggerRef,
-    overlayRef: panelRef,
-    preferredPlacement: "below",
-    gap: 4,
-    margin: 8,
-    minHeight: 120,
-    maxHeight: 420,
-    minWidth: isMobile ? undefined : 280,
-    maxWidth: 420,
-    width: isMobile ? "max" : undefined,
-    align: "start",
-  });
+  // 运行时长（对齐会话列表）：面板里只要有在跑的会话就按 1Hz 走动；没有活动行时不挂表。
+  const [now, setNow] = useState(() => Date.now());
+  const anyRunningRow = rows.some((row) => runningIds.has(row.session.id));
+  useEffect(() => {
+    if (!open || !anyRunningRow) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [open, anyRunningRow]);
+
+  // 两个触发器各一套定位（同一时刻只开一个），公共参数共用。
+  const overlayOptions = useMemo(
+    () => ({
+      overlayRef: panelRef,
+      preferredPlacement: "below" as const,
+      gap: 4,
+      margin: 8,
+      minHeight: 120,
+      maxHeight: 420,
+      minWidth: isMobile ? undefined : 280,
+      maxWidth: 420,
+      width: isMobile ? ("max" as const) : undefined,
+      align: "start" as const,
+    }),
+    [isMobile],
+  );
+  const switcherOverlay = useAnchoredOverlay({ open: menu === "switcher", anchorRef: switcherRef, ...overlayOptions });
+  const directoryOverlay = useAnchoredOverlay({ open: menu === "directory", anchorRef: directoryRef, ...overlayOptions });
+  const overlay = menu === "switcher" ? switcherOverlay : directoryOverlay;
 
   // 换会话即收起下拉并重置展开态（避免把上一个谱系的折叠状态带过来）。
   useEffect(() => {
-    setOpen(false);
+    menuRef.current = null;
+    setMenu(null);
     setCollapsed(new Set<string>());
   }, [session.id]);
 
+  const openMenu = useCallback((kind: LineageMenuKind) => {
+    menuRef.current = kind;
+    setMenu(kind);
+  }, []);
+
   const closePanel = useCallback((restoreFocus: boolean) => {
-    setOpen(false);
-    if (restoreFocus) triggerRef.current?.focus();
+    const kind = menuRef.current;
+    menuRef.current = null;
+    setMenu(null);
+    if (restoreFocus && kind) (kind === "switcher" ? switcherRef : directoryRef).current?.focus();
   }, []);
 
   useEffect(() => {
@@ -136,7 +204,8 @@ export function SessionLineage({ catalogStore, session, onSelectSession }: Props
     const onDocMouseDown = (event: MouseEvent) => {
       const target = event.target as Node | null;
       if (!target) return;
-      if (panelRef.current?.contains(target) || triggerRef.current?.contains(target)) return;
+      if (panelRef.current?.contains(target)) return;
+      if (switcherRef.current?.contains(target) || directoryRef.current?.contains(target)) return;
       closePanel(false);
     };
     document.addEventListener("mousedown", onDocMouseDown);
@@ -157,16 +226,17 @@ export function SessionLineage({ catalogStore, session, onSelectSession }: Props
 
   // 打开时把焦点放到当前会话那一行（找不到就第一行），与首页菜单同一套
   // 真实焦点移动（而非 aria-activedescendant），屏幕阅读器能直接读到 treeitem。
+  // 必须等 overlay.ready：定位前面板是 visibility:hidden，focus() 会被忽略。
   useEffect(() => {
-    if (!open) return;
+    if (!open || !overlay.ready) return;
     if (rows.length === 0) {
-      setOpen(false);
+      closePanel(false);
       return;
     }
     const currentIndex = rows.findIndex((row) => row.session.id === session.id);
     focusTreeRow(panelRef.current, currentIndex >= 0 ? currentIndex : 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, overlay.ready]);
 
   // 折叠/展开后把焦点还给被操作的那一行（它自身仍在列表里）。
   useEffect(() => {
@@ -199,9 +269,10 @@ export function SessionLineage({ catalogStore, session, onSelectSession }: Props
       const focused = document.activeElement as HTMLElement | null;
       const rowsEls = treeRows(panelRef.current);
       const focusedIndex = focused ? rowsEls.indexOf(focused) : -1;
-      const node = focusedIndex >= 0 ? rows[focusedIndex] : undefined;
-      const hasChildren = node ? (index.get(node.session.id)?.length ?? 0) > 0 : false;
-      const isCollapsed = node ? collapsed.has(node.session.id) : false;
+      const row = focusedIndex >= 0 ? rows[focusedIndex] : undefined;
+      const target = row?.session;
+      const hasChildren = target ? (index.get(target.id)?.length ?? 0) > 0 : false;
+      const isCollapsed = target ? collapsed.has(target.id) : false;
 
       switch (event.key) {
         case "ArrowDown":
@@ -221,26 +292,26 @@ export function SessionLineage({ catalogStore, session, onSelectSession }: Props
           focusTreeRow(panelRef.current, rowsEls.length - 1);
           return;
         case "ArrowRight":
-          if (!node) return;
+          if (!row) return;
           event.preventDefault();
           if (hasChildren && isCollapsed) {
-            pendingFocusRef.current = node.session.id;
-            toggleCollapsed(node.session.id);
+            pendingFocusRef.current = row.session.id;
+            toggleCollapsed(row.session.id);
           } else {
             focusTreeRow(panelRef.current, focusedIndex + 1);
           }
           return;
         case "ArrowLeft": {
-          if (!node) return;
+          if (!row) return;
           event.preventDefault();
           if (hasChildren && !isCollapsed) {
-            pendingFocusRef.current = node.session.id;
-            toggleCollapsed(node.session.id);
+            pendingFocusRef.current = row.session.id;
+            toggleCollapsed(row.session.id);
             return;
           }
           // 回到父节点：向上找第一个层级更小的可见行。
           for (let i = focusedIndex - 1; i >= 0; i -= 1) {
-            if (rows[i].depth < node.depth) {
+            if (rows[i].depth < row.depth) {
               focusTreeRow(panelRef.current, i);
               return;
             }
@@ -249,9 +320,9 @@ export function SessionLineage({ catalogStore, session, onSelectSession }: Props
         }
         case "Enter":
         case " ":
-          if (!node) return;
+          if (!target) return;
           event.preventDefault();
-          pickSession(node.session);
+          pickSession(target);
           return;
         default:
       }
@@ -282,9 +353,11 @@ export function SessionLineage({ catalogStore, session, onSelectSession }: Props
     return parts.length > 0 ? parts.join(" · ") : null;
   }, []);
 
-  const shownCrumbs: Array<SessionInfo | "gap"> = isMobile && crumbs.length > 2
-    ? [crumbs[0], "gap", crumbs[crumbs.length - 1]]
-    : crumbs;
+  const shownCrumbs = visibleCrumbEntries(crumbs, { compact: isMobile });
+  // 子会话没有首条消息，页头标题取运行标签（scout 之类），再回退到会话标题（dsh 同：label ?? id）。
+  const selfTitle = rowTitle(session);
+  // 末段是否合并成按钮：子代理会话才有（dsh 的 lineage 槽换掉的正是这一段标题）。
+  const isSubagent = Boolean(session.subagent);
 
   return (
     <div className="session-lineage">
@@ -294,20 +367,43 @@ export function SessionLineage({ catalogStore, session, onSelectSession }: Props
             {i > 0 && <span className="session-lineage-sep" aria-hidden="true">/</span>}
             {entry === "gap" ? (
               <span className="session-lineage-gap" aria-hidden="true">…</span>
-            ) : entry.id === session.id ? (
+            ) : entry.id !== session.id ? (
+              <button
+                type="button"
+                className="session-lineage-crumb instant-tooltip"
+                data-tooltip={t("lineage_switchTo", { title: rowTitle(entry) })}
+                onClick={() => onSelectSession(entry)}
+              >
+                {truncateTitle(rowTitle(entry), isMobile ? 16 : 30)}
+              </button>
+            ) : isSubagent ? (
+              // 末段（当前会话就是子代理）：标题与展开按钮合成一个按钮（dsh 的 switcher）
+              <button
+                ref={switcherRef}
+                type="button"
+                className="session-lineage-title instant-tooltip"
+                aria-haspopup="tree"
+                aria-expanded={menu === "switcher"}
+                aria-controls={menu === "switcher" ? treeId : undefined}
+                aria-label={t("lineage_switcherLabel", { title: selfTitle })}
+                data-tooltip={t("lineage_switcherLabel", { title: selfTitle })}
+                onClick={() => (menu === "switcher" ? closePanel(true) : openMenu("switcher"))}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowDown" && menu !== "switcher") {
+                    event.preventDefault();
+                    openMenu("switcher");
+                  }
+                }}
+              >
+                {selfRunning && <span className="session-lineage-dot" aria-hidden="true" />}
+                <span className="session-lineage-trigger-label">{truncateTitle(selfTitle, isMobile ? 20 : 36)}</span>
+                <Chevron open={menu === "switcher"} />
+              </button>
+            ) : (
               <span className="session-lineage-current" aria-current="page" title={t("lineage_current")}>
                 {selfRunning && <span className="session-lineage-dot" aria-hidden="true" />}
                 {shortSessionTitle(entry, isMobile ? 16 : 30)}
               </span>
-            ) : (
-              <button
-                type="button"
-                className="session-lineage-crumb instant-tooltip"
-                data-tooltip={t("lineage_switchTo", { title: shortSessionTitle(entry, 48) })}
-                onClick={() => onSelectSession(entry)}
-              >
-                {shortSessionTitle(entry, isMobile ? 16 : 30)}
-              </button>
             )}
           </Fragment>
         ))}
@@ -317,22 +413,22 @@ export function SessionLineage({ catalogStore, session, onSelectSession }: Props
         <>
           <span className="session-lineage-sep" aria-hidden="true">/</span>
           <button
-            ref={triggerRef}
+            ref={directoryRef}
             type="button"
             className="session-lineage-trigger instant-tooltip"
             aria-haspopup="tree"
-            aria-expanded={open}
-            aria-controls={open ? treeId : undefined}
+            aria-expanded={menu === "directory"}
+            aria-controls={menu === "directory" ? treeId : undefined}
             data-tooltip={t("lineage_listLabel")}
-            onClick={() => (open ? closePanel(true) : setOpen(true))}
+            onClick={() => (menu === "directory" ? closePanel(true) : openMenu("directory"))}
             onKeyDown={(event) => {
-              if (event.key === "ArrowDown" && !open) {
+              if (event.key === "ArrowDown" && menu !== "directory") {
                 event.preventDefault();
-                setOpen(true);
+                openMenu("directory");
               }
             }}
           >
-            {(runningCount > 0 || selfRunning) && <span className="session-lineage-dot" aria-hidden="true" />}
+            {runningCount > 0 && <span className="session-lineage-dot" aria-hidden="true" />}
             <span className="session-lineage-trigger-label">
               {t("lineage_subagentCount", { count: directory.length })}
             </span>
@@ -341,9 +437,7 @@ export function SessionLineage({ catalogStore, session, onSelectSession }: Props
                 {t("lineage_runningCount", { count: runningCount })}
               </span>
             )}
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <polyline points="6 9 12 15 18 9" />
-            </svg>
+            <Chevron open={menu === "directory"} />
           </button>
         </>
       )}
@@ -367,35 +461,36 @@ export function SessionLineage({ catalogStore, session, onSelectSession }: Props
           }}
         >
           {activity.stale && <div className="session-lineage-note">{t("lineage_stale")}</div>}
-          {rows.map((node) => {
-            const entry = activity.bySessionId.get(node.session.id);
-            const childCount = index.get(node.session.id)?.length ?? 0;
-            const isCollapsed = collapsed.has(node.session.id);
-            const isCurrent = node.session.id === session.id;
-            const isRunning = runningIds.has(node.session.id);
+          {rows.map((row) => {
+            const target = row.session;
+            const entry = activity.bySessionId.get(target.id);
+            const childCount = index.get(target.id)?.length ?? 0;
+            const isCollapsed = collapsed.has(target.id);
+            const isCurrent = target.id === session.id;
+            const isRunning = runningIds.has(target.id);
             const needsAttention = entry?.step.activityState === "needs_attention";
             const meta = rowMeta(entry);
-            const label = rowTitle(node.session);
+            const label = rowTitle(target);
             return (
               <div
-                key={node.session.id}
+                key={target.id}
                 role="treeitem"
                 tabIndex={-1}
-                aria-level={node.depth}
+                aria-level={row.depth}
                 aria-expanded={childCount > 0 ? !isCollapsed : undefined}
                 aria-selected={isCurrent}
-                data-session-id={node.session.id}
+                data-session-id={target.id}
                 className={`session-lineage-row${isCurrent ? " is-current" : ""}${needsAttention ? " needs-attention" : ""}`}
-                style={{ paddingLeft: 8 + (node.depth - 1) * 14 }}
+                style={{ paddingLeft: 8 + (row.depth - 1) * 14 }}
                 title={[
                   isCurrent ? t("lineage_current") : t("lineage_switchTo", { title: label }),
                   t("sidebar_subagentReadOnly"),
                   // run-0 布局（旧版 pi-subagents / official-subagent）不显示次数
-                  ...(node.session.subagent && node.session.subagent.runIndex > 0
-                    ? [t("sidebar_runCount", { count: node.session.subagent.runIndex })]
+                  ...(target.subagent && target.subagent.runIndex > 0
+                    ? [t("sidebar_runCount", { count: target.subagent.runIndex })]
                     : []),
                 ].join(" · ")}
-                onClick={() => pickSession(node.session)}
+                onClick={() => pickSession(target)}
               >
                 {childCount > 0 ? (
                   <button
@@ -405,7 +500,7 @@ export function SessionLineage({ catalogStore, session, onSelectSession }: Props
                     aria-label={isCollapsed ? t("sidebar_expandChild") : t("sidebar_collapseChild")}
                     onClick={(event) => {
                       event.stopPropagation();
-                      toggleCollapsed(node.session.id);
+                      toggleCollapsed(target.id);
                     }}
                   >
                     <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ transform: isCollapsed ? "rotate(-90deg)" : "none" }}>
@@ -415,7 +510,11 @@ export function SessionLineage({ catalogStore, session, onSelectSession }: Props
                 ) : (
                   <span className="session-lineage-row-toggle" aria-hidden="true" />
                 )}
-                {isRunning && <span className="session-lineage-dot" aria-hidden="true" />}
+                {needsAttention ? (
+                  <WaitingSessionIndicator size={12} />
+                ) : isRunning ? (
+                  <RunningSessionIndicator size={12} />
+                ) : null}
                 <span className="session-lineage-row-label">{label}</span>
                 {entry?.mode && entry.mode !== "single" && (
                   <span className="session-lineage-row-tag">{entry.mode}</span>
@@ -424,6 +523,9 @@ export function SessionLineage({ catalogStore, session, onSelectSession }: Props
                   <span className="session-lineage-row-attention">{t("lineage_needsAttention")}</span>
                 )}
                 {meta && <span className="session-lineage-row-meta">{meta}</span>}
+                {isRunning && !needsAttention && (
+                  <RunningDurationText startedAt={entry?.step.startedAt} now={now} running />
+                )}
               </div>
             );
           })}

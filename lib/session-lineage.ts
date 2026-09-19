@@ -100,11 +100,28 @@ export function visibleLineageNodes(
 
 /** 首条消息缺失时服务端写下的占位符（子代理会话都是这个）。 */
 const MISSING_FIRST_MESSAGE = "(no messages)";
+/**
+ * 顶栏面包屑的可见段：窄屏超过两段时只留首尾，中间用 "gap" 占位
+ * （否则段名会把当前会话挤出可视区）。
+ */
+export function visibleCrumbEntries(
+  crumbs: readonly SessionInfo[],
+  options: { compact: boolean },
+): Array<SessionInfo | "gap"> {
+  if (!options.compact || crumbs.length <= 2) return [...crumbs];
+  return [crumbs[0], "gap", crumbs[crumbs.length - 1]];
+}
 
 /** 顶栏短标题：name → 首条消息首行 → id（与 CommandPalette 同一约定），单行截断。 */
+/** 单行截断：超长时保留 maxLength-1 个字符 + 省略号。 */
+export function truncateTitle(text: string, maxLength: number): string {
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(1, maxLength - 1))}…`;
+}
+
 export function shortSessionTitle(session: SessionInfo, maxLength = DEFAULT_TITLE_LENGTH): string {
   // 子代理会话的服务端投影没有 name、firstMessage 是占位符，直接退回 id
-  // （下拉行优先用 run step 的 label/agent，见 SessionLineage）。
+  // （下拉行与子会话页头优先用 run step 的 label/agent，见 SessionLineage）。
   const fallbackMessage = session.subagent ? "" : session.firstMessage;
   const source = session.name?.trim()
     || (fallbackMessage.trim() === MISSING_FIRST_MESSAGE ? "" : fallbackMessage)
@@ -113,7 +130,5 @@ export function shortSessionTitle(session: SessionInfo, maxLength = DEFAULT_TITL
     .split(/\r?\n/)
     .map((line) => line.trim())
     .find((line) => line.length > 0);
-  const raw = firstLine || session.id;
-  if (raw.length <= maxLength) return raw;
-  return `${raw.slice(0, Math.max(1, maxLength - 1))}…`;
+  return truncateTitle(firstLine || session.id, maxLength);
 }

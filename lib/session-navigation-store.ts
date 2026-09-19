@@ -203,6 +203,13 @@ export function createSessionNavigationStore(options?: {
       const projectChanged = previous.projectRoot !== identity.projectRoot;
       if (!cwdChanged && !projectChanged) return state;
 
+      // URL 恢复在途：身份 hydrate / 自动选项目不得抢跑成新会话。
+      // 用户已经主动切走（cwd 两边都有值且不同）则放行，startNew 会把 restore 收成 ready。
+      if (state.urlRestore.kind === "loading") {
+        const userSwitch = Boolean(previous.cwd && identity.cwd && previous.cwd !== identity.cwd);
+        if (!userSwitch) return state;
+      }
+
       if (!previous.cwd && !previous.projectRoot) {
         if (state.target.kind === "none" && identity.cwd) return startNew(identity.cwd);
         return state;

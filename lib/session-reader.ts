@@ -1,5 +1,5 @@
-import { closeSync, existsSync, openSync, readSync, statSync } from "fs";
-import { normalize as normalizePath } from "path";
+import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "fs";
+import { join as joinPath, normalize as normalizePath } from "path";
 import type { AgentMessage, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
 import { PIDANCE_COMMAND_CUSTOM_TYPE, parseCommandEntryData } from "./session-command-entry";
 import {
@@ -238,10 +238,36 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
 }
 
 /**
- * subagent 发现的磁盘缓存：子会话文件不在顶层扫描里，但同样按
- * (path, mtimeMs, size) 键控，避免每次列表扫描都对每个 parent 重新
- * 读文件/扫目录（之前 ~400ms 全量成本的主要来源之一）。
+ * subagent 发现缓存除父 jsonl 的 mtime/size 外，还对 run 根做有界树戳：
+ * 深度 2（根 / runId / run-N），最多 96 次 stat。子目录里新建或删除
+ * session.jsonl 会改到 run-N 的 mtime，单层根 mtime 看不见。
  */
+const RUN_TREE_STAMP_MAX_STATS = 96;
+
+function stampPath(path: string, depth: number, budget: { n: number }): string {
+  if (budget.n <= 0) return "";
+  let st: ReturnType<typeof statSync>;
+  try { st = statSync(path); } catch { return ""; }
+  budget.n -= 1;
+  if (!st.isDirectory()) return `${st.mtimeMs}:${st.size}`;
+  let names: string[] = [];
+  try { names = readdirSync(path); } catch { return `${st.mtimeMs}:${st.size}`; }
+  const parts = [`${st.mtimeMs}:${st.size}`];
+  if (depth <= 0) {
+    for (const name of names.slice(0, 32)) parts.push(name);
+    return parts.join("|");
+  }
+  for (const name of names.slice(0, 32)) {
+    parts.push(`${name}=${stampPath(joinPath(path, name), depth - 1, budget)}`);
+  }
+  return parts.join("|");
+}
+
+export function computeParentRunTreeStamp(parentPath: string): string {
+  if (!parentPath.endsWith(".jsonl")) return "";
+  return stampPath(parentPath.slice(0, -6), 2, { n: RUN_TREE_STAMP_MAX_STATS });
+}
+
 function getCachedDiscovery(
   parentPath: string,
   parentId: string,
@@ -251,13 +277,13 @@ function getCachedDiscovery(
 ): CachedDiscoveredChild[] {
   try {
     const st = statSync(parentPath);
+    const treeStamp = computeParentRunTreeStamp(parentPath);
     const record = discoveryRecords.get(parentPath);
-    if (record && record.m === st.mtimeMs && record.s === st.size) {
+    if (record && record.m === st.mtimeMs && record.s === st.size && record.d === treeStamp) {
       return record.c;
     }
-    // 父文件变更/新增：重新发现并更新缓存记录（含 mtime/size 锚）
     const children = discover(parentPath, parentId);
-    discoveryRecords.set(parentPath, { m: st.mtimeMs, s: st.size, c: children });
+    discoveryRecords.set(parentPath, { m: st.mtimeMs, s: st.size, d: treeStamp, c: children });
     return children;
   } catch {
     // 父文件不可 stat（已删除）：清掉缓存记录，返回空

@@ -202,6 +202,46 @@ export const RECENT_SESSIONS_INITIAL_VISIBLE = 5;
 /** 最近区每次「加载更多」追加条数。 */
 export const RECENT_SESSIONS_LOAD_MORE = 5;
 
+/** 最近区「显示更多 / 收起」后的可见条数。 */
+export function nextRecentVisibleCount(
+  current: number,
+  total: number,
+  action: "more" | "fewer",
+): number {
+  const totalSafe = Math.max(0, Math.floor(total));
+  if (action === "fewer") {
+    return Math.min(RECENT_SESSIONS_INITIAL_VISIBLE, totalSafe);
+  }
+  const cur = Number.isFinite(current) ? Math.max(0, Math.floor(current)) : RECENT_SESSIONS_INITIAL_VISIBLE;
+  return Math.min(cur + RECENT_SESSIONS_LOAD_MORE, totalSafe);
+}
+
+/** activity 里已有、列表还不认识的子会话：有界补刷，避免同一批 id 永不重试或轮询打爆。 */
+export function planSubagentDiscoveryRefresh(input: {
+  missingIds: readonly string[];
+  lastKey: string;
+  attempts: number;
+  lastAttemptAt: number;
+  now: number;
+  maxAttempts?: number;
+  cooldownMs?: number;
+}): { fire: boolean; lastKey: string; attempts: number; lastAttemptAt: number } {
+  const key = [...input.missingIds].filter(Boolean).sort().join(",");
+  if (!key) return { fire: false, lastKey: "", attempts: 0, lastAttemptAt: 0 };
+  const maxAttempts = input.maxAttempts ?? 3;
+  const cooldownMs = input.cooldownMs ?? 4_000;
+  if (key !== input.lastKey) {
+    return { fire: true, lastKey: key, attempts: 1, lastAttemptAt: input.now };
+  }
+  if (input.attempts >= maxAttempts) {
+    return { fire: false, lastKey: key, attempts: input.attempts, lastAttemptAt: input.lastAttemptAt };
+  }
+  if (input.now - input.lastAttemptAt < cooldownMs) {
+    return { fire: false, lastKey: key, attempts: input.attempts, lastAttemptAt: input.lastAttemptAt };
+  }
+  return { fire: true, lastKey: key, attempts: input.attempts + 1, lastAttemptAt: input.now };
+}
+
 export interface DeriveRecentSessionsInput {
   /** 全量会话列表（服务端 + 乐观合并后）；排序语义由本函数内部保证。 */
   sessions: readonly SessionInfo[];

@@ -60,6 +60,8 @@ interface SessionCacheRecord {
 interface DiscoveryCacheRecord {
 	m: number;
 	s: number;
+	/** run 根有界树戳（字符串）；缺字段/旧数字记录一律视为失配。 */
+	d?: string | number | null;
 	c: CachedDiscoveredChild[];
 }
 

@@ -41,9 +41,10 @@ import {
   bumpGroupVisibleCount,
   derivePinnedSessions,
   deriveRecentSessions,
+  nextRecentVisibleCount,
+  planSubagentDiscoveryRefresh,
   RECENT_SESSIONS_LIMIT,
   RECENT_SESSIONS_INITIAL_VISIBLE,
-  RECENT_SESSIONS_LOAD_MORE,
   getGroupVisibleCount,
   getVisibleTopLevelNodes,
   resetGroupVisibleCount,
@@ -200,7 +201,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [archiveError, setArchiveError] = useState<string | null>(null);
   // subagent 活跃运行（子会话 + 等待中的主会话）：数据源是与顶栏谱系共用的
   // useSubagentActivity（单一 30s 轮询），这里只把子会话 id 映射成集合。
-  const { runningChildIds: subagentChildRunningIds } = useSubagentActivity();
+  const { runningChildIds: subagentChildRunningIds, bySessionId: subagentActivityBySession } = useSubagentActivity();
+  const subagentChildIds = useMemo(
+    () => [...subagentActivityBySession.keys()],
+    [subagentActivityBySession],
+  );
   const subagentRunningIds = useMemo(() => {
     const ids = new Set<string>(subagentChildRunningIds);
     for (const s of serverSessions) {
@@ -369,7 +374,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       const cached = loadCachedSessionList();
       if (cached && cached.length > 0) {
         if (!mountedRef.current || !shouldApplySessionListResponse(gen, sessionListFetchGenRef.current)) return;
-        catalogStore.applyServerList({ sessions: cached, archivedSessions: [], archivedCount: 0 });
+        catalogStore.applyServerList({ sessions: cached, archivedSessions: [], archivedCount: 0, provisional: true });
       }
     }
     catalogStore.beginListLoad();
@@ -414,6 +419,29 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     initialLoadDone.current = true;
     loadSessionsRef.current(isFirst);
   }, [refreshKey]);
+
+  // subagent 的子会话可能由本机独立 runner 进程写出（后台/异步 run），不会有本地
+  // 事件，所以列表仍不认识 activity 已经报出的子会话时补一次刷新；刷新后即认识，
+  // 同一批缺失 id 只催一次，避免轮询反复触发整表拉取。
+  const subagentRefreshRef = useRef({ lastKey: "", attempts: 0, lastAttemptAt: 0 });
+  useEffect(() => {
+    const known = new Set(serverSessionsRef.current.map((session) => session.id));
+    const missingIds = subagentChildIds.filter((id) => !known.has(id));
+    const plan = planSubagentDiscoveryRefresh({
+      missingIds,
+      lastKey: subagentRefreshRef.current.lastKey,
+      attempts: subagentRefreshRef.current.attempts,
+      lastAttemptAt: subagentRefreshRef.current.lastAttemptAt,
+      now: Date.now(),
+    });
+    subagentRefreshRef.current = {
+      lastKey: plan.lastKey,
+      attempts: plan.attempts,
+      lastAttemptAt: plan.lastAttemptAt,
+    };
+    if (!plan.fire) return;
+    loadSessionsRef.current(false);
+  }, [subagentChildIds, serverSessions]);
 
   // 会话列表刷新为事件驱动（新会话/agent_end/删除/fork 经 refreshKey 触发；
   // 窗口重新聚焦时补一次），不做定时轮询（openchamber 同语义）。
@@ -1594,18 +1622,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                   />
                 );
               })}
-              {recentVisibleCount < recentSessions.length && (
-                <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "2px 8px 5px 28px" }}>
-                  <button
-                    type="button"
-                    className="sidebar-pagination-btn"
-                    onClick={() => setRecentVisibleCount((n) => Math.min(n + RECENT_SESSIONS_LOAD_MORE, recentSessions.length))}
-                  >
-                    {t("sidebar_showMore")}
-                    <span aria-hidden="true">+{RECENT_SESSIONS_LOAD_MORE}</span>
-                  </button>
-                </div>
-              )}
+              <GroupPagination
+                groupKey="recent"
+                total={recentSessions.length}
+                visibleCount={recentVisibleCount}
+                searchActive={false}
+                onShowMore={() => setRecentVisibleCount((n) => nextRecentVisibleCount(n, recentSessions.length, "more"))}
+                onShowFewer={() => setRecentVisibleCount((n) => nextRecentVisibleCount(n, recentSessions.length, "fewer"))}
+              />
             </div>}
           </div>
         )}

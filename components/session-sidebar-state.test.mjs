@@ -414,6 +414,48 @@ test("最近会话：排除 subagent 子会话与已关闭项目内的会话", a
   assert.deepEqual(recent.map((s) => s.id), ["root-recent"]);
 });
 
+test("最近会话：显示更多后可收到默认条数", async () => {
+  const m = await load();
+  assert.equal(m.nextRecentVisibleCount(5, 20, "more"), 10);
+  assert.equal(m.nextRecentVisibleCount(10, 20, "more"), 15);
+  assert.equal(m.nextRecentVisibleCount(18, 20, "more"), 20);
+  assert.equal(m.nextRecentVisibleCount(20, 20, "more"), 20);
+  assert.equal(m.nextRecentVisibleCount(15, 20, "fewer"), 5);
+  assert.equal(m.nextRecentVisibleCount(20, 3, "fewer"), 3);
+  assert.equal(m.nextRecentVisibleCount(-1, 20, "more"), 5);
+});
+
+test("子代理发现补刷：新缺失集合立刻火，同集合冷却后最多再试，成功清空复位", async () => {
+  const m = await load();
+  const first = m.planSubagentDiscoveryRefresh({
+    missingIds: ["c1"], lastKey: "", attempts: 0, lastAttemptAt: 0, now: 1000,
+  });
+  assert.equal(first.fire, true);
+  assert.equal(first.attempts, 1);
+  const sameTick = m.planSubagentDiscoveryRefresh({
+    missingIds: ["c1"], lastKey: first.lastKey, attempts: first.attempts, lastAttemptAt: first.lastAttemptAt, now: 1001,
+  });
+  assert.equal(sameTick.fire, false);
+  const afterCooldown = m.planSubagentDiscoveryRefresh({
+    missingIds: ["c1"], lastKey: first.lastKey, attempts: first.attempts, lastAttemptAt: first.lastAttemptAt, now: 5001,
+  });
+  assert.equal(afterCooldown.fire, true);
+  assert.equal(afterCooldown.attempts, 2);
+  const exhausted = m.planSubagentDiscoveryRefresh({
+    missingIds: ["c1"], lastKey: "c1", attempts: 3, lastAttemptAt: 1000, now: 20_000,
+  });
+  assert.equal(exhausted.fire, false);
+  const cleared = m.planSubagentDiscoveryRefresh({
+    missingIds: [], lastKey: "c1", attempts: 3, lastAttemptAt: 1000, now: 20_000,
+  });
+  assert.equal(cleared.fire, false);
+  assert.equal(cleared.lastKey, "");
+  const reappeared = m.planSubagentDiscoveryRefresh({
+    missingIds: ["c1"], lastKey: "", attempts: 0, lastAttemptAt: 0, now: 30_000,
+  });
+  assert.equal(reappeared.fire, true);
+});
+
 test("最近会话：excludeIds 与损坏 limit 容错", async () => {
   const m = await load();
   const list = [

@@ -79,6 +79,8 @@ export type SessionCatalogStore = {
     runningStartedAt?: Record<string, number>;
     selectedSessionId?: string | null;
     now?: number;
+    /** 客户端缓存预览（SWR 的旧快照）：不改变「权威列表已就绪」判定。 */
+    provisional?: boolean;
   }): void;
   applyListError(message: string): void;
   beginListLoad(): void;
@@ -268,7 +270,9 @@ export function createSessionCatalogStore(options?: {
       state.archivedCount = input.archivedCount ?? archivedSessions.length;
       state.loading = false;
       state.error = null;
-      state.serverListLoaded = true;
+      // 旧缓存快照只能先亮 UI，不得把 URL 恢复的判定放行：拿 50 条旧列表判 not-found
+      // 会把真实存在的会话误判为「找不到」，并让恢复不再重试。
+      state.serverListLoaded = input.provisional ? state.serverListLoaded : true;
       state.listStatus = "ready";
       recyclePending(input.sessions, archivedSessions);
       const keep = new Set([

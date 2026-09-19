@@ -68,25 +68,41 @@ test("主会话 + 3 个子会话：斜线分隔 + 数量触发器（dsh 语义�
   assert.match(html, /aria-current="page"/);
 });
 
-test("进入子会话：面包屑根 → 子 → 孙，触发器统计整个谱系", () => {
+test("子会话页：父标题可点返回，末段标题与展开按钮合成一个按钮", () => {
   const root = session("root", { name: "主会话" });
-  const a = child("a", "root", { modified: "2026-09-15T10:00:00.000Z" });
-  const a1 = child("a1", "a", { modified: "2026-09-15T11:00:00.000Z" });
+  const a = child("a", "root", { modified: "2026-09-15T10:00:00.000Z", name: "调查登录" });
+  const a1 = child("a1", "a", { modified: "2026-09-15T11:00:00.000Z", name: "读日志" });
   const html = render([root, a, a1], a1);
-  // 根与 a 可点，a1 是当前位置
-  assert.equal((html.match(/session-lineage-crumb instant-tooltip/g) ?? []).length, 2);
-  assert.match(html, /Switch to 主会话/);
-  assert.match(html, /aria-current="page"/);
-  // 目录挂在根上：a + a1 都在
-  assert.match(html, /2 subagent\(s\)/);
-  assert.equal((html.match(/class="session-lineage-sep"/g) ?? []).length, 3);
+  // 面包屑保留祖先层（可点返回），只把末段标题换成合并按钮
+  assert.match(html, /session-lineage-crumb instant-tooltip/);
+  assert.match(html, /调查登录/);
+  assert.match(html, /class="session-lineage-title instant-tooltip"/);
+  assert.match(html, /aria-haspopup="tree"/);
+  assert.match(html, /aria-label="Switch subagent: 读日志"/);
+  assert.equal(html.includes("session-lineage-current"), false);
+  // 自己没有后代 → 不出现数量触发器
+  assert.equal(html.includes('class="session-lineage-trigger instant-tooltip"'), false);
 });
 
-test("父会话缺失（已删除）时仍显示当前子会话自身", () => {
+test("子会话页的数量触发器只统计自己的后代（不是整条谱系）", () => {
+  const root = session("root", { name: "主会话" });
+  const a = child("a", "root", { name: "调查登录" });
+  const a1 = child("a1", "a", { modified: "2026-09-15T11:00:00.000Z", name: "读日志" });
+  const grand = child("grand", "a1", { name: "翻日志" });
+  const html = render([root, a, a1, grand], a1);
+  assert.match(html, /class="session-lineage-title instant-tooltip"/);
+  assert.match(html, /class="session-lineage-trigger instant-tooltip"/);
+  assert.match(html, /1 subagent\(s\)/);
+  // 整条谱系是 3（a、a1、grand）：触发器不数它
+  assert.equal(html.includes("3 subagent(s)"), false);
+});
+
+test("父会话缺失（已删除）时仍渲染合并按钮，没有可跳的父层", () => {
   const orphan = child("orphan", "gone");
   const html = render([orphan], orphan);
-  assert.match(html, /aria-current="page"/);
-  assert.equal(html.includes("session-lineage-trigger"), false);
+  assert.match(html, /class="session-lineage-title instant-tooltip"/);
+  assert.equal(html.includes("session-lineage-crumb "), false);
+  assert.equal(html.includes('class="session-lineage-trigger instant-tooltip"'), false);
 });
 
 test("超长标题单行截断（桌面 30 字符 + 省略号）", () => {
