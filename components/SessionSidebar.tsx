@@ -678,7 +678,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [updatePrefs]);
 
   const handleProjectAdded = useCallback((cwd: string, root: string) => {
-    // 只追加项目列表并恢复关闭态，不切换当前项目/会话（避免覆盖用户正在看的项目）。
+    // 追加项目列表并恢复关闭态；然后把当前项目切到刚添加的项目并进入新会话
+    // 空态（引导页）——引导页与侧栏共用同一 identity，避免「显示 A、实际建到 B」。
     updatePrefs((prev) =>
       prev.addedProjectRoots.includes(root)
         ? prev
@@ -686,8 +687,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     );
     restoreClosedProject(root);
     closeCustomPathPanel();
-    onProjectAdded?.(root);
-  }, [updatePrefs, restoreClosedProject, closeCustomPathPanel, onProjectAdded]);
+    onProjectAdded?.(cwd);
+    // 显式给出 root，不从会话列表反推（刚添加的项目可能还没有任何会话）。
+    selectCwd(cwd, root);
+    onNewSession?.(cwd);
+  }, [updatePrefs, restoreClosedProject, closeCustomPathPanel, onProjectAdded, selectCwd, onNewSession]);
 
   const openAddProjectDialog = useCallback(() => {
     setCustomPathOpen(true);

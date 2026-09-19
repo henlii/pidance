@@ -63,6 +63,8 @@ interface Props {
   guideDefaultCwd?: string | null;
   /** 引导页改项目/工作树：同步到全局项目身份（文件栏、Git、标题） */
   onGuideTargetChange?: (cwd: string, projectRoot?: string | null) => void;
+  /** 侧栏新增项目后递增：引导页把新项目并入项目下拉（读 localStorage 只发生一次） */
+  addedProjectsToken?: number;
   onAgentEnd?: () => void;
   /** agentRunning 变化（含冷启动前）→ 侧栏立即显示运行中 */
   onAgentRunningChange?: (running: boolean, sessionId: string | null) => void;
@@ -225,7 +227,7 @@ export function ProcessDetailsGroup({ messageCount, toolCallCount, children, t, 
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, onGuideTargetChange, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onTurnMetricsChange, onOpenFile, footerCollapsed, onFooterToggle }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, addedProjectsToken, onGuideTargetChange, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onTurnMetricsChange, onOpenFile, footerCollapsed, onFooterToggle }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -857,6 +859,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
                 // 等于新会话真正落在的目录，不因未手动选择而显示空态。
                 targetCwd={effectiveNewSessionCwd}
                 onTargetChange={handleDraftTargetChange}
+                addedProjectsToken={addedProjectsToken}
               />
             </div>
             {todoPanelElement}

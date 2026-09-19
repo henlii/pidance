@@ -26,6 +26,7 @@ import {
   clearDefaultWorktreeCache,
   getDefaultWorktreeCache,
   hydrateWorktreeCache,
+  mergeAddedProjectRoots,
   parsePersistedWorktrees,
   resolveGuideTargetSync,
   serializePersistedWorktrees,
@@ -64,6 +65,8 @@ type Props = {
    targetCwd: string | null;
   /** 选择目标；projectRoot 为所属主仓（工作树时与 cwd 不同） */
    onTargetChange: (cwd: string | null, projectRoot?: string | null) => void;
+  /** 侧栏新增项目后递增：把新项目并入项目下拉（偏好只在挂载时读一次） */
+   addedProjectsToken?: number;
  };
 
 /** 项目下拉显示名：取路径末段（项目名）；全路径放 tooltip。 */
@@ -73,7 +76,7 @@ function projectDisplayName(cwd: string): string {
   return seg || cwd;
 }
 
-export function NewSessionGuide({ targetCwd, onTargetChange }: Props) {
+export function NewSessionGuide({ targetCwd, onTargetChange, addedProjectsToken }: Props) {
   const { t } = useI18n();
   const [projects, setProjects] = useState<GuideProject[]>([]);
   const [loadingProjects, setLoadingProjects] = useState(true);
@@ -118,7 +121,8 @@ export function NewSessionGuide({ targetCwd, onTargetChange }: Props) {
         const data = (await res.json()) as { sessions?: SessionInfo[] };
         const sessions = data.sessions ?? [];
         saveCachedSessionList(sessions);
-        const sorted = aggregateGuideProjects(sessions, 12, addedProjectRoots);
+        // 响应回来时重读偏好：挂载后才添加的项目不能在覆盖列表时又被冲掉。
+        const sorted = aggregateGuideProjects(sessions, 12, loadSidebarPreferences().addedProjectRoots);
         if (!cancelled) {
           setProjects(sorted);
         }
@@ -133,6 +137,14 @@ export function NewSessionGuide({ targetCwd, onTargetChange }: Props) {
     };
     // 仅 mount 时执行（项目列表只加载一次；targetCwd 变化由下方同步 effect 收敛）
   }, [addedProjectRoots]);
+
+  // 侧栏新增项目（可能尚无任何会话，不会出现在 /api/sessions 聚合里）：
+  // 必须并入项目下拉，否则 resolveGuideTargetSync 归属不到项目、刚切过去的目标被清空。
+  useEffect(() => {
+    if (addedProjectsToken === undefined) return;
+    const roots = loadSidebarPreferences().addedProjectRoots;
+    setProjects((prev) => mergeAddedProjectRoots(prev, roots));
+  }, [addedProjectsToken]);
 
   const loadWorktrees = useCallback((cwd: string): Promise<void> => {
     setSelectedCwd(cwd);
