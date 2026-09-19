@@ -143,6 +143,11 @@ export function reduceAutoFollow(mode: AutoFollowMode, trigger: AutoFollowTrigge
   }
 }
 
+/** 运行收尾钉底：只在仍跟随才写 scrollTop；released 后已排定的回调也必须再查一次。 */
+export function shouldPinAfterRunSettle(mode: AutoFollowMode): boolean {
+  return mode === "following";
+}
+
 /** 回到底部按钮：仅「可滚动 + released + 不在末端区域」时显示。 */
 export function shouldShowJumpButton(
   mode: AutoFollowMode,

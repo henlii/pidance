@@ -1176,19 +1176,186 @@ span.linenumber {
   transition: opacity 0.12s ease;
 }
 
-/* ── 扩展卡片文字按钮（OpenChamber 风格：Submit/Cancel） ── */
+/* ── 扩展面板 GUI 外壳 ── */
+.extension-panel-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 95;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  background: var(--overlay);
+}
+.extension-panel-inline {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+  background: var(--bg);
+}
+.extension-panel-shell {
+  position: relative;
+  max-height: min(52vh, 560px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
+  border-radius: 12px;
+  background: var(--bg-panel);
+  box-shadow: 0 16px 40px color-mix(in srgb, var(--text) 12%, transparent);
+  font-family: inherit;
+}
+.extension-panel-shell--overlay {
+  max-height: min(760px, calc(100dvh - 32px - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
+}
+.extension-panel-header {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px 8px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.extension-panel-title {
+  min-width: 0;
+  flex: 1;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+.extension-panel-header-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+.extension-panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 12px 14px;
+  overflow-y: auto;
+  overscroll-behavior: auto;
+  touch-action: auto;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text);
+  user-select: text;
+  -webkit-user-select: text;
+}
+.extension-panel-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+.extension-panel-hint,
+.extension-panel-status {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.extension-panel-copy {
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.extension-panel-editor {
+  display: block;
+  width: 100%;
+  min-height: 120px;
+  max-height: 320px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.55;
+  resize: vertical;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+.extension-panel-ansi {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.extension-panel-keytrap {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.extension-option-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.extension-option-btn {
+  width: 100%;
+  min-height: 40px;
+  padding: 10px 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.45;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.extension-option-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.extension-option-btn:disabled {
+  color: var(--text-dim);
+  cursor: not-allowed;
+}
+@media (max-width: 640px) {
+  .extension-panel-shell {
+    max-height: min(70vh, calc(100dvh - 24px - env(safe-area-inset-bottom)));
+  }
+  .extension-option-btn,
+  .extension-card-btn {
+    min-height: 44px;
+  }
+}
+
+/* ── 扩展卡片文字按钮 ── */
 .extension-card-btn {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 26px;
-  padding: 0 12px;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 8px 14px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--bg);
   color: var(--text-muted);
   font: inherit;
-  font-size: 12;
+  font-size: 13px;
   cursor: pointer;
   transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
@@ -1199,6 +1366,16 @@ span.linenumber {
 .extension-card-btn:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+.extension-card-btn--primary {
+  background: var(--accent);
+  color: var(--accent-foreground);
+  border-color: transparent;
+}
+.extension-card-btn--primary:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--accent-foreground);
+  filter: brightness(1.06);
 }
 /* ── 新会话引导选择器（OpenChamber draft-target-selectors 风格） ── */
 .guide-selectors {
@@ -1476,7 +1653,7 @@ span.linenumber {
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
 }
-/* 顶栏子会话谱系：主会话 / 子会话 / N 个子会话 ▾ */
+/* 顶栏子会话谱系：主会话页 `标题 / N 个子会话 ▾`；子会话页 `父标题 / [子标题 ▾]`（末段标题与展开按钮合成一个按钮） */
 .session-lineage {
   display: flex;
   align-items: center;
@@ -1555,6 +1732,34 @@ span.linenumber {
 .session-lineage-trigger-running {
   white-space: nowrap;
   color: var(--status-warning);
+}
+/* 子会话页：标题与展开按钮合成一个按钮（dsh 的 switcher 形态） */
+.session-lineage-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 260px;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.session-lineage-title:hover,
+.session-lineage-title[aria-expanded="true"] {
+  background: var(--bg-selected);
+}
+.session-lineage-title:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.session-lineage-title .session-lineage-trigger-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .session-lineage-dot {
   flex-shrink: 0;
@@ -1913,6 +2118,9 @@ span.linenumber {
   .session-lineage-crumb,
   .session-lineage-current {
     max-width: 84px;
+  }
+  .session-lineage-title {
+    max-width: 42vw;
   }
   .session-lineage-trigger-running {
     display: none;

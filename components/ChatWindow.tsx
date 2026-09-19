@@ -1,11 +1,10 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { AgentMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
+import type { AgentMessage, BashExecutionMessage, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import type { BranchActions } from "@/lib/branch-bookmarks";
-import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
-import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
-import { composeChatPlan, type ChatRenderItem } from "@/lib/chat-compositor";
+import { parseAnsiLine } from "@/lib/ansi";
+import { composeChatPlan, type ChatRenderItem, type ChatRenderPlanItem } from "@/lib/chat-compositor";
 import type { TurnMetrics } from "@/lib/browser-session-runtime-registry";
 import { MessageView } from "./MessageView";
 import { ImagePreviewOverlay } from "./MessageImage";
@@ -23,6 +22,7 @@ import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE, CHAT_COLUMN_MAX_WI
 const CHAT_INPUT_SIDE_PADDING = CHAT_GUTTER;
 const CHAT_INPUT_SIDE_PADDING_MOBILE = 16;
 import { ExtensionDialog } from "./ExtensionDialog";
+import { ExtensionCustomPanel } from "./ExtensionCustomPanel";
 import { NewSessionGuide } from "./NewSessionGuide";
 import { TodoPanel } from "./TodoPanel";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
@@ -38,12 +38,21 @@ import {
   getNextVisibleCount,
   getVisibleRenderWindow,
   growVisibleCountOnAppend,
+  shrinkVisibleCountOnPlanShrink,
   resolveHistoryLoadAction,
   restoreScrollTop,
-  shouldCompensatePrepend,
   shouldShowHistorySentinel,
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
+import {
+  applyViewportScrollAnchor,
+  captureReadingScrollAnchor,
+  captureViewportScrollAnchor,
+  CHAT_IGNORE_RECAPTURE_ATTR,
+  shouldApplyPrependCompensation,
+  type PrependCompensationPending,
+  type ViewportScrollAnchor,
+} from "@/lib/chat-scroll-anchor";
 
 interface Props {
   session: SessionInfo | null;
@@ -91,6 +100,20 @@ function phaseLabel(phase: AgentPhase, t: ReturnType<typeof useI18n>["t"]): stri
 
 
 
+function planItemStableKey(
+  item: ChatRenderPlanItem | undefined,
+  messageKeys: readonly string[],
+): string | null {
+  if (!item) return null;
+  if (item.kind === "processGroup") {
+    return `process:${messageKeys[item.userIdx] ?? item.userIdx}:${messageKeys[item.finalAssistantIdx] ?? item.finalAssistantIdx}`;
+  }
+  if (item.source === "live") return "live";
+  const idx = item.messageIndex;
+  if (typeof idx !== "number") return item.keyPrefix ?? null;
+  return messageKeys[idx] ?? `idx:${idx}`;
+}
+
 // 过程详情默认持续展开（Issue #13）：外层不再默认隐藏整个 user→answer 过程；
 // 用户仍可主动收起/展开，局部 thinking / tool 明细保持各自的按需折叠。
 //
@@ -98,28 +121,33 @@ function phaseLabel(phase: AgentPhase, t: ReturnType<typeof useI18n>["t"]): stri
 // （renderMessage 只拼 JSX），贵的是 React 把整棵子树渲染进 DOM —— 长会话里一轮过程
 // 动辄 40–50 条消息、47 次工具调用，按 entryId 跳到历史后整页可达 2.7 万 DOM 节点、
 // 秒级长任务。不把子树交给 React，就不会付这份代价。
-export function ProcessDetailsGroup({ messageCount, toolCallCount, children, t }: { messageCount: number; toolCallCount: number; children: ReactNode; t: ReturnType<typeof useI18n>["t"] }) {
+export function ProcessDetailsGroup({ messageCount, toolCallCount, children, t, eager = false }: { messageCount: number; toolCallCount: number; children: ReactNode; t: ReturnType<typeof useI18n>["t"]; eager?: boolean }) {
   const [expanded, setExpanded] = useState(true);
   const holderRef = useRef<HTMLDivElement>(null);
-  // 无 IntersectionObserver（SSR / jsdom / 老浏览器）时退化为直接挂载：
-  // 懒挂载只是性能优化，不能成为「内容可见」的前提条件。
-  const [inViewport, setInViewport] = useState(() => typeof IntersectionObserver === "undefined");
+  // 无 IntersectionObserver 时直接挂载。eager 只给收尾刚收成的最后一轮：
+  // 首帧必须是真实内容。更早的历史组仍先占位，进视口再挂载。
+  const [inViewport, setInViewport] = useState(() => eager || typeof IntersectionObserver === "undefined");
   /**
    * 卸载后用于占位的高度 = 上一次实测高度。
    * 用估算值占位会让滚动位置漂移（实测连续跳转后目标偏 18012px）；
    * 记住真实高度则挂载/卸载前后布局几乎不变。
    */
-  const measuredHeightRef = useRef<number | null>(null);
-  // 挂载期间记录真实高度，供下次卸载时占位
+  const estimateHeight = messageCount * 56 + toolCallCount * 24;
+  const measuredHeightRef = useRef<number | null>(estimateHeight);
+  const syncMeasuredHeight = () => {
+    const el = holderRef.current;
+    if (!el) return;
+    const height = el.getBoundingClientRect().height;
+    if (height > 0) measuredHeightRef.current = height;
+  };
+  useLayoutEffect(() => {
+    syncMeasuredHeight();
+  }, [inViewport]);
   useEffect(() => {
     const el = holderRef.current;
     if (!el || !inViewport) return;
-    const record = () => {
-      const h = el.getBoundingClientRect().height;
-      if (h > 0) measuredHeightRef.current = h;
-    };
-    record();
-    const ro = new ResizeObserver(record);
+    syncMeasuredHeight();
+    const ro = new ResizeObserver(() => { syncMeasuredHeight(); });
     ro.observe(el);
     return () => ro.disconnect();
   }, [inViewport]);
@@ -133,6 +161,11 @@ export function ProcessDetailsGroup({ messageCount, toolCallCount, children, t }
     // rootMargin 上下各留一屏半：预挂载减少滚动空白，卸载留足余量避免抖动。
     const io = new IntersectionObserver(
       (entries) => {
+        const node = holderRef.current;
+        if (node) {
+          const height = node.getBoundingClientRect().height;
+          if (height > 0) measuredHeightRef.current = height;
+        }
         setInViewport(entries[0]?.isIntersecting === true);
       },
       { rootMargin: "150% 0px" },
@@ -260,7 +293,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     agentPhase, toolExecutionSnapshots,
     isNew,
     sessionIdRef, scrollContainerRef,
-    jumpButtonVisible, jumpToBottom, markExternalScrollWrite, notifyProgrammaticSmooth,
+    jumpButtonVisible, jumpToBottom, markExternalScrollWrite, notifyProgrammaticSmooth, isAutoFollowing,
     loadOlderHistory,
     loadNewerHistory,
     jumpToEntry,
@@ -320,6 +353,15 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
 
   const writesDisabled = isReadOnly || lockedByOther;
   const sessionBusy = agentRunning || bashRunning || isCompacting;
+  const liveSlot = streamState.isStreaming && streamState.streamingMessage
+    ? { message: streamState.streamingMessage, isActive: true }
+    : undefined;
+  const chatPlan = composeChatPlan({
+    messages,
+    isStreaming: streamState.isStreaming,
+    agentOrBashRunning: sessionBusy,
+    liveSlot,
+  });
   const [todosCollapsed, setTodosCollapsed] = useState(true);
   const todoCollapseScope = session?.id ?? (effectiveNewSessionCwd ? `new:${effectiveNewSessionCwd}` : "new-session");
   // Todo 展开状态只属于当前聊天视图；切换会话后恢复默认折叠。
@@ -367,23 +409,32 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   }, [sessionBusy, handleAbort]);
 
 // --- Lazy-load historical messages ---
-  // 1) 客户端 visibleCount：已加载消息内只渲染末 N 条
+  // 1) 客户端 visibleCount：已加载计划项内只渲染末 N 条（过程组是一项，不是一条消息）
   // 2) 服务端 hasMoreBefore：滚到顶时 loadOlderHistory prepend 更旧页（OpenChamber 风格）
   // 3) 尾部追加时同步增大 visibleCount，避免自动跟随时 startIndex 前移卸载更早消息
   const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE);
   const sentinelRef = useRef<HTMLDivElement>(null);
-  const prevScrollDistanceRef = useRef<number | null>(null);
-  /** 已补偿过的头部 entry id：只有「头部变老」（prepend）才需要补偿。 */
-  const compensatedHeadRef = useRef<string | null>(null);
+  const pendingCompensationRef = useRef<PrependCompensationPending | null>(null);
+  const compensationGenRef = useRef(0);
+  const ignoreScrollRecaptureRef = useRef(false);
   const prevPlanTotalRef = useRef<number | null>(null);
-  // 会话切换时重置可见窗口与计划长度种子
+  const readingAnchorRef = useRef<ViewportScrollAnchor | null>(null);
+  const prevPlanSigRef = useRef<string | null>(null);
+  const { startIndex: planStartIndex, hasMore: localHasMore } = getVisibleRenderWindow(chatPlan.length, visibleCount);
+  const renderedHeadKey = planItemStableKey(chatPlan[planStartIndex], messageKeys);
+  const renderedHeadKeyRef = useRef(renderedHeadKey);
+  renderedHeadKeyRef.current = renderedHeadKey;
+  // 快照必须在绘制前作废：A→B→A 时旧 then() 不得改新事务。
+  useLayoutEffect(() => {
+    compensationGenRef.current += 1;
+    pendingCompensationRef.current = null;
+    prevPlanTotalRef.current = null;
+    readingAnchorRef.current = null;
+    prevPlanSigRef.current = null;
+  }, [session?.id]);
+  // 会话切换时重置可见窗口（首屏末 N 条）
   useEffect(() => {
     setVisibleCount(VISIBLE_PAGE_SIZE);
-    prevPlanTotalRef.current = null;
-    // 距离快照属于上一个会话：带过去会在新会话的首次布局变化时被错误套用，
-    // 表现为「一打开/一切换就跳一大段」。
-    prevScrollDistanceRef.current = null;
-    compensatedHeadRef.current = null;
   }, [session?.id]);
 
   // IntersectionObserver on the sentinel div at the top of the message list.
@@ -392,61 +443,138 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     const sentinel = sentinelRef.current;
     const container = scrollContainerRef.current;
     if (!sentinel || !container) return;
+    const capturePending = (): number => {
+      const generation = ++compensationGenRef.current;
+      pendingCompensationRef.current = {
+        generation,
+        sessionId: session?.id ?? null,
+        visibleCount,
+        distance: captureScrollDistance(container.scrollHeight, container.scrollTop),
+        renderedHeadKey: renderedHeadKeyRef.current,
+        anchor: captureViewportScrollAnchor(container),
+      };
+      return generation;
+    };
+    const recaptureIfPending = () => {
+      if (ignoreScrollRecaptureRef.current) return;
+      if (container.getAttribute(CHAT_IGNORE_RECAPTURE_ATTR) === "1") return;
+      const anchor = captureViewportScrollAnchor(container);
+      if (!isAutoFollowing()) readingAnchorRef.current = captureReadingScrollAnchor(container) ?? anchor;
+      const pending = pendingCompensationRef.current;
+      if (!pending) return;
+      pending.distance = captureScrollDistance(container.scrollHeight, container.scrollTop);
+      pending.anchor = anchor;
+    };
     const observer = new IntersectionObserver(
       (entries) => {
         if (!entries[0]?.isIntersecting) return;
         const action = resolveHistoryLoadAction({
-          visibleCount,
-          messagesLength: messages.length,
+          localHasMore,
           hasMoreBefore,
           historyLoading,
         });
         if (action === "none") return;
-        // Save distance from top before prepending to restore scroll later
-        prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
+        const generation = capturePending();
         if (action === "expand-local") {
           setVisibleCount((prev) => getNextVisibleCount(prev));
           return;
         }
-        // action === "load-server"：已到本地头，拉更旧页
+        // load-server：扩窗交给计划增长的 layout（与 hydrate 同一绘制前批次），
+        // then 只负责失败/过期时丢掉本事务快照，不得改另一会话的 visibleCount。
         void loadOlderHistory().then((loaded) => {
-          if (loaded) setVisibleCount((v) => getNextVisibleCount(v));
-          // 没拉到（失败/会话已切走）：本次不会发生 prepend，快照作废，
-          // 否则它会一直等到下一个无关的布局变化才被套用。
-          else prevScrollDistanceRef.current = null;
+          if (compensationGenRef.current !== generation) return;
+          if (!loaded && pendingCompensationRef.current?.generation === generation) {
+            pendingCompensationRef.current = null;
+          }
         });
       },
       { root: container, threshold: 0 },
     );
     observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [visibleCount, messages.length, scrollContainerRef, hasMoreBefore, historyLoading, loadOlderHistory]);
+    // 用户滚动发生之后再采锚点（wheel 监听器在默认滚动之前触发）。
+    container.addEventListener("scroll", recaptureIfPending, { passive: true });
+    return () => {
+      observer.disconnect();
+      container.removeEventListener("scroll", recaptureIfPending);
+    };
+  }, [localHasMore, visibleCount, scrollContainerRef, hasMoreBefore, historyLoading, loadOlderHistory, session?.id, isAutoFollowing]);
 
-  // After visibleCount increases (more messages prepended), restore the
-  // scroll position so the viewport doesn't jump.
-  //
-  // 两个要点（否则就是「首次向上滚动跳过很大一段」）：
-  // 1. 必须是 useLayoutEffect：它在 DOM 变更后、**浏览器绘制前**同步执行。原实现用
-  //    useEffect，用户会先看到内容位移（prepend 把视口整体下推），随后才被拉回。
-  // 2. 只在「头部变老」时补偿：尾部追加（流式/新消息）也会改变 scrollHeight，
-  //    但它发生在视口下方，套用同一个补偿会把视口错误地下移。
-  useLayoutEffect(() => {
-    if (prevScrollDistanceRef.current == null) return;
+  useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
-    const head = entryIds[0] ?? null;
-    if (!shouldCompensatePrepend({
-      savedDistance: prevScrollDistanceRef.current,
-      headEntryId: head,
-      compensatedHeadEntryId: compensatedHeadRef.current,
-    })) return;
-    compensatedHeadRef.current = head;
-    // prepend 补偿是 auto-follow 之外的 scrollTop 写入：先标记，让随后的
-    // scroll 事件不参与状态判定（用户在顶部阅读，绝不能被钉底逻辑拉走）。
-    markExternalScrollWrite();
-    container.scrollTop = restoreScrollTop(container.scrollHeight, prevScrollDistanceRef.current);
-    prevScrollDistanceRef.current = null;
-  }, [entryIds, visibleCount, messages.length, scrollContainerRef, markExternalScrollWrite]);
+    const onScroll = () => {
+      if (ignoreScrollRecaptureRef.current) return;
+      if (container.getAttribute(CHAT_IGNORE_RECAPTURE_ATTR) === "1") return;
+      if (isAutoFollowing()) return;
+      readingAnchorRef.current = captureReadingScrollAnchor(container) ?? captureViewportScrollAnchor(container);
+    };
+    container.addEventListener("scroll", onScroll, { passive: true });
+    return () => container.removeEventListener("scroll", onScroll);
+  }, [scrollContainerRef, session?.id, isAutoFollowing, messages.length, chatPlan.length]);
+
+  // 计划变长（prepend / 流式追加）时在绘制前补 visibleCount，保持 startIndex，
+  // 再决定是否消费本事务的 prepend 快照。setState 会再跑一遍 layout，仍在绘制前。
+  useLayoutEffect(() => {
+    const prevTotal = prevPlanTotalRef.current;
+    const nextTotal = chatPlan.length;
+    let windowReady = true;
+    if (prevTotal === null || prevTotal === 0) {
+      prevPlanTotalRef.current = nextTotal;
+    } else if (nextTotal !== prevTotal) {
+      if (nextTotal > prevTotal) {
+        const grown = growVisibleCountOnAppend(visibleCount, prevTotal, nextTotal);
+        if (grown !== visibleCount) {
+          windowReady = false;
+          setVisibleCount(grown);
+        }
+      } else if (nextTotal < prevTotal) {
+        const shrunk = shrinkVisibleCountOnPlanShrink(visibleCount, prevTotal, nextTotal);
+        if (shrunk !== visibleCount) {
+          windowReady = false;
+          setVisibleCount(shrunk);
+        }
+      }
+      prevPlanTotalRef.current = nextTotal;
+    }
+
+    if (!windowReady) return;
+    const container = scrollContainerRef.current;
+    const pending = pendingCompensationRef.current;
+    if (container && shouldApplyPrependCompensation({
+      pending,
+      sessionId: session?.id ?? null,
+      generation: compensationGenRef.current,
+      renderedHeadKey,
+      visibleCount,
+    }) && pending) {
+      markExternalScrollWrite();
+      ignoreScrollRecaptureRef.current = true;
+      const restored = pending.anchor ? applyViewportScrollAnchor(container, pending.anchor) : false;
+      if (!restored) {
+        container.scrollTop = restoreScrollTop(container.scrollHeight, pending.distance);
+      }
+      pendingCompensationRef.current = null;
+      requestAnimationFrame(() => {
+        ignoreScrollRecaptureRef.current = false;
+      });
+    }
+    const planLayoutSig = chatPlan.map((item) => (
+      item.kind === "processGroup"
+        ? `g:${item.userIdx}:${item.finalAssistantIdx}:${item.messageCount}`
+        : `m:${item.source}:${item.messageIndex ?? "x"}:${item.keyPrefix}`
+    )).join("|");
+    const following = isAutoFollowing();
+    if (container && !following && readingAnchorRef.current && prevPlanSigRef.current && prevPlanSigRef.current !== planLayoutSig) {
+      markExternalScrollWrite();
+      applyViewportScrollAnchor(container, readingAnchorRef.current);
+    }
+    prevPlanSigRef.current = planLayoutSig;
+    if (container && !following) {
+      readingAnchorRef.current = captureReadingScrollAnchor(container) ?? captureViewportScrollAnchor(container);
+    } else {
+      readingAnchorRef.current = null;
+    }
+  }, [renderedHeadKey, visibleCount, chatPlan, entryIds, messages.length, session?.id, markExternalScrollWrite, scrollContainerRef, isAutoFollowing]);
   // Push session stats up to AppShell for the top bar.
   // Compare scalar fields to avoid loops from new object identity each render.
   const statsKey = sessionStats
@@ -508,31 +636,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
 
   const visibleMessages = messages.filter((m) => m.role === "user" || m.role === "assistant");
   const messageRefs = useMessageRefs(visibleMessages.length);
-
-  // P3b：live streaming slot 进入统一渲染计划（compositor）——live 与磁盘消息同计划
-  // 渲染，删除计划尾部的独立 MessageView；ChatMinimap 也消费同一计划。
-  const liveSlot = streamState.isStreaming && streamState.streamingMessage
-    ? { message: streamState.streamingMessage, isActive: true }
-    : undefined;
-const chatPlan = composeChatPlan({
-    messages,
-    isStreaming: streamState.isStreaming,
-    agentOrBashRunning: sessionBusy,
-    liveSlot,
-  });
-  // 计划变长（流式追加 / 新消息）时补齐 visibleCount，防止固定窗口把更早项卸出 DOM。
-  // 切换会话时 prev 为 null，只播种不增长，保持首屏末 N 条。
-  useEffect(() => {
-    const nextTotal = chatPlan.length;
-    const prevTotal = prevPlanTotalRef.current;
-    if (prevTotal === null) {
-      prevPlanTotalRef.current = nextTotal;
-      return;
-    }
-    if (nextTotal === prevTotal) return;
-    setVisibleCount((current) => growVisibleCountOnAppend(current, prevTotal, nextTotal));
-    prevPlanTotalRef.current = nextTotal;
-  }, [chatPlan.length]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   const messageCwd = session?.cwd ?? effectiveNewSessionCwd ?? undefined;
@@ -883,13 +986,14 @@ const chatPlan = composeChatPlan({
                     onCompactContext={!isLive && !sessionBusy && !writesDisabled ? handleCompact : undefined}
                   />
                 );
-                if (!isVisible || !item.attachRef || currentRefIdx === undefined) return view;
+                const anchorId = isLive || !entryIds[idx] ? undefined : `${item.keyPrefix}:${entryIds[idx]}`;
+                if (!anchorId && (!isVisible || !item.attachRef || currentRefIdx === undefined)) return view;
                 return (
                   <div
                     key={`${item.keyPrefix}-${stableKey}`}
-                    ref={attachVisibleRef(idx, currentRefIdx)}
-                    // 定位/验收锚点：导航条跳转与浏览器回归按 entryId 断言目标位置
-                    data-message-entry-id={!isLive ? entryIds[idx] : undefined}
+                    ref={isVisible && item.attachRef && currentRefIdx !== undefined ? attachVisibleRef(idx, currentRefIdx) : undefined}
+                    data-message-entry-id={!isLive && item.attachRef ? entryIds[idx] : undefined}
+                    data-chat-anchor={anchorId}
                   >
                     {view}
                   </div>
@@ -900,6 +1004,7 @@ const chatPlan = composeChatPlan({
               /** 计划项下标 → 该计划项对应的消息下标（供渲染窗口撑开精确定位） */
               const messageIndexByPlanIndex = new Map<number, number>();
               const plan = chatPlan;
+              const lastProcessUserIdx = [...plan].reverse().find((entry) => entry.kind === "processGroup")?.userIdx;
               for (const item of plan) {
                 if (item.kind === "message") {
                   const messageIndex = (item as { messageIndex?: number | null }).messageIndex;
@@ -918,6 +1023,7 @@ const chatPlan = composeChatPlan({
                       t={t}
                       messageCount={item.messageCount}
                       toolCallCount={item.toolCallCount}
+                      eager={item.userIdx === lastProcessUserIdx}
                     >
                       {item.children.map((child) => renderMessage(child))}
                     </ProcessDetailsGroup>
@@ -931,7 +1037,7 @@ const chatPlan = composeChatPlan({
                     </div>,
                   );
               }
-              const { startIndex, hasMore: localHasMore } = getVisibleRenderWindow(rendered.length, visibleCount);
+              const startIndex = planStartIndex;
               // 渲染窗口（只渲染末尾 visibleCount 条计划项）是否覆盖目标 entry：
               // 目标可能已加载但落在窗口外，导航条跳转前需要先把窗口撑开到覆盖它。
               expandRenderWindowToEntryRef.current = (entryId: string) => {
@@ -1259,15 +1365,16 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
               style={{
                 display: "flex",
                 width: "100%",
+                minHeight: 36,
                 alignItems: "center",
-                gap: 6,
-                padding: "5px 9px",
+                gap: 8,
+                padding: "8px 12px",
                 border: "none",
                 borderBottom: collapsed ? "none" : "1px solid var(--border)",
                 background: "transparent",
-                color: "var(--text-dim)",
-                fontSize: 11,
-                fontFamily: "var(--font-mono)",
+                color: "var(--text)",
+                fontSize: 13,
+                fontFamily: "inherit",
                 cursor: "pointer",
                 textAlign: "left",
               }}
@@ -1525,8 +1632,6 @@ function NoticeShelf({ notices, activities, onDismiss, onTogglePin, floating = f
   );
 }
 
-type ExtensionCustomRequest = Extract<ExtensionUiRequest, { method: "custom" }>;
-
 function renderAnsiLine(line: string, keyPrefix: string): ReactNode[] {
   return parseAnsiLine(line).map((segment, index) => (
     Object.keys(segment.style).length > 0
@@ -1535,141 +1640,4 @@ function renderAnsiLine(line: string, keyPrefix: string): ReactNode[] {
   ));
 }
 
-function ExtensionCustomPanel({
-  request,
-  onInput,
-}: {
-  request: ExtensionCustomRequest;
-  onInput: (request: ExtensionCustomRequest, data: string) => void;
-}) {
-  const { t } = useI18n();
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  const composingRef = useRef(false);
-  const displayLines = normalizeCustomPanelLines(request.lines);
 
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, [request.id]);
-
-  return (
-    <div
-      style={{
-        position: "absolute",
-        inset: 0,
-        zIndex: 95,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 20,
-        background: "var(--overlay)",
-      }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        onClick={(event) => {
-          if (!(event.target as HTMLElement).closest("button")) inputRef.current?.focus();
-        }}
-        style={{
-          position: "relative",
-          // 与输入框同宽（面板覆盖在会话列上方，宽度不一致会显成错位的另一栏）
-          width: `min(${CHAT_COLUMN_MAX_WIDTH}px, 100%)`,
-          maxHeight: "min(760px, calc(100vh - 40px))",
-          border: "1px solid var(--border)",
-          borderRadius: 8,
-          background: "var(--bg)",
-          boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
-          overflow: "hidden",
-          outline: "none",
-        }}
-      >
-        <textarea
-          ref={inputRef}
-          aria-label={t("chat_extensionPanel")}
-          autoCapitalize="off"
-          autoComplete="off"
-          autoCorrect="off"
-          spellCheck={false}
-          onKeyDown={(event) => {
-            if (composingRef.current || event.nativeEvent.isComposing) return;
-            const data = toTerminalKeyData(event);
-            if (!data) return;
-            event.preventDefault();
-            event.stopPropagation();
-            onInput(request, data);
-          }}
-          onInput={(event) => {
-            if (composingRef.current || event.nativeEvent.isComposing) return;
-            const text = event.currentTarget.value;
-            event.currentTarget.value = "";
-            if (text) onInput(request, text);
-          }}
-          onCompositionStart={() => {
-            composingRef.current = true;
-          }}
-          onCompositionEnd={(event) => {
-            composingRef.current = false;
-            const input = event.currentTarget;
-            queueMicrotask(() => {
-              const text = input.value;
-              input.value = "";
-              if (text) onInput(request, text);
-            });
-          }}
-          onPaste={(event) => {
-            event.preventDefault();
-            const text = event.clipboardData.getData("text");
-            if (text) onInput(request, asBracketedPaste(text));
-          }}
-          style={{
-            position: "absolute",
-            width: 1,
-            height: 1,
-            padding: 0,
-            border: 0,
-            opacity: 0,
-            pointerEvents: "none",
-          }}
-        />
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 12px", borderBottom: "1px solid var(--border)" }}>
-          <div style={{ color: "var(--text)", fontSize: 13, fontWeight: 650 }}>{t("chat_extensionPanel")}</div>
-          <button
-            onClick={() => onInput(request, "\x03")}
-            style={{
-              padding: "5px 9px",
-              borderRadius: 6,
-              border: "1px solid var(--border)",
-              background: "var(--bg-panel)",
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: 12,
-            }}
-          >
-            {t("chat_close")}
-          </button>
-        </div>
-        <pre
-          style={{
-            margin: 0,
-            padding: 14,
-            maxHeight: "calc(min(760px, 100vh - 40px) - 48px)",
-            overflow: "auto",
-            background: "var(--bg-panel)",
-            color: "var(--text)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 13,
-            lineHeight: 1.45,
-            whiteSpace: "pre",
-          }}
-        >
-          {(displayLines.length ? displayLines : [""]).map((line, index, allLines) => (
-            <Fragment key={index}>
-              {renderAnsiLine(line, `line-${index}`)}
-              {index < allLines.length - 1 ? "\n" : null}
-            </Fragment>
-          ))}
-        </pre>
-      </div>
-    </div>
-  );
-}

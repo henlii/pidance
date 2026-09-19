@@ -934,12 +934,7 @@ function pinStreamBlockToBottom(
 }
 
 /**
- * 块标签：`【思考】` / `【工具】`。
- *
- * 设计约束（用户要求）：**永不出现独立标题行**。标签内联在内容前面 —— 折叠与流式中
- * 整块只有一行（标签 + 末行内容），展开后也是标签接着内容，不再单独占一行标题。
- * 标签本身是唯一的状态标识与展开/收起入口（不再有工具名、状态、耗时、图标等标题元素；
- * 工具状态仍由左侧 3px 状态色边框表达）。
+ * 块标签：`思考·` / `Bash·`。折叠态标签与摘要同一行；展开态标题独占第一行，正文从第二行起。
  */
 const BLOCK_LABEL_STYLE = {
   flexShrink: 0,
@@ -947,11 +942,19 @@ const BLOCK_LABEL_STYLE = {
   border: "none",
   background: "none",
   color: "var(--text-dim)",
-  cursor: "pointer",
   fontFamily: "var(--font-mono)",
   fontSize: 11,
   lineHeight: 1.4,
 } as const;
+
+function formatBlockLabel(name: string): string {
+  return `${name}·`;
+}
+
+function formatToolBlockLabel(toolName: string): string {
+  const trimmed = toolName.trim() || "tool";
+  return formatBlockLabel(trimmed.charAt(0).toUpperCase() + trimmed.slice(1));
+}
 
 /** 耗时/右对齐小字（标签行右侧，不占额外行高）。 */
 const BLOCK_META_STYLE = {
@@ -981,56 +984,45 @@ const COLLAPSED_LINE_STYLE = {
  * 结构上左侧是撑满剩余宽度的按钮（标签 + 摘要），右侧耗时是独立元素 ——
  * 这样整行（除耗时外）都可点，光标停在行内任意处都是手型。
  */
-function BlockHeaderRow({ label, expanded, onToggle, summary, meta, indent, showCommandLabel }: {
+function BlockHeaderRow({ label, expanded, onToggle, summary, meta, showCommandLabel }: {
   label: string;
   expanded: boolean;
   onToggle: () => void;
   /** 折叠态那一行的内容摘要（展开态传 null，由分区自己渲染内容） */
   summary: string | null;
-  /** 行右侧的耗时等次要信息，不参与点击 */
+  /** 行右侧的耗时 */
   meta?: string | null;
-  /** 并进分区表头时不需要额外内边距（只影响间距） */
-  indent?: boolean;
   /** 渲染「命令」小字：只有工具块的命令分区需要，思考块不要 */
   showCommandLabel?: boolean;
 }) {
   const { t } = useI18n();
   return (
-    <div
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={expanded}
+      title={expanded ? t("chat_hideProcess") : t("chat_showProcess")}
+      data-block-header="true"
       style={{
         display: "flex",
         alignItems: "center",
         gap: 7,
         width: "100%",
-        padding: indent ? 0 : "6px 10px",
+        boxSizing: "border-box",
+        padding: "6px 10px",
         minWidth: 0,
+        border: "none",
+        background: "none",
+        color: "inherit",
+        cursor: "pointer",
+        textAlign: "left",
       }}
     >
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={expanded}
-        title={expanded ? t("chat_hideProcess") : t("chat_showProcess")}
-        style={{
-          flex: 1,
-          minWidth: 0,
-          display: "flex",
-          alignItems: "center",
-          gap: 7,
-          padding: 0,
-          border: "none",
-          background: "none",
-          color: "inherit",
-          cursor: "pointer",
-          textAlign: "left",
-        }}
-      >
-        <span style={BLOCK_LABEL_STYLE}>【{label}】</span>
-        {summary !== null && <span style={COLLAPSED_LINE_STYLE}>{summary}</span>}
-        {showCommandLabel && <span style={{ color: "var(--text-dim)", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em", flexShrink: 0 }}>{t("message_toolCommand")}</span>}
-      </button>
-      {meta && <span style={BLOCK_META_STYLE}>{meta}</span>}
-    </div>
+      <span style={BLOCK_LABEL_STYLE}>{label}</span>
+      {summary !== null && <span style={COLLAPSED_LINE_STYLE}>{summary}</span>}
+      {showCommandLabel && <span style={{ color: "var(--text-dim)", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em", flexShrink: 0 }}>{t("message_toolCommand")}</span>}
+      {meta && <span style={{ ...BLOCK_META_STYLE, marginLeft: "auto" }}>{meta}</span>}
+    </button>
   );
 }
 
@@ -1142,52 +1134,27 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
         borderRadius: 6,
         overflow: "hidden",
         fontSize: 13,
+        background: "var(--bg-panel)",
       }}
     >
-      <div
-        style={{
-          display: "flex",
-          alignItems: expanded ? "flex-start" : "center",
-          gap: 6,
-          width: "100%",
-          padding: "6px 10px",
-          background: "var(--bg-panel)",
-          minWidth: 0,
-        }}
-      >
-        {!expanded && (
-          <BlockHeaderRow
-            label={t("chat_blockThinking")}
-            expanded={expanded}
-            onToggle={() => void toggle()}
-            summary={collapsedText}
-            meta={duration === undefined ? null : formatElapsedDuration(duration * 1000)}
-            indent
-          />
-        )}
-        {/* 展开后标签同样是收起入口：正文本身要保持可选中，所以只有标签这一小段可点 */}
-        {expanded && (
-          <button
-            type="button"
-            onClick={() => void toggle()}
-            aria-expanded={expanded}
-            title={t("chat_hideProcess")}
-            style={{ ...BLOCK_LABEL_STYLE, flexShrink: 0 }}
-          >
-            【{t("chat_blockThinking")}】
-          </button>
-        )}
+      <BlockHeaderRow
+        label={formatBlockLabel(t("chat_blockThinking"))}
+        expanded={expanded}
+        onToggle={() => void toggle()}
+        summary={expanded ? null : collapsedText}
+        meta={duration === undefined ? null : formatElapsedDuration(duration * 1000)}
+      />
+      {expanded && (
         <div
           ref={bodyRef}
-          tabIndex={expanded ? 0 : undefined}
+          tabIndex={0}
           className="chat-selectable"
           onScroll={(event) => {
             if (pinningBodyRef.current) return;
             followBodyRef.current = isNearStreamBlockBottom(event.currentTarget);
           }}
-          style={expanded ? {
-            flex: 1,
-            minWidth: 0,
+          style={{
+            padding: "0 10px 8px",
             color: error ? "var(--error-text)" : "var(--text-muted)",
             fontSize: 12,
             lineHeight: 1.6,
@@ -1196,14 +1163,11 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
             overflow: "auto",
             overscrollBehavior: "auto",
             touchAction: "pan-y",
-          } : COLLAPSED_LINE_STYLE}
+          }}
         >
-          {expanded ? bodyText : collapsedText}
+          {bodyText}
         </div>
-        {expanded && duration !== undefined && (
-          <span style={BLOCK_META_STYLE}>{formatElapsedDuration(duration * 1000)}</span>
-        )}
-      </div>
+      )}
     </div>
   );
 }
@@ -1329,7 +1293,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
           展开且存在命令分区时，标签并进该分区表头（展开后同样不出现标题行）。 */}
       {(!expanded || !command) && (
         <BlockHeaderRow
-          label={t("chat_blockTool")}
+          label={formatToolBlockLabel(block.toolName)}
           expanded={expanded}
           onToggle={() => setExpanded(!expanded)}
           summary={!expanded ? (isRunning && liveLastLine.trim() ? liveLastLine : command) : null}
@@ -1339,19 +1303,16 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
 
       {/* ── Expanded: 参数友好摘要（替代原始 JSON，OpenChamber 风格） ── */}
       {expanded && command && (
-        <div style={{ padding: "8px 10px", background: "var(--bg-subtle)" }}>
-          <div style={{ marginBottom: 4 }}>
-            <BlockHeaderRow
-              label={t("chat_blockTool")}
-              expanded={expanded}
-              onToggle={() => setExpanded(!expanded)}
-              summary={null}
-              meta={elapsedMs === undefined ? null : formatElapsedDuration(elapsedMs)}
-              indent
-              showCommandLabel
-            />
-          </div>
-          <code style={{ display: "block", maxHeight: streamBlockMaxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{command}</code>
+        <div style={{ background: "var(--bg-subtle)" }}>
+          <BlockHeaderRow
+            label={formatToolBlockLabel(block.toolName)}
+            expanded={expanded}
+            onToggle={() => setExpanded(!expanded)}
+            summary={null}
+            meta={elapsedMs === undefined ? null : formatElapsedDuration(elapsedMs)}
+            showCommandLabel
+          />
+          <code style={{ display: "block", padding: "0 10px 8px", maxHeight: streamBlockMaxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{command}</code>
         </div>
       )}
 

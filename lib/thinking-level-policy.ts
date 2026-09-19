@@ -73,3 +73,28 @@ export function guidePageThinkingUpdate(
   return namedLevel(thinkingLevel);
 }
 
+/**
+ * 远程思考档是否可以写进当前视图。
+ *
+ * 磁盘 hydrate 是打开会话的权威落地。热状态 / thinking_level_changed 在用户
+ * 尚未改档时不得覆盖已经落地的值——Pi 常把 max/xhigh 误报成 high，
+ * 而会话实际仍按磁盘档位发请求。用户改档或代次前进之后，远程值重新可写。
+ */
+export function shouldAcceptRemoteThinking(input: {
+  viewSessionId: string | null;
+  targetSessionId: string | null;
+  generation: number;
+  capturedGeneration: number;
+  userTouched: boolean;
+  localLevel: string | null;
+  remoteLevel: string;
+  source: "disk" | "live-hydrate" | "event";
+}): boolean {
+  if (!input.viewSessionId || input.viewSessionId !== input.targetSessionId) return false;
+  if (input.generation !== input.capturedGeneration) return false;
+  if (input.source === "disk") return true;
+  if (input.userTouched) return true;
+  if (input.localLevel && input.localLevel !== input.remoteLevel) return false;
+  return true;
+}
+

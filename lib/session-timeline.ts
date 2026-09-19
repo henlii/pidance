@@ -168,31 +168,71 @@ export function mergeTailRecords(
 }
 
 /**
- * 归并后保留仍未被磁盘包含的乐观记录。
+ * overlap 之后、且 previous 里没有的已确认 user 条数。
+ * 只认「最后一条已确认记录仍在 next 里」之后的后缀，避免把历史扩窗/切页当成交付。
+ */
+function countNewTailUsers(previous: Timeline, next: Timeline): number {
+  const previousIdSet = new Set(previous.map((record) => record.entryId).filter(Boolean));
+  const lastPrevConfirmed = [...previous].reverse().find((record) => record.entryId);
+  let start = 0;
+  if (lastPrevConfirmed) {
+    const overlap = next.findIndex((record) => record.entryId === lastPrevConfirmed.entryId);
+    if (overlap < 0) return 0;
+    start = overlap + 1;
+  } else {
+    for (let index = next.length - 1; index >= 0; index--) {
+      if (next[index].entryId && next[index].message.role === "assistant") {
+        start = index + 1;
+        break;
+      }
+    }
+  }
+  let count = 0;
+  for (let index = start; index < next.length; index++) {
+    const record = next[index];
+    if (record.entryId && !previousIdSet.has(record.entryId) && record.message.role === "user") count += 1;
+  }
+  return count;
+}
+
+/**
+ * 归并后保留仍未被交付证据消化的乐观记录。
  *
- * hydrate 用磁盘快照替换/覆盖尾部时，未确认的乐观气泡（无 entryId）会被丢掉；
- * 若那份快照尚未包含刚发出的消息，用户会看到气泡消失、随后又出现，
- * 而迟到的 message_end 也再无记录可绑定。这里把「磁盘确实还没有」的乐观记录
- * 重新挂回尾部，直到磁盘真正包含它。
- *
- * 只用于同会话重载（tail/prepend）；换会话或分支切换（replace）不保留。
+ * 消化只发生在 overlap 锚点之后的新确认 user 上，按发送顺序一对一绑定 pending，
+ * 不比较正文/附件形状（磁盘投影经常和乐观气泡不一致）。
  */
 export function retainPendingRecords(previous: Timeline, next: Timeline): Timeline {
   const presentKeys = new Set(next.map((record) => record.key));
-  const presentTexts = new Set(
-    next
-      .filter((record) => record.entryId)
-      .map((record) => messageContentText((record.message as { content?: unknown }).content)),
-  );
+  let remainingSlots = countNewTailUsers(previous, next);
   const kept = previous.filter((record) => {
     if (!record.pending || record.entryId) return false;
-    // 归并本身已保留它（如 prepend 不动尾部）→ 不重复追加。
     if (presentKeys.has(record.key)) return false;
-    const text = messageContentText((record.message as { content?: unknown }).content);
-    // 磁盘已包含同文本条目 → 乐观记录已被权威视图取代。
-    return text.length === 0 || !presentTexts.has(text);
+    if (record.message.role === "user" && remainingSlots > 0) {
+      remainingSlots -= 1;
+      return false;
+    }
+    return true;
   });
   return kept.length === 0 ? next : [...next, ...kept];
+}
+
+export type HydratePendingPolicy = "retain" | "drop";
+
+/** replace 默认丢掉 pending；tail/prepend 默认保留。调用方必须按意图显式覆盖。 */
+export function resolveHydratePendingPolicy(
+  mode: "replace" | "tail" | "prepend",
+  pending?: HydratePendingPolicy,
+): HydratePendingPolicy {
+  if (pending === "retain" || pending === "drop") return pending;
+  return mode === "replace" ? "drop" : "retain";
+}
+
+export function applyHydratePending(
+  previous: Timeline,
+  next: Timeline,
+  pending: HydratePendingPolicy,
+): Timeline {
+  return pending === "drop" ? next : retainPendingRecords(previous, next);
 }
 
 export type UserConfirmationOutcome = "key" | "text" | "reconciled" | "appended" | "duplicate";

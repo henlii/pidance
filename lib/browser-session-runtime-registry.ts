@@ -29,7 +29,8 @@ import {
   mergeTailRecords,
   optimisticRecord,
   prependOlderRecords,
-  retainPendingRecords,
+  applyHydratePending,
+  resolveHydratePendingPolicy,
   submissionKey,
   timelineEntryIds,
   timelineFromDisk,
@@ -320,7 +321,13 @@ export type BrowserSessionRuntimeRegistry = {
     sessionId: string,
     messages: AgentMessage[],
     entryIds?: string[],
-    options?: { sinceSeq?: number; hydrateRequestSeq?: number; mode?: TimelineHydrateMode },
+    options?: {
+      sinceSeq?: number;
+      hydrateRequestSeq?: number;
+      mode?: TimelineHydrateMode;
+      /** replace 默认 drop；tail/prepend 默认 retain。loadSession 必须显式 retain。 */
+      pending?: "retain" | "drop";
+    },
   ): HydrateOutcome;
   /**
    * 追加本地乐观消息（引导/合并队列）。返回生成的稳定 key，后续用它原子回滚，
@@ -1327,9 +1334,8 @@ export function createBrowserSessionRuntimeRegistry(
         : mode === "tail"
           ? mergeTailRecords(previous, messages, entryIds)
           : timelineFromDisk(messages, entryIds);
-      // 同会话重载不得吞掉磁盘尚未包含的乐观气泡：否则它会先消失、
-      // 之后又出现，迟到的 message_end 也再没有记录可绑定。
-      slot.timeline = mode === "replace" ? merged : [...retainPendingRecords(previous, merged)];
+      const pending = resolveHydratePendingPolicy(mode, options?.pending);
+      slot.timeline = [...applyHydratePending(previous, merged, pending)];
       for (const entryId of timelineEntryIds(slot.timeline)) {
         if (entryId) slot.consumedEntryIds.add(entryId);
       }

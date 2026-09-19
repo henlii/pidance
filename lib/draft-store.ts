@@ -65,6 +65,23 @@ export function clearDraft(key: string): void {
   flushServerPrefs();
 }
 
+/**
+ * 发送已受理后才清草稿：空草稿或仍是发出去的那份才删。
+ * 用户在等待回执时改了正文、或清空正文后另贴了图，必须留下。
+ */
+export function forgetDraftIfUnedited(key: string, sentValue: string, sentImageCount = 0): void {
+  const draft = getDraft(key);
+  if (!draft) {
+    clearDraft(key);
+    return;
+  }
+  const textIsNew = draft.value !== "" && draft.value !== sentValue;
+  const extraImages = draft.images.length > sentImageCount;
+  const newImagesOnEmpty = draft.value === "" && draft.images.length > 0;
+  if (textIsNew || extraImages || newImagesOnEmpty) return;
+  clearDraft(key);
+}
+
 /** 从服务端恢复指定 key 的草稿（网页激活/多客户端同步用）。 */
 export function hydrateDraftFromServer(key: string): ChatDraft | null {
   const remote = getServerPref<ChatDraft>(draftKeyPath(key));

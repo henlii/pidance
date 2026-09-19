@@ -30,6 +30,11 @@ import {
   hasDirtyBuffers,
   makeFileBufferKey,
 } from "@/lib/file-editor-state";
+import {
+  nextActiveFileTabId,
+  planWorkspaceFileTabReset,
+  shouldResetFileTabsOnCwdChange,
+} from "@/lib/workspace-file-tabs";
 import { buildAtMentionText, buildFileAtMentionsText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import { createSessionNavigationStore } from "@/lib/session-navigation-store";
@@ -963,6 +968,33 @@ function AppShellInner() {
     setPendingCloseTabId(null);
     applyChangesPanelOpen(false);
   }, [applyChangesPanelOpen, dispatchFileEditorAction, fileTabs]);
+
+  const workspaceCwdForFilesRef = useRef(identity.cwd);
+  const fileTabsRef = useRef(fileTabs);
+  fileTabsRef.current = fileTabs;
+  const activeFileTabIdRef = useRef(activeFileTabId);
+  activeFileTabIdRef.current = activeFileTabId;
+  useEffect(() => {
+    const previousCwd = workspaceCwdForFilesRef.current;
+    const currentCwd = identity.cwd;
+    workspaceCwdForFilesRef.current = currentCwd;
+    if (!shouldResetFileTabsOnCwdChange(previousCwd, currentCwd)) return;
+    const plan = planWorkspaceFileTabReset({
+      tabs: fileTabsRef.current,
+      dirtyBufferKeys: new Set(
+        fileTabsRef.current
+          .filter((tab) => tab.bufferKey && getBuffer(fileEditorStateRef.current, tab.bufferKey)?.dirty === true)
+          .map((tab) => tab.bufferKey as string),
+      ),
+    });
+    for (const key of plan.removeBufferKeys) {
+      dispatchFileEditorAction({ type: "remove", key });
+    }
+    setFileTabs(plan.keepTabs as typeof fileTabs);
+    setActiveFileTabId(nextActiveFileTabId(activeFileTabIdRef.current, plan.keepTabs));
+    setPendingCloseTabId(plan.pendingCloseTabId);
+    if (plan.closePanel) applyChangesPanelOpen(false);
+  }, [applyChangesPanelOpen, dispatchFileEditorAction, identity.cwd]);
 
   const handleSaveAndClose = useCallback(async () => {
     const tab = fileTabs.find((item) => item.id === pendingCloseTabId);

@@ -893,6 +893,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const clearInput = useCallback(() => {
     setValue("");
+    valueRef.current = "";
     setAtQuery(null);
     if (draftKey) clearDraft(draftKey);
     if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
@@ -926,44 +927,34 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const sentDraftRef = useRef<{
     key: string | null;
     value: string;
+    images: AttachedImage[];
+    uploads: Array<{ id: string; name: string; mimeType: string; size: number; status: "ready"; path: string }>;
     imageKeys: string[];
     uploadPaths: string[];
   } | null>(null);
 
-  const settleSentDraft = useCallback(() => {
+  /** 拒绝回执：把捕获的载荷还给原草稿，保留后来编辑；成功路径不得再改编辑器。 */
+  const restoreSentDraft = useCallback(() => {
     const sent = sentDraftRef.current;
     sentDraftRef.current = null;
     if (!sent) return;
-    if (draftKeyRef.current !== sent.key) {
-      // 输入框已经属于别的草稿/会话：只作废**发送的那份**版本（且它未被}
-      // 外部改写时才作废），绝不动当前输入框。
-      if (sent.key) {
-        const draft = getDraft(sent.key);
-        if (draft && draft.value === sent.value) clearDraft(sent.key);
-      }
+    if (sent.key && sent.key !== draftKeyRef.current) {
+      const existing = getDraft(sent.key) ?? { value: "", images: [] };
+      setDraft(sent.key, {
+        value: [sent.value, existing.value].filter((part) => part.trim()).join("\n\n"),
+        images: [...sent.images.map(imageToDraftImage), ...existing.images],
+      });
       return;
     }
-    const images = attachedImagesRef.current;
-    const uploads = attachedUploadsRef.current;
-    const sentUploads = uploads.filter((item) => item.path && sent.uploadPaths.includes(item.path));
-    const untouched = valueRef.current === sent.value
-      && images.length === sent.imageKeys.length
-      && images.every((image) => sent.imageKeys.includes(attachmentIdentity(image)))
-      && sentUploads.length === sent.uploadPaths.length;
-    if (untouched) {
-      clearInput();
-      return;
+    appendAttachedImages(sent.images);
+    if (sent.value.trim()) prependDraftText(sent.value);
+    if (sent.uploads.length) {
+      setAttachedUploads((prev) => {
+        const known = new Set(prev.map((item) => item.path).filter(Boolean));
+        return [...prev, ...sent.uploads.filter((item) => !known.has(item.path))];
+      });
     }
-    // 等待期间又编辑过：只移除已发送的那部分，保留新输入的内容。
-    // 前缀剥离只在**无歧义**时做：剩余内容又以同一段正文开头时（发 "hello"、
-    // 现在 "hellohello"），无法判断用户新打的那段在已发送内容之前还是之后，
-    // 删错就把用户刚输入的字吃掉。宁可不删（留在输入框里可自行删），也不猜。
-    const current = valueRef.current;
-    const rest = current.startsWith(sent.value) ? current.slice(sent.value.length) : null;
-    if (rest !== null && !rest.startsWith(sent.value)) setValue(rest.trimStart());
-    setAttachedImages((prev) => prev.filter((image) => !sent.imageKeys.includes(attachmentIdentity(image))));
-    setAttachedUploads((prev) => prev.filter((item) => !(item.path && sent.uploadPaths.includes(item.path))));
-  }, [clearInput]);
+  }, [appendAttachedImages, prependDraftText]);
 
   useEffect(() => {
     if (!draftKey || draftKeyRef.current !== draftKey) return;
@@ -1035,54 +1026,46 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       if (hasFailedAttachments) setImageAttachError(t("input_imageUploadBlocked"));
       return;
     }
-    // 纯文本/命令：点击即乐观清空（外部 pi 预检/冷启动可能数秒，不必等确认）；
-    // 失败路径由 useAgentSession 经 insertIfEmpty 恢复（此处覆盖同步 false 返回）。
-    // 有附件时不乐观清空：发送失败恢复图片成本高，保持确认后清空。
-    const hasAttachment = attachedImages.length > 0 || hasReadyUploads;
+    // 先捕获完整载荷再清编辑器：带图发送也立刻移交，气泡出现时输入框必须已空。
+    // 失败只由 restoreSentDraft 把这份载荷还给原草稿，成功不再改当前输入。
     const capturedDraftKey = draftKeyRef.current;
-    if (!hasAttachment) clearInput();
-    if (hasAttachment) {
-      sentDraftRef.current = {
-        key: capturedDraftKey ?? null,
-        value: valueRef.current,
-        imageKeys: attachedImages.map(attachmentIdentity),
-        uploadPaths: attachedUploads
-          .filter((item): item is typeof item & { path: string } => item.status === "ready" && typeof item.path === "string")
-          .map((item) => item.path),
-      };
-    }
-    if (!attachedImages.length && !hasReadyUploads && base.startsWith("/") && onBuiltinCommand) {
+    const capturedImages = attachedImages.slice();
+    const capturedUploads = attachedUploads.filter(
+      (item): item is typeof item & { path: string } => item.status === "ready" && typeof item.path === "string",
+    );
+    const msg = composeMessageWithUploads(base);
+    const binaryBlocks = attachmentBinaryBlocks(
+      capturedImages,
+      capturedUploads.map((item) => ({ path: item.path, name: item.name, mimeType: item.mimeType, size: item.size })),
+    );
+    sentDraftRef.current = {
+      key: capturedDraftKey ?? null,
+      value: valueRef.current,
+      images: capturedImages,
+      uploads: capturedUploads.map((item) => ({ ...item, status: "ready" as const })),
+      imageKeys: capturedImages.map(attachmentIdentity),
+      uploadPaths: capturedUploads.map((item) => item.path),
+    };
+    clearInput();
+    if (!capturedImages.length && !capturedUploads.length && base.startsWith("/") && onBuiltinCommand) {
       const result = await onBuiltinCommand(base);
       if (result.handled) {
-        if (result.error) insertIfEmptyLocal(base);
+        if (result.error) restoreSentDraft();
+        else sentDraftRef.current = null;
         return;
       }
     }
-    const msg = composeMessageWithUploads(base);
-    // 原图卡片、队列媒体、删除回收都从 media 引用派生（不再看兼容字段 original）。
-    const binaryBlocks = attachmentBinaryBlocks(
-      attachedImages,
-      attachedUploads
-        .filter((item): item is typeof item & { path: string } => item.status === "ready" && typeof item.path === "string")
-        .map((item) => ({ path: item.path, name: item.name, mimeType: item.mimeType, size: item.size })),
-    );
     const submitted = await onSend(
       msg,
-      attachedImages.length ? attachedImages : undefined,
+      capturedImages.length ? capturedImages : undefined,
       binaryBlocks.length ? binaryBlocks : undefined,
     );
     if (submitted === false) {
-      // 按发送时 draftKey 恢复，避免切到会话 B 后写进 B 的输入框。
-      if (!hasAttachment && capturedDraftKey) {
-        setDraft(capturedDraftKey, { value: base, images: [] });
-        if (draftKeyRef.current === capturedDraftKey) insertIfEmptyLocal(base);
-      } else if (!hasAttachment) {
-        insertIfEmptyLocal(base);
-      }
+      restoreSentDraft();
       return;
     }
-    settleSentDraft();
-  }, [value, attachedImages, attachedUploads, hasReadyUploads, hasUploading, hasFailedAttachments, isStreaming, onBuiltinCommand, onPromptWithStreamingBehavior, onSend, clearInput, insertIfEmptyLocal, onAudioUnlock, composeMessageWithUploads, settleSentDraft, t]);
+    sentDraftRef.current = null;
+  }, [value, attachedImages, attachedUploads, hasReadyUploads, hasUploading, hasFailedAttachments, isStreaming, onBuiltinCommand, onPromptWithStreamingBehavior, onSend, clearInput, restoreSentDraft, onAudioUnlock, composeMessageWithUploads, t]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()

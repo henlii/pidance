@@ -75,10 +75,32 @@ function composer(initial) {
     getDraft: (key) => drafts[key] ?? null,
     setDraft: (key, draft) => { drafts[key] = draft; calls.values.push([key, draft.value]); },
     clearDraft: (key) => { delete drafts[key]; calls.cleared.push(key); },
-    clearInput: () => { calls.cleared.push(draftKeyRef.current); },
+    clearInput: () => {
+      calls.cleared.push(draftKeyRef.current);
+      valueRef.current = "";
+      attachedImagesRef.current = [];
+      attachedUploadsRef.current = [];
+      calls.values.push(["live", ""]);
+      calls.images.push([]);
+    },
     insertIfEmptyLocal: (text) => { calls.inserted.push(text); },
+    prependDraftText: (text) => {
+      const combined = [text, valueRef.current].filter((part) => String(part).trim()).join("\n\n");
+      valueRef.current = combined;
+      calls.values.push(["live", combined]);
+    },
+    appendAttachedImages: (images) => {
+      if (!images?.length) return;
+      const known = new Set(attachedImagesRef.current.map(attachmentIdentity));
+      attachedImagesRef.current = [
+        ...attachedImagesRef.current,
+        ...images.filter((image) => !known.has(attachmentIdentity(image))),
+      ];
+      calls.images.push(attachedImagesRef.current.map(attachmentIdentity));
+    },
     composeMessageWithUploads: (base) => base,
     attachmentBinaryBlocks: () => [],
+    imageToDraftImage: (image) => image,
     t: (key) => key,
     setValue: (next) => { valueRef.current = next; calls.values.push(["live", next]); },
     setAttachedImages: (update) => {
@@ -91,12 +113,12 @@ function composer(initial) {
     },
     onSend: initial.onSend,
   };
-  env.settleSentDraft = callback("settleSentDraft", env);
+  env.restoreSentDraft = callback("restoreSentDraft", env);
   env.handleSend = callback("handleSend", env);
   return { env, drafts, calls, draftKeyRef, valueRef, attachedImagesRef, attachedUploadsRef, sentDraftRef };
 }
 
-test("H3-a：带附件发送成功只结算 A 的草稿，不清 B 的输入框", async () => {
+test("H3-a：带图发送立刻清空 A，回执不得清 B", async () => {
   let resolveSend;
   const gate = new Promise((resolve) => { resolveSend = resolve; });
   const state = composer({
@@ -107,17 +129,17 @@ test("H3-a：带附件发送成功只结算 A 的草稿，不清 B 的输入框"
     onSend: () => gate,
   });
   const send = state.env.handleSend();
-  // 回执在途：用户切到会话 B 并正在编辑。
+  assert.deepEqual(state.calls.cleared, ["A"], "带图也必须在回执前移交编辑器");
+  assert.equal(state.valueRef.current, "");
+  assert.deepEqual(state.attachedImagesRef.current, []);
   state.draftKeyRef.current = "B";
   resolveSend(true);
   await send;
-
-  assert.deepEqual(state.calls.cleared, ["A"], "只作废发送的那份草稿（A），绝不清当前输入框（B）");
   assert.equal(state.drafts.B?.value, "B-message", "B 未发送的内容必须原样保留");
-  assert.equal(state.drafts.A, undefined, "A 已发送的草稿版本被结算掉");
+  assert.deepEqual(state.calls.cleared, ["A"], "成功回执不得再清当前输入框");
 });
 
-test("H3-b：同一会话在途期间继续编辑，保留新输入、只移除已发送部分", async () => {
+test("H3-b：同一会话在途期间的新编辑，成功回执必须原样保留", async () => {
   let resolveSend;
   const gate = new Promise((resolve) => { resolveSend = resolve; });
   const sent = image("/sent.png");
@@ -130,18 +152,16 @@ test("H3-b：同一会话在途期间继续编辑，保留新输入、只移除�
     onSend: () => gate,
   });
   const send = state.env.handleSend();
-  // 回执在途：用户又敲了一行、并贴了另一张图。
-  state.valueRef.current = "sent text\n\nnew line";
-  state.attachedImagesRef.current = [sent, typed];
+  assert.equal(state.valueRef.current, "");
+  state.valueRef.current = "new line";
+  state.attachedImagesRef.current = [typed];
   resolveSend(true);
   await send;
-
-  assert.deepEqual(state.calls.cleared, [], "用户的新编辑不能被清掉");
-  assert.deepEqual(state.calls.values.at(-1), ["live", "new line"], "只移除已发送的正文");
-  assert.deepEqual(state.calls.images.at(-1), ["/typed.png"], "只移除已发送的图片");
+  assert.equal(state.valueRef.current, "new line", "后来打的字不能被回执清掉");
+  assert.deepEqual(state.attachedImagesRef.current.map(attachmentIdentity), ["/typed.png"]);
 });
 
-test("H3-c：内容没变才按整条清空（原有行为保持）", async () => {
+test("H3-c：带图发送成功不再二次清空", async () => {
   const state = composer({
     drafts: { A: { value: "A-message", images: [image("/a.png")] } },
     draftKey: "A",
@@ -150,10 +170,11 @@ test("H3-c：内容没变才按整条清空（原有行为保持）", async () =
     onSend: async () => true,
   });
   await state.env.handleSend();
-  assert.deepEqual(state.calls.cleared, ["A"], "内容未变：整条清空");
+  assert.deepEqual(state.calls.cleared, ["A"]);
+  assert.equal(state.valueRef.current, "");
 });
 
-test("H3-d：纯文本路径保持乐观清空与失败恢复", async () => {
+test("H3-d：纯文本失败把载荷还给原草稿", async () => {
   const state = composer({
     drafts: { A: { value: "", images: [] } },
     draftKey: "A",
@@ -162,12 +183,34 @@ test("H3-d：纯文本路径保持乐观清空与失败恢复", async () => {
     onSend: async () => false,
   });
   await state.env.handleSend();
-  assert.deepEqual(state.calls.cleared, ["A"], "纯文本点击即乐观清空");
-  assert.deepEqual(state.calls.values, [["A", "plain text"]], "失败后按发送时的 draftKey 恢复");
-  assert.deepEqual(state.calls.inserted, ["plain text"]);
+  assert.deepEqual(state.calls.cleared, ["A"], "点击即乐观清空");
+  assert.equal(state.valueRef.current, "plain text", "拒绝后正文回到输入框");
 });
 
-test("I6：前缀与已发送内容重叠时不动输入框（不删用户刚打的字）", async () => {
+test("带图：点击后、回执前输入框与预览已空", async () => {
+  let resolveSend;
+  const gate = new Promise((resolve) => { resolveSend = resolve; });
+  const pic = image("/photo.png");
+  const state = composer({
+    drafts: { A: { value: "see this", images: [pic] } },
+    draftKey: "A",
+    value: "see this",
+    attachedImages: [pic],
+    onSend: (msg, images) => {
+      assert.equal(msg, "see this");
+      assert.equal(images?.length, 1, "提交载荷仍带图");
+      return gate;
+    },
+  });
+  const send = state.env.handleSend();
+  assert.equal(state.valueRef.current, "");
+  assert.deepEqual(state.attachedImagesRef.current, []);
+  resolveSend(true);
+  await send;
+  assert.equal(state.valueRef.current, "", "成功后不得把图和字填回来");
+});
+
+test("I6：成功回执不得改写后来输入", async () => {
   let resolveSend;
   const gate = new Promise((resolve) => { resolveSend = resolve; });
   const sent = image("/sent.png");
@@ -179,17 +222,10 @@ test("I6：前缀与已发送内容重叠时不动输入框（不删用户刚打
     onSend: () => gate,
   });
   const send = state.env.handleSend();
-  // 回执在途：用户又打了一段与已发送内容相同的前缀，谁在前谁在后无从判断。
   state.valueRef.current = "hellohello";
   const writesBefore = state.calls.values.length;
   resolveSend(true);
   await send;
-
-  assert.deepEqual(
-    state.calls.values.slice(writesBefore),
-    [],
-    "有歧义就不改写输入框：删错会把用户刚输入的字吃掉",
-  );
-  assert.deepEqual(state.calls.cleared, [], "也不整条清空");
-  assert.deepEqual(state.calls.images.at(-1), [], "已发送的图片仍要移除（否则会重复发送）");
+  assert.deepEqual(state.calls.values.slice(writesBefore), []);
+  assert.equal(state.valueRef.current, "hellohello");
 });

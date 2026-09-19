@@ -16,7 +16,7 @@ import { preserveCustomRenderedLines } from "@/lib/custom-rendered-lines";
 import type { SessionActivity } from "@/lib/session-activity";
 import { isDefinitiveRejection, readAgentLiveFlag, sendAgentCommand } from "@/lib/agent-client";
 import { generateSubmissionId, isQueueablePromptReason, type PromptReason, type PromptReceipt, type QueueDispatchReceipt } from "@/lib/agent-commands";
-import { clearDraft, getDraft, setDraft, type ChatDraft } from "@/lib/draft-store";
+import { clearDraft, forgetDraftIfUnedited, getDraft, setDraft, type ChatDraft } from "@/lib/draft-store";
 import { getOrCreateBrowserSessionRuntimeRegistry, type RegistrySubscription } from "@/lib/browser-session-runtime-registry";
 import {
   captureChatTargetToken,
@@ -50,7 +50,7 @@ import { useChatAutoFollow } from "@/hooks/useChatAutoFollow";
 import { ensureServerPrefsLoaded, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { resolveDisplayModel, settleModelOverride } from "@/lib/model-selection";
 import { useI18n } from "@/lib/i18n";
-import { guidePageThinkingUpdate, thinkingLevelForEnsureBody } from "@/lib/thinking-level-policy";
+import { guidePageThinkingUpdate, shouldAcceptRemoteThinking, thinkingLevelForEnsureBody } from "@/lib/thinking-level-policy";
 import { isThinkingLevel, type AgentThinkingLevel } from "@/lib/agent-settings";
 
 import {
@@ -463,6 +463,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // 档位权威已确认的会话 id（loadSession 应用 context 后置位，切会话复位）：
   // 用于过滤 attach 重放/加载窗口内的 thinking_level_changed 回写。
   const thinkingSettledRef = useRef<string | null>(null);
+  const thinkingGenerationRef = useRef(0);
+  const thinkingUserTouchedRef = useRef(false);
+  const applyRemoteThinking = useCallback((input: {
+    targetSessionId: string | null;
+    capturedGeneration: number;
+    remoteLevel: string;
+    source: "disk" | "live-hydrate" | "event";
+  }) => {
+    if (!isThinkingLevel(input.remoteLevel)) return;
+    if (!shouldAcceptRemoteThinking({
+      viewSessionId: sessionIdRef.current,
+      targetSessionId: input.targetSessionId,
+      generation: thinkingGenerationRef.current,
+      capturedGeneration: input.capturedGeneration,
+      userTouched: thinkingUserTouchedRef.current,
+      localLevel: thinkingLevelRef.current,
+      remoteLevel: input.remoteLevel,
+      source: input.source,
+    })) return;
+    setThinkingLevel(input.remoteLevel);
+  }, []);
   // settings.json 默认只服务于新会话引导页；已有会话没有自己的档位时为 off，
   // 不得把全局默认带入其它会话。
   const resolvedThinking: AgentThinkingLevel = isNew
@@ -665,6 +686,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     markExternalScrollWrite,
     notifyProgrammaticSmooth,
     notifyBrowsingHistory,
+    isAutoFollowing,
   } = useChatAutoFollow({
     isMobile: opts.isMobile ?? false,
     loading,
@@ -792,6 +814,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     onMessagesReplaced?: () => void,
   ) => {
     const loadRequestSeq = ++loadRequestSeqRef.current;
+    const thinkingGenAtLoad = thinkingGenerationRef.current;
     const signal = beginLoadRequest();
     let messagesLoaded = false;
     try {
@@ -865,7 +888,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         sid,
         hydratedMessages,
         tailEntryIds,
-        { sinceSeq: hydrateSinceSeq, hydrateRequestSeq, mode },
+        { sinceSeq: hydrateSinceSeq, hydrateRequestSeq, mode, pending: "retain" },
       );
       if (outcome === "superseded") return null;
       // 只有分支导航成功拿到整体会话、即将应用新 context 时才重置跟随；
@@ -900,7 +923,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setError(null);
       if (isThinkingLevel(d.context.thinkingLevel)) {
         // off 也是会话的有效值，必须覆盖上一个会话遗留的深度。
-        setThinkingLevel(d.context.thinkingLevel);
+        applyRemoteThinking({
+          targetSessionId: sid,
+          capturedGeneration: thinkingGenAtLoad,
+          remoteLevel: d.context.thinkingLevel,
+          source: "disk",
+        });
       }
       // 权威档位已到（无论有无档）：解锁思考档显示/事件回写。
       thinkingSettledRef.current = sid;
@@ -922,8 +950,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const applyLiveState = (liveState: AgentStateResponse) => {
         if (liveState.contextUsage !== undefined) setContextUsage(liveState.contextUsage ?? null);
         if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt ?? null);
-        if (liveState.thinkingLevel !== undefined) {
-          if (isThinkingLevel(liveState.thinkingLevel)) setThinkingLevel(liveState.thinkingLevel);
+        if (liveState.thinkingLevel !== undefined && isThinkingLevel(liveState.thinkingLevel)) {
+          applyRemoteThinking({
+            targetSessionId: sid,
+            capturedGeneration: thinkingGenAtLoad,
+            remoteLevel: liveState.thinkingLevel,
+            source: "live-hydrate",
+          });
         }
         if (liveState.model?.provider && liveState.model?.modelId) {
           lastKnownModelBySessionRef.current.set(sid, { provider: liveState.model.provider, modelId: liveState.model.modelId });
@@ -998,7 +1031,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [applyProjectedQueues, beginLoadRequest, notifyAutoFollowBranchReset, patchExtensionUiState, queueEntryNow]);
+  }, [applyProjectedQueues, applyRemoteThinking, beginLoadRequest, notifyAutoFollowBranchReset, patchExtensionUiState, queueEntryNow]);
 
   /**
    * 向上滚动加载更旧历史（OpenChamber loadOlder 语义）。
@@ -1047,6 +1080,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const outcome = getOrCreateBrowserSessionRuntimeRegistry().hydrate(sid, olderMsgs, olderIds, {
         hydrateRequestSeq,
         mode: "prepend",
+        pending: "retain",
       });
       const applied = outcome === "applied";
       // 被并发 hydrate（分支切换 / 更新的尾页）取代时不能声称成功：
@@ -1108,6 +1142,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         sinceSeq: hydrateSinceSeq,
         hydrateRequestSeq,
         mode: "replace",
+        pending: "drop",
       });
       const applied = outcome === "applied";
       // 分支切换与 SSE 并发时旧响应作废：不重置跟随、不写过期分页。
@@ -1187,6 +1222,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         sinceSeq: hydrateSinceSeq,
         hydrateRequestSeq,
         mode: "replace",
+        pending: "retain",
       });
       if (outcome !== "applied" || !isCurrent()) return false;
       messagesSessionIdRef.current = sid;
@@ -1244,6 +1280,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         sinceSeq: hydrateSinceSeq,
         hydrateRequestSeq,
         mode: "replace",
+        pending: "retain",
       });
       if (outcome !== "applied") return false;
       hasMoreAfterRef.current = d.context.hasMoreAfter === true;
@@ -1540,7 +1577,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (state.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
     seedTurnMetricsFromState(sid, state);
     if (state.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt ?? null);
-    if (isThinkingLevel(state.thinkingLevel)) setThinkingLevel(state.thinkingLevel);
+    if (isThinkingLevel(state.thinkingLevel)) {
+      applyRemoteThinking({
+        targetSessionId: sid,
+        capturedGeneration: thinkingGenerationRef.current,
+        remoteLevel: state.thinkingLevel,
+        source: "live-hydrate",
+      });
+    }
     // host 热投影的模型：磁盘 loadSession 未返回前恢复模型显示，避免切换窗口
     // 内 displayModel 为空显示「模型」占位。
     if (state.model?.provider && state.model?.modelId) {
@@ -1554,7 +1598,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     // 活动 custom 面板：刷新/重连后从状态恢复内容与输入入口（#34）。
     applyActiveCustomUi(state.activeCustomUi);
-  }, [applyProjectedQueues, applyActiveCustomUi, patchExtensionUiState, seedTurnMetricsFromState, setLastKnownModel]);
+  }, [applyProjectedQueues, applyActiveCustomUi, applyRemoteThinking, patchExtensionUiState, seedTurnMetricsFromState, setLastKnownModel]);
 
   /**
    * 统一 agent run 结束路径（P2）：agent_end / prompt_done / reconcile idle 三路合一。
@@ -1931,16 +1975,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         break;
       case "thinking_level_changed": {
-        // SDK clamp/落盘后的权威深度回写 UI：用户选择经 SDK 校验可能被 clamp
-        // （模型不支持时降档）或已在磁盘生效，必须以事件值覆盖本地预选，否则
-        // UI 显示与真实生效深度分叉（"思考总是乱变"）。
-        // 只接受当前会话且档位权威已确认后的回写：切回会话瞬间 attach 重放的
-        // 历史事件不抢在 loadSession 前落 UI（loadSession 的 context 值更权威）。
+        // SDK clamp/落盘后的权威深度回写 UI。未触摸时不得覆盖磁盘已落地的档位
+        // （Pi 常把 max 误报成 high）；用户改档后事件重新可写。
         const level = event.level as string | undefined;
-        if (level && isThinkingLevel(level)) {
-          if (thinkingReadyRef.current && thinkingSettledRef.current === sessionIdRef.current) {
-            setThinkingLevel(level as ThinkingLevelOption);
-          }
+        if (level && thinkingReadyRef.current && thinkingSettledRef.current === sessionIdRef.current) {
+          applyRemoteThinking({
+            targetSessionId: sessionIdRef.current,
+            capturedGeneration: thinkingGenerationRef.current,
+            remoteLevel: level,
+            source: "event",
+          });
         }
         break;
       }
@@ -2110,7 +2154,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // 不是已投递 run——队列面板负责表现，等 flush 后才会出现 user 消息。
           acceptQueuedReceipt(receipt.sessionId, receipt.queue);
           addNotice({ type: "info", message: t("input_queuedWhileBusy") });
-          if (sendStillCurrent()) clearDraft(draftKey);
+          if (sendStillCurrent()) forgetDraftIfUnedited(draftKey, trimmedMessage, images?.length ?? 0);
           return true;
         }
         if (receipt.status !== "accepted") {
@@ -2132,7 +2176,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (receipt.status === "queued") {
           acceptQueuedReceipt(target.sessionId, receipt.queue);
           addNotice({ type: "info", message: t("input_queuedWhileBusy") });
-          clearDraft(draftKey);
+          forgetDraftIfUnedited(draftKey, trimmedMessage, images?.length ?? 0);
           return true;
         }
         if (receipt.status !== "accepted") {
@@ -2143,10 +2187,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       if (sendStillCurrent() && promptSubmittedRef.current && sentSessionId) {
         setServerPref(`sessionQueueHold.${sentSessionId}`, null);
-        // 已提交（accepted）：该草稿不再回填。发送确认后立刻清，避免“发送中切走
-        // 会话 → 旧 draftKey 仍持有已发文本 → 切回草稿复现”。
-        // 只清与本次发送文本一致的草稿；用户已改写成新内容时保留。
-        clearDraft(draftKey);
+        // 已提交（accepted）：只清「仍是这份已发内容」的草稿。发送后用户已改写
+        // 或另贴了图时必须保留，不能无条件 clearDraft。
+        forgetDraftIfUnedited(draftKey, trimmedMessage, images?.length ?? 0);
       }
       if (sendStillCurrent() && isSlashCommandPrompt && sentSessionId) {
         const runId = runtime.getRunState(sentSessionId)?.promptRunId;
@@ -2343,7 +2386,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 引导页常无 live session：本地状态必须先更新（否则无 sid 时直接 return，思考/模型选不中）
       setNewSessionModel({ provider, modelId });
       const localThinking = guidePageThinkingUpdate(thinkingLevel);
-      if (localThinking) setThinkingLevel(localThinking as ThinkingLevelOption);
+      if (localThinking) {
+        thinkingUserTouchedRef.current = true;
+        thinkingGenerationRef.current += 1;
+        setThinkingLevel(localThinking as ThinkingLevelOption);
+      }
       // ensure 正在跑（首次 prompt 并发）时等它；失败/超时不得吞掉本地模型选择
       let sid = sessionIdRef.current;
       if (!sid && ensuringNewSessionRef.current) {
@@ -2367,13 +2414,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 本地立即同步显示；失败时按代次回滚到选择前的值。
     const previousThinking = thinkingLevelRef.current;
     const previousOverride = currentModelOverrideRef.current;
-    if (thinkingLevel && isThinkingLevel(thinkingLevel)) setThinkingLevel(thinkingLevel);
+    if (thinkingLevel && isThinkingLevel(thinkingLevel)) {
+      thinkingUserTouchedRef.current = true;
+      thinkingGenerationRef.current += 1;
+      setThinkingLevel(thinkingLevel);
+    }
+    const capturedGen = thinkingGenerationRef.current;
+    const targetSid = sid;
     setCurrentModelOverride({ provider, modelId });
     await applySelection({
       sessionId: sid,
       model: { provider, modelId },
       thinkingLevel,
       onFailure: () => {
+        if (sessionIdRef.current !== targetSid) return;
+        if (thinkingGenerationRef.current !== capturedGen) return;
         setCurrentModelOverride(previousOverride);
         setThinkingLevel(previousThinking);
       },
@@ -2828,10 +2883,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (isReadOnly) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
-    if (behavior === "followUp") {
-      await handleFollowUpRef.current(message, images);
-      return;
-    }
     const piImages = promptImageInputs(images);
     const restore = (reason: PromptReason | undefined, fallback?: string) => {
       // 内容归属原会话：切走后写它的草稿，而不是直接丢弃。
@@ -2839,6 +2890,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (sessionIdRef.current !== sid) return;
       addNotice({ type: "error", message: reason ? queueRejectionMessage(reason) : (fallback ?? t("chat_sendFailed")) });
     };
+    // Pi TUI：AgentSession.prompt() 先执行扩展斜杠（/btw），即使主 run 仍在流式。
+    // 不得走 follow-up 队列或 steer（SDK 会抛 cannot be queued）。
+    if (message.trim().startsWith("/")) {
+      try {
+        const receipt = await sendAgentCommand<PromptReceipt>(sid, {
+          type: "prompt",
+          message,
+          ...(piImages?.length ? { images: piImages } : {}),
+        });
+        if (receipt?.status === "rejected") restore(receipt.reason);
+        else if (receipt?.status === "queued") {
+          acceptQueuedReceipt(sid, receipt.queue);
+          ensureEventsConnected(sid);
+        }
+      } catch (e) {
+        restore(undefined, e instanceof Error ? e.message : String(e));
+      }
+      return;
+    }
+    if (behavior === "followUp") {
+      await handleFollowUpRef.current(message, images);
+      return;
+    }
     try {
       const receipt = await sendAgentCommand<PromptReceipt>(sid, {
         type: "steer",
@@ -3103,13 +3177,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 与 handleModelChange 共用同一结算入口：串行 + 按操作代次回滚，
     // 避免同一会话里「旧请求迟到失败抹掉更新的选择」。
     const previous = thinkingLevelRef.current;
+    thinkingUserTouchedRef.current = true;
+    thinkingGenerationRef.current += 1;
+    const capturedGen = thinkingGenerationRef.current;
+    const targetSid = sessionIdRef.current;
     setThinkingLevel(level);
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
     if (!sid) return;
     await applySelection({
       sessionId: sid,
       thinkingLevel: level,
-      onFailure: () => setThinkingLevel(previous),
+      onFailure: () => {
+        if (sessionIdRef.current !== (targetSid ?? sid)) return;
+        if (thinkingGenerationRef.current !== capturedGen) return;
+        setThinkingLevel(previous);
+      },
     });
   }, [applySelection, isReadOnly]);
 
@@ -3243,6 +3325,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 最近已知模型，避免输入框在窗口期内显示「模型」占位。
     const rememberedModel = (session?.id ? lastKnownModelBySessionRef.current.get(session.id) : undefined) ?? null;
     setLastKnownModel(rememberedModel);
+    thinkingGenerationRef.current += 1;
+    thinkingUserTouchedRef.current = false;
     setThinkingLevel(null);
     thinkingSettledRef.current = null;
     setThinkingReady(false);
@@ -3388,7 +3472,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               setSystemPrompt(agentState.state.systemPrompt ?? null);
             }
             if (stillCurrent && isThinkingLevel(agentState.state.thinkingLevel)) {
-              setThinkingLevel(agentState.state.thinkingLevel);
+              applyRemoteThinking({
+                targetSessionId: session.id,
+                capturedGeneration: thinkingGenerationRef.current,
+                remoteLevel: agentState.state.thinkingLevel,
+                source: "live-hydrate",
+              });
             }
             if (stillCurrent && agentState.state.extensionStatuses !== undefined) {
               patchExtensionUiState({ statuses: agentState.state.extensionStatuses ?? [] });
@@ -3505,7 +3594,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Refs
     sessionIdRef, eventSourceRef, scrollContainerRef,
     // 自动跟随
-    jumpButtonVisible, jumpToBottom, markExternalScrollWrite, notifyProgrammaticSmooth,
+    jumpButtonVisible, jumpToBottom, markExternalScrollWrite, notifyProgrammaticSmooth, isAutoFollowing,
     // Actions
     loadOlderHistory,
     loadNewerHistory,

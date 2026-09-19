@@ -81,6 +81,7 @@ import {
 } from "./web-extension-ui";
 import type { NavigationActions } from "./live-session-registry";
 import { resolveSessionModel } from "./resolve-session-model";
+import { isImmediateSlashPrompt } from "./slash-prompt";
 import {
   applyPassThroughExtendedThinkingInPlace,
   withPassThroughExtendedThinking,
@@ -517,11 +518,12 @@ export class SdkSessionHost {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
     if (!this._alive || !this.runtime || this.startupHold || this.isRunning() || this.flushingFollowUp) return;
-    if (this.listeners.length > 0) return; // 仍有活跃端点（SSE 订阅）→ 保活，不释放
+    // 自动投递由 Host 拥有，不依赖是否还有浏览器订阅。有人看只是推迟 dispose。
     if (this.hasWaitingFollowUp() && !this.isFollowUpHeld()) {
       this.scheduleFollowUpFlush();
       return;
     }
+    if (this.listeners.length > 0) return;
     // Live host 是 JSONL writer。所有端点都关闭且 settled、空队列时才释放：
     // 立即 dispose 会让浏览器侧 contextUsage/extension footer/状态条随 live 投影
     // 消失（用户感知“会话一结束信息就没了”）。30s 兜底窗口给端点重连/重开，
@@ -530,12 +532,12 @@ export class SdkSessionHost {
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
       if (this.isRunning() || this.flushingFollowUp) return;
-      // fire 时又出现订阅者（30s 窗口内端点重开）：取消释放，继续保活。
-      if (this.listeners.length > 0) return;
       if (this.hasWaitingFollowUp() && !this.isFollowUpHeld()) {
         this.scheduleFollowUpFlush();
         return;
       }
+      // fire 时又出现订阅者（30s 窗口内端点重开）：取消释放，继续保活。
+      if (this.listeners.length > 0) return;
       // 有队列且未 hold：由 flush 流程推进，不在这里 dispose。
       void this.destroyAsync().catch(() => {
         /* 命令仍在进行（busy）：命令结束后的 resetIdleTimer 会再次触发回收 */
@@ -2213,7 +2215,7 @@ export class SdkSessionHost {
           this.promptReceipts.set(parsed.submissionId, failed);
           return failed;
         }
-        if (this.bashRunning) {
+        if (this.bashRunning && !isImmediateSlashPrompt(parsed.message)) {
           // 结构化回绝：客户端按 reason=shell 提示并回草稿，不能靠 HTTP 错误猜。
           const busy = this.reject(parsed.submissionId, "bash");
           this.promptReceipts.set(parsed.submissionId, busy);
@@ -2222,7 +2224,8 @@ export class SdkSessionHost {
         // AgentSession.prompt() rejects direct prompts while manual compaction is
         // running. Preserve the user's message in the existing Pidance follow-up
         // queue; compaction_end will schedule the normal prompt flush.
-        if (session.isCompacting) {
+        // 扩展斜杠（/btw 等）除外：SDK 在压缩检查之前就执行 registerCommand。
+        if (session.isCompacting && !isImmediateSlashPrompt(parsed.message)) {
           // 压缩中不能起 run：正文与图片一起进产品队列（条目只持引用），
           // compaction_end 会按正常流程投递。旧实现把带图消息整条回绝，用户只能
           // 等压缩结束再手动重发。
@@ -2244,7 +2247,7 @@ export class SdkSessionHost {
         // 自动投递在途：外部 prompt 不能并发起 run（两个 prompt 抢同一个
         // SessionManager）。只有 flush 自己的内部票据能穿过——用布尔标志的话，
         // 恰好在这一刻到达的外部请求会共享它，等于门禁不存在。
-        if (this.flushingFollowUp && ticket !== this.internalPromptTicket) {
+        if (this.flushingFollowUp && ticket !== this.internalPromptTicket && !isImmediateSlashPrompt(parsed.message)) {
           const busy = this.reject(parsed.submissionId, "busy");
           this.promptReceipts.set(parsed.submissionId, busy);
           return busy;
@@ -2255,10 +2258,31 @@ export class SdkSessionHost {
         // （promptRunning=false、lastStopReason="error"、emit prompt_done、setFollowUpHeld），
         // UI 上本轮运行被误判为已结束（F8）。
         // streamingBehavior="steer" 是投递路径自己用的（SDK 会转向而不是报错），放行。
+        // 斜杠命令：Pi TUI 走 AgentSession.prompt()，扩展命令即使 streaming 也立刻执行，
+        // 不得在这里 busy 掉。未注册的斜杠仍会由 SDK 抛错，下面按 busy 回执，不另起一轮。
         if ((this.promptRunning || session.isStreaming) && command.streamingBehavior !== "steer") {
-          const busy = this.reject(parsed.submissionId, "busy");
-          this.promptReceipts.set(parsed.submissionId, busy);
-          return busy;
+          if (!isImmediateSlashPrompt(parsed.message)) {
+            const busy = this.reject(parsed.submissionId, "busy");
+            this.promptReceipts.set(parsed.submissionId, busy);
+            return busy;
+          }
+          try {
+            await session.prompt(parsed.message, {
+              images: resolvedImages.images as never,
+              source: "rpc",
+            });
+            const receipt: PromptReceipt = {
+              submissionId: parsed.submissionId,
+              sessionId: this.realSessionId,
+              status: "accepted",
+            };
+            this.promptReceipts.set(parsed.submissionId, receipt);
+            return receipt;
+          } catch {
+            const busy = this.reject(parsed.submissionId, "busy");
+            this.promptReceipts.set(parsed.submissionId, busy);
+            return busy;
+          }
         }
         if (!acquireRunningLease(this.realSessionId)) {
           throw new Error(SESSION_RUNNING_LOCKED_MESSAGE);

@@ -185,6 +185,7 @@ export const en = {
   lineage_switchTo: 'Switch to {title}',
   lineage_stale: 'Update failed — data may be stale',
   lineage_needsAttention: 'Needs attention',
+  lineage_switcherLabel: 'Switch subagent: {title}',
   sidebar_expandRecentSessions: 'Expand recent sessions',
   sidebar_collapseRecentSessions: 'Collapse recent sessions',
   // archive
@@ -508,6 +509,8 @@ export const en = {
   extension_selectAnOption: 'Select an option',
   extension_otherPlaceholder: 'Enter a custom value',
   extension_ctrlEnterHint: 'Ctrl+Enter to submit',
+  extension_copy: 'Copy',
+  extension_copied: 'Copied',
   // 本轮核心工作区补充翻译
 
   // 新会话引导页（OpenChamber 风格项目/工作树选择）

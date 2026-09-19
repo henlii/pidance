@@ -123,14 +123,10 @@ test("SSR/source：面板与输入框同宽同中线，内容区可滚动", () =
     request: request("select", { options: ["一"] }),
     onRespond: () => {},
   });
-  // 与输入框一致的 820 宽度（旧 560 窄栏会显成错位的另一栏）
   assert.match(html, /width:min\(\d+px, 100%\)/, "面板未使用与输入框一致的宽度（取自共享常量）");
   assert.ok(!html.includes("min(560px, 100%)"), "面板仍保留旧的窄栏宽度");
-  // column flex 里的滚动契约：flex 1 1 auto + min-height 0，否则内容超出被裁切而不是滚动
-  assert.ok(
-    html.includes("flex:1 1 auto;min-height:0;padding:10px 12px;overflow-y:auto"),
-    "内容区缺少可滚动契约（flex/min-height:0）",
-  );
+  assert.ok(html.includes("extension-panel-body"), "内容区走 GUI 外壳滚动区");
+  assert.ok(html.includes("extension-panel-footer"), "操作区固定在面板底部");
   // 面板自身不再带 padding：由 ChatWindow 按输入框同款内边距与 820 宽度包裹
   const chatWindow = readFileSync(fileURLToPath(new URL("./ChatWindow.tsx", import.meta.url)), "utf8");
   const block = chatWindow.slice(

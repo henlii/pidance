@@ -33,6 +33,26 @@ export function growVisibleCountOnAppend(
 }
 
 /**
+ * 渲染计划缩短（收尾把末轮收成 processGroup、卸掉 live 槽）时同步减小 visibleCount。
+ * 固定窗口在 total 变小时会把 startIndex 前移，把更早内容挂到视口上方，阅读位置跟着跳。
+ * 按缩短前的 startIndex 收窗口，已渲染头部保持不动。
+ */
+export function shrinkVisibleCountOnPlanShrink(
+  visibleCount: number,
+  previousTotal: number,
+  nextTotal: number,
+): number {
+  if (!Number.isFinite(visibleCount) || !Number.isFinite(previousTotal) || !Number.isFinite(nextTotal)) {
+    return visibleCount;
+  }
+  if (nextTotal >= previousTotal) return visibleCount;
+  const safeVisible = Math.max(0, visibleCount);
+  const prevStart = Math.max(0, previousTotal - safeVisible);
+  if (nextTotal <= prevStart) return Math.max(0, nextTotal);
+  return nextTotal - prevStart;
+}
+
+/**
  * 顶部哨兵是否应挂载：本地还有未渲染条，或服务端还有更旧页。
  * 仅看 localHasMore 会在 visibleCount ≥ 已加载条数时卸掉哨兵，导致第二次起无法再拉历史。
  */
@@ -42,40 +62,23 @@ export function shouldShowHistorySentinel(localHasMore: boolean, hasMoreBefore: 
 
 /**
  * 哨兵进入视口时的动作：先扩本地窗口，到头再请求服务端更旧页。
+ *
+ * visibleCount 按**渲染计划项**计数（过程组会把多条消息合成一项），
+ * 必须用 localHasMore（计划窗口），不能和 messages.length 比。
  */
 export function resolveHistoryLoadAction(options: {
-  visibleCount: number;
-  messagesLength: number;
+  localHasMore: boolean;
   hasMoreBefore: boolean;
   historyLoading: boolean;
 }): "expand-local" | "load-server" | "none" {
   if (options.historyLoading) return "none";
-  if (options.visibleCount < options.messagesLength) return "expand-local";
+  if (options.localHasMore) return "expand-local";
   if (options.hasMoreBefore) return "load-server";
   return "none";
 }
 
 export function captureScrollDistance(scrollHeight: number, scrollTop: number): number {
   return scrollHeight - scrollTop;
-}
-
-/**
- * 本次布局变化是否应做 prepend 补偿（Bug：首次向上滚动跳过很大一段）。
- *
- * 两个条件缺一不可：
- * - 存在待补偿的距离快照（哨兵命中时捕获）；
- * - **头部 entry id 变老**：只有头部插入更旧内容才会把视口向下推。尾部追加
- *   （流式/新消息）同样会改变 scrollHeight，但它发生在视口下方，套用同一补偿
- *   会把视口错误地下移。
- */
-export function shouldCompensatePrepend(input: {
-  savedDistance: number | null;
-  headEntryId: string | null;
-  compensatedHeadEntryId: string | null;
-}): boolean {
-  if (input.savedDistance == null) return false;
-  if (!input.headEntryId) return false;
-  return input.headEntryId !== input.compensatedHeadEntryId;
 }
 
 export function restoreScrollTop(scrollHeight: number, savedDistance: number): number {

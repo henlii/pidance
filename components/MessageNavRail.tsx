@@ -17,6 +17,10 @@ import { useCallback, useEffect, useRef, useState, RefObject } from "react";
 import { resolveActiveOutlineEntry, type UserMessageOutlineItem } from "@/lib/session-outline";
 import { useI18n } from "@/lib/i18n";
 import { CHAT_GUTTER } from "@/lib/chat-column";
+import {
+  applyViewportScrollAnchor,
+  captureViewportScrollAnchor,
+} from "@/lib/chat-scroll-anchor";
 
 interface Props {
   /**
@@ -368,15 +372,8 @@ export function MessageNavRail({
      * 把锚点消息放回加载前相对容器顶的同一偏移（瞬时）。
      * 锚点不在当前 DOM（不在新窗口 / 已卸载）返回 false，不做任何移动。
      */
-    const applyAnchorOffset = (anchor: { entryId: string; offset: number }) => {
-      const el = resolveMessageElementRef.current?.(anchor.entryId);
-      if (!el || !el.isConnected) return false;
-      scrollEl.scrollTop = el.getBoundingClientRect().top
-        - scrollEl.getBoundingClientRect().top
-        + scrollEl.scrollTop
-        - anchor.offset;
-      return true;
-    };
+    const applyAnchorOffset = (anchor: { entryId: string; offset: number }) =>
+      applyViewportScrollAnchor(scrollEl, anchor, (id) => resolveMessageElementRef.current?.(id) ?? null);
 
     /**
      * 快速滚动到目标（平滑动画，不是瞬时跳转）。
@@ -488,21 +485,8 @@ export function MessageNavRail({
      * 而浏览器不会替我们保住「当前视口对应的内容」—— scrollTop 只是个数字，
      * 换窗后它指向完全不同的内容，用户看到的就是「显示的内容被换掉了」。
      */
-    const captureAnchor = (): { entryId: string; offset: number } | null => {
-      const containerTop = scrollEl.getBoundingClientRect().top;
-      let first: { entryId: string; offset: number } | null = null;
-      let best: { entryId: string; offset: number } | null = null;
-      for (const el of scrollEl.querySelectorAll<HTMLElement>("[data-message-entry-id]")) {
-        const anchorId = el.getAttribute("data-message-entry-id");
-        if (!anchorId) continue;
-        const offset = el.getBoundingClientRect().top - containerTop;
-        first ??= { entryId: anchorId, offset };
-        if (offset > 1) break; // 已经越过容器顶：后面的只会更靠下
-        best = { entryId: anchorId, offset };
-      }
-      // 视口在第一条消息之上（还没滚到任何消息）：用第一条当锚点，偏移为正也能还原
-      return best ?? first;
-    };
+    const captureAnchor = (): { entryId: string; offset: number } | null =>
+      captureViewportScrollAnchor(scrollEl);
 
     // 等目标进入 DOM（服务端定位后需要一拍渲染）
     const waitForTarget = async (): Promise<HTMLElement | null> => {

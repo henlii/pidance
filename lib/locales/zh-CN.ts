@@ -185,6 +185,7 @@ export const zhCN: Record<TranslationKey, string> = {
   lineage_switchTo: '切换到 {title}',
   lineage_stale: '更新失败，数据可能过期',
   lineage_needsAttention: '需要关注',
+  lineage_switcherLabel: '切换子代理：{title}',
   sidebar_expandRecentSessions: '展开最近会话',
   sidebar_collapseRecentSessions: '折叠最近会话',
   // 归档
@@ -508,6 +509,8 @@ export const zhCN: Record<TranslationKey, string> = {
   extension_selectAnOption: '请选择一项',
   extension_otherPlaceholder: '输入自定义内容',
   extension_ctrlEnterHint: 'Ctrl+Enter 提交',
+  extension_copy: '复制',
+  extension_copied: '已复制',
   // 本轮核心工作区补充翻译
 
   // 新会话引导页（OpenChamber 风格项目/工作树选择）

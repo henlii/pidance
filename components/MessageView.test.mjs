@@ -224,7 +224,7 @@ test("思考块：流式中保持折叠，单行显示最后一行输出", () =>
   const html = renderMessage(thinkingMessage("第一行推理\n第二行推理\n最后一行推理"), { isStreaming: true });
   assert.ok(html.includes('aria-expanded="false"'), "流式中不得自动展开");
   // 标签内联在内容前面：整块只有一行，没有独立的标题行
-  assert.ok(html.includes("【Thinking】"), "标签与内容同一行");
+  assert.ok(html.includes("Thinking·"), "标签与内容同一行");
   assert.ok(html.includes("最后一行推理"), "折叠态显示最后一行");
   assert.ok(!html.includes("第二行推理"), "折叠态不渲染整段内容");
 });
@@ -232,7 +232,7 @@ test("思考块：流式中保持折叠，单行显示最后一行输出", () =>
 test("思考块：非流式（历史消息）折叠态同样显示末行内容", () => {
   const html = renderMessage(thinkingMessage("旧推理第一行\n旧推理末行"));
   assert.ok(html.includes('aria-expanded="false"'));
-  assert.ok(html.includes("【Thinking】"));
+  assert.ok(html.includes("Thinking·"));
   // 折叠态也要能看见内容（此前历史块只有标签，看起来像内容丢失）
   assert.ok(html.includes("旧推理末行"), "历史块折叠态显示末行");
   assert.ok(!html.includes("旧推理第一行"), "折叠态不渲染整段内容");
@@ -245,10 +245,9 @@ test("思考块：用户展开后渲染完整内容", () => {
   const setExpandedCalls = block.match(/setExpanded\(/g) ?? [];
   assert.equal(setExpandedCalls.length, 1, "只允许用户点击触发的 setExpanded");
   assert.ok(block.includes("onToggle={() => void toggle()}"));
-  // 标签内联在内容前面（同一行），展开态直接渲染 bodyText，不再渲染独立标题行
-  assert.match(block, /\{expanded \? bodyText : collapsedText\}/);
-  assert.ok(block.includes('label={t("chat_blockThinking")}'), "标签内联在内容行里");
-  assert.ok(!block.includes("borderTop: \"1px solid var(--border)\""), "展开态不再有标题/内容分隔行");
+  assert.match(block, /summary=\{expanded \? null : collapsedText\}/);
+  assert.ok(block.includes("{bodyText}"), "展开态正文从标题下一行开始");
+  assert.ok(block.includes("formatBlockLabel"), "思考标签为 思考·");
 });
 
 test("实时工具：运行中保持折叠，折叠摘要显示快照输出的最后一行", () => {
@@ -267,7 +266,7 @@ test("实时工具：运行中保持折叠，折叠摘要显示快照输出的�
   // 运行中也不自动展开（折叠/展开只由用户决定）
   assert.ok(html.includes('aria-expanded="false"'));
   // 单行：标签 + 实时输出末行（整段输出与命令行都不渲染，避免出现第二行）
-  assert.ok(html.includes("【Tool】"));
+  assert.ok(html.includes("Bash·"));
   assert.ok(html.includes("finished"));
   assert.ok(!html.includes("checking\nfinished"));
   assert.ok(!html.includes("npm run lint -- --fix"), "运行中不显示命令行，只显示实时末行");
@@ -317,7 +316,7 @@ test("TUI 渲染桥：ANSI 调用/实时行优先于原始输出；有 result �
   });
   // 运行中保持折叠：单行摘要只显示实时输出末行（ANSI 明细需用户展开）
   assert.ok(runningHtml.includes('aria-expanded="false"'));
-  assert.ok(runningHtml.includes("【Tool】"));
+  assert.ok(runningHtml.includes("Bash·"));
   assert.ok(runningHtml.includes("原始实时输出"));
   assert.ok(!runningHtml.includes("插件调用"));
   assert.ok(!runningHtml.includes("插件实时输出"));
@@ -344,13 +343,31 @@ test("实时工具：终态默认折叠为标签、命令行与固定耗时摘�
 
   assert.ok(html.includes('aria-expanded="false"'));
   // 单行：标签 + 命令行 + 耗时；状态由左侧 3px 状态色边框表达，不再占一行文字
-  assert.ok(html.includes("【Tool】"));
+  assert.ok(html.includes("Bash·"));
   assert.ok(html.includes("node test.mjs"));
   assert.ok(!html.includes("Done"), "状态不再单独占一行文字（改由左侧状态色边框表达）");
   assert.ok(html.includes("2.5s"));
   assert.ok(!html.includes("ok</span>"), "终态不把输出末行当摘要，保持命令行稳定");
   assert.ok(!html.includes("Live output"));
   assert.ok(!html.includes(">ok</pre>"));
+});
+
+test("块表头：整行按钮带内边距，边缘可点", () => {
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  const header = source.slice(source.indexOf("function BlockHeaderRow("), source.indexOf("function ThinkingBlock("));
+  assert.ok(header.includes('data-block-header="true"'));
+  assert.ok(header.includes('padding: "6px 10px"'), "内边距在按钮上，点边缘才能 toggle");
+  assert.ok(header.includes("width: \"100%\""));
+});
+
+test("pwsl 工具标签用实际工具名", () => {
+  const html = renderMessage({
+    role: "assistant",
+    content: [{ type: "toolCall", toolCallId: "tool-2", toolName: "pwsl", input: { command: "Get-Date" } }],
+  });
+  assert.ok(html.includes("Pwsl·"));
+  assert.ok(!html.includes("【工具】"));
+  assert.ok(!html.includes("【Tool】"));
 });
 
 test("历史工具：无快照时保持默认折叠", () => {

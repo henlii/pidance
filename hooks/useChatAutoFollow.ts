@@ -13,6 +13,7 @@ import {
   isLayoutDrivenScroll,
   isPointerSelectIntent,
   reduceAutoFollow,
+  shouldPinAfterRunSettle,
   shouldShowJumpButton,
   type AutoFollowMode,
 } from "@/lib/chat-auto-follow";
@@ -100,6 +101,7 @@ export function useChatAutoFollow({
   const applyAutoFollowMode = useCallback((mode: AutoFollowMode) => {
     if (autoFollowModeRef.current === mode) return;
     autoFollowModeRef.current = mode;
+    if (mode === "released") pendingEndPinRef.current = false;
     updateJumpButtonVisibility();
   }, [updateJumpButtonVisibility]);
 
@@ -144,7 +146,7 @@ export function useChatAutoFollow({
 
   const notifyAutoFollowEnd = useCallback(() => {
     runSettleUntilRef.current = Date.now() + RUN_SETTLE_MS;
-    pendingEndPinRef.current = true;
+    pendingEndPinRef.current = shouldPinAfterRunSettle(autoFollowModeRef.current);
   }, []);
 
   const jumpToBottom = useCallback(() => {
@@ -248,7 +250,7 @@ export function useChatAutoFollow({
         // 按住期间内容增长被 pinToBottom 的交互态挡掉了；仍跟随就补一次守卫钉底，
         // 否则内容会停在半途（下一次增长才被拉回）。只补钉底，不改成 released/following。
         requestAnimationFrame(() => {
-          if (autoFollowModeRef.current === "following") pinToBottom("instant");
+          if (shouldPinAfterRunSettle(autoFollowModeRef.current)) pinToBottom("instant");
         });
       }
       updateJumpButtonVisibility();
@@ -330,14 +332,13 @@ export function useChatAutoFollow({
     const busy = agentRunning || bashRunning;
     if (wasSessionBusyRef.current && !busy) {
       runSettleUntilRef.current = Date.now() + RUN_SETTLE_MS;
-      if (autoFollowModeRef.current === "following") {
+      requestAnimationFrame(() => {
+        if (!shouldPinAfterRunSettle(autoFollowModeRef.current)) return;
+        pinToBottom("instant");
         requestAnimationFrame(() => {
-          pinToBottom("instant");
-          requestAnimationFrame(() => {
-            if (autoFollowModeRef.current === "following") pinToBottom("instant");
-          });
+          if (shouldPinAfterRunSettle(autoFollowModeRef.current)) pinToBottom("instant");
         });
-      }
+      });
     }
     wasSessionBusyRef.current = busy;
   }, [agentRunning, bashRunning, pinToBottom]);
@@ -347,13 +348,15 @@ export function useChatAutoFollow({
     if (!container) return;
     const content = container.firstElementChild;
     const onResize = () => {
-      lastScrollHeightRef.current = container.scrollHeight;
-      lastClientHeightRef.current = container.clientHeight;
       const now = Date.now();
-      if (autoFollowModeRef.current !== "following") {
+      if (!shouldPinAfterRunSettle(autoFollowModeRef.current)) {
+        // released：不要先改 lastScrollHeight。否则紧随其后的 clamp scroll
+        // 会看成「高度没变的用户滚动」，占位缩到真实底部时会被吸回 following。
         updateJumpButtonVisibility();
         return;
       }
+      lastScrollHeightRef.current = container.scrollHeight;
+      lastClientHeightRef.current = container.clientHeight;
       if (now < programmaticSmoothUntilRef.current) return;
       if (now < externalWriteUntilRef.current) {
         updateJumpButtonVisibility();
@@ -376,7 +379,7 @@ export function useChatAutoFollow({
       pendingResetPinRef.current = false;
       pendingEndPinRef.current = false;
       initialScrollDoneRef.current = true;
-      if (autoFollowModeRef.current === "following") pinToBottom("instant");
+      if (shouldPinAfterRunSettle(autoFollowModeRef.current)) pinToBottom("instant");
     } else if (!initialScrollDoneRef.current) {
       initialScrollDoneRef.current = true;
       pinToBottom("instant");
@@ -395,6 +398,8 @@ export function useChatAutoFollow({
     return () => mql.removeEventListener("change", update);
   }, []);
 
+  const isAutoFollowing = useCallback(() => autoFollowModeRef.current === "following", []);
+
   return {
     scrollContainerRef,
     jumpButtonVisible,
@@ -405,5 +410,6 @@ export function useChatAutoFollow({
     markExternalScrollWrite,
     notifyProgrammaticSmooth,
     notifyBrowsingHistory,
+    isAutoFollowing,
   };
 }
