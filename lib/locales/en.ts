@@ -765,7 +765,7 @@ export const en = {
   defaults_modelEmpty: "No models for this provider",
   defaults_modelsLoadFailed: "Failed to load model list",
   defaults_thinking: "Default thinking level", defaults_thinkingHint: "xhigh/max apply to models that did not disable them; no per-model custom map required.",
-  defaults_thinkingUnset: "(not set — Pi uses medium)",
+  defaults_thinkingUnset: "(not set)",
   defaults_queueSection: "Message queue",
   defaults_steeringMode: "Steering mode",
   defaults_followUpMode: "Follow-up mode",

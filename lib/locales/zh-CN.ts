@@ -764,7 +764,7 @@ export const zhCN: Record<TranslationKey, string> = {
   defaults_modelEmpty: "该 Provider 下暂无模型",
   defaults_modelsLoadFailed: "模型列表加载失败",
   defaults_thinking: "默认思考级别", defaults_thinkingHint: "xhigh/max 对未禁用该档的模型生效，不必在每个模型上自定义映射。",
-  defaults_thinkingUnset: "（未设置：用 Pi 默认 medium）",
+  defaults_thinkingUnset: "（未设置）",
   defaults_queueSection: "消息队列",
   defaults_steeringMode: "Steering 模式",
   defaults_followUpMode: "Follow-up 模式",

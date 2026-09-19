@@ -452,8 +452,11 @@ const MODEL_COMPAT_BOOLS = [
   "sendSessionAffinityHeaders",
 ] as const;
 
-/** models.json compat 布尔开关 → 本地化标签（中文名 + 原始键名）。 */
-const COMPAT_BOOL_LABEL_KEYS: Record<string, TranslationKey> = {
+/** 两个 compat 开关清单的并集；漏一个就无法编译，新开关必须配文案。 */
+type CompatBoolKey = (typeof PROVIDER_COMPAT_BOOLS)[number] | (typeof MODEL_COMPAT_BOOLS)[number];
+
+/** models.json compat 布尔开关 → 本地化标签（中文侧带原始键名）。 */
+const COMPAT_BOOL_LABEL_KEYS: Record<CompatBoolKey, TranslationKey> = {
   supportsDeveloperRole: "models_compatDeveloperRole",
   supportsReasoningEffort: "models_compatReasoningEffort",
   supportsStore: "models_compatStore",
@@ -518,24 +521,21 @@ function CompatBoolGrid({
   compat,
   onChange,
 }: {
-  keys: readonly string[];
+  keys: readonly CompatBoolKey[];
   compat?: Record<string, unknown>;
   onChange: (next?: Record<string, unknown>) => void;
 }) {
   const { t } = useI18n();
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      {keys.map((key) => {
-        const labelKey = COMPAT_BOOL_LABEL_KEYS[key];
-        return (
-          <Check
-            key={key}
-            label={labelKey ? t(labelKey) : key}
-            checked={compat?.[key] === true}
-            onChange={(v) => onChange(setCompatBool(compat, key, v))}
-          />
-        );
-      })}
+      {keys.map((key) => (
+        <Check
+          key={key}
+          label={t(COMPAT_BOOL_LABEL_KEYS[key])}
+          checked={compat?.[key] === true}
+          onChange={(v) => onChange(setCompatBool(compat, key, v))}
+        />
+      ))}
     </div>
   );
 }

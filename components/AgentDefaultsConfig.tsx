@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import { useI18n } from "@/lib/i18n";
+import type { TranslationKey } from "@/lib/locales/en";
 import { THINKING_LEVELS, type AgentThinkingLevel } from "@/lib/agent-settings";
 import { SettingsJsonEditor } from "./SettingsJsonEditor";
 import { SettingsPageFooter, settingsPrimaryButtonStyle, settingsSecondaryButtonStyle } from "./SettingsPageFooter";
@@ -123,6 +124,17 @@ function BooleanField({
     </label>
   );
 }
+
+/** 思考级别 → 已有文案键（与输入框同一套说法，值仍写 settings.json 原始档位）。 */
+const THINKING_LEVEL_LABEL_KEYS: Record<AgentThinkingLevel, TranslationKey> = {
+  off: "input_thinkingOff",
+  minimal: "input_thinkingMinimal",
+  low: "input_thinkingLow",
+  medium: "input_thinkingMedium",
+  high: "input_thinkingHigh",
+  xhigh: "input_thinkingXhigh",
+  max: "input_thinkingMax",
+};
 
 type SettingsObject = Record<string, unknown>;
 
@@ -530,7 +542,7 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
                   <option value="">{t("defaults_thinkingUnset")}</option>
                   {THINKING_LEVELS.map((level) => (
                     <option key={level} value={level}>
-                      {level}
+                      {level} · {t(THINKING_LEVEL_LABEL_KEYS[level])}
                     </option>
                   ))}
                 </select>
