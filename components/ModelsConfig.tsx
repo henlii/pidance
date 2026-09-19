@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Check as CheckIcon, Eraser, LoaderCircle, Plus, Zap } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/lib/i18n";
+import type { TranslationKey } from "@/lib/locales/en";
 import { SettingsPageFooter, settingsPrimaryButtonStyle } from "./SettingsPageFooter";
 import { SettingsJsonEditor } from "./SettingsJsonEditor";
 // Color icons (have their own fill colors — no background needed)
@@ -451,6 +452,27 @@ const MODEL_COMPAT_BOOLS = [
   "sendSessionAffinityHeaders",
 ] as const;
 
+/** models.json compat 布尔开关 → 本地化标签（中文名 + 原始键名）。 */
+const COMPAT_BOOL_LABEL_KEYS: Record<string, TranslationKey> = {
+  supportsDeveloperRole: "models_compatDeveloperRole",
+  supportsReasoningEffort: "models_compatReasoningEffort",
+  supportsStore: "models_compatStore",
+  supportsUsageInStreaming: "models_compatUsageInStreaming",
+  supportsStrictMode: "models_compatStrictMode",
+  sendSessionAffinityHeaders: "models_compatSessionAffinityHeaders",
+  supportsLongCacheRetention: "models_compatLongCacheRetention",
+  requiresReasoningContentOnAssistantMessages: "models_compatReasoningContentOnAssistant",
+  requiresThinkingAsText: "models_compatThinkingAsText",
+};
+
+/** cost 子键 → 本地化标签。 */
+const COST_LABEL_KEYS: Record<"input" | "output" | "cacheRead" | "cacheWrite", TranslationKey> = {
+  input: "models_costInput",
+  output: "models_costOutput",
+  cacheRead: "models_costCacheRead",
+  cacheWrite: "models_costCacheWrite",
+};
+
 const THINKING_FORMATS = [
   "",
   "openai",
@@ -500,16 +522,20 @@ function CompatBoolGrid({
   compat?: Record<string, unknown>;
   onChange: (next?: Record<string, unknown>) => void;
 }) {
+  const { t } = useI18n();
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      {keys.map((key) => (
-        <Check
-          key={key}
-          label={key}
-          checked={compat?.[key] === true}
-          onChange={(v) => onChange(setCompatBool(compat, key, v))}
-        />
-      ))}
+      {keys.map((key) => {
+        const labelKey = COMPAT_BOOL_LABEL_KEYS[key];
+        return (
+          <Check
+            key={key}
+            label={labelKey ? t(labelKey) : key}
+            checked={compat?.[key] === true}
+            onChange={(v) => onChange(setCompatBool(compat, key, v))}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -973,7 +999,7 @@ function ModelDetail({
         <SectionTitle>{t("models_cost")}</SectionTitle>
         <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
           {(["input", "output", "cacheRead", "cacheWrite"] as const).map((k) => (
-            <Field key={k} label={k}>
+            <Field key={k} label={t(COST_LABEL_KEYS[k])}>
               <NumInput value={costVal(k)} onChange={(v) => setCost(k, v)} placeholder="0" />
             </Field>
           ))}

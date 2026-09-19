@@ -549,13 +549,13 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
                 onChange={(v) => setDraft({ ...draft, compactionEnabled: v })}
               />
               <NumberField
-                label="reserveTokens"
+                label={t("defaults_reserveTokens")}
                 value={draft.compactionReserve}
                 min={1}
                 onChange={(v) => setDraft({ ...draft, compactionReserve: v })}
               />
               <NumberField
-                label="keepRecentTokens"
+                label={t("defaults_keepRecentTokens")}
                 value={draft.compactionKeep}
                 min={1}
                 onChange={(v) => setDraft({ ...draft, compactionKeep: v })}
@@ -573,13 +573,13 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
                 onChange={(v) => setDraft({ ...draft, retryEnabled: v })}
               />
               <NumberField
-                label="maxRetries"
+                label={t("defaults_maxRetries")}
                 value={draft.retryMaxRetries}
                 min={0}
                 onChange={(v) => setDraft({ ...draft, retryMaxRetries: v })}
               />
               <NumberField
-                label="baseDelayMs"
+                label={t("defaults_baseDelayMs")}
                 value={draft.retryBaseDelayMs}
                 min={0}
                 onChange={(v) => setDraft({ ...draft, retryBaseDelayMs: v })}
@@ -609,64 +609,64 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
             <div style={sectionTitleStyle}>{t("defaults_advancedSection")}</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               <TextField
-                label="httpProxy"
+                label={t("defaults_httpProxy")}
                 value={draft.httpProxy}
                 onChange={(v) => setDraft({ ...draft, httpProxy: v })}
               />
               <NumberField
-                label="httpIdleTimeoutMs"
+                label={t("defaults_httpIdleTimeoutMs")}
                 value={draft.httpIdleTimeoutMs}
                 min={1}
                 onChange={(v) => setDraft({ ...draft, httpIdleTimeoutMs: v })}
               />
               <TextField
-                label="sessionDir"
+                label={t("defaults_sessionDir")}
                 value={draft.sessionDir}
                 onChange={(v) => setDraft({ ...draft, sessionDir: v })}
               />
               <TextField
-                label="shellPath"
+                label={t("defaults_shellPath")}
                 value={draft.shellPath}
                 onChange={(v) => setDraft({ ...draft, shellPath: v })}
               />
               <TextField
-                label="externalEditor"
+                label={t("defaults_externalEditor")}
                 value={draft.externalEditor}
                 onChange={(v) => setDraft({ ...draft, externalEditor: v })}
               />
               <div>
-                <div style={labelStyle}>defaultProjectTrust</div>
+                <div style={labelStyle}>{t("defaults_defaultProjectTrust")}</div>
                 <input
                   type="text"
                   value={draft.defaultProjectTrust}
-                  placeholder="always / ask / never"
+                  placeholder={t("defaults_defaultProjectTrustPlaceholder")}
                   onChange={(e) => setDraft({ ...draft, defaultProjectTrust: e.target.value })}
                   style={{ ...inputStyle, fontFamily: "inherit" }}
                 />
               </div>
               <div>
-                <div style={labelStyle}>doubleEscapeAction</div>
+                <div style={labelStyle}>{t("defaults_doubleEscapeAction")}</div>
                 <select
                   value={draft.doubleEscapeAction}
                   onChange={(e) => setDraft({ ...draft, doubleEscapeAction: e.target.value })}
                   style={selectStyle}
                 >
-                  <option value="">（未设置）</option>
-                  <option value="fork">fork</option>
-                  <option value="tree">tree</option>
-                  <option value="none">none</option>
+                  <option value="">{t("defaults_unset")}</option>
+                  <option value="fork">{t("defaults_doubleEscapeFork")}</option>
+                  <option value="tree">{t("defaults_doubleEscapeTree")}</option>
+                  <option value="none">{t("defaults_doubleEscapeNone")}</option>
                 </select>
               </div>
               <div>
-                <div style={labelStyle}>transport（模型传输通道）</div>
+                <div style={labelStyle}>{t("defaults_transport")}</div>
                 <select
                   value={draft.transport}
                   onChange={(e) => setDraft({ ...draft, transport: e.target.value })}
                   style={selectStyle}
                 >
-                  <option value="auto">auto（默认：Codex/Responses 自动尝试 WebSocket）</option>
-                  <option value="sse">sse（HTTP 流）</option>
-                  <option value="websocket">websocket（WebSocket 直连，GPT Codex 快速通道）</option>
+                  <option value="auto">{t("defaults_transportAuto")}</option>
+                  <option value="sse">{t("defaults_transportSse")}</option>
+                  <option value="websocket">{t("defaults_transportWebsocket")}</option>
                 </select>
               </div>
               <BooleanField
