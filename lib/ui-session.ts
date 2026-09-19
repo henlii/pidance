@@ -11,6 +11,8 @@ import path from "node:path";
 import { homedir } from "node:os";
 
 export const UI_SESSION_COOKIE_NAME = "pidance_ui_session";
+/** 浏览器设备标识 cookie（仅用于「同一浏览器只占一行设备记录」，不是凭据）。 */
+export const UI_DEVICE_COOKIE_NAME = "pidance_device_id";
 export const UI_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 /** 信任设备长期有效（10 年）：有效性由登录管理删除控制，不因时间过期。 */
 export const UI_TRUSTED_DEVICE_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1000;
@@ -374,16 +376,32 @@ export function hasUiSessionDevice(
   return readUiSessionDevices(filePath, store, nowMs).some((d) => d.id === id);
 }
 
-/** 注册设备（登录成功后）。 */
+/** 注册设备（登录成功后）：同一 id 原地更新，不新增行、不改列表顺序。 */
 export function saveUiSessionDevice(
   device: UiSessionDevice,
   filePath = uiSessionsFilePath(),
   store: DeviceFileStore = defaultDeviceStore,
   nowMs = Date.now(),
 ): void {
-  const devices = readUiSessionDevices(filePath, store, nowMs).filter((d) => d.id !== device.id);
-  devices.push(device);
+  const devices = readUiSessionDevices(filePath, store, nowMs);
+  const index = devices.findIndex((d) => d.id === device.id);
+  if (index >= 0) devices[index] = device;
+  else devices.push(device);
   writeDevices(devices, filePath, store);
+}
+
+/**
+ * 设备 id 形态校验：32 位小写十六进制（randomBytes(16).toString("hex")）。
+ * 不信任外来值，避免任意字符串被当成设备 id 写入注册表。
+ */
+export function isUiDeviceId(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{32}$/.test(value);
+}
+
+/** 读取设备 id cookie（校验形态）；缺失/非法 → null（调用方自行生成新 id）。 */
+export function readUiDeviceIdCookie(cookieHeader: string | null | undefined): string | null {
+  const raw = parseCookieValue(cookieHeader, UI_DEVICE_COOKIE_NAME);
+  return isUiDeviceId(raw) ? raw : null;
 }
 
 /** 删除设备（登出该设备）。 */
