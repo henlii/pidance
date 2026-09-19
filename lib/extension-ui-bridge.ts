@@ -35,6 +35,22 @@ function isBlockingMethod(method: ExtensionUiRequest["method"]): method is Exten
 }
 
 /**
+ * 从 host 状态里的 `pendingExtensionRequests` 挑出阻塞请求（保持 FIFO 顺序）。
+ *
+ * 阻塞请求只有 SSE 事件、没有重放：后台/断流期间漏掉一条，问答就永远不出现。
+ * 恢复入口（热状态、切会话、reconcile、切回前台）统一用这个函数把快照转成队列。
+ */
+export function pickBlockingExtensionRequests(events: unknown): ExtensionUiBlockingRequest[] {
+  if (!Array.isArray(events)) return [];
+  return events.filter((event): event is ExtensionUiBlockingRequest => {
+    const candidate = event as { type?: unknown; id?: unknown; method?: unknown } | null;
+    if (!candidate || candidate.type !== "extension_ui_request") return false;
+    if (typeof candidate.id !== "string" || !candidate.id) return false;
+    return isBlockingMethod(candidate.method as ExtensionUiRequest["method"]);
+  });
+}
+
+/**
  * 从 host 状态恢复活动 custom 面板（Issue #34）。
  *
  * custom 面板只有 SSE 事件、没有重放，刷新或切回后服务端仍在等输入但浏览器端

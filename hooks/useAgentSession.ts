@@ -37,6 +37,7 @@ import {
   applyExtensionUiRequest,
   clearAllExtensionUiBlocking,
   clearExtensionUiRequest,
+  pickBlockingExtensionRequests,
   projectBlockingHead,
   restoreCustomUi,
 } from "@/lib/extension-ui-bridge";
@@ -542,6 +543,49 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets,
     extensionUiStateRef, commitExtensionUiState, patchExtensionUiState, dismissExtensionUiRequest,
   } = useExtensionUiState();
+  /**
+   * 从状态恢复活动 custom 面板（Issue #34）：custom 只有事件、没有重放，
+   * 刷新或切回后服务端仍在等输入，但浏览器端会缺内容与输入入口。
+   * 只恢复不清理（关闭由 closed 事件负责，避免与刚打开的面板竞争）。
+   */
+  const applyActiveCustomUi = useCallback((active: { id?: unknown; lines?: unknown } | null | undefined) => {
+    if (!active) return;
+    const current = extensionUiStateRef.current;
+    const next = restoreCustomUi(current, active);
+    if (next !== current) commitExtensionUiState(next);
+  }, [commitExtensionUiState, extensionUiStateRef]);
+
+  /**
+   * 应用 host 状态里的扩展 UI 投影：status / widget / 待答阻塞请求 / 活动 custom 面板。
+   *
+   * 这几项在浏览器侧**只有 SSE 事件，没有重放**。页面在后台（浏览器冻结/断流，
+   * 见 registry 的 shouldAutoReconnect）或断网期间漏掉 `extension_ui_request`，
+   * 回到前台后智能体明明在等回答，界面却什么都不显示，只能刷新会话才看得到。
+   * 所以凡是从服务端拿到状态的地方（热状态、切会话、reconcile、切回前台）
+   * 都用这一份投影补齐；空闲（队列为空）时不清本地队列，避免竞态抹掉刚到的请求。
+   */
+  const applyExtensionUiProjection = useCallback((state?: AgentStateResponse | null) => {
+    if (!state) return;
+    if (state.extensionStatuses !== undefined) {
+      patchExtensionUiState({ statuses: state.extensionStatuses ?? [] });
+    }
+    if (state.extensionWidgets !== undefined) {
+      patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
+    }
+    const queue = pickBlockingExtensionRequests(state.pendingExtensionRequests);
+    const current = extensionUiStateRef.current.blockingQueue ?? [];
+    // 队列相同（同 id 同顺序）就不重写：状态会反复回到，没必要逐 tick 重渲染。
+    const sameQueue = queue.length === current.length
+      && queue.every((item, index) => item.id === current[index]?.id);
+    if (queue.length > 0 && !sameQueue) {
+      patchExtensionUiState({
+        blockingQueue: queue,
+        ...projectBlockingHead(queue),
+      });
+    }
+    applyActiveCustomUi(state.activeCustomUi);
+  }, [applyActiveCustomUi, extensionUiStateRef, patchExtensionUiState]);
+
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [], followUpRows: [], followUpRevision: null });
   // 每会话本地 follow-up 队列：Host 是唯一 owner，浏览器只持「权威条目 + 一个
   // 乐观待提交值 + CAS 基线」，按 sessionId 分账（见 lib/queue-state.ts 不变量）。
@@ -972,20 +1016,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           applyProjectedQueues(sid, liveState.queuedMessages);
         }
         // 活动 custom 面板：热状态恢复（#34）。
-        applyActiveCustomUi(liveState.activeCustomUi);
-        if (Array.isArray(liveState.pendingExtensionRequests)) {
-          const queue = (liveState.pendingExtensionRequests as AgentEvent[])
-            .filter((e): e is ExtensionUiBlockingRequest => {
-              const method = (e as { method?: string }).method;
-              return method === "select" || method === "confirm" || method === "input" || method === "editor";
-            });
-          if (queue.length > 0) {
-            patchExtensionUiState({
-              blockingQueue: queue,
-              ...projectBlockingHead(queue),
-            });
-          }
-        }
+        applyExtensionUiProjection(liveState);
       };
 
       try {
@@ -1031,7 +1062,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [applyProjectedQueues, applyRemoteThinking, beginLoadRequest, notifyAutoFollowBranchReset, patchExtensionUiState, queueEntryNow]);
+  }, [applyExtensionUiProjection, applyProjectedQueues, applyRemoteThinking, beginLoadRequest, notifyAutoFollowBranchReset, patchExtensionUiState, queueEntryNow]);
 
   /**
    * 向上滚动加载更旧历史（OpenChamber loadOlder 语义）。
@@ -1538,18 +1569,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [addNotice, addLiveActivity, commitExtensionUiState, opts.chatInputRef, extensionUiStateRef]);
 
   /**
-   * 从状态恢复活动 custom 面板（Issue #34）：custom 只有事件、没有重放，
-   * 刷新或切回后服务端仍在等输入，但浏览器端会缺内容与输入入口。
-   * 只恢复不清理（关闭由 closed 事件负责，避免与刚打开的面板竞争）。
-   */
-  const applyActiveCustomUi = useCallback((active: { id?: unknown; lines?: unknown } | null | undefined) => {
-    if (!active) return;
-    const current = extensionUiStateRef.current;
-    const next = restoreCustomUi(current, active);
-    if (next !== current) commitExtensionUiState(next);
-  }, [commitExtensionUiState, extensionUiStateRef]);
-
-  /**
    * 用 host 下发的本 run 吞吐读数兜底（冷挂载/刷新看不到 step 开始）。
    * 空对象（服务端也没有读数）等于清掉 seed，避免显示上一轮的旧值。
    *
@@ -1743,13 +1762,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (state?.queuedMessages !== undefined) {
         applyProjectedQueues(sid, state.queuedMessages);
       }
+      // 漏掉的扩展提问（后台/断流）：本轮仍在跑时按状态补上，否则智能体在等回答
+      // 而界面什么都不显示，用户只能刷新会话。
+      if (stillCurrent) applyExtensionUiProjection(state);
       if (result.shouldFinish) {
         await finishAgentRun(sid, result.runId);
       }
     } catch {
       // Network still down — the next poll / visibility / online tick retries.
     }
-  }, [applyProjectedQueues, finishAgentRun]);
+  }, [applyExtensionUiProjection, applyProjectedQueues, finishAgentRun]);
 
   // Recovery net for missed SSE events: while the agent is running, verify
   // against the server periodically and whenever the tab returns to the
@@ -1790,7 +1812,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     ensureEventsConnected(sid);
     void reconcileAgentState(sid);
     // 无论是否 running 都重拉：空闲会话也可能在后台跑完（本 slot 未感知）。
-    void loadSession(sid, false);
+    // includeState：漏掉的事件（尤其是扩展提问、custom 面板）只能靠状态快照补回。
+    // 本进程不知道那一轮在跑时 reconcile 会直接返回，所以必须走状态这条路。
+    void loadSession(sid, false, true);
   }, [ensureEventsConnected, reconcileAgentState, loadSession]);
 
   useEffect(() => {
@@ -3488,22 +3512,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             if (agentState.state.queuedMessages !== undefined) {
               applyProjectedQueues(session.id, agentState.state.queuedMessages);
             }
-            // 活动 custom 面板：冷加载/刷新恢复（#34）。会话已切走则不写
+            // 扩展 UI 投影（status/widget/阻塞请求/custom 面板）：会话已切走则不写
             // （customUi 是全局面板态，不按会话分，故使用同一个归属守卫）。
-            if (stillCurrent) applyActiveCustomUi(agentState.state.activeCustomUi);
-            if (Array.isArray(agentState.state.pendingExtensionRequests)) {
-              const queue = (agentState.state.pendingExtensionRequests as AgentEvent[])
-                .filter((e): e is ExtensionUiBlockingRequest => {
-                  const method = (e as { method?: string }).method;
-                  return method === "select" || method === "confirm" || method === "input" || method === "editor";
-                });
-              if (queue.length > 0) {
-                patchExtensionUiState({
-                  blockingQueue: queue,
-                  ...projectBlockingHead(queue),
-                });
-              }
-            }
+            if (stillCurrent) applyExtensionUiProjection(agentState.state);
           }
         });
       }
@@ -3521,7 +3532,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         runtimeSubscriptionRef.current = null;
       }
     };
-  }, [session?.id, session?.readOnly, newSessionIntentId, isNew, notifyAutoFollowBranchReset]);
+  }, [session?.id, session?.readOnly, newSessionIntentId, isNew, notifyAutoFollowBranchReset, applyExtensionUiProjection]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);
