@@ -26,6 +26,7 @@ import {
   dropAllPendingRecords,
   dropPendingRecord,
   findRecord,
+  insertRecordBeforePendingSteers,
   mergeTailRecords,
   optimisticRecord,
   prependOlderRecords,
@@ -636,7 +637,9 @@ export function createBrowserSessionRuntimeRegistry(
       ...(message as unknown as Record<string, unknown>),
       entryId: resolved,
     } as unknown as AgentMessage;
-    slot.timeline = appendRecord(slot.timeline, {
+    // 本步记录必须插在「本步流式期间发出的待确认引导」之前：引导属于下一组，
+    // 直接追加会把它从组下方翻到组上方（与磁盘顺序相反）。
+    slot.timeline = insertRecordBeforePendingSteers(slot.timeline, {
       key: resolved || nextLocalKey(slot),
       message: withEntry,
       entryId: resolved,
@@ -1345,7 +1348,14 @@ export function createBrowserSessionRuntimeRegistry(
     appendLocal(sessionId, message) {
       const slot = getSlot(sessionId, true)!;
       const key = nextLocalKey(slot);
-      slot.timeline = appendRecord(slot.timeline, optimisticRecord(key, message));
+      // 本步还在流式时发出的本地记录（引导）：Pi 把引导投递到下一个 step 边界，
+      // 磁盘上它排在被打断那一步的内容之后；而这里只能先追加在末尾，所以打上标记，
+      // 等这一步的 assistant 记录到达时插到它前面（见 insertRecordBeforePendingSteers）。
+      const duringStreamingStep = slot.snapshot.streamState.isStreaming === true;
+      slot.timeline = appendRecord(slot.timeline, {
+        ...optimisticRecord(key, message),
+        ...(duringStreamingStep ? { duringStreamingStep: true } : {}),
+      });
       bumpTimeline(slot);
       publish(slot);
       return key;

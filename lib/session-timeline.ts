@@ -18,6 +18,15 @@ export type TimelineRecord = {
   entryId: string;
   /** true = 本地乐观，尚未被服务端事件或磁盘快照证实。 */
   pending: boolean;
+  /**
+   * 这条本地乐观 user 消息是在「本步还在流式输出」时发出的（引导）。
+   *
+   * Pi 把引导投递到**下一个 step 边界**：磁盘上该引导排在被打断那一步的内容之后。
+   * 而浏览器侧乐观气泡在发出当刻就追加到时间线末尾，本步记录（message_end）随后才到
+   * ——如果直接追加，引导会被翻到整组上方（用户实测：引导气泡先在下、落盘后跳到上面）。
+   * 所以本步记录落盘时要插到这类待确认记录前面，见 insertRecordBeforePendingSteers。
+   */
+  duringStreamingStep?: boolean;
 };
 
 export type Timeline = readonly TimelineRecord[];
@@ -81,6 +90,28 @@ export function findRecord(timeline: Timeline, key: string): TimelineRecord | un
 
 export function appendRecord(timeline: Timeline, record: TimelineRecord): TimelineRecord[] {
   return [...timeline, record];
+}
+
+/**
+ * 追加一条已落盘的 step 记录，但要插在「本步流式期间发出的待确认引导」之前。
+ *
+ * 场景：用户在第 N 步还在输出时插话。乐观气泡已在时间线末尾，第 N 步的
+ * assistant 记录随后到达 —— 它属于上面那一组，必须排在引导之前；否则引导气泡
+ * 会从「组下方」跳到「组上方」（磁盘上的顺序也是 step 内容在前）。
+ * 只跳过**尾部连续**的这类记录：中间隔了别的已落盘消息就不动（那是普通新回合）。
+ */
+export function insertRecordBeforePendingSteers(
+  timeline: Timeline,
+  record: TimelineRecord,
+): TimelineRecord[] {
+  let index = timeline.length;
+  while (index > 0) {
+    const previous = timeline[index - 1];
+    if (!previous.pending || previous.duringStreamingStep !== true) break;
+    index -= 1;
+  }
+  if (index === timeline.length) return [...timeline, record];
+  return [...timeline.slice(0, index), record, ...timeline.slice(index)];
 }
 
 /** 按 key 就地替换；key 不存在时返回 null（调用方决定回退策略）。 */
