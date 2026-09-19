@@ -16,8 +16,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * 把错误与它的 cause 链（undici 把连接失败包在 cause 里）压成一行可读文案。
+ * 只取 error.message 会得到孤零零的 "fetch failed"，看不出是拒连、DNS 还是 TLS。
+ */
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const seen = new Set<unknown>();
+  const parts: string[] = [];
+  const push = (text: string) => {
+    const trimmed = text.trim();
+    if (trimmed && !parts.some((part) => part.includes(trimmed))) parts.push(trimmed);
+  };
+  const walk = (value: unknown, depth: number): void => {
+    if (depth > 4 || value === null || value === undefined || seen.has(value)) return;
+    seen.add(value);
+    const node = value as { message?: unknown; code?: unknown; cause?: unknown; errors?: unknown };
+    if (typeof node.message === "string") push(node.message);
+    else if (typeof value !== "object") push(String(value));
+    // 状态码类信息（ECONNREFUSED / ENOTFOUND / CERT_*）单独带上，message 里往往没有
+    if (typeof node.code === "string") push(node.code);
+    if (Array.isArray(node.errors) && node.errors.length > 0) walk(node.errors[0], depth + 1);
+    if (node.cause !== undefined) walk(node.cause, depth + 1);
+  };
+  walk(error, 0);
+  return parts.join(": ") || String(error);
 }
 
 /**

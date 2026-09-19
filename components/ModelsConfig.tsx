@@ -821,19 +821,31 @@ function ModelDetail({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ providerName, provider, model }),
       });
-      const d = await res.json() as {
+      // 服务端异常时 Next 会直接回纯文本 500（Internal Server Error），
+      // 硬 res.json() 会把 SyntaxError 当成错误文案显示，看不出真因。
+      const raw = await res.text();
+      let d: {
         ok?: boolean;
         error?: string;
         latencyMs?: number;
         status?: number;
         responseText?: string;
-      };
+      } = {};
+      try {
+        d = JSON.parse(raw) as typeof d;
+      } catch {
+        d = {};
+      }
       if (!res.ok || !d.ok) {
+        const bodySnippet = raw.trim().slice(0, 200);
+        // 只有字符串型 error 才当文案；Next 的开发/生产错误体结构不一，其余一律回退到正文
+        const errorText = typeof d.error === "string" && d.error.trim() ? d.error : null;
         setTestState({
           phase: "error",
-          message: d.error ?? `HTTP ${res.status}`,
+          // 状态码由 badge 的 meta 展示，正文这里不重复带
+          message: errorText ?? (bodySnippet || `HTTP ${res.status}`),
           latencyMs: d.latencyMs,
-          status: d.status,
+          status: d.status ?? (res.ok ? undefined : res.status),
         });
         return;
       }
