@@ -25,7 +25,27 @@ import { clampSchedule, decodeRecording } from "./lib/sse-recording-decode.mjs";
 
 const exec = promisify(execFile);
 const URL_BASE = process.env.PIDANCE_TEST_URL ?? "http://127.0.0.1:31416";
-const PASSWORD = process.env.PIDANCE_TEST_PASSWORD ?? "";
+/**
+ * 31416 有 UI 锁：密码依次取测试环境变量、系统环境、服务端密钥文件
+ * （与 chat-scroll-settle-replay / message-nav-rail-follow 同一套，不打印值）。
+ */
+function readUiPassword() {
+  if (process.env.PIDANCE_TEST_PASSWORD) return process.env.PIDANCE_TEST_PASSWORD;
+  if (process.env.PI_WEB_PASSWORD) return process.env.PI_WEB_PASSWORD;
+  try {
+    const raw = readFileSync("/etc/pidance/secret.env", "utf8");
+    for (const line of raw.split(/\r?\n/)) {
+      if (line.startsWith("PI_WEB_PASSWORD=")) {
+        return line.slice("PI_WEB_PASSWORD=".length).replace(/^['"]|['"]$/g, "");
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return "";
+}
+
+const PASSWORD = readUiPassword();
 const AUTH_HEADER = PASSWORD ? { Authorization: `Basic ${Buffer.from(`pi:${PASSWORD}`).toString("base64")}` } : {};
 const SESSION = "pidance-sse-replay";
 const FIXTURE_PATH = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "sse-run-recording.json");
