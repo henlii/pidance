@@ -42,9 +42,21 @@ export function aggregateGuideProjects(
     .map(([cwd, v]) => ({ cwd, count: v.count, latest: v.latest }))
     .sort((a, b) => b.latest - a.latest)
     .slice(0, limit);
+  return mergeAddedProjectRoots(projects, extraRoots, limit);
+}
+
+/**
+ * 把「无会话的已添加项目」并入项目列表：置顶便于刚添加即可见
+ * （与侧栏空项目置顶语义一致），已知项目不重复，仍受 limit 约束。
+ */
+export function mergeAddedProjectRoots(
+  projects: GuideProject[],
+  extraRoots: readonly string[],
+  limit = 12,
+): GuideProject[] {
   const known = new Set(projects.map((p) => p.cwd));
-  // 无会话的已添加项目：置顶便于刚添加即可见（与侧栏空项目置顶语义一致）。
   const extra = extraRoots.filter((root) => !known.has(root)).map((cwd) => ({ cwd, count: 0, latest: 0 }));
+  // 无新增时返回原数组（调用方按引用判等，避免无谓重渲染）。
   return extra.length > 0 ? [...extra, ...projects].slice(0, limit) : projects;
 }
 

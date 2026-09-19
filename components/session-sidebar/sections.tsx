@@ -489,14 +489,8 @@ function WorktreeGroupSection({
   const collapseLabel = collapsed
     ? t("sidebar_expandWorktreeNamed", { name: label })
     : t("sidebar_collapseWorktreeNamed", { name: label });
-  // 聚合运行圆点：组内任一会话运行中即显示；不显示单个时长。
-  const groupHasRunning = useMemo(() => {
-    const running = new Set([...runningSessionIds, ...subagentRunningIds]);
-    const anyRunning = (nodes: SessionDisplayNode[]): boolean =>
-      nodes.some((node) => running.has(node.session.id) || anyRunning(node.children));
-    return anyRunning(group.tree);
-  }, [group, runningSessionIds, subagentRunningIds]);
-  // 聚合等待黄点：组内任一会话在询问用户（暂停）即显示（优先于运行圆环）。
+  // 工作树行不显示运行中标记（会话行各自显示运行圆点/时长）。
+  // 聚合等待黄点：组内任一会话在询问用户（暂停）即显示。
   const groupHasWaiting = useMemo(() => {
     const anyWaiting = (nodes: SessionDisplayNode[]): boolean =>
       nodes.some((node) => waitingIds.has(node.session.id) || anyWaiting(node.children));
@@ -549,11 +543,6 @@ function WorktreeGroupSection({
         <span aria-hidden="true" className="sidebar-indicator-icon" style={{ position: "absolute", left: sidebarIndicatorLeft(0), top: "50%", display: "flex", width: SIDEBAR_INDICATOR_SLOT, height: 20, alignItems: "center", justifyContent: "center", transform: "translateY(-50%)", color: "var(--text-dim)" }}>
           <BranchIcon size={11} />
         </span>
-        {groupHasRunning && !groupHasWaiting && (
-          <span aria-hidden="true" style={{ position: "absolute", left: sidebarIndicatorLeft(0), top: "50%", display: "flex", width: SIDEBAR_INDICATOR_SLOT, height: 20, alignItems: "center", justifyContent: "center", transform: "translateY(-50%)", pointerEvents: "none" }}>
-            <RunningSessionIndicator size={18} />
-          </span>
-        )}
         <PathLabel
           text={label}
           style={{
@@ -563,7 +552,7 @@ function WorktreeGroupSection({
             fontFamily: "var(--font-mono)",
           }}
         />
-        {groupHasWaiting ? <WaitingSessionIndicator size={10} /> : groupHasRunning && <RunningSessionIndicator size={10} />}
+        {groupHasWaiting && <WaitingSessionIndicator size={10} />}
         <SidebarIconButton
           label={t("sidebar_newSessionIn", { project: label })}
           hoverReveal
