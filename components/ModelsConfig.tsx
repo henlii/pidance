@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Check as CheckIcon, Eraser, LoaderCircle, Plus, Zap } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/lib/i18n";
+import type { TranslationKey } from "@/lib/locales/en";
 import { SettingsPageFooter, settingsPrimaryButtonStyle } from "./SettingsPageFooter";
 import { SettingsJsonEditor } from "./SettingsJsonEditor";
 // Color icons (have their own fill colors — no background needed)
@@ -451,6 +452,30 @@ const MODEL_COMPAT_BOOLS = [
   "sendSessionAffinityHeaders",
 ] as const;
 
+/** 两个 compat 开关清单的并集；漏一个就无法编译，新开关必须配文案。 */
+type CompatBoolKey = (typeof PROVIDER_COMPAT_BOOLS)[number] | (typeof MODEL_COMPAT_BOOLS)[number];
+
+/** models.json compat 布尔开关 → 本地化标签（中文侧带原始键名）。 */
+const COMPAT_BOOL_LABEL_KEYS: Record<CompatBoolKey, TranslationKey> = {
+  supportsDeveloperRole: "models_compatDeveloperRole",
+  supportsReasoningEffort: "models_compatReasoningEffort",
+  supportsStore: "models_compatStore",
+  supportsUsageInStreaming: "models_compatUsageInStreaming",
+  supportsStrictMode: "models_compatStrictMode",
+  sendSessionAffinityHeaders: "models_compatSessionAffinityHeaders",
+  supportsLongCacheRetention: "models_compatLongCacheRetention",
+  requiresReasoningContentOnAssistantMessages: "models_compatReasoningContentOnAssistant",
+  requiresThinkingAsText: "models_compatThinkingAsText",
+};
+
+/** cost 子键 → 本地化标签。 */
+const COST_LABEL_KEYS: Record<"input" | "output" | "cacheRead" | "cacheWrite", TranslationKey> = {
+  input: "models_costInput",
+  output: "models_costOutput",
+  cacheRead: "models_costCacheRead",
+  cacheWrite: "models_costCacheWrite",
+};
+
 const THINKING_FORMATS = [
   "",
   "openai",
@@ -496,16 +521,17 @@ function CompatBoolGrid({
   compat,
   onChange,
 }: {
-  keys: readonly string[];
+  keys: readonly CompatBoolKey[];
   compat?: Record<string, unknown>;
   onChange: (next?: Record<string, unknown>) => void;
 }) {
+  const { t } = useI18n();
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       {keys.map((key) => (
         <Check
           key={key}
-          label={key}
+          label={t(COMPAT_BOOL_LABEL_KEYS[key])}
           checked={compat?.[key] === true}
           onChange={(v) => onChange(setCompatBool(compat, key, v))}
         />
@@ -973,7 +999,7 @@ function ModelDetail({
         <SectionTitle>{t("models_cost")}</SectionTitle>
         <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
           {(["input", "output", "cacheRead", "cacheWrite"] as const).map((k) => (
-            <Field key={k} label={k}>
+            <Field key={k} label={t(COST_LABEL_KEYS[k])}>
               <NumInput value={costVal(k)} onChange={(v) => setCost(k, v)} placeholder="0" />
             </Field>
           ))}
@@ -1508,17 +1534,19 @@ function AddProviderPicker({
   return (
     <div
       style={embedded
-        ? { position: "absolute", inset: 0, zIndex: 10, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center" }
+        // 嵌入模式：浮层以宿主内容区为准（ModelsConfig 嵌入根节点是 relative），
+        // 尺寸不得按视口算，否则 820 宽 / 72vh 高的面板会被内容区裁掉顶栏与左侧按钮。
+        ? { position: "absolute", inset: 0, zIndex: 10, padding: 12, boxSizing: "border-box", background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center" }
         : { position: "fixed", inset: 0, zIndex: 1100, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center" }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div style={{ width: 820, maxWidth: "calc(100vw - 32px)", maxHeight: "min(72vh, calc(100vh - 32px))", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10, display: "flex", flexDirection: "column", boxShadow: "0 8px 32px rgba(0,0,0,0.22)", overflow: "hidden" }}>
-        {/* 顶栏：返回 + 搜索 */}
+      <div style={{ width: embedded ? "100%" : 820, maxWidth: embedded ? "100%" : "calc(100vw - 32px)", maxHeight: embedded ? "100%" : "min(72vh, calc(100vh - 32px))", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10, display: "flex", flexDirection: "column", boxShadow: "0 8px 32px rgba(0,0,0,0.22)", overflow: "hidden" }}>
+        {/* 顶栏：取消 + 搜索（本面板是选完即关的弹层，没有上一级可回，标取消更准）} */}
         <div style={{ padding: "10px 14px", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", alignItems: "center", gap: 8 }}>
           <button
             type="button"
             onClick={onClose}
-            aria-label={t("common_back")}
+            aria-label={t("common_cancel")}
             style={{
               display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0,
               minHeight: 28, padding: "0 8px", borderRadius: 6,
@@ -1527,9 +1555,9 @@ function AddProviderPicker({
             }}
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <polyline points="15 18 9 12 15 6" />
+              <line x1="6" y1="6" x2="18" y2="18" /><line x1="18" y1="6" x2="6" y2="18" />
             </svg>
-            {t("common_back")}
+            {t("common_cancel")}
           </button>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--text-dim)", flexShrink: 0 }} aria-hidden="true">
             <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />

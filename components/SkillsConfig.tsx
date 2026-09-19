@@ -371,7 +371,7 @@ function AddSkillPanel({
             onKeyDown={(e) => {
               if (e.key === "Enter") search(query);
             }}
-            placeholder="e.g. react, testing, deploy"
+            placeholder={t("skills_searchPlaceholder")}
             style={{
               flex: 1,
               padding: "7px 10px",
