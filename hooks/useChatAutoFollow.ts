@@ -108,8 +108,14 @@ export function useChatAutoFollow({
   const pinToBottom = useCallback((behavior: ScrollBehavior = "instant") => {
     const container = scrollContainerRef.current;
     if (!container) return;
+    // 指针按在正文上（拖选中）：不抢滚动，否则选区和拖动会被持续打断。
+    //
+    // 注意这里**不能**再加「页面上存在 Range 选区就不钉底」的判断：选区是粘性的，
+    // 一旦用户选了一段工具输出，后续所有 pin 都被挡掉，而 pin 是唯一的 scrollTop
+    // 写入方 —— 表现出来就是「多输出了几条工具块之后，自动跟随就此一直失效」，
+    // 连「回到底部」点了也没反应（用户实测）。阅读意图由跟随状态兜：拖选在
+    // pointerup 时会把状态置为 released，released 时的调用点本身就不会 pin。
     if (selectingRef.current) return;
-    if (typeof window !== "undefined" && window.getSelection()?.type === "Range") return;
     const top = Math.max(0, container.scrollHeight - container.clientHeight);
     if (behavior === "smooth") {
       programmaticSmoothUntilRef.current = Date.now() + PROGRAMMATIC_SMOOTH_IGNORE_MS;
@@ -150,6 +156,10 @@ export function useChatAutoFollow({
   }, []);
 
   const jumpToBottom = useCallback(() => {
+    // 显式「回到底部」：用户的意图优先，不受任何交互态阻挡。
+    selectingRef.current = false;
+    activePointerIdRef.current = null;
+    selectOriginRef.current = null;
     applyAutoFollowMode(reduceAutoFollow(autoFollowModeRef.current, { kind: "jump-button" }));
     pinToBottom(prefersReducedMotionRef.current ? "instant" : "smooth");
   }, [applyAutoFollowMode, pinToBottom]);
