@@ -60,14 +60,26 @@ export function saveFile(options: SaveFileOptions): { path: string; size: number
   if (!original.isFile()) throw new FileSaveError("bad-request", "目标不是常规文件");
   // 二进制/环境文件/受保护目录名不再拦截：用户显式保存即写入。
 
-  let realCwd: string; let realTarget: string; let realRoots: Set<string>;
+  let realTarget: string; let realRoots: Set<string>;
   try {
-    realCwd = fs.realpathSync(cwd);
     realTarget = fs.realpathSync(target);
-    realRoots = new Set([...allowedRoots].map((root) => fs.realpathSync(root)));
+    // 失效的授权根直接跳过：会话 cwd / 项目根可能已被删除或改名，一个失效根不该让
+    // 所有保存都失败（file-read / file-ops 本来就是这个口径）。
+    realRoots = new Set<string>();
+    for (const root of allowedRoots) {
+      try {
+        realRoots.add(fs.realpathSync(root));
+      } catch {
+        // 已消失的根：跳过
+      }
+    }
     if (validateSaveName(realTarget) || !allowed(realTarget, realRoots)) throw new FileSaveError("forbidden", "目标不在授权目录内");
-    for (let current = path.dirname(target); isStrictPathChild(current, cwd); current = path.dirname(current)) {
-      if (fs.lstatSync(current).isSymbolicLink()) throw new FileSaveError("forbidden", "目标父目录不能是符号链接");
+    // 父目录 symlink 检查需要会话 cwd 作为边界；cwd 已消失（工作树被删）时无法判定，
+    // 跳过该检查——目标本身已经过 realpath 与授权校验。
+    if (fs.existsSync(cwd)) {
+      for (let current = path.dirname(target); isStrictPathChild(current, cwd); current = path.dirname(current)) {
+        if (fs.lstatSync(current).isSymbolicLink()) throw new FileSaveError("forbidden", "目标父目录不能是符号链接");
+      }
     }
   } catch (error) {
     if (error instanceof FileSaveError) throw error;
