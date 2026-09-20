@@ -145,11 +145,16 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
 
 1. **widget 的 placement**：缺省按 `aboveEditor` 处理（与 Pi 默认一致），所以扩展不写 placement 时，Web 就会把它渲染在**输入框上方**。
 2. **组件工厂形式**（`setWidget(key, (tui, theme) => Component)`）：Pidance 走 `lib/tui-render-bridge.ts` 无头渲染成 ANSI 行，再当文本渲染。这是**快照式**的：工厂自身的 state/invalidate 驱动的实时重绘不支持；渲染失败会静默跳过（不设置、不 emit）。
-3. **`mode === "rpc"` 分支**：pi-subagents 在检测到宿主是 rpc 模式时，改发机器可读快照而不是 TUI 组件：
+3. **`mode === "rpc"` 快照已解码**：pi-subagents 在检测到宿主是 rpc 模式时，发的是同一份数据的一行快照
    `PI_SUBAGENT_ASYNC_JSON:{"kind":"pi-subagents.async-status-snapshot",…}`（见其 `src/tui/render.ts` 与 `src/runs/background/async-status-snapshot.ts`）。
-   **Pidance 目前没有这个前缀的解码器**，于是那行 JSON 被当普通文本渲染出来 —— 这就是“调用子代理时输入框上方冒出一块奇怪面板”的原因（key `subagent-async`，placement `aboveEditor`）。
-   同一时刻 pi-subagents 还会设置 `subagent-fleet-status`（placement `belowEditor`，内容形如 `1 active agent · ↓ 0 tokens · ↓/← to inspect`）：那一条是 TUI 组件，经渲染桥转成了可读文本，但里面的 `↓/← to inspect` 是终端键位，在 Web 里没有意义。
-   子代理全部结束后 pi-subagents 会 `setWidget(key, undefined)`，两块面板随即消失。
+   Pidance 现在在 `lib/subagent-async-widget.ts` 里解析它，并**按 TUI 的行结构**渲染成 `components/SubagentAsyncWidget.tsx`：
+   标题 `异步子代理 <agent> · 后台`（多个 run 时是 `异步子代理`），每行 = 状态字形（●/◦/✓/■/✗，颜色同 TUI 的 accent/success/warning/error）＋ label ＋ 状态 ＋ 已用时长 ＋ `⎿ 当前工具 工具时长 · N 轮 · N 次工具`；位置仍是输入框上方（TUI 的 aboveEditor 语义）。
+   有意不搬的：终端键位提示（`↓/← to inspect`）——Web 里换成面板自身折叠，子会话导航在顶栏谱系下拉。
+   解析失败时**不显示原始载荷**（宁可空着，也不把 JSON 糊到界面上）。
+   子代理全部结束后 pi-subagents 会 `setWidget(key, undefined)`，面板消失。
+4. **仍存在的差异**：
+   - `subagent-fleet-status`（placement `belowEditor`）是 TUI 组件，经渲染桥转成文本，里面的 `↓/← to inspect` 是终端键位，在 Web 里没有意义（尚未处理）。
+   - 新开页面拿不到“已经存在”的 widget：widget 目前只走 SSE 实时投影，状态水合不带它，所以打开一个正在跑子代理的会话要等下一次 widget 更新才出现（另见后续 issue）。
 4. **状态条与 widget 不区分“谁提供”**：Web 侧只按 key 渲染与折叠（折叠状态存 `localStorage` 的 `pidance.collapsedWidgetKeys.v1`）。
 
 ---
@@ -177,7 +182,7 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
 | 侧栏结构（项目/未分组/最近/置顶） | §2.2、§3、§6 | `components/SessionSidebar.tsx`、`components/session-sidebar-model.ts` |
 | 右栏与二级面板（新增/移除 Tab、层级、z-index） | §2.2、§2.3、§3 | `components/RightPanel.tsx`、`components/ChangesPanel.tsx`、`app/globals.css` |
 | 手机断点与抽屉行为 | §2.3、§6 | `hooks/useIsMobile.ts`、`app/globals.css`（≤640px 段） |
-| 扩展 UI 槽位（新增/映射变化/新解码前缀） | §5、§3 | `lib/web-extension-ui.ts`、`lib/extension-ui-bridge.ts`、`lib/tui-render-bridge.ts` |
+| 扩展 UI 槽位（新增/映射变化/新解码前缀） | §5、§3 | `lib/web-extension-ui.ts`、`lib/extension-ui-bridge.ts`、`lib/tui-render-bridge.ts`、`lib/subagent-async-widget.ts`、`components/SubagentAsyncWidget.tsx` |
 | 状态呈现（运行中/未读/子代理/队列） | §4 | `lib/session-catalog-store.ts`、`components/session-sidebar/display.tsx` |
 | 新增 Web 专属面或新的刻意分叉 | §6、§3 | 对应组件 + `docs/architecture.md` 的源码地图 |
 | Electron 壳新增 bridge 能力 | §6、§3 | `desktop/src/preload.js`、页面侧接线 |

@@ -29,6 +29,8 @@ const CHAT_INPUT_SIDE_PADDING = CHAT_GUTTER;
 const CHAT_INPUT_SIDE_PADDING_MOBILE = 16;
 import { ExtensionDialog } from "./ExtensionDialog";
 import { ExtensionCustomPanel } from "./ExtensionCustomPanel";
+import { SubagentAsyncWidget } from "./SubagentAsyncWidget";
+import { ASYNC_STATUS_SNAPSHOT_PREFIX, parseSubagentAsyncSnapshot } from "@/lib/subagent-async-widget";
 import { NewSessionGuide } from "./NewSessionGuide";
 import { TodoPanel } from "./TodoPanel";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
@@ -1362,6 +1364,15 @@ function ExtensionStatusBar({ statuses }: { statuses: Array<{ key: string; text:
 }
 
 function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: string[] }> }) {
+  // 扩展可能发「机器载荷」widget（pi-subagents 的 subagent-async 在 rpc 模式下就是一整行
+  // PI_SUBAGENT_ASYNC_JSON:{…}）。这类载荷要按数据渲染，绝不能当文本显示原样 JSON。
+  const parsed = widgets.map((widget) => ({
+    widget,
+    snapshot: widget.lines.some((line) => typeof line === "string" && line.startsWith(ASYNC_STATUS_SNAPSHOT_PREFIX))
+      ? parseSubagentAsyncSnapshot(widget.lines)
+      : null,
+    machinePayload: widget.lines.some((line) => typeof line === "string" && line.startsWith(ASYNC_STATUS_SNAPSHOT_PREFIX)),
+  }));
   const { t } = useI18n();
   // 内容限高内滚：超长 widget（如统计表）否则会把输入区整块顶出可视区
   const bodyMaxHeight = useIsMobile() ? CHAT_BLOCK_MAX_HEIGHT_MOBILE : CHAT_BLOCK_MAX_HEIGHT;
@@ -1381,7 +1392,25 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
   if (widgets.length === 0) return null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
-      {widgets.map((widget) => {
+      {parsed.map(({ widget, snapshot, machinePayload }) => {
+        // 机器载荷：解析成功就按数据渲染（标题由面板自己给，不用原始 widget key）；
+        // 解析失败说明格式变了，宁可什么都不显示，也不把载荷当文本糊在界面上。
+        if (machinePayload) {
+          if (!snapshot) return null;
+          return (
+            <div
+              key={widget.key}
+              style={{
+                border: "1px solid var(--border)",
+                borderRadius: 7,
+                background: "var(--bg-panel)",
+                overflow: "hidden",
+              }}
+            >
+              <SubagentAsyncWidget snapshot={snapshot} />
+            </div>
+          );
+        }
         const collapsed = collapsedKeys.has(widget.key);
         return (
           <div
