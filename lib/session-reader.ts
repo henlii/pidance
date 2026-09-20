@@ -23,7 +23,6 @@ import {
   binaryMessageToUiMessage,
   parseBinaryMessageData,
 } from "./message-binary";
-import { resolveProject, type ProjectInfo } from "./worktree";
 import { discoverSubagentSessions } from "./subagent-sessions";
 import { getAgentDir } from "./pi-paths";
 import { openSessionView } from "./pi-session-io";
@@ -125,14 +124,6 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
     }
   }
 
-  // Resolve each unique cwd to its project root (main repo shared by all
-  // worktrees). resolveProject caches per-cwd, so this is cheap after warmup.
-  const uniqueCwds = [...new Set(piSessions.map((s) => s.cwd).filter(Boolean))];
-  const projectByCwd = new Map<string, ProjectInfo>();
-  await Promise.all(uniqueCwds.map(async (cwd) => {
-    projectByCwd.set(cwd, await resolveProject(cwd));
-  }));
-
   const resultPaths = new Set<string>();
   const resultIds = new Set<string>();
   const sessions: SessionInfo[] = piSessions
@@ -142,7 +133,6 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
       if (resultPaths.has(path) || resultIds.has(s.id)) return [];
       resultPaths.add(path); resultIds.add(s.id);
       cacheSessionPath(s.id, s.path);
-      const project = s.cwd ? projectByCwd.get(s.cwd) : undefined;
       return [{
         path: s.path,
         id: s.id,
@@ -153,8 +143,8 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
         messageCount: s.messageCount,
         firstMessage: s.firstMessage || "(no messages)",
         parentSessionId: s.parentSessionPath ? pathToId.get(normalizePath(s.parentSessionPath)) : undefined,
-        projectRoot: project?.projectRoot ?? s.cwd,
-        ...(project?.isWorktree && project.branch ? { worktreeBranch: project.branch } : {}),
+        // 一个目录就是一个项目：projectRoot 恒等于会话 cwd，不再折叠 linked worktree。
+        projectRoot: s.cwd,
       }];
     });
 
@@ -212,7 +202,6 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
     }
   }
   const childInfos = await Promise.all(subagents.map(async ({ child }) => {
-    const project = await resolveProject(child.cwd);
     let modified = child.timestamp;
     try { modified = statSync(child.path).mtime.toISOString(); } catch { /* 使用 header 时间 */ }
     cacheSessionPath(child.id, child.path);
@@ -224,8 +213,7 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
       modified,
       messageCount: 0,
       firstMessage: "(no messages)",
-      projectRoot: project?.projectRoot ?? child.cwd,
-      ...(project?.isWorktree && project.branch ? { worktreeBranch: project.branch } : {}),
+      projectRoot: child.cwd,
       subagent: { parentSessionId: child.parentSessionId, runId: child.runId, runIndex: child.runIndex, ...(child.agent ? { agent: child.agent } : {}) },
       readOnly: true as const,
     } satisfies SessionInfo;

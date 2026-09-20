@@ -188,178 +188,6 @@ test("乱序 list 响应：仅最新 gen 可写 server/error/loading", async () 
   assert.equal(m.shouldApplySessionListResponse(3, 3), true);
 });
 
-test("worktree preload generation 不含 session refreshKey", async () => {
-  const m = await load();
-  assert.equal(m.buildWorktreePreloadGeneration(0), "wt:0");
-  assert.equal(m.buildWorktreePreloadGeneration(4), "wt:4");
-  assert.equal(m.buildWorktreePreloadGeneration(4.9), "wt:4");
-  // 契约：字符串前缀固定 wt:，不得出现 session 相关 token
-  const gen = m.buildWorktreePreloadGeneration(7);
-  assert.match(gen, /^wt:\d+$/);
-  assert.equal(gen.includes("refresh"), false);
-  assert.equal(gen.includes("session"), false);
-});
-
-// ── 项目 worktree 快照 ─────────────────────────────────────────────────────
-
-const wt = (path, branch = "main", isMain = false) => ({ path, branch, isMain });
-
-test("worktree 快照：loading/error 保留 last-known；单项目错误不影响其他", async () => {
-  const m = await load();
-  let map = {};
-  map = m.upsertProjectWorktreeSnapshot(map, "/repo-a", {
-    status: "ready",
-    worktrees: [wt("/repo-a", "main", true), wt("/repo-a-wt/feat", "feat")],
-  });
-  map = m.upsertProjectWorktreeSnapshot(map, "/repo-b", {
-    status: "ready",
-    worktrees: [wt("/repo-b", "main", true)],
-  });
-
-  // loading 保留 a 的列表
-  const loading = m.upsertProjectWorktreeSnapshot(map, "/repo-a", { status: "loading" });
-  assert.equal(loading["/repo-a"].status, "loading");
-  assert.equal(loading["/repo-a"].worktrees.length, 2);
-  assert.equal(loading["/repo-b"].status, "ready");
-
-  // error 保留 last-known，不影响 b
-  const errored = m.upsertProjectWorktreeSnapshot(loading, "/repo-a", {
-    status: "error",
-    error: "network",
-  });
-  assert.equal(errored["/repo-a"].status, "error");
-  assert.equal(errored["/repo-a"].error, "network");
-  assert.equal(errored["/repo-a"].worktrees.length, 2);
-  assert.equal(errored["/repo-b"].worktrees.length, 1);
-  assert.equal(errored["/repo-b"].status, "ready");
-});
-
-test("worktree 快照：相同列表不触发更新；idle 清空；remove 只删目标", async () => {
-  const m = await load();
-  const list = [wt("/repo", "main", true)];
-  let map = m.upsertProjectWorktreeSnapshot({}, "/repo", { status: "ready", worktrees: list });
-  const same = m.upsertProjectWorktreeSnapshot(map, "/repo", {
-    status: "ready",
-    worktrees: [wt("/repo", "main", true)],
-  });
-  assert.equal(same, map);
-
-  const idle = m.upsertProjectWorktreeSnapshot(map, "/repo", { status: "idle" });
-  assert.notEqual(idle, map);
-  assert.equal(idle["/repo"].status, "idle");
-  assert.deepEqual(idle["/repo"].worktrees, []);
-
-  map = m.upsertProjectWorktreeSnapshot(map, "/other", { status: "ready", worktrees: list });
-  const removed = m.removeProjectWorktreeSnapshot(map, "/repo");
-  assert.equal("/repo" in removed, false);
-  assert.equal("/other" in removed, true);
-  assert.equal(m.removeProjectWorktreeSnapshot(removed, "/missing"), removed);
-});
-
-test("worktree 列表比较：path/branch/isMain 顺序敏感", async () => {
-  const m = await load();
-  assert.equal(m.sameWorktreeList([], []), true);
-  assert.equal(
-    m.sameWorktreeList([wt("/a", "x", true)], [wt("/a", "x", true)]),
-    true,
-  );
-  assert.equal(
-    m.sameWorktreeList([wt("/a", "x", true)], [wt("/a", "y", true)]),
-    false,
-  );
-  assert.equal(
-    m.sameWorktreeList([wt("/a"), wt("/b")], [wt("/b"), wt("/a")]),
-    false,
-  );
-});
-
-// ── 预加载队列与 canonical 快照收敛 ────────────────────────────────────────
-
-test("buildKnownProjectRoots：projectRoot 已在 roots → 不加入 selectedCwd（返回原引用）", async () => {
-  const m = await load();
-  const roots = ["/repo-a", "/repo-b"];
-  // 点击 worktree 分组后 selectedCwd 是 worktree 路径，不得混入预加载队列
-  const same = m.buildKnownProjectRoots(roots, "/repo-a/.claude/worktrees/1-feat", "/repo-a");
-  assert.equal(same, roots);
-  assert.deepEqual(same, ["/repo-a", "/repo-b"]);
-});
-
-test("buildKnownProjectRoots：projectRoot 不在 roots → unshift projectRoot", async () => {
-  const m = await load();
-  const roots = ["/repo-b"];
-  const next = m.buildKnownProjectRoots(roots, "/repo-b/.claude/worktrees/x", "/repo-a");
-  assert.notEqual(next, roots);
-  assert.deepEqual(next, ["/repo-a", "/repo-b"]);
-});
-
-test("buildKnownProjectRoots：projectRoot 为空且 selectedCwd 不在 roots → unshift selectedCwd", async () => {
-  const m = await load();
-  const roots = ["/repo-b"];
-  const next = m.buildKnownProjectRoots(roots, "/repo-a", null);
-  assert.notEqual(next, roots);
-  assert.deepEqual(next, ["/repo-a", "/repo-b"]);
-  // selectedCwd 已在 roots → 原引用
-  const same = m.buildKnownProjectRoots(roots, "/repo-b", null);
-  assert.equal(same, roots);
-});
-
-test("buildKnownProjectRoots：空输入不变（返回原引用）", async () => {
-  const m = await load();
-  const empty = [];
-  assert.equal(m.buildKnownProjectRoots(empty, null, null), empty);
-  assert.equal(m.buildKnownProjectRoots(empty, "", null), empty);
-  assert.equal(m.buildKnownProjectRoots(empty, "/a", null) === empty, false);
-});
-
-test("upsertCanonicalProjectWorktreeSnapshot：请求 root 即 canonical → 只写该 key", async () => {
-  const m = await load();
-  const list = [wt("/repo", "main", true)];
-  const map = m.upsertCanonicalProjectWorktreeSnapshot({}, "/repo", "/repo", list);
-  assert.deepEqual(Object.keys(map), ["/repo"]);
-  assert.equal(map["/repo"].status, "ready");
-  assert.deepEqual(map["/repo"].worktrees, list);
-});
-
-test("upsertCanonicalProjectWorktreeSnapshot：不同 → 移除请求 root（含 loading key），只保留 canonical", async () => {
-  const m = await load();
-  // 预加载期间请求 root（worktree 路径）先写入了 loading 条目
-  let map = m.upsertProjectWorktreeSnapshot({}, "/repo/.claude/worktrees/1-feat", { status: "loading" });
-  map = m.upsertProjectWorktreeSnapshot(map, "/repo", {
-    status: "ready",
-    worktrees: [wt("/repo", "main", true)],
-  });
-  const next = m.upsertCanonicalProjectWorktreeSnapshot(
-    map,
-    "/repo/.claude/worktrees/1-feat",
-    "/repo",
-    [wt("/repo", "main", true), wt("/repo/.claude/worktrees/1-feat", "feat")],
-  );
-  // 请求 root key 已被移除（含 loading），只剩 canonical
-  assert.deepEqual(Object.keys(next).sort(), ["/repo"]);
-  assert.equal(next["/repo"].status, "ready");
-  assert.equal(next["/repo"].worktrees.length, 2);
-  // 原 map 不被修改（immutable）
-  assert.equal("/repo/.claude/worktrees/1-feat" in map, true);
-});
-
-test("upsertCanonicalProjectWorktreeSnapshot：请求 root 不存在时 remove 是 no-op 不抛错", async () => {
-  const m = await load();
-  const list = [wt("/repo", "main", true)];
-  const map = m.upsertProjectWorktreeSnapshot({}, "/repo", { status: "ready", worktrees: list });
-  // requestRoot 不在 map 中：remove no-op，随后 upsert canonical 无变化 → 原引用
-  const same = m.upsertCanonicalProjectWorktreeSnapshot(map, "/missing-wt", "/repo", list);
-  assert.equal(same, map);
-  assert.deepEqual(Object.keys(same), ["/repo"]);
-  assert.equal(same["/repo"].status, "ready");
-  // canonical 内容不同 → 正常写回且仍只有 canonical 一个 key
-  const changed = m.upsertCanonicalProjectWorktreeSnapshot(map, "/missing-wt", "/repo", [
-    ...list,
-    wt("/repo-wt/feat", "feat"),
-  ]);
-  assert.deepEqual(Object.keys(changed), ["/repo"]);
-  assert.equal(changed["/repo"].worktrees.length, 2);
-});
-
 // ── 最近会话区 ─────────────────────────────────────────────────────────────
 
 test("最近会话：按 modified 降序取 top N，默认 20；不修改输入数组", async () => {
@@ -372,13 +200,14 @@ test("最近会话：按 modified 降序取 top N，默认 20；不修改输入�
     session("mid2", { modified: "2026-07-06T00:00:00.000Z" }),
     session("sixth", { modified: "2026-07-04T00:00:00.000Z" }),
   ];
-  const recent = m.deriveRecentSessions({ sessions: list });
+  const visibleRoots = new Set(["/repo"]);
+  const recent = m.deriveRecentSessions({ sessions: list, visibleRoots });
   // 仅 6 条时默认 limit=20 返回全部 6 条（按 modified 降序）
   assert.deepEqual(recent.map((s) => s.id), ["newest", "newer", "mid2", "mid", "sixth", "old"]);
   // 输入未被修改
   assert.equal(list.length, 6);
   // 自定义 limit
-  const top3 = m.deriveRecentSessions({ sessions: list, limit: 3 });
+  const top3 = m.deriveRecentSessions({ sessions: list, visibleRoots, limit: 3 });
   assert.deepEqual(top3.map((s) => s.id), ["newest", "newer", "mid2"]);
 });
 
@@ -390,26 +219,30 @@ test("最近会话：输入乱序也能正确派生（内部稳定排序）", as
     session("c", { modified: "2026-07-10T00:00:00.000Z" }),
   ];
   assert.deepEqual(
-    m.deriveRecentSessions({ sessions: list, limit: 2 }).map((s) => s.id),
+    m.deriveRecentSessions({ sessions: list, visibleRoots: new Set(["/repo"]), limit: 2 }).map((s) => s.id),
     ["a", "c"],
   );
 });
 
-test("最近会话：排除 subagent 子会话与已关闭项目内的会话", async () => {
+test("最近会话：排除 subagent 子会话与不在项目列表/未选中目录内的会话", async () => {
   const m = await load();
   const list = [
-    session("root-recent", { modified: "2026-07-12T00:00:00.000Z", projectRoot: "/repo-a" }),
+    session("root-recent", { modified: "2026-07-12T00:00:00.000Z" }),
     session("subagent", {
       modified: "2026-07-13T00:00:00.000Z",
-      projectRoot: "/repo-a",
       subagent: { parentSessionId: "parent", runId: "r1", runIndex: 1 },
     }),
-    session("closed-project", { modified: "2026-07-11T00:00:00.000Z", projectRoot: "/repo-closed" }),
-    session("closed-fallback-cwd", { modified: "2026-07-10T00:00:00.000Z", cwd: "/repo-closed-2" }),
+    session("closed-project", { modified: "2026-07-11T00:00:00.000Z", cwd: "/repo-closed" }),
+    // 陈旧缓存：projectRoot 指向 /repo，但 cwd 是旁路目录 —— 仍按 cwd 判定。
+    session("stale-cache", { modified: "2026-07-10T00:00:00.000Z", cwd: "/repo-worktrees/feat", projectRoot: "/repo" }),
   ];
-  // 项目区由侧栏项目列表控制；最近区不再按项目过滤（未加入项目的会话也要有去处）
-  const recent = m.deriveRecentSessions({ sessions: list });
-  assert.deepEqual(recent.map((s) => s.id), ["root-recent", "closed-project", "closed-fallback-cwd"]);
+  // 整个侧栏一致：项目区、最近区、置顶区都只显示 visibleRoots 内的会话。
+  const visibleRoots = new Set(["/repo", "/repo-worktrees/feat"]);
+  const recent = m.deriveRecentSessions({ sessions: list, visibleRoots });
+  assert.deepEqual(recent.map((s) => s.id), ["root-recent", "stale-cache"]);
+  // 选中目录也进 visibleRoots（当前上下文不能凭空消失）。
+  const onlySelected = m.deriveRecentSessions({ sessions: list, visibleRoots: new Set(["/repo-closed"]) });
+  assert.deepEqual(onlySelected.map((s) => s.id), ["closed-project"]);
 });
 
 test("最近会话：显示更多后可收到默认条数", async () => {
@@ -461,15 +294,17 @@ test("最近会话：excludeIds 与损坏 limit 容错", async () => {
     session("b", { modified: "2026-07-11T00:00:00.000Z" }),
     session("c", { modified: "2026-07-10T00:00:00.000Z" }),
   ];
+  const visibleRoots = new Set(["/repo"]);
   assert.deepEqual(
-    m.deriveRecentSessions({ sessions: list, excludeIds: new Set(["a"]) }).map((s) => s.id),
+    m.deriveRecentSessions({ sessions: list, visibleRoots, excludeIds: new Set(["a"]) }).map((s) => s.id),
     ["b", "c"],
   );
-  assert.deepEqual(m.deriveRecentSessions({ sessions: list, limit: 0 }).map((s) => s.id), []);
-  assert.deepEqual(m.deriveRecentSessions({ sessions: list, limit: -3 }).map((s) => s.id), []);
-  assert.deepEqual(m.deriveRecentSessions({ sessions: list, limit: 2.9 }).map((s) => s.id), ["a", "b"]);
-  // 空输入安全空态
-  assert.deepEqual(m.deriveRecentSessions({ sessions: [] }), []);
+  assert.deepEqual(m.deriveRecentSessions({ sessions: list, visibleRoots, limit: 0 }).map((s) => s.id), []);
+  assert.deepEqual(m.deriveRecentSessions({ sessions: list, visibleRoots, limit: -3 }).map((s) => s.id), []);
+  assert.deepEqual(m.deriveRecentSessions({ sessions: list, visibleRoots, limit: 2.9 }).map((s) => s.id), ["a", "b"]);
+  // 空输入 / 空 visibleRoots 安全空态
+  assert.deepEqual(m.deriveRecentSessions({ sessions: [], visibleRoots }), []);
+  assert.deepEqual(m.deriveRecentSessions({ sessions: list, visibleRoots: new Set() }), []);
   assert.equal(m.RECENT_SESSIONS_LIMIT, 20);
   assert.equal(m.RECENT_SESSIONS_INITIAL_VISIBLE, 5);
   assert.equal(m.RECENT_SESSIONS_LOAD_MORE, 5);
@@ -480,38 +315,41 @@ test("最近会话：excludeIds 与损坏 limit 容错", async () => {
 test("置顶会话：按 pinnedSessionIds 顺序输出仍存在、可见的会话", async () => {
   const m = await load();
   const list = [
-    session("first", { projectRoot: "/repo-a" }),
-    session("second", { projectRoot: "/repo-a" }),
-    session("closed", { projectRoot: "/repo-closed" }),
+    session("first", { cwd: "/repo-a" }),
+    session("second", { cwd: "/repo-a" }),
+    session("closed", { cwd: "/repo-closed" }),
     session("sub", {
       subagent: { parentSessionId: "p", runId: "r1", runIndex: 1 },
     }),
   ];
-  // 顺序 = pinnedSessionIds 顺序（最新置顶在前）；已删除/归档（不在 sessions）与
-  // subagent 跳过；项目是否在侧栏列表里不影响置顶
+  // 顺序 = pinnedSessionIds 顺序（最新置顶在前）；已删除/归档（不在 sessions）、
+  // subagent 与不在项目列表/未选中目录内的会话跳过。
   const pinned = m.derivePinnedSessions({
     sessions: list,
+    visibleRoots: new Set(["/repo", "/repo-a"]),
     pinnedSessionIds: ["second", "gone", "first", "closed", "sub"],
   });
-  assert.deepEqual(pinned.map((s) => s.id), ["second", "first", "closed"]);
+  assert.deepEqual(pinned.map((s) => s.id), ["second", "first"]);
   // 不修改输入数组
   assert.equal(list.length, 4);
 });
 
 test("置顶会话：空置顶列表与空会话列表安全空态", async () => {
   const m = await load();
-  assert.deepEqual(m.derivePinnedSessions({ sessions: [], pinnedSessionIds: [] }), []);
+  const visibleRoots = new Set(["/repo"]);
+  assert.deepEqual(m.derivePinnedSessions({ sessions: [], visibleRoots, pinnedSessionIds: [] }), []);
   assert.deepEqual(
-    m.derivePinnedSessions({ sessions: [session("a")], pinnedSessionIds: [] }),
+    m.derivePinnedSessions({ sessions: [session("a")], visibleRoots, pinnedSessionIds: [] }),
     [],
   );
   assert.deepEqual(
-    m.derivePinnedSessions({ sessions: [], pinnedSessionIds: ["ghost"] }),
+    m.derivePinnedSessions({ sessions: [], visibleRoots, pinnedSessionIds: ["ghost"] }),
     [],
   );
   // 重复 id 不重复输出
   const dup = m.derivePinnedSessions({
     sessions: [session("a")],
+    visibleRoots,
     pinnedSessionIds: ["a", "a"],
   });
   assert.deepEqual(dup.map((s) => s.id), ["a"]);

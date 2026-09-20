@@ -8,7 +8,7 @@
   </p>
 </div>
 
-Pidance is an open-source web client for the [Pi](https://github.com/badlogic/pi-mono) coding agent. It reads local Pi session files directly and preserves Pi SDK session and runtime semantics, bringing live chat, project files, Git, worktrees, subagents, and configuration into one browser workspace. Pi remains the source of truth for data and execution semantics; Pidance provides a clearer and more complete interface.
+Pidance is an open-source web client for the [Pi](https://github.com/badlogic/pi-mono) coding agent. It reads local Pi session files directly and preserves Pi SDK session and runtime semantics, bringing live chat, project files, Git, subagents, and configuration into one browser workspace. Pi remains the source of truth for data and execution semantics; Pidance provides a clearer and more complete interface.
 
 > Current version: `0.2.33` · npm package: `@henlii/pidance` · CLI: `pidance`
 
@@ -16,7 +16,7 @@ Pidance is an open-source web client for the [Pi](https://github.com/badlogic/pi
 
 ![Pidance new-session workspace](./docs/screenshots/desktop.png)
 
-<p align="center"><sub>New-session workspace with project and worktree selectors, model controls, and contextual side panels. The path shown is anonymized.</sub></p>
+<p align="center"><sub>New-session workspace with the project selector, model controls, and contextual side panels. The path shown is anonymized.</sub></p>
 
 ![Pidance appearance settings](./docs/screenshots/settings.png)
 
@@ -24,11 +24,11 @@ Pidance is an open-source web client for the [Pi](https://github.com/badlogic/pi
 
 ## Features
 
-- **Project-oriented sessions**: browse a Project → Worktree → Session tree with search, recent sessions, archive/restore, rename, automatic titles, and HTML export.
+- **Project-oriented sessions**: browse a Project → Session tree (a project is the directory you added) with search, recent sessions, archive/restore, rename, automatic titles, and HTML export.
 - **Live agent chat**: stream responses, thinking, tool calls, ANSI terminal output, compaction, and running state over SSE, with reconciliation after reconnects.
 - **Safe exploration**: continue from an earlier message, create an in-session branch, or fork to an independent `.jsonl` session without conflating those semantics.
 - **Project workspace**: browse and preview source, Markdown, images, audio, PDFs, and DOCX; search files, use `@` mentions, and inspect Git status and diffs.
-- **Git worktree workflow**: select, create, and remove worktrees in the UI while new sessions and the file workspace follow the chosen checkout.
+- **One directory, one project**: for a second Git checkout, create it with `git worktree` yourself and add that directory as a project. Pidance does not manage worktrees; new sessions and the file workspace always follow the selected directory.
 - **Pi ecosystem integration**: inspect synchronous and asynchronous subagent run status, interact with generic extension UI cards, and view read-only projections of structured todos.
 - **Central configuration**: manage provider authentication, API keys, models and model tests, session defaults, skills, plugins, and project trust.
 - **Polished interface**: responsive desktop/mobile layouts, a command palette, session minimap, completion sound, English and Chinese, plus Light / Dark / System themes.
@@ -145,7 +145,6 @@ Start with the [documentation index](./docs/README.md). Detailed maintainer guid
 - [Architecture](./docs/architecture.md) · [Static review](./docs/architecture-review-2026-09-15.md)
 - [Development](./docs/development.md) · [Security](./docs/security.md)
 - [Windows desktop shell](./desktop/README.md) · [Version history](./docs/release-notes/README.md)
-- [Git worktrees](./docs/worktrees.md)
 - [Release and package auditing](./docs/release.md)
 - [Historical interface prototypes](./docs/ui-redesign/README.md)
 - [Theme token design reference](./docs/ui-redesign/theme-tokens.md)

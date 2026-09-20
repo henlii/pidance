@@ -403,12 +403,10 @@ export interface SessionInfo {
   };
   /** 子代理持久化会话只能浏览，服务端也必须执行此门禁。 */
   readOnly?: true;
-  /** Main repo root shared by all worktrees of this cwd (cwd itself for non-git dirs).
+  /** Project root = the session cwd itself (one directory, one project).
    *  Always set by the server; optional because the client builds transient
    *  SessionInfo objects before the first refresh. Fall back to cwd. */
   projectRoot?: string;
-  /** Branch name when cwd is a linked git worktree (not the main checkout) */
-  worktreeBranch?: string;
   /** 归档时间（ISO）。存在即视为已归档：普通列表/Recent/搜索默认排除，聊天只读。 */
   archivedAt?: string;
 }

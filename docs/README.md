@@ -10,7 +10,6 @@
 | 会话与系统架构 | [架构说明](architecture.md) | 状态 owner、提交/SSE/停止链路、持久化、源码地图 |
 | 安全与数据边界 | [安全说明](security.md) | 认证、文件访问、远程部署、共享会话与单写者限制 |
 | 开发与验证 | [开发指南](development.md) | 31416、构建隔离、测试、多端验证 |
-| Git worktree | [中文](worktrees.zh-CN.md) / [English](worktrees.md) | 创建、切换、删除与会话归属 |
 | Windows 桌面壳 | [Desktop](../desktop/README.md) | 安装制品、服务复用、托盘、IPC、独立构建 |
 | 正式发布 / 候选包 | [发布指南](release.md) | 版本准备、tag、CI OIDC、审计、失败处理 |
 | 产物保留与清理 | [产物管理](artifacts.md) | 测试输出、tgz、正式安装、临时数据 |

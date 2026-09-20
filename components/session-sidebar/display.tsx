@@ -545,13 +545,6 @@ export function ProjectMenuItem({ icon, label, onClick }: { icon: ReactNode; lab
   );
 }
 
-export interface WorktreeActions {
-  /** 本项目 worktree 状态已加载且为 git 顶层检出：可创建/删除。 */
-  canManage: boolean;
-  createHint: string;
-  busy: boolean;
-}
-
 export function GroupPagination({ groupKey, total, visibleCount, searchActive, onShowMore, onShowFewer }: {
   groupKey: string;
   total: number;
@@ -583,7 +576,7 @@ export function GroupPagination({ groupKey, total, visibleCount, searchActive, o
 
 /**
  * 会话列表的运行指示：旋转圆环动画（运行中）。
- * 会话行的图标列使用本组件；项目行/worktree 行不显示运行中状态。
+ * 会话行的图标列使用本组件；项目行不显示运行中状态。
  */
 export function RunningSessionIndicator({ size = 14 }: { size?: number }) {
   const { t } = useI18n();
@@ -651,7 +644,7 @@ export function WaitingSessionIndicator({ size = 14 }: { size?: number }) {
  * - running + 无 startedAt（刷新后 SSE 重建，无法确认真实开始时间）：
  *   显示「运行中」而不是伪造时长；
  * - 非 running：不渲染。
- * 项目行/worktree 行不渲染本组件，也不显示运行中聚合标记——
+ * 项目行不渲染本组件，也不显示运行中聚合标记——
  * 运行状态只由会话行自己表达。
  */
 export function RunningDurationText({ startedAt, now, running }: {

@@ -21,7 +21,6 @@ import {
   projectHasRunningSession,
   sortSidebarProjects,
   type SidebarProjectNode,
-  type SidebarWorktreeGroup,
 } from "./session-sidebar-model";
 import {
   applySyncedSidebarUi,
@@ -89,18 +88,15 @@ import {
   SlidersIcon,
   TrashIcon,
   UnreadSessionIndicator,
-  WorktreeActions,
   XIcon,
 } from "@/components/session-sidebar/display";
-import { ProjectSection, WorktreeGroupSection, SessionTreeItem, SessionItem } from "@/components/session-sidebar/sections";
+import { ProjectSection, SessionTreeItem, SessionItem } from "@/components/session-sidebar/sections";
 import { ProjectRowMenu, SessionRowMenu } from "@/components/session-sidebar/menus";
 import { AddProjectDialog } from "@/components/session-sidebar/AddProjectDialog";
 import { EditProjectDialog } from "@/components/session-sidebar/EditProjectDialog";
 import { ArchiveView } from "@/components/ArchiveView";
 import { canArchiveSession } from "./session-capabilities";
 import { archiveSession, archiveFailureKind } from "@/lib/session-archive-client";
-import { useWorktreePreload } from "@/hooks/useWorktreePreload";
-import { useSidebarWorktreeActions } from "@/hooks/useSidebarWorktreeActions";
 import { mergeRunningStartedAt } from "@/lib/running-duration";
 import { createSessionCatalogStore, type SessionCatalogStore } from "@/lib/session-catalog-store";
 import { getOrCreateBrowserSessionRuntimeRegistry } from "@/lib/browser-session-runtime-registry";
@@ -182,15 +178,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const serverSessionsRef = useRef<SessionInfo[]>(serverSessions);
   serverSessionsRef.current = serverSessions;
   const sessionListFetchGenRef = useRef(0);
-  const { cwd: selectedCwd, projectRoot: selectedProjectRoot } = useProjectIdentity();
-  const { setIdentity, getIdentitySnapshot } = useProjectActions();
+  const { cwd: selectedCwd } = useProjectIdentity();
+  const { setIdentity } = useProjectActions();
   const [homeDir, setHomeDir] = useState<string>("");
   const [customPathOpen, setCustomPathOpen] = useState(false);
   // 项目行三点菜单：同一时刻仅一个打开（root 标识）
   const [openProjectMenuRoot, setOpenProjectMenuRoot] = useState<string | null>(null);
   const [editProjectRoot, setEditProjectRoot] = useState<string | null>(null);
   const mountedRef = useRef(true);
-  const wtNewInputRef = useRef<HTMLInputElement>(null);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   // SSE running ∪ 当前聊天冷启动 agentRunning（发送瞬间即可显示运行中/时长）
   const effectiveRunningSessionIds = catalogSnapshot.effectiveRunningIds;
@@ -274,9 +269,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     });
     return () => cancelAnimationFrame(frame);
   }, [displayMenuOpen]);
-  // 跨刷新偏好：显示模式 + 项目/worktree 折叠集合（独立 seam）
+  // 跨刷新偏好：显示模式 + 项目折叠集合（独立 seam）
   const [prefs, setPrefs] = useState<SidebarPreferences>(() => loadSidebarPreferences());
-  // 每个主仓/非主 worktree group 的展开条数均为瞬时态，不写偏好。
+  // 每个项目的展开条数均为瞬时态，不写偏好。
   const [groupVisibleCounts, setGroupVisibleCounts] = useState<Record<string, number>>({});
   // 会话级 child 折叠：保持瞬时（沿用原行为）
   const [collapsedSessionIds, setCollapsedSessionIds] = useState<Set<string>>(() => new Set());
@@ -361,7 +356,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [recentVisibleCount, setRecentVisibleCount] = useState(RECENT_SESSIONS_INITIAL_VISIBLE);
 
   const collapsedProjectRoots = useMemo(() => new Set(prefs.collapsedProjectRoots), [prefs.collapsedProjectRoots]);
-  const collapsedWorktreePaths = useMemo(() => new Set(prefs.collapsedWorktreePaths), [prefs.collapsedWorktreePaths]);
 
   // Catalog 订阅：store 内任何变更同步触发本组件重渲（依赖 tick 触发 memo）。
   useEffect(() => {
@@ -480,21 +474,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       return { ...prev, projectRoots: merged, projectRootsMigrated: !serverListLoaded };
     });
   }, [prefs.projectRootsMigrated, serverListLoaded, allSessions, updatePrefs]);
-
-  const {
-    worktreeSnapshots,
-    worktreeSnapshotsRef,
-    worktreeMetadata,
-    setWtRefreshKey,
-    commitWorktreeSnapshots,
-  } = useWorktreePreload({
-    allSessions,
-    selectedCwd,
-    selectedProjectRoot,
-    setIdentity,
-    getIdentitySnapshot,
-    mountedRef,
-  });
 
   useEffect(() => {
     const local = parseUnreadSessionState([...loadUnreadSessionIds()]);
@@ -620,41 +599,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     mountedRef.current = false;
   }, []);
 
-  /** 从最新本地数据乐观解析项目根；服务端响应仍是权威来源。 */
-  const projectRootFor = useCallback((cwd: string | null): string | null => {
-    if (!cwd) return null;
-    if (selectedCwd === cwd && selectedProjectRoot) return selectedProjectRoot;
-    for (const [root, snapshot] of Object.entries(worktreeSnapshotsRef.current)) {
-      if (snapshot.worktrees.some((worktree) => worktree.path === cwd)) return root;
-    }
-    const match = allSessions.find((s) => s.cwd === cwd);
-    return match?.projectRoot ?? cwd;
-  }, [selectedCwd, selectedProjectRoot, allSessions]);
-  const selectCwd = useCallback((cwd: string | null, explicitRoot?: string | null) => {
-    const root = cwd === null ? null : explicitRoot ?? projectRootFor(cwd) ?? cwd;
-    setIdentity({ cwd, projectRoot: root, status: cwd ? "ready" : "idle", error: null });
-  }, [projectRootFor, setIdentity]);
-  const selectedProject = selectedProjectRoot ?? projectRootFor(selectedCwd);
-  const {
-    wtNewForProject,
-    setWtNewForProject,
-    wtNewBranch,
-    setWtNewBranch,
-    wtError,
-    setWtError,
-    wtErrorRoot,
-    setWtErrorRoot,
-    wtBusy,
-    wtConfirmRemove,
-    setWtConfirmRemove,
-    handleCreateWorktree,
-    handleRemoveWorktree,
-  } = useSidebarWorktreeActions({
-    selectedCwd,
-    selectCwd: (cwd, projectRoot) => selectCwd(cwd, projectRoot),
-    commitWorktreeSnapshots,
-    setWtRefreshKey,
-  });
+  /** 项目 = 目录：选中 cwd 就是项目根，identity 由 store 维持二者相等。 */
+  const selectCwd = useCallback((cwd: string | null) => {
+    setIdentity({ cwd, status: cwd ? "ready" : "idle", error: null });
+  }, [setIdentity]);
+  const selectedProject = selectedCwd;
+  // 关闭项目被拒绝时的行内提示（运行中的会话必须先停）；换项目即清掉，不留陈旧提示。
+  const [closeProjectError, setCloseProjectError] = useState<{ root: string; message: string } | null>(null);
+  useEffect(() => {
+    setCloseProjectError(null);
+  }, [selectedCwd]);
 
   // Auto-select cwd and restore session from URL on first load
   useEffect(() => {
@@ -691,16 +645,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     setCustomPathOpen(false);
   }, []);
 
-  const handleProjectAdded = useCallback((cwd: string, root: string) => {
+  const handleProjectAdded = useCallback((cwd: string) => {
     // 追加进项目列表（列表是项目区唯一来源）；然后把当前项目切到刚添加的项目并进入
     // 新会话空态（引导页）——引导页与侧栏共用同一 identity，避免「显示 A、实际建到 B」。
     updatePrefs((prev) =>
-      prev.projectRoots.includes(root) ? prev : { ...prev, projectRoots: [...prev.projectRoots, root] },
+      prev.projectRoots.includes(cwd) ? prev : { ...prev, projectRoots: [...prev.projectRoots, cwd] },
     );
     closeCustomPathPanel();
     onProjectAdded?.(cwd);
-    // 显式给出 root，不从会话列表反推（刚添加的项目可能还没有任何会话）。
-    selectCwd(cwd, root);
+    // 不从会话列表反推项目根（刚添加的项目可能还没有任何会话）。
+    selectCwd(cwd);
     onNewSession?.(cwd);
   }, [updatePrefs, closeCustomPathPanel, onProjectAdded, selectCwd, onNewSession]);
 
@@ -726,14 +680,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     return () => document.removeEventListener("mousedown", handler);
   }, [displayMenuOpen]);
 
-  // Clicking a session moves the effective cwd to that session's worktree.
+  // Clicking a session moves the effective cwd to that session's directory.
   // Done on the click path (not via the selectedCwd prop sync) so it also
-  // works when the prop value won't change — e.g. re-clicking the already
-  // open session after manually switching worktrees.
+  // works when the prop value won't change — e.g. re-clicking an already
+  // open session.
   // identity 切换统一由 AppShell.handleSelectSession 在 suppress 之后完成：
   // ProjectContext 的 store 更新（useSyncExternalStore）同步触发身份 watcher，
   // 若在此处先 selectCwd，watcher 会在 suppress 生效前清空刚选中的会话 →
-  // 掉进引导页。worktree 预加载随后修正权威 projectRoot。
+  // 掉进引导页。
   const handleSelectSessionFromList = useCallback((s: SessionInfo) => {
     onSelectSession(s);
   }, [onSelectSession]);
@@ -798,10 +752,19 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   /** 置顶会话 id 集合：置顶会话从最近区排除（不重复出现）。 */
   const pinnedIds = useMemo(() => new Set(prefs.pinnedSessionIds), [prefs.pinnedSessionIds]);
 
+  /**
+   * 侧栏可见目录：项目列表 ∪ 当前选中 cwd。项目区、最近区、置顶区共用同一集合，
+   * 不在其中的会话（例如没加入项目的旁路 checkout）整个侧栏都不出现。
+   */
+  const visibleRoots = useMemo(
+    () => new Set([...prefs.projectRoots, ...(selectedCwd ? [selectedCwd] : [])]),
+    [prefs.projectRoots, selectedCwd],
+  );
+
   /** 置顶会话：按置顶顺序（最新置顶在前）；仅显示仍存在、可见的会话。 */
   const pinnedSessions = useMemo(
-    () => derivePinnedSessions({ sessions: allSessions, pinnedSessionIds: prefs.pinnedSessionIds }),
-    [allSessions, prefs.pinnedSessionIds],
+    () => derivePinnedSessions({ sessions: allSessions, visibleRoots, pinnedSessionIds: prefs.pinnedSessionIds }),
+    [allSessions, visibleRoots, prefs.pinnedSessionIds],
   );
 
   /** 置顶/取消置顶：唯一写入入口经偏好 seam；新置顶插到最前。 */
@@ -816,8 +779,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   /** 最近会话：按 modified 降序取 top 20 候选；UI 默认展示 5、每次加载更多 5。 */
   const recentSessions = useMemo(
-    () => deriveRecentSessions({ sessions: allSessions, excludeIds: pinnedIds, limit: RECENT_SESSIONS_LIMIT }),
-    [allSessions, pinnedIds],
+    () => deriveRecentSessions({ sessions: allSessions, visibleRoots, excludeIds: pinnedIds, limit: RECENT_SESSIONS_LIMIT }),
+    [allSessions, visibleRoots, pinnedIds],
   );
   // 池变短时收敛可见条数，避免 slice 空档
   useEffect(() => {
@@ -832,9 +795,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     if (!targetCwd) return;
     // Generate a temporary UUID client-side — no backend call needed.
     // Pi will be spawned lazily when the user sends the first message.
-    selectCwd(targetCwd, projectRootFor(targetCwd));
+    selectCwd(targetCwd);
     onNewSession?.(targetCwd);
-  }, [selectedCwd, onNewSession, selectCwd, projectRootFor]);
+  }, [selectedCwd, onNewSession, selectCwd]);
 
   // 搜索行开关：打开自动聚焦；关闭同时清空瞬时查询与全文结果。
   const clearSearchState = useCallback(() => {
@@ -910,15 +873,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     return () => clearTimeout(timer);
   }, [searchOpen, searchMode, sessionQuery]);
 
-  // 当前有效项目根（由 selectedCwd 乐观解析；服务端 worktree 数据仍是权威）
-  // 全项目树：分组/排序/空态补齐全部在纯模型内完成。
-  const knownWorktreesByProject = useMemo(
-    () => Object.fromEntries(Object.entries(worktreeSnapshots).map(([root, snapshot]) => [root, snapshot.worktrees])),
-    [worktreeSnapshots],
-  );
+  // 全项目树：分组/排序/空态补齐全部在纯模型内完成（项目 = cwd 目录）。
   const sidebarTree = useMemo(
-    () => buildSidebarTree(allSessions, { selectedCwd, selectedProjectRoot: selectedProject, knownWorktreesByProject, projectRoots: prefs.projectRoots }),
-    [allSessions, selectedCwd, selectedProject, knownWorktreesByProject, prefs.projectRoots],
+    () => buildSidebarTree(allSessions, { selectedCwd, projectRoots: prefs.projectRoots }),
+    [allSessions, selectedCwd, prefs.projectRoots],
   );
   // 会话 id → 树节点映射（含 children）：最近区行用与项目树相同的
   // SessionTreeItem 渲染，折叠/展开行为完全一致（共享 collapsedSessionIds）。
@@ -930,10 +888,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         if (node.children.length > 0) walk(node.children);
       }
     };
-    for (const project of sidebarTree) {
-      walk(project.mainTree);
-      for (const group of project.worktrees) walk(group.tree);
-    }
+    for (const project of sidebarTree) walk(project.tree);
     return map;
   }, [sidebarTree]);
   // 项目区已只包含列表内项目（buildSidebarTree 负责），搜索管线直接用树。
@@ -993,20 +948,17 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     });
   }, [sidebarTree]);
 
-  // 选中或 URL 恢复会话时自动展开 project/worktree/session 三级祖先，
+  // 选中或 URL 恢复会话时自动展开 project/session 两级祖先，
   // 避免「已选中但列表里不可见」；这是显式选中驱动，与搜索强制展开无关。
   useEffect(() => {
     if (!selectedSessionId) return;
     const location = locateSessionInSidebarTree(sidebarTree, selectedSessionId);
     if (!location) return;
     updatePrefs((prev) => {
-      const hasProject = prev.collapsedProjectRoots.includes(location.projectRoot);
-      const hasWorktree = location.worktreePath !== null && prev.collapsedWorktreePaths.includes(location.worktreePath);
-      if (!hasProject && !hasWorktree) return prev;
+      if (!prev.collapsedProjectRoots.includes(location.projectRoot)) return prev;
       return {
         ...prev,
-        collapsedProjectRoots: hasProject ? prev.collapsedProjectRoots.filter((root) => root !== location.projectRoot) : prev.collapsedProjectRoots,
-        collapsedWorktreePaths: hasWorktree ? prev.collapsedWorktreePaths.filter((path) => path !== location.worktreePath) : prev.collapsedWorktreePaths,
+        collapsedProjectRoots: prev.collapsedProjectRoots.filter((root) => root !== location.projectRoot),
       };
     });
     if (location.ancestors.length > 0) {
@@ -1041,7 +993,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     // 展开/折叠会改列表高度，不因此 scrollIntoView，否则滚动条乱跳。
     if (isInitialRestore || (selectionChanged && outsideViewport)) row.scrollIntoView({ block: "nearest" });
     if (isInitialRestore) initialSelectionScrollDoneRef.current = true;
-  }, [selectedSessionId, initialSessionId, visibleTree, collapsedProjectRoots, collapsedWorktreePaths, collapsedSessionIds]);
+  }, [selectedSessionId, initialSessionId, visibleTree, collapsedProjectRoots, collapsedSessionIds]);
 
   const toggleSessionCollapse = useCallback((sessionId: string) => {
     userTouchedSessionCollapseRef.current.add(sessionId);
@@ -1063,26 +1015,19 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }));
   }, [updatePrefs]);
 
-  const toggleWorktreeCollapse = useCallback((path: string) => {
-    updatePrefs((prev) => ({
-      ...prev,
-      collapsedWorktreePaths: prev.collapsedWorktreePaths.includes(path)
-        ? prev.collapsedWorktreePaths.filter((item) => item !== path)
-        : [...prev.collapsedWorktreePaths, path],
-    }));
-  }, [updatePrefs]);
-
   /**
    * 关闭项目：只把 root 从项目列表移除（项目区与项目信任都据此收敛）——绝不删除
-   * 目录、会话、AgentSession、worktree 或 Git 数据；重新添加同路径项目即恢复。
+   * 目录、会话、AgentSession 或 Git 数据；重新添加同路径项目即恢复。
    */
   const handleCloseProject = useCallback((root: string) => {
     setOpenProjectMenuRoot(null);
     // 运行中关项目会藏掉控制面：拒绝关闭，与归档 running→409 对齐。
+    // 只检查该项目目录（cwd）下的 running；别处 checkout 的运行不挡住关闭。
     if (projectHasRunningSession(allSessions, effectiveRunningSessionIds, root)) {
-      setWtError(t("sidebar_closeProjectRunning"));
+      setCloseProjectError({ root, message: t("sidebar_closeProjectRunning") });
       return;
     }
+    setCloseProjectError(null);
     updatePrefs((prev) => (prev.projectRoots.includes(root)
       ? { ...prev, projectRoots: prev.projectRoots.filter((item) => item !== root) }
       : prev));
@@ -1091,7 +1036,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     if (selectedProject === root) {
       const next = pickProjectRootAfterClose(sidebarTree, root, new Set());
       if (next) {
-        selectCwd(next, next);
+        selectCwd(next);
       } else {
         selectCwd(null);
         onNewSession?.();
@@ -1154,34 +1099,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   const collapseAll = useCallback(() => {
     const ids = collectAllCollapseIds(openTree);
-    updatePrefs((prev) => ({
-      ...prev,
-      collapsedProjectRoots: ids.projectRoots,
-      collapsedWorktreePaths: ids.worktreePaths,
-    }));
+    updatePrefs((prev) => ({ ...prev, collapsedProjectRoots: ids.projectRoots }));
   }, [openTree, updatePrefs]);
 
   const expandAll = useCallback(() => {
-    updatePrefs((prev) => (prev.collapsedProjectRoots.length === 0 && prev.collapsedWorktreePaths.length === 0
+    updatePrefs((prev) => (prev.collapsedProjectRoots.length === 0
       ? prev
-      : { ...prev, collapsedProjectRoots: [], collapsedWorktreePaths: [] }));
+      : { ...prev, collapsedProjectRoots: [] }));
   }, [updatePrefs]);
-
-  // worktree 管理能力：所有已知项目均可显示/操作（快照缓存优先、后台预加载），
-  // 不再要求项目处于选中态；可否创建/删除取决于该项目已加载的 git 顶层信息。
-  const worktreeActionsFor = useCallback((projectRoot: string): WorktreeActions | null => {
-    const snapshot = worktreeSnapshots[projectRoot];
-    const metadata = worktreeMetadata[projectRoot];
-    const canManage = Boolean(metadata?.isGit && metadata.isTopLevel);
-    const createHint = canManage
-      ? t("sidebar_createWorktree")
-      : snapshot?.status === "loading" || !snapshot
-        ? t("sidebar_checkingWorktree")
-        : metadata?.isGit
-          ? t("sidebar_worktreeOpenRoot")
-          : t("sidebar_worktreeGitOnly");
-    return { canManage, createHint, busy: wtBusy };
-  }, [worktreeSnapshots, worktreeMetadata, wtBusy, t]);
 
   return (
     <RunningTimeContext.Provider value={{ startedAt: runningStartedAt, now: runningNow }}>
@@ -1468,7 +1393,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             {archiveError}
           </div>
         )}
-      {/* 项目树：Project → (非主 Worktree) → Session → child */}
+      {/* 项目树：Project → Session → child */}
       <div ref={sessionListRef} style={{ flex: "1 1 auto", overflowY: "auto", overflowX: "hidden", padding: "2px 0", minHeight: 80 }}>
         {loading && (
           <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
@@ -1647,7 +1572,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           <ProjectSection
             key={project.root}
             project={project}
-            homeDir={homeDir}
             displayMode={displayMode}
             projectAliases={projectAliases}
             selectedSessionId={selectedSessionId}
@@ -1655,11 +1579,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             subagentRunningIds={subagentRunningIds}
             unreadSessionIds={unreadSessionIds}
             collapsedProjectRoots={collapsedProjectRoots}
-            collapsedWorktreePaths={collapsedWorktreePaths}
             collapsedSessionIds={collapsedSessionIds}
             searchActive={searchActive}
             onToggleProject={toggleProjectCollapse}
-            onToggleWorktree={toggleWorktreeCollapse}
             onNewSession={handleNewSession}
             onSelectSession={handleSelectSessionFromList}
             menuOpen={openProjectMenuRoot === project.root}
@@ -1672,33 +1594,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             groupVisibleCounts={groupVisibleCounts}
             onShowMore={(groupKey) => setGroupVisibleCounts((counts) => bumpGroupVisibleCount(counts, groupKey))}
             onShowFewer={(groupKey) => setGroupVisibleCounts((counts) => resetGroupVisibleCount(counts, groupKey))}
-            worktreeActions={worktreeActionsFor(project.root)}
-            wtNewOpen={wtNewForProject === project.root}
-            wtNewBranch={wtNewBranch}
-            wtError={wtErrorRoot === project.root ? wtError : null}
-            wtConfirmRemove={wtConfirmRemove}
-            wtNewInputRef={wtNewInputRef}
-            onStartCreateWorktree={() => {
-              setWtNewForProject(project.root);
-              setWtError(null);
-              setWtErrorRoot(null);
-              setTimeout(() => wtNewInputRef.current?.focus(), 0);
-            }}
-            onWtNewBranchChange={(value) => {
-              setWtNewBranch(value);
-              setWtError(null);
-              setWtErrorRoot(null);
-            }}
-            onSubmitCreateWorktree={() => void handleCreateWorktree()}
-            onCancelCreateWorktree={() => {
-              setWtNewForProject(null);
-              setWtNewBranch("");
-              setWtError(null);
-              setWtErrorRoot(null);
-            }}
-            onRequestRemoveWorktree={(path) => void handleRemoveWorktree(project.root, path, false)}
-            onConfirmRemoveWorktree={(path) => void handleRemoveWorktree(project.root, path, true)}
-            onCancelRemoveWorktree={() => setWtConfirmRemove(null)}
+            actionError={closeProjectError?.root === project.root ? closeProjectError.message : null}
             onSessionArchive={handleArchiveSession}
             isSessionPinned={(id) => pinnedIds.has(id)}
             onTogglePin={togglePinSession}
@@ -1713,7 +1609,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       <AddProjectDialog
         open={customPathOpen}
         onClose={closeCustomPathPanel}
-        resolveProjectRoot={(cwd) => projectRootFor(cwd) ?? cwd}
         onAdded={handleProjectAdded}
       />
       <EditProjectDialog

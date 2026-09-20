@@ -4,14 +4,12 @@
  * 职责边界：
  * - 分组可见条数（show more / show fewer / 搜索全量）
  * - 乐观会话列表合并（server ↔ pending，stale 保护）
- * - 项目 worktree 快照 immutable upsert（按 projectRoot，loading/error 保留 last-known）
+ * - 最近会话/置顶会话派生（只暴露项目列表与当前选中目录内的会话）
  *
- * 树投影仍由 session-sidebar-model 负责；本文件只产出可接入的状态切片，
- * 供后续 designer 无业务决策地接线。
+ * 树投影仍由 session-sidebar-model 负责；本文件只产出可接入的状态切片。
  */
 
 import type { SessionInfo } from "@/lib/types";
-import type { WorktreeEntry } from "@/lib/project-context";
 
 // ── 分组可见条数 ───────────────────────────────────────────────────────────
 
@@ -185,14 +183,6 @@ export function shouldApplySessionListResponse(
   return responseGen === latestGen && responseGen > 0;
 }
 
-/**
- * worktree 预加载 generation 字符串：只依赖 wtRefreshKey，
- * 不得嵌入 session refreshKey（session list 刷新不得重抓 worktree）。
- */
-export function buildWorktreePreloadGeneration(wtRefreshKey: number): string {
-  return `wt:${Math.max(0, Math.floor(wtRefreshKey))}`;
-}
-
 // ── 最近会话区 ─────────────────────────────────────────────────────────────
 
 /** 最近区候选池上限（按 modified 取最近 N 条）。 */
@@ -245,6 +235,8 @@ export function planSubagentDiscoveryRefresh(input: {
 export interface DeriveRecentSessionsInput {
   /** 全量会话列表（服务端 + 乐观合并后）；排序语义由本函数内部保证。 */
   sessions: readonly SessionInfo[];
+  /** 允许出现在侧栏的目录集合（项目列表 ∪ 当前选中 cwd）。 */
+  visibleRoots: ReadonlySet<string>;
   /** 附加排除 id（如已删除、仅显示占位等）。 */
   excludeIds?: ReadonlySet<string>;
   /** 展示条数上限；损坏/负数回退默认 RECENT_SESSIONS_LIMIT（20）。 */
@@ -257,17 +249,18 @@ export interface DeriveRecentSessionsInput {
  *
  * 排除规则：
  * - subagent 子会话（`session.subagent` 存在）——子会话只读、不参与最近区
- * - 项目是否在侧栏项目列表里不影响最近区（未加入项目的会话也要有地方可去）
+ * - cwd 不在 visibleRoots 内的会话——未加入项目、又没被选中的目录不进侧栏
  * - `excludeIds` 显式排除的 id
  *
  * 本函数不修改输入数组；输入是否已排序不影响结果（内部先稳定排序）。
  */
 export function deriveRecentSessions(input: DeriveRecentSessionsInput): SessionInfo[] {
-  const { sessions, excludeIds, limit = RECENT_SESSIONS_LIMIT } = input;
+  const { sessions, visibleRoots, excludeIds, limit = RECENT_SESSIONS_LIMIT } = input;
   const n = Math.max(0, Math.floor(limit));
   const filtered = sessions.filter((s) => {
     if (s.subagent) return false;
     if (excludeIds?.has(s.id)) return false;
+    if (!visibleRoots.has(s.cwd)) return false;
     return true;
   });
   const sorted = filtered.slice().sort(compareSessionsByActivity);
@@ -277,6 +270,8 @@ export function deriveRecentSessions(input: DeriveRecentSessionsInput): SessionI
 export interface DerivePinnedSessionsInput {
   /** 全量会话列表（服务端 + 乐观合并后）。 */
   sessions: readonly SessionInfo[];
+  /** 允许出现在侧栏的目录集合（项目列表 ∪ 当前选中 cwd）。 */
+  visibleRoots: ReadonlySet<string>;
   /** 置顶 id 顺序（最新置顶在前）；结果按此顺序输出。 */
   pinnedSessionIds: readonly string[];
 }
@@ -287,15 +282,16 @@ export interface DerivePinnedSessionsInput {
  * 排除规则：
  * - 已不在 sessions 中的 id（会话已删除/归档）——静默跳过
  * - subagent 子会话（只读、不参与置顶）
+ * - cwd 不在 visibleRoots 内的会话——同项目区规则，整个侧栏一致
  *
- * 项目是否在侧栏项目列表里不影响置顶（置顶是用户显式指定，项目区才受列表控制）。
  * 本函数不修改输入数组；不存在/被排除的 id 不报错。
  */
 export function derivePinnedSessions(input: DerivePinnedSessionsInput): SessionInfo[] {
-  const { sessions, pinnedSessionIds } = input;
+  const { sessions, visibleRoots, pinnedSessionIds } = input;
   const byId = new Map<string, SessionInfo>();
   for (const s of sessions) {
     if (s.subagent) continue;
+    if (!visibleRoots.has(s.cwd)) continue;
     byId.set(s.id, s);
   }
   const result: SessionInfo[] = [];
@@ -308,159 +304,4 @@ export function derivePinnedSessions(input: DerivePinnedSessionsInput): SessionI
     }
   }
   return result;
-}
-
-// ── 项目 worktree 快照 ─────────────────────────────────────────────────────
-
-export type ProjectWorktreeStatus = "idle" | "loading" | "ready" | "error";
-
-export interface ProjectWorktreeSnapshot {
-  status: ProjectWorktreeStatus;
-  worktrees: readonly WorktreeEntry[];
-  error?: string;
-}
-
-/** 全表：projectRoot → 快照。不持久化到 Pi / session schema。 */
-export type ProjectWorktreeSnapshots = Readonly<Record<string, ProjectWorktreeSnapshot>>;
-
-export const EMPTY_PROJECT_WORKTREE_SNAPSHOT: ProjectWorktreeSnapshot = {
-  status: "idle",
-  worktrees: [],
-};
-
-/** 比较两条 worktree 列表是否语义相同（path/branch/isMain 顺序敏感）。 */
-export function sameWorktreeList(
-  a: readonly WorktreeEntry[],
-  b: readonly WorktreeEntry[],
-): boolean {
-  if (a === b) return true;
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    const x = a[i]!;
-    const y = b[i]!;
-    if (x.path !== y.path || x.branch !== y.branch || x.isMain !== y.isMain) return false;
-  }
-  return true;
-}
-
-/** 比较两份快照是否可跳过更新。 */
-export function sameProjectWorktreeSnapshot(
-  a: ProjectWorktreeSnapshot | undefined,
-  b: ProjectWorktreeSnapshot,
-): boolean {
-  if (!a) return false;
-  if (a.status !== b.status) return false;
-  if ((a.error ?? undefined) !== (b.error ?? undefined)) return false;
-  return sameWorktreeList(a.worktrees, b.worktrees);
-}
-
-export type ProjectWorktreeUpsert =
-  | { status: "idle" }
-  | { status: "loading" }
-  | { status: "ready"; worktrees: readonly WorktreeEntry[] }
-  | { status: "error"; error: string; worktrees?: readonly WorktreeEntry[] };
-
-/**
- * 对单个 projectRoot 做 immutable upsert。
- * - loading / error：保留 last-known worktrees（除非本次显式给出 worktrees）
- * - ready：写入新列表
- * - idle：清空为默认空快照
- * - 语义不变时返回原 map 引用，避免无谓 re-render
- * 单项目错误不影响其他 projectRoot 条目。
- */
-export function upsertProjectWorktreeSnapshot(
-  map: ProjectWorktreeSnapshots,
-  projectRoot: string,
-  patch: ProjectWorktreeUpsert,
-): ProjectWorktreeSnapshots {
-  const prev = map[projectRoot];
-  let next: ProjectWorktreeSnapshot;
-
-  switch (patch.status) {
-    case "idle":
-      next = EMPTY_PROJECT_WORKTREE_SNAPSHOT;
-      break;
-    case "loading":
-      next = {
-        status: "loading",
-        worktrees: prev?.worktrees ?? [],
-      };
-      break;
-    case "ready":
-      next = {
-        status: "ready",
-        worktrees: patch.worktrees,
-      };
-      break;
-    case "error":
-      next = {
-        status: "error",
-        worktrees: patch.worktrees ?? prev?.worktrees ?? [],
-        error: patch.error,
-      };
-      break;
-  }
-
-  if (sameProjectWorktreeSnapshot(prev, next)) return map;
-  return { ...map, [projectRoot]: next };
-}
-
-/**
- * 移除某项目快照；不存在时返回原引用。
- * 不影响其他项目。
- */
-export function removeProjectWorktreeSnapshot(
-  map: ProjectWorktreeSnapshots,
-  projectRoot: string,
-): ProjectWorktreeSnapshots {
-  if (!(projectRoot in map)) return map;
-  const next = { ...map };
-  delete next[projectRoot];
-  return next;
-}
-
-/**
- * 组装 worktree 预加载队列的项目根列表。
- *
- * 语义（修复侧栏把 worktree 路径误当项目根预加载的问题）：
- * - selectedProjectRoot 存在：只用它作为锚点——已在 roots 则返回原引用，
- *   否则 unshift 到队首；**不再**用 selectedCwd 兜底（点击 worktree 分组后
- *   selectedCwd 是 worktree 路径，混入队列会向 /api/worktrees?cwd=<worktree 路径>
- *   发起请求并污染快照 key）。
- * - selectedProjectRoot 为空：selectedCwd 不在 roots 时才 unshift 兜底。
- * 无变化时返回原引用，避免触发 useMemo/effect 无谓重跑。
- */
-export function buildKnownProjectRoots(
-  roots: readonly string[],
-  selectedCwd: string | null,
-  selectedProjectRoot: string | null,
-): readonly string[] {
-  if (selectedProjectRoot) {
-    if (roots.includes(selectedProjectRoot)) return roots;
-    return [selectedProjectRoot, ...roots];
-  }
-  if (selectedCwd && !roots.includes(selectedCwd)) return [selectedCwd, ...roots];
-  return roots;
-}
-
-/**
- * 提交 worktree 响应到快照表，并按服务端权威 projectRoot（canonicalRoot）收敛 key。
- *
- * - canonicalRoot === requestRoot：等同 upsertProjectWorktreeSnapshot ready。
- * - canonicalRoot !== requestRoot：请求 root（如 worktree 路径）不得成为快照 key——
- *   先移除该 key（含此前预加载写入的 loading 条目，remove 对不存在的 key 是 no-op），
- *   再把 ready 快照写入 canonicalRoot。否则 buildSidebarTree 会把这个请求 root
- *   当成项目根创建项目桶并补 worktree 分组，侧栏多出「项目 + 工作树」。
- */
-export function upsertCanonicalProjectWorktreeSnapshot(
-  map: ProjectWorktreeSnapshots,
-  requestRoot: string,
-  canonicalRoot: string,
-  worktrees: readonly WorktreeEntry[],
-): ProjectWorktreeSnapshots {
-  if (canonicalRoot === requestRoot) {
-    return upsertProjectWorktreeSnapshot(map, requestRoot, { status: "ready", worktrees });
-  }
-  const withoutRequestRoot = removeProjectWorktreeSnapshot(map, requestRoot);
-  return upsertProjectWorktreeSnapshot(withoutRequestRoot, canonicalRoot, { status: "ready", worktrees });
 }

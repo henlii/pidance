@@ -121,7 +121,7 @@
 | 会话业务/运行时 | `lib/session-service.ts`、`live-session-registry.ts`、`sdk-session-host.ts` |
 | 扩展适配 | `lib/web-extension-ui.ts`、`extension-ui-bridge.ts`、`components/ExtensionDialog.tsx`、`ExtensionCustomPanel.tsx` |
 | 磁盘与读模型 | `lib/pi-session-io.ts`、`session-reader.ts`、`session-metadata-cache.ts`、`session-leaf-sidecar.ts` |
-| 项目/文件/Git | `lib/project-context.ts`、`worktree.ts`、`file-access.ts`、`app/api/files/`、`app/api/git/` |
+| 项目/文件/Git | `lib/project-context.ts`、`lib/ui-preferences.ts`、`file-access.ts`、`app/api/files/`、`app/api/git/` |
 | 管理面 | `app/api/auth/`、`models-config/`、`plugins/`、`skills/`；对应 `lib/` store/adapters |
 | 启动/桌面/发布 | `bin/pidance.js`、`instrumentation.ts`、`desktop/src/`、`.github/workflows/` |
 

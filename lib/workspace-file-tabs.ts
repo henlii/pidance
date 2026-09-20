@@ -1,7 +1,7 @@
 /**
  * File tabs in the secondary panel are scoped to the current workspace cwd.
- * Switching project/worktree (cwd change) must close the previous workspace's
- * files. Same-cwd session switches and projectRoot metadata fills do not.
+ * Switching project (cwd change) must close the previous workspace's files.
+ * Same-cwd session switches and projectRoot metadata fills do not.
  */
 
 export type WorkspaceFileTab = {

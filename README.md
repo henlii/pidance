@@ -24,11 +24,11 @@ Pidance 是面向 [Pi](https://github.com/badlogic/pi-mono) coding agent 的开�
 
 ## 功能特性
 
-- **项目化会话空间**：按 Project → Worktree → Session 浏览会话树，支持搜索、最近会话、归档、恢复、重命名、自动命名与 HTML 导出。
+- **项目化会话空间**：按 Project → Session 浏览会话树（项目 = 你加入的那个目录），支持搜索、最近会话、归档、恢复、重命名、自动命名与 HTML 导出。
 - **实时 Agent 对话**：通过 SSE 呈现流式回复、思考过程、工具调用、终端 ANSI 输出、压缩状态和运行中状态；页面恢复后自动对账。
 - **安全探索不同方向**：从历史消息继续、创建会话内分支，或 fork 为独立 `.jsonl` 会话；两种分支语义清晰分离。
 - **项目工作区**：浏览与预览源码、Markdown、图片、音频、PDF 和 DOCX，支持文件搜索、`@` 引用、Git 状态与 diff。
-- **Git worktree 工作流**：在界面内选择、创建和移除工作树，新会话与文件工作区自动跟随所选 checkout。
+- **一个目录就是一个项目**：需要另一份 Git checkout 时用 `git worktree` 自己建，再把该目录加为项目；Pidance 不管理 worktree，新会话与文件工作区始终跟随所选目录。
 - **Pi 生态集成**：展示同步与异步子代理运行状态、通用扩展 UI 卡片与交互，以及结构化 Todos 的只读投影。
 - **集中配置**：管理供应商认证、API Key、模型与测试、会话默认值、技能、插件和项目信任。
 - **精心打磨的界面**：响应式桌面/移动布局、命令面板、会话 minimap、完成提示音、中英双语，以及 Light / Dark / System 主题。
@@ -149,7 +149,6 @@ Pi AgentSessionRuntime
 - [架构与会话交互](./docs/architecture.md) · [静态审查](./docs/architecture-review-2026-09-15.md)
 - [开发与验证](./docs/development.md) · [安全边界](./docs/security.md)
 - [Windows 桌面壳](./desktop/README.md) · [版本变更](./docs/release-notes/README.md)
-- [Git worktree 使用说明](./docs/worktrees.zh-CN.md)
 - [发布与制品审计](./docs/release.md)
 - [历史界面设计稿](./docs/ui-redesign/README.md)
 - [主题 Token 设计参考](./docs/ui-redesign/theme-tokens.md)

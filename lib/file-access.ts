@@ -54,8 +54,8 @@ export function getAllowedRootsFromSessions(sessions: Awaited<ReturnType<typeof 
   const roots = new Set<string>();
   for (const s of sessions) {
     if (s.readOnly !== true && s.cwd) roots.add(normalizeSlashes(s.cwd));
-    // The project root (main repo shared by all worktrees) is browsable too —
-    // the project dropdown lists it even when only worktrees have sessions.
+    // projectRoot equals cwd (one directory, one project); kept separate so an
+    // older cached SessionInfo that still carries another root stays usable.
     if (s.readOnly !== true && s.projectRoot) roots.add(normalizeSlashes(s.projectRoot));
   }
 

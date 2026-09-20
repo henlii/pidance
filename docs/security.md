@@ -6,7 +6,7 @@
 
 Pidance 是运行在用户机器上的 Agent 工作区，不是多租户隔离平台。获准使用服务的人可以通过 Agent、终端和文件功能操作服务账号有权限访问的资源，应视为可信操作者。
 
-**当前文件访问不是项目目录沙箱。** `lib/file-access.ts` 的 `isFileAccessUnrestricted()` 返回 `true`；历史文档中的“仅允许 selected project/worktree 根目录”不符合当前实现。各端点仍可能有格式、上传或冲突校验，但这些不等于目录隔离。
+**当前文件访问不是项目目录沙箱。** `lib/file-access.ts` 的 `isFileAccessUnrestricted()` 返回 `true`；历史文档中的“仅允许选中项目根目录”不符合当前实现。各端点仍可能有格式、上传或冲突校验，但这些不等于目录隔离。
 
 ## 监听与认证
 

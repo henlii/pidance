@@ -1,7 +1,7 @@
 /**
  * 会话栏 UI 偏好 seam（跨刷新持久化）。
  *
- * 只放跨刷新偏好：显示模式、项目/worktree 折叠集合、侧栏宽度。
+ * 只放跨刷新偏好：显示模式、项目折叠集合、侧栏宽度。
  * 搜索查询、搜索框开关、会话级 child 折叠、可见条数均为组件瞬时态，绝不写入这里。
  * 读写容错：localStorage 不可用（隐私模式/SSR）时静默回退默认值。
  */
@@ -108,8 +108,6 @@ export interface SidebarPreferences {
   displayMode: SidebarDisplayMode;
   /** 已折叠项目根路径（projectRoot）。 */
   collapsedProjectRoots: string[];
-  /** 已折叠非主 worktree 路径。 */
-  collapsedWorktreePaths: string[];
   /** 项目显示名 alias（projectRoot → 名称）；项目行与搜索共用。 */
   projectAliases: ProjectAliases;
   /**
@@ -147,7 +145,6 @@ export interface SidebarPreferences {
 export const DEFAULT_SIDEBAR_PREFERENCES: SidebarPreferences = {
   displayMode: "standard",
   collapsedProjectRoots: [],
-  collapsedWorktreePaths: [],
   projectAliases: {},
   projectRoots: [],
   projectRootsMigrated: false,
@@ -205,7 +202,6 @@ export function parseSidebarPreferences(raw: unknown): SidebarPreferences {
       ...DEFAULT_SIDEBAR_PREFERENCES,
       projectAliases: {},
       collapsedProjectRoots: [],
-      collapsedWorktreePaths: [],
     };
   }
   const record = raw as Record<string, unknown>;
@@ -214,7 +210,6 @@ export function parseSidebarPreferences(raw: unknown): SidebarPreferences {
       ? record.displayMode
       : DEFAULT_SIDEBAR_PREFERENCES.displayMode,
     collapsedProjectRoots: parsePathList(record.collapsedProjectRoots),
-    collapsedWorktreePaths: parsePathList(record.collapsedWorktreePaths),
     projectAliases: parseProjectAliases(record.projectAliases),
     ...parseProjectRoots(record),
     // 旧数据缺字段时 clamp 非数字 → 默认 300；越界/损坏一律钳入 [min, max]。
@@ -284,7 +279,6 @@ export function serializeSidebarPreferences(prefs: SidebarPreferences): string {
   return JSON.stringify({
     displayMode: prefs.displayMode,
     collapsedProjectRoots: prefs.collapsedProjectRoots,
-    collapsedWorktreePaths: prefs.collapsedWorktreePaths,
     projectAliases: prefs.projectAliases,
     projectRoots: prefs.projectRoots,
     sidebarWidth: clampSidebarWidth(prefs.sidebarWidth),
@@ -336,7 +330,6 @@ export function saveSidebarPreferences(prefs: SidebarPreferences): void {
 export type SyncedSidebarUi = {
   displayMode: SidebarDisplayMode;
   collapsedProjectRoots: string[];
-  collapsedWorktreePaths: string[];
   projectRoots: string[];
   showRecentSessions: boolean;
   pinnedSessionIds: string[];
@@ -348,7 +341,6 @@ export function sidebarUiFromPrefs(prefs: SidebarPreferences): SyncedSidebarUi {
   return {
     displayMode: prefs.displayMode,
     collapsedProjectRoots: prefs.collapsedProjectRoots,
-    collapsedWorktreePaths: prefs.collapsedWorktreePaths,
     projectRoots: prefs.projectRoots,
     showRecentSessions: prefs.showRecentSessions,
     pinnedSessionIds: prefs.pinnedSessionIds,
@@ -365,7 +357,6 @@ export function applySyncedSidebarUi(prefs: SidebarPreferences, remote: unknown)
     ...prefs,
     displayMode: parsed.displayMode,
     collapsedProjectRoots: parsed.collapsedProjectRoots,
-    collapsedWorktreePaths: parsed.collapsedWorktreePaths,
     projectRoots: parsed.projectRoots,
     // 服务端仍是旧模型（载荷里没有 projectRoots 键）且本地也还没有项目列表时，
     // 继续保持「待迁移」：这台浏览器（新设备/清过缓存）也要做一次性种子，

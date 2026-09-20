@@ -9,9 +9,7 @@
  * 和主 Agent 不一致。
  *
  * 所以：侧栏「加入项目」写 `true`，「关闭项目」（= 从项目列表移除）撤销，两边口径
- * 一致。分支工作树同样
- * 处理（它建在仓库旁：`<repo>-worktrees/<branch>`，不是仓库子目录，拿不到项目那条
- * 祖先条目），创建时写、删除时撤。
+ * 一致。用户自己建的 linked worktree 也一样——把它加入项目即可拿到同一份信任。
  *
  * 写入必须走 SDK 的 `ProjectTrustStore`：它和 pi CLI 用同一把 proper-lockfile 锁，
  * 自己读写 JSON 会和终端里正在跑的 pi 并发写互相覆盖。
@@ -20,8 +18,8 @@
  * - 列表里的项目一律写**自己的精确条目**（即使祖先条目已经给 true）：信任列表与
  *   侧栏项目一一对应，关闭项目时删掉的就是它自己那条。祖先条目的继承效果是 Pi 的
  *   查找规则（最近祖先生效），不在本模块里做 `false` 覆盖。
- * - 信任面 = 侧栏项目列表（`projectRoots`）∪ 分支工作树；列表之外的会话 cwd 与临时
- *   目录不写，避免把信任面铺开。
+ * - 信任面 = 侧栏项目列表（`projectRoots`）；列表之外的会话 cwd 与临时目录不写，
+ *   避免把信任面铺开。
  */
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";

@@ -158,16 +158,15 @@ test("搜索命中 child 时保留完整祖先链（fork 链）；subagent 不�
   assert.equal(filtered[0].children[0].relation, "fork");
 });
 
-test("搜索可命中 name/firstMessage/id/worktreeBranch/subagent run", async () => {
+test("搜索可命中 name/firstMessage/id/subagent run", async () => {
   const { buildSessionDisplayTree, filterSessionDisplayTree, sessionMatchesQuery } = await jiti.import("./session-tree.ts");
   const s = session("abc123def456", {
     name: "Refactor auth",
     firstMessage: "how do I migrate",
-    worktreeBranch: "feat/login",
     subagent: { parentSessionId: "p", runId: "deadbeef", runIndex: 7, agent: "reviewer" },
     readOnly: true,
   });
-  for (const q of ["refactor", "migrate", "abc123", "feat/login", "reviewer", "deadbeef", "run 7", "run-7", "7"]) {
+  for (const q of ["refactor", "migrate", "abc123", "reviewer", "deadbeef", "run 7", "run-7", "7"]) {
     assert.ok(sessionMatchesQuery(s, q), `应命中: ${q}`);
   }
   assert.ok(!sessionMatchesQuery(s, "nonexistent"));

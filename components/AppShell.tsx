@@ -602,28 +602,20 @@ function AppShellInner() {
     if (typeof window !== "undefined") {
     }
     // 显式点选会话：先跳过身份 watcher（必须在本函数任何 state 变更之前）。
-    // selectCwd / 迟到的 worktree 预加载回写不能把刚选中的会话清掉，否则
-    // 会掉进引导页（刷新才恢复）。
+    // selectCwd / 迟到的身份回写不能把刚选中的会话清掉，否则会掉进引导页（刷新才恢复）。
     identityEpochRef.current += 1;
     cwdValidateAbortRef.current?.abort();
     navigationStoreRef.current.selectPersisted({
       id: session.id,
       cwd: session.cwd,
-      projectRoot: session.projectRoot,
     });
     selectedSessionIdRef.current = session.id;
     setSelectedSession(session);
-    // 统一在此同步 identity：会话 cwd 与 projectRoot 成为当前项目上下文。
+    // 统一在此同步 identity：会话 cwd 就是当前项目根（项目 = 目录）。
     // 调用方（SessionSidebar 点击路径）不再自行 selectCwd，避免 store 同步
-    // 刷新在 suppress 生效前触发 watcher 清空会话；worktree 预加载随后会把
-    // projectRoot 修正为权威主仓 root。
+    // 刷新在 suppress 生效前触发 watcher 清空会话。
     if (session.cwd) {
-      setIdentity({
-        cwd: session.cwd,
-        projectRoot: session.projectRoot ?? session.cwd,
-        status: "ready",
-        error: null,
-      });
+      setIdentity({ cwd: session.cwd, status: "ready", error: null });
     }
     invalidateHydrate();
     // 选中已有会话：清掉新建 intent（含 ref 与 state），使迟到 ensure/promote 失效。
@@ -644,10 +636,9 @@ function AppShellInner() {
   }, [isMobile, invalidateHydrate, syncUrl, sessionRestoreStatus]);
 
   const handleNewSession = useCallback((targetCwd?: string) => {
-    // 侧栏行内入口（项目行/非主 worktree 行）显式给出目标 cwd；其点击路径已先把
-    // ProjectContext identity 切到目标 cwd（含 projectRoot）。这里仅兜底：identity
-    // 尚未落在目标 cwd 时补齐（projectRoot 缺省由 store 回填为 cwd，随后由
-    // worktree 数据权威修正），保证 lazy 新会话落到正确项目。
+    // 侧栏行内入口（项目行）显式给出目标 cwd；其点击路径已先把 ProjectContext
+    // identity 切到目标 cwd。这里仅兜底：identity 尚未落在目标 cwd 时补齐，
+    // 保证 lazy 新会话落到正确项目。
     const cwd = targetCwd ?? getIdentitySnapshot().cwd;
     if (!cwd) return;
     identityEpochRef.current += 1;
@@ -674,14 +665,9 @@ function AppShellInner() {
     syncUrl("/");
   }, [isMobile, getIdentitySnapshot, setIdentity, invalidateHydrate, syncUrl]);
 
-  /** 引导页改项目/工作树：写入全局 identity，不重建 intent、不重挂载 ChatWindow。 */
-  const handleGuideTargetChange = useCallback((cwd: string, projectRoot?: string | null) => {
-    setIdentity({
-      cwd,
-      projectRoot: projectRoot ?? cwd,
-      status: "ready",
-      error: null,
-    });
+  /** 引导页改项目：写入全局 identity，不重建 intent、不重挂载 ChatWindow。 */
+  const handleGuideTargetChange = useCallback((cwd: string) => {
+    setIdentity({ cwd, status: "ready", error: null });
     setGuideDefaultCwd(cwd);
     if (newSessionIntentRef.current) {
       const next = { ...newSessionIntentRef.current, cwd };
@@ -715,7 +701,6 @@ function AppShellInner() {
     navigationStoreRef.current.applyHydrate({
       id: sessionId,
       cwd: info.cwd ?? "",
-      projectRoot: info.projectRoot,
     });
   }, []);
 
@@ -762,7 +747,7 @@ function AppShellInner() {
       }
       setSelectedSession((prev) => {
         if (!prev || prev.id !== sessionId) return prev;
-        // 补全 projectRoot 等服务端字段；已有完整字段时仍可刷新 path/name。
+        // 补全服务端字段；已有完整字段时仍可刷新 path/name。
         return { ...prev, ...result.value };
       });
       applyHydratedToNavigation(sessionId, result.value);
@@ -793,7 +778,6 @@ function AppShellInner() {
       navigationStoreRef.current.promote(intentId ?? "", {
         id: session.id,
         cwd: session.cwd,
-        projectRoot: session.projectRoot,
       });
       setPendingHighlightId(null);
       selectedSessionIdRef.current = session.id;
@@ -846,7 +830,6 @@ function AppShellInner() {
     navigationStoreRef.current.forkTo({
       id: newSessionId,
       cwd: activeCwd ?? "",
-      projectRoot: undefined,
     });
     // fork 复用 targeted hydration，不套 new-intent 门禁。
     hydrateSelectedSession(newSessionId, { forFork: true });
@@ -1063,7 +1046,7 @@ function AppShellInner() {
           id: navTarget.sessionId,
           path: "",
           cwd: navTarget.cwd,
-          projectRoot: navTarget.projectRoot,
+          projectRoot: navTarget.cwd,
           created: selectedSession?.created ?? "",
           modified: selectedSession?.modified ?? "",
           messageCount: selectedSession?.messageCount ?? 0,

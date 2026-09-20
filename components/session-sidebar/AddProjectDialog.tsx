@@ -15,9 +15,8 @@ import { DialogButton } from "./display";
 export interface AddProjectDialogProps {
   open: boolean;
   onClose: () => void;
-  /** 解析 cwd 所属项目根；失败时回退 cwd 本身。 */
-  resolveProjectRoot: (cwd: string) => string;
-  onAdded: (cwd: string, projectRoot: string) => void;
+  /** 项目 = 目录：加入的项目根就是所选目录本身。 */
+  onAdded: (cwd: string) => void;
 }
 
 /** 输入去抖：打字过程中不逐字请求目录列表。 */
@@ -31,7 +30,7 @@ const AUTO_BROWSE_DEBOUNCE_MS = 250;
  * - 路径不存在时界面照常显示，只在列表处给出「目录不存在」提示，不弹窗
  * - 「添加」按输入值校验：路径不存在才弹确认框问是否创建，确认后先建目录再加入项目
  */
-export function AddProjectDialog({ open, onClose, resolveProjectRoot, onAdded }: AddProjectDialogProps) {
+export function AddProjectDialog({ open, onClose, onAdded }: AddProjectDialogProps) {
   const { t } = useI18n();
   const inputRef = useRef<HTMLInputElement>(null);
   const [value, setValue] = useState("");
@@ -161,11 +160,11 @@ export function AddProjectDialog({ open, onClose, resolveProjectRoot, onAdded }:
         setError(result.message);
         return;
       }
-      onAdded(result.cwd, resolveProjectRoot(result.cwd));
+      onAdded(result.cwd);
     } finally {
       setSubmitting(null);
     }
-  }, [value, submitting, onAdded, resolveProjectRoot]);
+  }, [value, submitting, onAdded]);
 
   /** 确认创建：先建目录再加入项目；失败保留确认框，错误可读可重试。 */
   const confirmCreate = useCallback(async () => {
@@ -180,11 +179,11 @@ export function AddProjectDialog({ open, onClose, resolveProjectRoot, onAdded }:
         return;
       }
       setCreateTarget(null);
-      onAdded(result.cwd, resolveProjectRoot(result.cwd));
+      onAdded(result.cwd);
     } finally {
       setSubmitting(null);
     }
-  }, [createTarget, submitting, onAdded, resolveProjectRoot]);
+  }, [createTarget, submitting, onAdded]);
 
   return (
     <>

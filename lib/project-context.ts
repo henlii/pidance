@@ -5,24 +5,10 @@ export interface ProjectSessionTreeNode {
   children: ProjectSessionTreeNode[];
 }
 
-export interface WorktreeEntry {
-  path: string;
-  branch: string | null;
-  isMain: boolean;
-}
-
-export interface WorktreeState {
-  forCwd: string;
-  projectRoot: string;
-  isGit: boolean;
-  isTopLevel: boolean;
-  worktrees: WorktreeEntry[];
-}
-
 export function getRecentProjects(sessions: SessionInfo[]): string[] {
   const latest = new Map<string, string>();
   for (const session of sessions) {
-    const root = session.projectRoot ?? session.cwd;
+    const root = session.cwd;
     const previous = latest.get(root);
     if (!previous || session.modified > previous) latest.set(root, session.modified);
   }
@@ -84,56 +70,28 @@ export interface ProjectIdentitySnapshot {
   status: ProjectIdentityStatus;
   error: string | null;
   cwd: string | null;
+  /** 项目根恒等于 cwd（一个目录就是一个项目），由 store 维持不变式。 */
   projectRoot: string | null;
-  branch: string | null;
-  isGit: boolean;
-  isTopLevel: boolean;
 }
 export interface ProjectStoreInitial {
   identity?: Partial<ProjectIdentitySnapshot>;
 }
 type Listener = () => void;
 
-const defaultIdentity: ProjectIdentitySnapshot = { status: "idle", error: null, cwd: null, projectRoot: null, branch: null, isGit: false, isTopLevel: false };
+const defaultIdentity: ProjectIdentitySnapshot = { status: "idle", error: null, cwd: null, projectRoot: null };
 
 function normalizeIdentity(identity: ProjectIdentitySnapshot): ProjectIdentitySnapshot {
-  if (identity.cwd !== null && identity.projectRoot !== null) return identity;
-  return {
-    ...identity,
-    cwd: null,
-    projectRoot: null,
-    branch: null,
-    isGit: false,
-    isTopLevel: false,
-  };
-}
-
-/**
- * worktree 预加载完成后是否可回写 identity。
- * 必须用「完成当下」的快照，不能用发起请求时的闭包 cwd——否则切到另一会话后，
- * 迟到的旧项目响应会把 identity 改回去，身份 watcher 清空选中会话，聊天掉进引导页。
- */
-export function shouldApplyWorktreeIdentityPatch(input: {
-  snapshotCwd: string | null;
-  snapshotProjectRoot: string | null;
-  requestedRoot: string;
-  canonicalRoot: string;
-}): boolean {
-  if (!input.snapshotCwd) return false;
-  return input.snapshotCwd === input.requestedRoot
-    || input.snapshotProjectRoot === input.requestedRoot
-    || input.snapshotCwd === input.canonicalRoot
-    || input.snapshotProjectRoot === input.canonicalRoot;
+  if (identity.cwd === null) {
+    return { ...identity, cwd: null, projectRoot: null };
+  }
+  return { ...identity, projectRoot: identity.cwd };
 }
 
 function sameIdentity(a: ProjectIdentitySnapshot, b: ProjectIdentitySnapshot): boolean {
   return a.status === b.status
     && a.error === b.error
     && a.cwd === b.cwd
-    && a.projectRoot === b.projectRoot
-    && a.branch === b.branch
-    && a.isGit === b.isGit
-    && a.isTopLevel === b.isTopLevel;
+    && a.projectRoot === b.projectRoot;
 }
 
 export function createProjectStore(initial: ProjectStoreInitial = {}) {
@@ -142,9 +100,7 @@ export function createProjectStore(initial: ProjectStoreInitial = {}) {
   let identitySnapshot = identity;
   const notifyIdentity = () => identityListeners.forEach((listener) => listener());
   const setIdentity = (patch: Partial<ProjectIdentitySnapshot>) => {
-    const nextPatch = patch.cwd !== undefined && patch.projectRoot === undefined
-      ? { ...patch, projectRoot: patch.cwd }
-      : patch;
+    const nextPatch = patch.cwd !== undefined ? { ...patch, projectRoot: patch.cwd } : patch;
     const next = normalizeIdentity({ ...identity, ...nextPatch });
     if (sameIdentity(identity, next)) return;
     identity = next;

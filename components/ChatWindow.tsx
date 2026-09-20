@@ -68,7 +68,7 @@ interface Props {
   /** 新会话引导页默认目标项目（入口解析的 cwd；null = 回落 localStorage 上次项目） */
   guideDefaultCwd?: string | null;
   /** 引导页改项目/工作树：同步到全局项目身份（文件栏、Git、标题） */
-  onGuideTargetChange?: (cwd: string, projectRoot?: string | null) => void;
+  onGuideTargetChange?: (cwd: string) => void;
   /** 侧栏新增项目后递增：引导页把新项目并入项目下拉（读 localStorage 只发生一次） */
   addedProjectsToken?: number;
   onAgentEnd?: () => void;
@@ -240,7 +240,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   // 只读（subagent 持久化）会话：历史正常读，一切写入口关闭，编辑器换成只读提示。
   const isReadOnly = session?.readOnly === true;
 
-  // OpenChamber draft-target 语义：空态引导页选中的目标 cwd（项目根或工作树路径）。
+  // OpenChamber draft-target 语义：空态引导页选中的目标目录（项目 = 目录）。
   // 持久化到 localStorage（对应 OpenChamber oc.chatInput.lastDraftTarget），
   // 选择不触发跳转/创建——仅覆盖新会话的创建目录，发送第一条消息才真正建会话。
   const [draftTargetCwd, setDraftTargetCwd] = useState<string | null>(() => {
@@ -253,7 +253,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
       return null;
     }
   });
-  const handleDraftTargetChange = useCallback((cwd: string | null, projectRoot?: string | null) => {
+  const handleDraftTargetChange = useCallback((cwd: string | null) => {
     setDraftTargetCwd(cwd);
     try {
       if (cwd) {
@@ -266,7 +266,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     } catch {
       // localStorage 不可用时仅内存生效
     }
-    if (cwd) onGuideTargetChange?.(cwd, projectRoot ?? cwd);
+    if (cwd) onGuideTargetChange?.(cwd);
   }, [onGuideTargetChange]);
   // 入口显式目标（顶部新建 = 当前选中项目 / 项目行 = 对应项目）同步进 localStorage，
   // 保证刷新后仍恢复为"上次的项目"（OpenChamber persistDraftTarget 语义）。

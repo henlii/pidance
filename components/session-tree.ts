@@ -120,13 +120,12 @@ export function normalizeSessionQuery(query: string): string {
   return query.trim().toLowerCase();
 }
 
-/** 会话的可搜索文本：name、firstMessage、id、worktreeBranch、subagent agent/run。 */
+/** 会话的可搜索文本：name、firstMessage、id、subagent agent/run。 */
 function sessionSearchableText(session: SessionInfo): string {
   const parts: string[] = [
     session.name ?? "",
     session.firstMessage,
     session.id,
-    session.worktreeBranch ?? "",
   ];
   if (session.subagent) {
     parts.push(session.subagent.agent ?? "", session.subagent.runId);
