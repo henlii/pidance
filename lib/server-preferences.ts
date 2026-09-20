@@ -91,6 +91,8 @@ function readPrefs(): ServerPrefs {
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+/** 激活同步的 in-flight：连续激活（focus + visibilitychange）合并成一次 GET。 */
+let syncPromise: Promise<void> | null = null;
 
 /**
  * 整包 PUT 的载荷：剥掉宿主持有的 `sessionQueue`。
@@ -181,30 +183,7 @@ export function flushServerPrefs(): void {
   }
 }
 
-/**
- * React 绑定：挂载时加载；visibilitychange/focus 时从服务端刷新
- * （多客户端同步）。返回最新 prefs 快照（变更时触发重渲染）。
- */
-export function useServerPreferences(): ServerPrefs {
-  const [prefs, setPrefs] = useState<ServerPrefs>(readPrefs());
-  const prefsRef = useRef(prefs);
-  prefsRef.current = prefs;
-
-  useEffect(() => {
-    const sub = () => setPrefs(readPrefs());
-    subscribers.add(sub);
-    void ensureServerPrefsLoaded().then((loaded) => {
-      // 加载完成后若有本地已应用值（接入点在加载前写入），保留内存值避免闪回
-      if (singletonPrefs === loaded || Object.keys(loaded).length === 0) {
-        setPrefs(readPrefs());
-      }
-    });
-    return () => {
-      subscribers.delete(sub);
-    };
-  }, []);
-
-  /** 收集对象深层所有值为 null 的点路径（如 drafts.abc → ["drafts.abc"]）。 */
+/** 收集对象深层所有值为 null 的点路径（如 drafts.abc → ["drafts.abc"]）。 */
 function collectNullPaths(value: unknown, prefix: string, out: string[]): string[] {
   if (value === null) {
     out.push(prefix);
@@ -217,53 +196,187 @@ function collectNullPaths(value: unknown, prefix: string, out: string[]): string
   return out;
 }
 
-/** 按点路径在目标对象上置 null（创建中间对象）。 */
+/**
+ * 按点路径在目标对象上置 null。**沿途逐层浅拷贝（copy-on-write）**：
+ * 直接把 null 写进共享的中间对象会改到调用方的输入（例如刚拉取的远端快照），
+ * 合并函数必须是纯的。
+ */
 function setPathNull(target: Record<string, unknown>, key: string): void {
   const parts = key.split(".");
   let node = target;
   for (let i = 0; i < parts.length - 1; i += 1) {
     const part = parts[i];
     const next = node[part];
-    if (typeof next !== "object" || next === null || Array.isArray(next)) {
-      node[part] = {};
-    }
-    node = node[part] as Record<string, unknown>;
+    const copy = typeof next === "object" && next !== null && !Array.isArray(next)
+      ? { ...(next as Record<string, unknown>) }
+      : {};
+    node[part] = copy;
+    node = copy;
   }
   node[parts[parts.length - 1]] = null;
 }
 
-// 网页激活同步：focus / visibilitychange(visible) 时重新拉取
+
+/**
+ * 把服务端快照合并进内存：远端为准，但本地墓碑（null）与本地未读状态优先。
+ *
+ * 墓碑优先的原因：删除的 PUT 可能仍在途/未发出，被 sync 覆盖会让服务端残留
+ * （例如已发送草稿）拉回本地复活。未读状态只按 mergeUnreadSessionState 并集合并。
+ */
+export function mergeSyncedServerPrefs(
+  local: ServerPrefs | null,
+  remote: ServerPrefs,
+): ServerPrefs {
+  const merged: ServerPrefs = { ...remote };
+  if (!local) return merged;
+  merged.unreadSessionState = mergeUnreadSessionState(
+    parseUnreadSessionState(local.unreadSessionState),
+    parseUnreadSessionState(remote.unreadSessionState ?? remote.unreadSessionIds),
+  );
+  for (const path of collectNullPaths(local, "", [])) {
+    setPathNull(merged, path);
+  }
+  return merged;
+}
+
+/**
+ * 网页激活同步（focus / visibilitychange(visible)）：重新拉取服务端偏好。
+ *
+ * - **模块级单例**：无论多少组件用 useServerPreferences，一个标签页只注册一对
+ *   focus/visibilitychange 监听与一个 beforeunload；最后一个订阅者退订时全部移除。
+ * - 注册与移除用同一组具名引用（原先 beforeunload 用两个匿名箭头，永远删不掉）。
+ * - 并发/连续激活合并为一次请求（见 syncServerPrefsFromServer 的 in-flight 复用）。
+ */
+export interface ActivationSyncTargets {
+  addEventListener(type: string, listener: () => void): void;
+  removeEventListener(type: string, listener: () => void): void;
+}
+
+export interface ActivationSyncController {
+  /** 登记一个使用者；返回退订函数（幂等）。返回的退订函数负责配对解除监听。 */
+  retain(): () => void;
+  /** 当前是否已挂上监听（测试断言用）。 */
+  isAttached(): boolean;
+  /** 当前使用者数量（测试断言用）。 */
+  refCount(): number;
+}
+
+export function createActivationSyncController(deps: {
+  /** window：focus + beforeunload */
+  windowTarget: ActivationSyncTargets;
+  /** document：visibilitychange */
+  documentTarget: ActivationSyncTargets;
+  isVisible: () => boolean;
+  syncNow: () => void;
+  flushNow: () => void;
+}): ActivationSyncController {
+  const onActivate = (): void => {
+    if (!deps.isVisible()) return;
+    deps.syncNow();
+  };
+  const onBeforeUnload = (): void => {
+    deps.flushNow();
+  };
+  let count = 0;
+  let attached = false;
+  const attach = (): void => {
+    if (attached) return;
+    attached = true;
+    deps.windowTarget.addEventListener("focus", onActivate);
+    deps.documentTarget.addEventListener("visibilitychange", onActivate);
+    deps.windowTarget.addEventListener("beforeunload", onBeforeUnload);
+  };
+  const detach = (): void => {
+    if (!attached) return;
+    attached = false;
+    deps.windowTarget.removeEventListener("focus", onActivate);
+    deps.documentTarget.removeEventListener("visibilitychange", onActivate);
+    deps.windowTarget.removeEventListener("beforeunload", onBeforeUnload);
+  };
+  return {
+    retain() {
+      count += 1;
+      if (count === 1) attach();
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        count = Math.max(0, count - 1);
+        if (count === 0) detach();
+      };
+    },
+    isAttached: () => attached,
+    refCount: () => count,
+  };
+}
+
+/**
+ * 服务端偏好是否已经加载过一次（含成功的激活同步）。
+ * 供「只在拿到服务端状态后才做决定」的迁移逻辑用：服务端已经是新模型时，
+ * 本地旧列表不该把共享列表覆盖掉。
+ */
+export function isServerPrefsLoaded(): boolean {
+  return singletonLoaded;
+}
+
+/** 从服务端重新拉取并合并到内存（并发调用合并为一次 GET）。 */
+export function syncServerPrefsFromServer(): Promise<void> {
+  if (syncPromise) return syncPromise;
+  syncPromise = fetchPrefs()
+    .then((remote) => {
+      singletonPrefs = mergeSyncedServerPrefs(singletonPrefs, remote);
+      singletonLoaded = true;
+      notify();
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      syncPromise = null;
+    });
+  return syncPromise;
+}
+
+/** 浏览器侧的激活同步单例（懒建：只在有订阅者时触碰 window/document）。 */
+let activationSync: ActivationSyncController | null = null;
+
+function getActivationSync(): ActivationSyncController | null {
+  if (typeof window === "undefined" || typeof document === "undefined") return null;
+  if (!activationSync) {
+    activationSync = createActivationSyncController({
+      windowTarget: window,
+      documentTarget: document,
+      isVisible: () => document.visibilityState === "visible",
+      syncNow: () => {
+        void syncServerPrefsFromServer();
+      },
+      flushNow: flushServerPrefs,
+    });
+  }
+  return activationSync;
+}
+
+/**
+ * React 绑定：挂载时加载；visibilitychange/focus 时从服务端刷新
+ * （多客户端同步）。返回最新 prefs 快照（变更时触发重渲染）。
+ */
+export function useServerPreferences(): ServerPrefs {
+  const [prefs, setPrefs] = useState<ServerPrefs>(readPrefs());
+  const prefsRef = useRef(prefs);
+  prefsRef.current = prefs;
+
   useEffect(() => {
-    const sync = () => {
-      if (document.visibilityState !== "visible") return;
-      void fetchPrefs()
-        .then((remote) => {
-          const local = singletonPrefs;
-          const merged: ServerPrefs = { ...remote };
-          if (local) {
-            merged.unreadSessionState = mergeUnreadSessionState(
-              parseUnreadSessionState(local.unreadSessionState),
-              parseUnreadSessionState(remote.unreadSessionState ?? remote.unreadSessionIds),
-            );
-            // 本地删除墓碑优先于远端旧值：删除 PUT 可能仍在途/未发出，
-            // 不能被 sync 覆盖，否则服务端残留（已发送草稿等）会拉回本地复活。
-            for (const path of collectNullPaths(local, "", [])) {
-              setPathNull(merged, path);
-            }
-          }
-          singletonPrefs = merged;
-          singletonLoaded = true;
-          notify();
-        })
-        .catch(() => undefined);
-    };
-    window.addEventListener("focus", sync);
-    document.addEventListener("visibilitychange", sync);
-    window.addEventListener("beforeunload", () => flushServerPrefs());
+    const sub = () => setPrefs(readPrefs());
+    subscribers.add(sub);
+    // 激活同步是模块级单例：首个订阅者挂监听，最后一个退订时移除（不再每实例各挂一套）。
+    const release = getActivationSync()?.retain();
+    void ensureServerPrefsLoaded().then((loaded) => {
+      // 加载完成后若有本地已应用值（接入点在加载前写入），保留内存值避免闪回
+      if (singletonPrefs === loaded || Object.keys(loaded).length === 0) {
+        setPrefs(readPrefs());
+      }
+    });
     return () => {
-      window.removeEventListener("focus", sync);
-      document.removeEventListener("visibilitychange", sync);
-      window.removeEventListener("beforeunload", () => flushServerPrefs());
+      subscribers.delete(sub);
+      release?.();
     };
   }, []);
 
