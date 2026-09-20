@@ -165,9 +165,9 @@ function AppShellInner() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
-  // 侧栏新增项目后递增：引导页据此把「刚添加、尚无会话」的项目并入项目下拉
-  // （引导页读 localStorage 一次，同一实例内不跟着更新）。
-  const [addedProjectsToken, setAddedProjectsToken] = useState(0);
+  // 侧栏项目列表：侧栏是 owner（读偏好、写偏好、同步服务端），这里只持有投影供
+  // 引导页项目下拉复用，保证「引导页能选的目录 = 侧栏显示的项目」。
+  const [projectRoots, setProjectRoots] = useState<readonly string[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   // ── 右侧工具区：图标栏桌面常驻；此状态控制内容面板/移动端整组抽屉 ──
@@ -1090,10 +1090,8 @@ function AppShellInner() {
         restoreNonce={restoreNonce}
         refreshKey={refreshKey}
         onSessionDeleted={handleSessionDeleted}
-        onProjectAdded={() => {
-          setRefreshKey((k) => k + 1);
-          setAddedProjectsToken((n) => n + 1);
-        }}
+        onProjectAdded={() => setRefreshKey((k) => k + 1)}
+        onProjectRootsChange={setProjectRoots}
       />
       {/* 底部 Settings / About：同规格图标按钮（24×24），不显示永久文字标签。登录管理在 设置 → 通用。 */}
       <div style={{ padding: "6px 8px", flexShrink: 0, display: "flex", alignItems: "center", gap: 4 }}>
@@ -1374,7 +1372,7 @@ function AppShellInner() {
                 newSessionCwd={effectiveNewSessionCwd}
                 newSessionIntentId={chatIntent?.id ?? newSessionIntent?.id ?? null}
                 guideDefaultCwd={guideDefaultCwd}
-                addedProjectsToken={addedProjectsToken}
+                projectRoots={projectRoots}
                 onGuideTargetChange={handleGuideTargetChange}
                 onAgentEnd={handleAgentEnd}
                 onAgentRunningChange={handleAgentRunningChange}

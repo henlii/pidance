@@ -509,8 +509,6 @@ export const en = {
 
   // 新会话引导页（OpenChamber 风格项目选择）
   guide_projectTitle: 'Choose a project',
-  guide_sessionCount: '{count} sessions',
-  guide_loading: 'Loading…',
   guide_noProjects: 'No projects yet — start a session from the sidebar.',
   guide_projectPlaceholder: 'Select a project…',
   // 命令面板（Ctrl/Cmd+K，OpenChamber CommandPalette 风格）

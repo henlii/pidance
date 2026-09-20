@@ -509,8 +509,6 @@ export const zhCN: Record<TranslationKey, string> = {
 
   // 新会话引导页（OpenChamber 风格项目选择）
   guide_projectTitle: '选择项目',
-  guide_sessionCount: '{count} 个会话',
-  guide_loading: '加载中…',
   guide_noProjects: '还没有项目——从侧栏开始新会话。',
   guide_projectPlaceholder: '选择项目…',
   // 命令面板（Ctrl/Cmd+K，OpenChamber CommandPalette 风格）

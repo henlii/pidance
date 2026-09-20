@@ -134,6 +134,8 @@ interface Props {
   onSessionDeleted?: (sessionId: string) => void;
   /** 添加项目成功：通知上层进入引导页并选中新项目 */
   onProjectAdded?: (cwd: string) => void;
+  /** 项目列表变化：让上层（引导页）拿到同一份列表，避免各自解析偏好 */
+  onProjectRootsChange?: (roots: readonly string[]) => void;
   /** AppShell 传入的唯一 catalog store；缺省时本组件自建（测试）。 */
   catalogStore?: SessionCatalogStore;
 }
@@ -153,7 +155,7 @@ function extractWaitingSessionIds(pending: unknown): Set<string> {
   return out;
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, restoreNonce = 0, refreshKey, onSessionDeleted, onProjectAdded, catalogStore: catalogStoreProp }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, restoreNonce = 0, refreshKey, onSessionDeleted, onProjectAdded, onProjectRootsChange, catalogStore: catalogStoreProp }: Props) {
   const { t } = useI18n();
   const catalogStoreRef = useRef<SessionCatalogStore | null>(catalogStoreProp ?? null);
   if (!catalogStoreRef.current) catalogStoreRef.current = catalogStoreProp ?? createSessionCatalogStore();
@@ -354,6 +356,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [recentVisibleCount, setRecentVisibleCount] = useState(RECENT_SESSIONS_INITIAL_VISIBLE);
 
   const collapsedProjectRoots = useMemo(() => new Set(prefs.collapsedProjectRoots), [prefs.collapsedProjectRoots]);
+
+  // 项目列表上报给上层：引导页项目下拉与侧栏项目区共用同一份列表，
+  // 不再各自解析 localStorage / 聚合会话 cwd。
+  useEffect(() => {
+    onProjectRootsChange?.(prefs.projectRoots);
+  }, [prefs.projectRoots, onProjectRootsChange]);
 
   // Catalog 订阅：store 内任何变更同步触发本组件重渲（依赖 tick 触发 memo）。
   useEffect(() => {
