@@ -23,8 +23,19 @@ const MAX_METADATA_CANDIDATES = 512;
  */
 const RUN_ID_DIR = /^(?:[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 const RUN_DIR = /^run-(\d+)$/;
+const FORKS_DIR = "forks";
 
 const ASYNC_RUN = /^async-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * `context: fork` 子会话的目录：pi-subagents 把 fork 出来的子会话写在
+ * `<父会话目录>/<父会话名>/forks/<时间戳>_<id>.jsonl`。
+ *
+ * 上游刻意嵌套一层（`src/shared/fork-context.ts` 的注释说明：fork 文件如果落在父会话的
+ * 顶层目录，Pi 的最近会话发现会挑到还没跑完的子会话，把 `pi -c` 抢走）。用户自己在
+ * Pidance 里 fork 出新会话走的是同级文件，不进这个目录，因此 `forks/` 下的 `.jsonl`
+ * 可以安全地按子代理会话处理。
+ */
 
 export const SUBAGENT_DISCOVERY_LIMITS = {
   maxChildren: MAX_CHILDREN,
@@ -94,7 +105,14 @@ function isDiscoveredLayout(file: string, root: string): boolean {
   // 同步/前台 run 布局：<root>/<runId>/run-<N>/session.jsonl
   if (parts.length === 3 && RUN_ID_DIR.test(parts[0]) && RUN_DIR.test(parts[1]) && parts[2] === "session.jsonl") return true;
   // async 布局（pi-subagents sessionDir）：<root>/async-<uuid>/*.jsonl（扁平）
-  return parts.length === 2 && ASYNC_RUN.test(parts[0]) && parts[1].endsWith(".jsonl");
+  if (parts.length === 2 && ASYNC_RUN.test(parts[0]) && parts[1].endsWith(".jsonl")) return true;
+  // fork 上下文布局：<root>/forks/<时间戳>_<uuid>.jsonl
+  return parts.length === 2 && parts[0] === FORKS_DIR && parts[1].endsWith(".jsonl");
+}
+
+/** 扁平布局（无 run-N 目录）：async run 与 fork 上下文子会话。 */
+function isFlatLayout(parts: readonly string[]): boolean {
+  return parts.length === 2 && (ASYNC_RUN.test(parts[0]) || parts[0] === FORKS_DIR);
 }
 
 type MetadataCandidate = { path: string; runId?: string; agent?: string };
@@ -204,16 +222,17 @@ function fallbackPaths(parentFile: string): string[] {
         if (result.length >= MAX_SCAN_ENTRIES) return result;
       }
     }
-    // async 布局：<root>/async-<uuid>/<timestamp>_<uuid>.jsonl（扁平，无 run-N）
+    // 扁平布局：<root>/async-<uuid>/*.jsonl 与 <root>/forks/*.jsonl（都没有 run-N）
     for (const entry of readdirSync(root, { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.isSymbolicLink() || !ASYNC_RUN.test(entry.name)) continue;
-      const asyncRoot = join(root, entry.name);
-      const names = readdirSync(asyncRoot, { withFileTypes: true })
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      if (!ASYNC_RUN.test(entry.name) && entry.name !== FORKS_DIR) continue;
+      const flatRoot = join(root, entry.name);
+      const names = readdirSync(flatRoot, { withFileTypes: true })
         .filter((file) => file.isFile() && !file.isSymbolicLink() && file.name.endsWith(".jsonl"))
         .map((file) => file.name)
         .sort();
       for (const name of names) {
-        result.push(join(asyncRoot, name));
+        result.push(join(flatRoot, name));
         if (result.length >= MAX_SCAN_ENTRIES) return result;
       }
     }
@@ -236,12 +255,19 @@ export function discoverSubagentSessions(parentFile: string, parentId: string): 
     if (!file || !isDiscoveredLayout(file, parentRoot) || seenPaths.has(file)) continue;
     const rel = relative(resolve(parentRoot), resolve(file)).split(/[\\/]/);
     const asyncLayout = rel.length === 2 && ASYNC_RUN.test(rel[0]);
-    const index = asyncLayout ? 0 : runIndex(file);
+    const forksLayout = rel.length === 2 && rel[0] === FORKS_DIR;
+    // 扁平布局没有 run-N 目录（index 记为 0，UI 只在 >0 时显示「第 N 次运行」）。
+    const index = isFlatLayout(rel) ? 0 : runIndex(file);
     if (index === null || index < 0) continue;
     const header = readHeader(file);
     if (!header || seenIds.has(header.id) || header.id === parentId) continue;
     // 防止同一条祖先链被恶意 header 重新指回自身。
-    const runId = asyncLayout ? rel[0].slice("async-".length) : candidate.runId ?? basename(dirname(dirname(file)));
+    const runId = asyncLayout
+      ? rel[0].slice("async-".length)
+      // fork 子会话没有 run 目录：优先用 run 记录里的 runId，否则用文件名（<时间戳>_<id>）标识
+      : forksLayout
+        ? candidate.runId ?? basename(file).replace(/\.jsonl$/, "")
+        : candidate.runId ?? basename(dirname(dirname(file)));
     seenPaths.add(file);
     seenIds.add(header.id);
     found.push({ path: file, header, runIndex: index, parentSessionId: parentId, runId, agent: candidate.agent ?? scan.agents.get(runId) });
