@@ -179,9 +179,34 @@ export function prependOlderRecords(
 }
 
 /**
+ * 磁盘尾页是否只是「时间线已知内容的旧快照」（读落后，不是新内容）。
+ *
+ * 判据：这一页的每个 entryId 都已在时间线里，且页尾不是时间线最后一条已确认记录。
+ * 说明时间线还有比这次磁盘读更新的记录 —— 磁盘读发生在写入落盘之前（同会话 tail
+ * 再拉的典型竞态：agent_end/切回前台触发的 reload 早于最后一笔 append 可见）。
+ * 这种页只能用来补齐更旧的历史，绝不能用它缩短时间线，否则界面会倒退到旧内容，
+ * 只有整页刷新（冷加载）才恢复。
+ */
+export function isTailPageBehind(
+  timelineEntryIds: readonly string[],
+  pageEntryIds: readonly string[],
+): boolean {
+  const pageIds = pageEntryIds.filter(Boolean);
+  if (pageIds.length === 0) return false;
+  const known = new Set(timelineEntryIds.filter(Boolean));
+  if (!pageIds.every((entryId) => known.has(entryId))) return false;
+  const lastKnown = [...timelineEntryIds].reverse().find(Boolean) ?? null;
+  const pageLast = pageIds[pageIds.length - 1];
+  return lastKnown !== null && pageLast !== lastKnown;
+}
+
+/**
  * 尾页重载合并：保留本地已加载、且不在新尾页中的更旧前缀；
  * 用新尾页替换重叠段及之后（含新产生的消息）。
  * 用于 agent_end reload / 同会话 tail 再拉，避免丢掉已 prepend 的历史。
+ *
+ * 例外：磁盘读落后于时间线（见 isTailPageBehind）时保持时间线不动 ——
+ * 「刷新」不得让已经显示出来的内容倒退，只有冷加载/明确导航才能缩短它。
  */
 export function mergeTailRecords(
   timeline: Timeline,
@@ -192,6 +217,7 @@ export function mergeTailRecords(
   const next = timelineFromDisk(nextMessages, nextEntryIds);
   const previousEntryIds = timeline.map((record) => record.entryId);
   if (previousEntryIds.every((entryId) => !entryId)) return next;
+  if (isTailPageBehind(previousEntryIds, nextEntryIds)) return [...timeline];
   const firstNew = next[0].entryId;
   const index = firstNew ? previousEntryIds.indexOf(firstNew) : -1;
   if (index <= 0) return next;
