@@ -245,6 +245,35 @@ test("最近会话：排除 subagent 子会话与不在项目列表/未选中目
   assert.deepEqual(onlySelected.map((s) => s.id), ["closed-project"]);
 });
 
+test("最近/置顶：陈旧 projectRoot 不参与判定，只有 cwd 在 visibleRoots 才出现", async () => {
+  const m = await load();
+  // 客户端旧缓存：cwd 在旁路 checkout，projectRoot 仍指向主仓
+  const stale = session("stale", {
+    cwd: "/repo-worktrees/feat",
+    projectRoot: "/repo",
+    modified: "2026-07-12T00:00:00.000Z",
+  });
+  const mainOnly = [session("main", { modified: "2026-07-11T00:00:00.000Z" }), stale];
+  // visibleRoots 只有主仓：陈旧 root 不得把旁路会话带进最近区 / 置顶区
+  assert.deepEqual(m.deriveRecentSessions({ sessions: mainOnly, visibleRoots: new Set(["/repo"]) }).map((s) => s.id), ["main"]);
+  assert.deepEqual(
+    m.derivePinnedSessions({ sessions: mainOnly, visibleRoots: new Set(["/repo"]), pinnedSessionIds: ["stale", "main"] }).map((s) => s.id),
+    ["main"],
+  );
+  // 把目录加入项目（两个 root 都可见）后，两个会话都出现
+  const both = new Set(["/repo", "/repo-worktrees/feat"]);
+  assert.deepEqual(m.deriveRecentSessions({ sessions: mainOnly, visibleRoots: both }).map((s) => s.id), ["stale", "main"]);
+  assert.deepEqual(
+    m.derivePinnedSessions({ sessions: mainOnly, visibleRoots: both, pinnedSessionIds: ["main", "stale"] }).map((s) => s.id),
+    ["main", "stale"],
+  );
+  // 当前选中的是旁路目录（visibleRoots 只有它）：只剩该目录的会话
+  assert.deepEqual(
+    m.deriveRecentSessions({ sessions: mainOnly, visibleRoots: new Set(["/repo-worktrees/feat"]) }).map((s) => s.id),
+    ["stale"],
+  );
+});
+
 test("最近会话：显示更多后可收到默认条数", async () => {
   const m = await load();
   assert.equal(m.nextRecentVisibleCount(5, 20, "more"), 10);
