@@ -34,7 +34,7 @@ import {
 } from "@/lib/ui-preferences";
 import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
 import { refreshSubagentActivity, useSubagentActivity } from "@/hooks/useSubagentActivity";
-import { setServerPref, useServerPreferences } from "@/lib/server-preferences";
+import { isServerPrefsLoaded, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import {
   bumpGroupVisibleCount,
   derivePinnedSessions,
@@ -460,26 +460,25 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const allSessions = serverSessions;
 
   /**
-   * 一次性迁移：旧模型用 added/closed 两个数组，没有单一项目列表。用「当前可见的
-   * 项目」作为种子写进列表，避免升级后项目区突然空掉（之后按需增删即可）。
-   * 等会话列表拉完再种，否则空列表会种出空项目区。
+   * 一次性迁移（旧模型 added/closed → 单一 projectRoots）：列表本身已由
+   * parseSidebarPreferences 按「added − closed」算好，这里只把它落地（localStorage +
+   * 服务端）并把迁移标记收尾，**不并任何会话 cwd、也不看会话列表**。
+   *
+   * 原先这里拿 getRecentProjects(allSessions) 当种子，等于把「有历史会话的目录」当成
+   * 用户添加的项目写进共享列表，项目列表与 trust.json 的信任面都会自己长（实测 8 → 11）。
+   * 没有旧键时列表保持为空，等用户自己「添加项目」。
    */
   useEffect(() => {
     if (!prefs.projectRootsMigrated) return;
-    // 会话列表还没到就别种：否则会把「部分列表」当成全部项目写死。
-    if (allSessions.length === 0 && !serverListLoaded) return;
-    const roots = getRecentProjects(allSessions);
-    updatePrefs((prev) => {
-      if (!prev.projectRootsMigrated) return prev;
-      const merged = [...prev.projectRoots];
-      for (const root of roots) {
-        if (!merged.includes(root)) merged.push(root);
-      }
-      // 列表权威加载完成才收尾；否则保持「待迁移」，等更完整的列表继续补齐
-      // （列表是分页/逐步到位的，第一次就清标记会只剩部分项目）。
-      return { ...prev, projectRoots: merged, projectRootsMigrated: !serverListLoaded };
-    });
-  }, [prefs.projectRootsMigrated, serverListLoaded, allSessions, updatePrefs]);
+    // 先等服务端偏好到齐：远端已经是新模型（带 projectRoots）时，applySyncedSidebarUi 会把
+    // 迁移标记清掉，这里就不该再用本地旧列表去覆盖共享列表（旧列表可能只有 added 的几条，
+    // 甚至是空的）。服务端拉不到时保持待迁移，不写。
+    if (!isServerPrefsLoaded()) return;
+    updatePrefs((prev) => (prev.projectRootsMigrated
+      ? { ...prev, projectRoots: prev.projectRoots, projectRootsMigrated: false }
+      : prev));
+    // serverPrefs 只作“加载完成/远端变化”的重跑信号，不读其内容。
+  }, [prefs.projectRootsMigrated, serverPrefs, updatePrefs]);
 
   useEffect(() => {
     const local = parseUnreadSessionState([...loadUnreadSessionIds()]);

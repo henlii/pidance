@@ -237,19 +237,45 @@ export function parseSidebarPreferences(raw: unknown): SidebarPreferences {
  * 可见集合 = added − closed；合并成一个列表后就等于它。迁移只在存储里**没有**
  * `projectRoots` 时发生，并置 migrated 标记交调用方做一次性种子。
  */
+/**
+ * 旧模型迁移计划（纯函数）：旧模型是两个数组（`addedProjectRoots` 显式加入 +
+ * `closedProjectRoots` 隐藏），可见集合 = added − closed，合并成单一列表后就是它。
+ *
+ * **只迁这两个数组本身，绝不并会话 cwd**：把「有历史会话的目录」当成项目写进共享列表，
+ * 会把项目列表和 `trust.json` 的信任面一起撑大（实测从 8 条涨到 11 条）。
+ * 返回 null 表示没有可迁移的东西（已是新模型，或没有旧键）—— 此时不种任何东西。
+ */
+export function planLegacyProjectRootsMigration(input: {
+  /** 旧键 addedProjectRoots 的原始值 */
+  added: unknown;
+  /** 旧键 closedProjectRoots 的原始值 */
+  closed: unknown;
+  /** 记录里是否已有新模型的 projectRoots 键 */
+  hasProjectRoots: boolean;
+}): { projectRoots: string[] } | null {
+  if (input.hasProjectRoots) return null;
+  const hadLegacyKeys = input.added !== undefined || input.closed !== undefined;
+  if (!hadLegacyKeys) return null;
+  const closed = new Set(parsePathList(input.closed));
+  return {
+    projectRoots: sanitizeProjectRoots(parsePathList(input.added).filter((root) => !closed.has(root))),
+  };
+}
+
 function parseProjectRoots(
   record: Record<string, unknown>,
 ): Pick<SidebarPreferences, "projectRoots" | "projectRootsMigrated"> {
   if (record.projectRoots !== undefined) {
     return { projectRoots: sanitizeProjectRoots(parsePathList(record.projectRoots)), projectRootsMigrated: false };
   }
-  const added = parsePathList(record.addedProjectRoots);
-  const closed = new Set(parsePathList(record.closedProjectRoots));
-  const hadLegacyKeys = record.addedProjectRoots !== undefined || record.closedProjectRoots !== undefined;
-  return {
-    projectRoots: sanitizeProjectRoots(added.filter((root) => !closed.has(root))),
-    projectRootsMigrated: hadLegacyKeys,
-  };
+  const plan = planLegacyProjectRootsMigration({
+    added: record.addedProjectRoots,
+    closed: record.closedProjectRoots,
+    hasProjectRoots: false,
+  });
+  return plan
+    ? { projectRoots: plan.projectRoots, projectRootsMigrated: true }
+    : { projectRoots: [], projectRootsMigrated: false };
 }
 
 /**
@@ -351,19 +377,31 @@ export function sidebarUiFromPrefs(prefs: SidebarPreferences): SyncedSidebarUi {
 
 export function applySyncedSidebarUi(prefs: SidebarPreferences, remote: unknown): SidebarPreferences {
   if (typeof remote !== "object" || remote === null || Array.isArray(remote)) return prefs;
-  const remoteRecord = remote as Record<string, unknown>;
   const parsed = parseSidebarPreferences({ ...prefs, ...remote });
+  // 远端载荷本身是否已带新模型的 projectRoots（本地默认值会遮蔽合并后的解析结果，
+  // 所以必须看远端自己的键）。
+  const remoteHasProjectRoots = (remote as Record<string, unknown>).projectRoots !== undefined;
+  // 服务端还是旧模型且本地还没有列表：用**旧模型的可见集合**（added − closed）起一次种子。
+  // 远端既没有 projectRoots 也没有旧键时 plan 为 null —— 以前这里会被当成「待迁移」，
+  // 让旧 localStorage 的客户端把会话 cwd 并进共享列表（列表与信任面一起被撑大）。
+  const remoteLegacyPlan = remoteHasProjectRoots
+    ? null
+    : planLegacyProjectRootsMigration({
+      added: (remote as Record<string, unknown>).addedProjectRoots,
+      closed: (remote as Record<string, unknown>).closedProjectRoots,
+      hasProjectRoots: false,
+    });
+  const seedFromRemoteLegacy = remoteLegacyPlan !== null && prefs.projectRoots.length === 0;
   return {
     ...prefs,
     displayMode: parsed.displayMode,
     collapsedProjectRoots: parsed.collapsedProjectRoots,
-    projectRoots: parsed.projectRoots,
-    // 服务端仍是旧模型（载荷里没有 projectRoots 键）且本地也还没有项目列表时，
-    // 继续保持「待迁移」：这台浏览器（新设备/清过缓存）也要做一次性种子，
-    // 否则项目区会空着。远端已经带上 projectRoots 时迁移结束。
-    projectRootsMigrated: remoteRecord.projectRoots === undefined
-      ? parsed.projectRoots.length === 0
-      : false,
+    projectRoots: seedFromRemoteLegacy ? remoteLegacyPlan.projectRoots : parsed.projectRoots,
+    // 迁移只由「确实存在旧键」触发：远端带了 projectRoots 就结束迁移；否则沿用本地的
+    // 待迁移标记，或由远端旧键起种子。没有旧键一律不迁移。
+    projectRootsMigrated: remoteHasProjectRoots
+      ? false
+      : prefs.projectRootsMigrated || seedFromRemoteLegacy,
     showRecentSessions: parsed.showRecentSessions,
     pinnedSessionIds: parsed.pinnedSessionIds,
     projectSort: parsed.projectSort,
