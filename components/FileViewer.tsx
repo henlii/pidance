@@ -815,6 +815,11 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, writable = false, buff
       esRef.current = null;
     }
 
+    // 打开/切换文件时先拉一次该文件 diff（服务端按 mtime 缓存，代价小）：
+    // 否则「Git 差异」开关要等文件在打开期间被改动（watch change / gitAffectedPaths 命中）
+    // 才出现，未跟踪/已修改的文件也一样看不到 diff。
+    void fetchGitDiff(filePath);
+
     fetchContent(filePath).then((d) => {
       if (d?.language === "markdown") setDisplayMode("preview");
     }).finally(() => setLoading(false));
