@@ -507,13 +507,12 @@ export const zhCN: Record<TranslationKey, string> = {
   extension_copied: '已复制',
   // 本轮核心工作区补充翻译
 
-  // 新会话引导页（OpenChamber 风格项目/工作树选择）
+  // 新会话引导页（OpenChamber 风格项目选择）
   guide_projectTitle: '选择项目',
   guide_sessionCount: '{count} 个会话',
   guide_loading: '加载中…',
   guide_noProjects: '还没有项目——从侧栏开始新会话。',
   guide_projectPlaceholder: '选择项目…',
-  guide_branchPlaceholder: '选择分支…',
   // 命令面板（Ctrl/Cmd+K，OpenChamber CommandPalette 风格）
   palette_title: '命令面板',
   palette_placeholder: '搜索会话、文件、操作…',

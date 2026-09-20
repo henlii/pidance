@@ -245,6 +245,27 @@ test("最近会话：排除 subagent 子会话与不在项目列表/未选中目
   assert.deepEqual(onlySelected.map((s) => s.id), ["closed-project"]);
 });
 
+test("filterSessionsByVisibleRoots：侧栏所有会话入口共用同一可见目录集合", async () => {
+  const m = await load();
+  const list = [
+    session("main", { cwd: "/repo" }),
+    session("side", { cwd: "/repo-worktrees/feat", projectRoot: "/repo" }),
+    session("sub", { cwd: "/repo", subagent: { parentSessionId: "p", runId: "r", runIndex: 0 } }),
+  ];
+  // 陈旧 projectRoot 不算数；不在集合内的目录一律不列出（含归档/全文命中行同源调用）
+  assert.deepEqual(
+    m.filterSessionsByVisibleRoots(list, new Set(["/repo"])).map((s) => s.id),
+    ["main", "sub"],
+  );
+  assert.deepEqual(
+    m.filterSessionsByVisibleRoots(list, new Set(["/repo", "/repo-worktrees/feat"])).map((s) => s.id),
+    ["main", "side", "sub"],
+  );
+  assert.deepEqual(m.filterSessionsByVisibleRoots(list, new Set()), []);
+  // 不修改输入数组
+  assert.equal(list.length, 3);
+});
+
 test("最近/置顶：陈旧 projectRoot 不参与判定，只有 cwd 在 visibleRoots 才出现", async () => {
   const m = await load();
   // 客户端旧缓存：cwd 在旁路 checkout，projectRoot 仍指向主仓

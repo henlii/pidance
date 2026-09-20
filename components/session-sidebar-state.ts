@@ -267,6 +267,17 @@ export function deriveRecentSessions(input: DeriveRecentSessionsInput): SessionI
   return sorted.slice(0, n);
 }
 
+/**
+ * 按可见目录过滤会话（保持原顺序）。侧栏所有会话入口共用同一集合：
+ * visibleRoots = 项目列表 ∪ 当前选中 cwd；不在其中的会话一律不列出。
+ */
+export function filterSessionsByVisibleRoots<T extends { cwd: string }>(
+  sessions: readonly T[],
+  visibleRoots: ReadonlySet<string>,
+): T[] {
+  return sessions.filter((session) => visibleRoots.has(session.cwd));
+}
+
 export interface DerivePinnedSessionsInput {
   /** 全量会话列表（服务端 + 乐观合并后）。 */
   sessions: readonly SessionInfo[];

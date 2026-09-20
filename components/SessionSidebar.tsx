@@ -39,6 +39,7 @@ import {
   bumpGroupVisibleCount,
   derivePinnedSessions,
   deriveRecentSessions,
+  filterSessionsByVisibleRoots,
   nextRecentVisibleCount,
   planSubagentDiscoveryRefresh,
   RECENT_SESSIONS_LIMIT,
@@ -66,8 +67,7 @@ import {
 import {
   AnimatedDropdown,
   ArchiveIcon,
-  BranchIcon,
-  BranchPlusIcon,
+
   ChatPlusIcon,
   CheckIcon,
   ChevronButton,
@@ -86,7 +86,6 @@ import {
   SearchIcon,
   SidebarIconButton,
   SlidersIcon,
-  TrashIcon,
   UnreadSessionIndicator,
   XIcon,
 } from "@/components/session-sidebar/display";
@@ -173,7 +172,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const loading = catalogSnapshot.loading;
   const error = catalogSnapshot.error;
   const archivedSessions = catalogSnapshot.archivedSessions;
-  const archivedCount = catalogSnapshot.archivedCount;
   const runningSessionIds = catalogSnapshot.runningIds;
   const serverSessionsRef = useRef<SessionInfo[]>(serverSessions);
   serverSessionsRef.current = serverSessions;
@@ -761,6 +759,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     [prefs.projectRoots, selectedCwd],
   );
 
+  /** 归档视图：同一可见集合；计数与列表同源，不用 CSS 藏。 */
+  const visibleArchivedSessions = useMemo(
+    () => filterSessionsByVisibleRoots(archivedSessions, visibleRoots),
+    [archivedSessions, visibleRoots],
+  );
+
   /** 置顶会话：按置顶顺序（最新置顶在前）；仅显示仍存在、可见的会话。 */
   const pinnedSessions = useMemo(
     () => derivePinnedSessions({ sessions: allSessions, visibleRoots, pinnedSessionIds: prefs.pinnedSessionIds }),
@@ -902,6 +906,19 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const searchActive = fulltextModeActive
     ? fulltextSessionIds.length > 0 || fulltextLoading || Boolean(fulltextError)
     : normalizedSessionQuery.length > 0;
+
+  /**
+   * 全文命中片段：只保留可见目录下的会话（与项目区/最近区/置顶区同一集合）。
+   * 命中来自服务端全盘搜索，未加入项目、又没被选中的目录在这里同样不露出。
+   */
+  const visibleFulltextHits = useMemo(() => {
+    if (!fulltextModeActive) return fulltextHits;
+    const cwdById = new Map(allSessions.map((s) => [s.id, s.cwd]));
+    return fulltextHits.filter((hit) => {
+      const cwd = cwdById.get(hit.sessionId);
+      return cwd !== undefined && visibleRoots.has(cwd);
+    });
+  }, [fulltextModeActive, fulltextHits, allSessions, visibleRoots]);
   // 项目 alias 参与元数据搜索；全文模式按命中 id 保留祖先链。
   const sortedOpenTree = useMemo(
     () => sortSidebarProjects(openTree, {
@@ -1328,10 +1345,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               <div style={{ marginTop: 6, fontSize: 10.5, color: "var(--text-dim)", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 {fulltextLoading && <span>{t("sidebar_searchFulltextLoading")}</span>}
                 {!fulltextLoading && fulltextSource === "fts" && (
-                  <span>{t("sidebar_searchFulltextSourceFts")} · {t("sidebar_searchFulltextHits", { count: fulltextHits.length })}</span>
+                  <span>{t("sidebar_searchFulltextSourceFts")} · {t("sidebar_searchFulltextHits", { count: visibleFulltextHits.length })}</span>
                 )}
                 {!fulltextLoading && fulltextSource === "jsonl" && (
-                  <span>{t("sidebar_searchFulltextSourceJsonl")} · {t("sidebar_searchFulltextHits", { count: fulltextHits.length })}</span>
+                  <span>{t("sidebar_searchFulltextSourceJsonl")} · {t("sidebar_searchFulltextHits", { count: visibleFulltextHits.length })}</span>
                 )}
                 {fulltextError && <span style={{ color: "var(--status-danger)" }}>{fulltextError}</span>}
               </div>
@@ -1342,12 +1359,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       </div>
 
       {/* 全文命中片段：点击深链打开对应会话 */}
-      {!archiveViewOpen && searchOpen && searchMode === "fulltext" && fulltextHits.length > 0 && (
+      {!archiveViewOpen && searchOpen && searchMode === "fulltext" && visibleFulltextHits.length > 0 && (
         <div style={{
           flex: "0 0 auto", maxHeight: 160, overflowY: "auto", overflowX: "hidden",
           borderBottom: "1px solid var(--border)", padding: "4px 0",
         }}>
-          {fulltextHits.slice(0, 12).map((hit, index) => (
+          {visibleFulltextHits.slice(0, 12).map((hit, index) => (
             <button
               key={`${hit.sessionId}-${hit.timestamp}-${index}`}
               type="button"
@@ -1376,11 +1393,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       )}
 
       {/* Archive 视图：侧栏内替换项目树（首版列表 + 恢复 + 删除；打开只读浏览为后续）。
-          数据源为 /api/sessions 默认响应的 archivedSessions/archivedCount。 */}
+          数据源为 /api/sessions 默认响应的 archivedSessions，按侧栏可见目录过滤。 */}
       {archiveViewOpen ? (
         <ArchiveView
-          sessions={archivedSessions}
-          count={archivedCount}
+          sessions={visibleArchivedSessions}
+          count={visibleArchivedSessions.length}
           homeDir={homeDir}
           loading={loading}
           onRefresh={loadSessions}

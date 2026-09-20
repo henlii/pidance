@@ -349,26 +349,6 @@ export const XIcon = ({ size = 14 }: { size?: number }) => (
   </svg>
 );
 
-export const BranchIcon = ({ size = 12 }: { size?: number }) => (
-  <svg {...iconProps(size)}>
-    <line x1="6" y1="3" x2="6" y2="15" />
-    <circle cx="18" cy="6" r="3" />
-    <circle cx="6" cy="18" r="3" />
-    <path d="M18 9a9 9 0 0 1-9 9" />
-  </svg>
-);
-
-export const BranchPlusIcon = ({ size = 14 }: { size?: number }) => (
-  <svg {...iconProps(size)}>
-    <line x1="6" y1="3" x2="6" y2="15" />
-    <circle cx="6" cy="18" r="3" />
-    <path d="M18 9a9 9 0 0 1-9 9" />
-    <circle cx="18" cy="6" r="3" />
-    <path d="M15.5 17.5h5" />
-    <path d="M18 15v5" />
-  </svg>
-);
-
 export const TrashIcon = ({ size = 13 }: { size?: number }) => (
   <svg {...iconProps(size)}>
     <polyline points="3 6 5 6 21 6" />

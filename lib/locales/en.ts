@@ -507,13 +507,12 @@ export const en = {
   extension_copied: 'Copied',
   // 本轮核心工作区补充翻译
 
-  // 新会话引导页（OpenChamber 风格项目/工作树选择）
+  // 新会话引导页（OpenChamber 风格项目选择）
   guide_projectTitle: 'Choose a project',
   guide_sessionCount: '{count} sessions',
   guide_loading: 'Loading…',
   guide_noProjects: 'No projects yet — start a session from the sidebar.',
   guide_projectPlaceholder: 'Select a project…',
-  guide_branchPlaceholder: 'Select a branch…',
   // 命令面板（Ctrl/Cmd+K，OpenChamber CommandPalette 风格）
   palette_title: 'Command palette',
   palette_placeholder: 'Search sessions, files, actions…',
