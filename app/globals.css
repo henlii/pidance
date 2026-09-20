@@ -1075,6 +1075,44 @@ span.linenumber {
     box-shadow: none;
   }
 
+  /* 二级面板（文件详情/Git diff）：与一级右栏同一套全屏抽屉，盖在其上。
+     打开文件即成为当前层，关闭（页签栏 ×）后回到它下面的一层。 */
+  .changes-panel {
+    position: fixed !important;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: 100% !important;
+    min-width: 0 !important;
+    z-index: 300;
+    border-left: none !important;
+    transition: transform 0.25s ease, box-shadow 0.25s ease;
+  }
+  .changes-panel.changes-panel-open {
+    transform: translateX(0);
+    box-shadow: -4px 0 20px rgba(0,0,0,0.15);
+  }
+  .changes-panel.changes-panel-closed {
+    transform: translateX(100%);
+    box-shadow: none;
+  }
+  /* 内层与外壳同 class：内层跟着外壳铺满，不再单独定位 */
+  .changes-panel > .changes-panel {
+    position: relative;
+    left: auto;
+    right: auto;
+    width: 100% !important;
+    height: 100%;
+    transition: none;
+    transform: none;
+    box-shadow: none;
+  }
+  /* 窄屏不拖拽调宽 */
+  .changes-panel-resize-handle {
+    display: none !important;
+  }
+
   /* 右侧工作区：移动端全屏右侧抽屉，不产生三栏挤压 */
   .workspace-container {
     position: fixed !important;
@@ -2003,11 +2041,6 @@ span.linenumber {
 .git-file-row.is-selected {
   background: var(--bg-selected);
   color: var(--text);
-}
-@media (max-width: 640px) {
-  .changes-panel {
-    display: none !important;
-  }
 }
 .git-file-row:focus-visible {
   outline: 2px solid var(--accent);

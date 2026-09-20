@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { affectedPathsMatchFile } from "@/lib/git-refresh";
+import { createLatestRequestGuard, type LatestRequestGuard } from "@/lib/latest-request";
 import type { GitFileDiffResponse } from "@/lib/git-types";
 import { useI18n } from "@/lib/i18n";
 import type { Tab } from "./TabBar";
@@ -38,10 +39,18 @@ export function ChangesPanel({ open, width, onWidthChange, cwd, isMobile, mobile
   const [dragging, setDragging] = useState(false);
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
+  // 快速切文件时旧响应可能后到：只有最新一次请求可以写 diff/loading/error。
+  const diffGuardRef = useRef<LatestRequestGuard | null>(null);
+  if (!diffGuardRef.current) diffGuardRef.current = createLatestRequestGuard();
+  const diffGuard = diffGuardRef.current;
+  useEffect(() => () => diffGuard.invalidate(), [diffGuard]);
 
   const fetchDiff = useCallback(async () => {
+    const requestId = diffGuard.next();
     if (!cwd || activeMode !== "diff" || !activeTab?.filePath) {
       setDiff(null);
+      setDiffError(null);
+      setDiffLoading(false);
       return;
     }
     setDiffLoading(true);
@@ -50,15 +59,17 @@ export function ChangesPanel({ open, width, onWidthChange, cwd, isMobile, mobile
       const params = new URLSearchParams({ cwd, path: activeTab.filePath });
       const response = await fetch(`/api/git/diff?${params.toString()}`);
       const next = await response.json().catch(() => ({})) as GitFileDiffResponse & { error?: string };
+      if (!diffGuard.isCurrent(requestId)) return;
       if (!response.ok) throw new Error(next.error ?? t("changes_diffError", { status: response.status }));
       setDiff(next.supported && typeof next.patch === "string" ? next : null);
     } catch (error) {
+      if (!diffGuard.isCurrent(requestId)) return;
       setDiff(null);
       setDiffError(error instanceof Error ? error.message : String(error));
     } finally {
-      setDiffLoading(false);
+      if (diffGuard.isCurrent(requestId)) setDiffLoading(false);
     }
-  }, [activeMode, activeTab?.filePath, cwd, t]);
+  }, [activeMode, activeTab?.filePath, cwd, t, diffGuard]);
 
   useEffect(() => { void fetchDiff(); }, [fetchDiff]);
   useEffect(() => {

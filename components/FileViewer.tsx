@@ -17,6 +17,7 @@ import {
   isDocumentPreviewPath,
   isImagePath,
 } from "@/lib/file-types";
+import { createLatestRequestGuard, type LatestRequestGuard } from "@/lib/latest-request";
 import { encodeFilePathForApi, getFileDirectory, getFileName, getRelativeFilePath } from "@/lib/file-paths";
 import { resolveLocalFileHref } from "@/lib/file-links";
 import { markdownPreviewRehypePlugins, markdownPreviewRemarkPlugins } from "@/lib/markdown";
@@ -735,7 +736,10 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, writable = false, buff
   const [wrapLines, setWrapLines] = useState(false);
   const [watching, setWatching] = useState(false);
   const esRef = useRef<EventSource | null>(null);
-  const gitDiffRequestRef = useRef(0);
+  // 切文件/切 diff 目标时旧响应可能后到：只有最新一次请求可以写 gitDiff。
+  const gitDiffGuardRef = useRef<LatestRequestGuard | null>(null);
+  if (!gitDiffGuardRef.current) gitDiffGuardRef.current = createLatestRequestGuard();
+  const gitDiffGuard = gitDiffGuardRef.current;
   const shellRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const bufferRef = useRef(buffer);
@@ -779,7 +783,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, writable = false, buff
   }, [dispatchBuffer, sourceSessionId]);
 
   const fetchGitDiff = useCallback(async (targetPath: string) => {
-    const requestId = ++gitDiffRequestRef.current;
+    const requestId = gitDiffGuard.next();
     if (!cwd) {
       setGitDiff(null);
       return;
@@ -789,12 +793,12 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, writable = false, buff
       const params = new URLSearchParams({ cwd, path: targetPath });
       const response = await fetch(`/api/git/diff?${params.toString()}`);
       const next = await response.json() as GitFileDiffResponse & { error?: string };
-      if (requestId !== gitDiffRequestRef.current) return;
+      if (!gitDiffGuard.isCurrent(requestId)) return;
       setGitDiff(response.ok && next.supported && typeof next.patch === "string" ? next : null);
     } catch {
-      if (requestId === gitDiffRequestRef.current) setGitDiff(null);
+      if (gitDiffGuard.isCurrent(requestId)) setGitDiff(null);
     }
-  }, [cwd]);
+  }, [cwd, gitDiffGuard]);
 
   // Initial load + SSE watch setup
   useEffect(() => {

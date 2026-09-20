@@ -894,10 +894,10 @@ function AppShellInner() {
       return next;
     });
     // 文件详情属于二级右栏；一级右栏保持导航，聊天主区始终可见。
-    // 移动端右栏为全屏 overlay 抽屉：关闭会话侧栏避免三层覆盖。
+    // 窄屏下二级面板本身就是全屏抽屉（盖在一级右栏之上）：只关会话侧栏，
+    // 不再顺带打开一级右栏，避免两层抽屉叠加、关闭后回不到原层。
     if (isMobile) {
       setSidebarOpen(false);
-      setRightPanelOpen(true);
     } else {
       applyRightPanelOpen(true);
     }
