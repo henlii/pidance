@@ -13,6 +13,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "./pi-paths";
+import { hasActiveSubagentRunForSession, listSubagentRuns } from "./subagent-runs";
 import {
   getPidancePref,
   readPidancePrefs,
@@ -514,6 +515,28 @@ export class SdkSessionHost {
     this.options.onRunningChange?.();
   }
 
+  /**
+   * 本会话名下是否还有正在跑的子代理 run。
+   *
+   * 为什么宿主不能在这时候回收：pi-subagents 完成子代理时是在**启动该 run 的扩展实例**里
+   * `pi.sendMessage({customType:"subagent-notify"}, {triggerTurn:true})` 唤起父会话。
+   * 宿主一旦 dispose，扩展实例就没了——完成事件没有监听者，用户看到的是「子代理跑完了，
+   * 主会话没被唤起」，只能等下次打开会话时补投一条不触发 turn 的通知。
+   *
+   * 代价（有意接受）：正在跑子代理期间本 host 继续持有 writer 租约。读取 run 记录失败
+   * 一律按「没有」处理（宁可回收，也不要因为读不到记录而永久占着租约）。
+   */
+  private hasActiveSubagentRun(): boolean {
+    const sessionFile = this.realSessionFile;
+    if (!sessionFile) return false;
+    try {
+      const { runs } = listSubagentRuns({ limit: 50 });
+      return hasActiveSubagentRunForSession(runs, sessionFile);
+    } catch {
+      return false;
+    }
+  }
+
   private resetIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
@@ -538,6 +561,12 @@ export class SdkSessionHost {
       }
       // fire 时又出现订阅者（30s 窗口内端点重开）：取消释放，继续保活。
       if (this.listeners.length > 0) return;
+      // 本会话名下还有子代理在跑：保活到它结束，否则完成事件没有 owner 宿主可投递，
+      // 父会话不会被唤起（见 hasActiveSubagentRun 的注释）。每轮空闲窗口复查一次。
+      if (this.hasActiveSubagentRun()) {
+        this.resetIdleTimer();
+        return;
+      }
       // 有队列且未 hold：由 flush 流程推进，不在这里 dispose。
       void this.destroyAsync().catch(() => {
         /* 命令仍在进行（busy）：命令结束后的 resetIdleTimer 会再次触发回收 */
@@ -1632,10 +1661,15 @@ export class SdkSessionHost {
         // agent_settled 表示 SDK 已完成本轮及其内部 continuation。没有未 hold
         // 的产品队列时立即销毁 host，释放跨进程 writer lease；否则继续由队列
         // flush 持有 host，直到最后一轮完成。
+        // 本会话名下还有子代理在跑时不销毁：完成事件要靠这个 live host 里的扩展实例
+        // 投递（pi-subagents 的 notify 带 triggerTurn 才能唤起父会话）；宿主一没，
+        // 用户只会看到「子代理跑完了但主会话没被唤起」。子代理结束后那一轮 settle
+        // 会正常销毁；run 记录陈旧/消失则由空闲定时器的复查兜底。
         const disposeAfterSettle =
           event.type === "agent_settled"
           && !this.flushingFollowUp
-          && (!this.hasWaitingFollowUp() || this.isFollowUpHeld());
+          && (!this.hasWaitingFollowUp() || this.isFollowUpHeld())
+          && !this.hasActiveSubagentRun();
         this.resetIdleTimer();
         if (disposeAfterSettle) {
           void this.destroyAsync().catch(() => {

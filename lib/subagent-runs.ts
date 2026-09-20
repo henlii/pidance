@@ -152,6 +152,52 @@ export function resolveAsyncRunsRoot(
   return path.join(tmp, `pi-subagents-${resolveTempScopeId(options)}`, "async-subagent-runs");
 }
 
+/**
+ * 子代理 run 的「进行中」状态（与浏览器投影 lib/subagent-activity.ts 同一语义）。
+ */
+export const ACTIVE_SUBAGENT_RUN_STATES: ReadonlySet<SubagentRunState> = new Set(["running", "queued", "paused"]);
+
+/**
+ * 判定 run 仍活着的更新时间上限：run 记录长时间不更新（进程被杀、记录残留）时不再据此保活，
+ * 避免宿主永不回收、一直占着 writer 租约。
+ */
+export const SUBAGENT_RUN_STALE_MS = 15 * 60_000;
+
+/**
+ * 该会话名下是否还有进行中的子代理 run。
+ *
+ * 归属判定用路径前缀：子代理会话文件都落在父会话路径旁
+ * （`<父会话路径去 .jsonl>/<runId>/run-N/…`、`<…>/async-<uuid>/…`、`<…>/forks/…`），
+ * 所以「run 的任一步骤 sessionFile 以 `<父会话路径去 .jsonl><分隔符>` 开头」即属本会话。
+ * 供宿主在空闲回收前判断是否需要保活（保活才能让子代理完成时的 notify 唤起父会话）。
+ */
+export function hasActiveSubagentRunForSession(
+  runs: readonly SubagentRunView[] | null | undefined,
+  sessionFile: string | null | undefined,
+  now = Date.now(),
+  staleMs = SUBAGENT_RUN_STALE_MS,
+): boolean {
+  const file = typeof sessionFile === "string" ? sessionFile : "";
+  if (!file.endsWith(".jsonl")) return false;
+  const base = file.slice(0, -".jsonl".length);
+  const isMine = (candidate: unknown): boolean => {
+    if (typeof candidate !== "string" || !candidate) return false;
+    if (!candidate.startsWith(base)) return false;
+    const next = candidate.charAt(base.length);
+    return next === "/" || next === "\\";
+  };
+  for (const run of runs ?? []) {
+    if (!run || typeof run !== "object") continue;
+    if (!ACTIVE_SUBAGENT_RUN_STATES.has(run.state)) continue;
+    const updatedAt = run.lastUpdate ?? run.startedAt;
+    if (typeof updatedAt === "number" && now - updatedAt > staleMs) continue;
+    for (const step of run.steps ?? []) {
+      if (isMine(step?.sessionFile)) return true;
+    }
+  }
+  return false;
+}
+
 export interface ListSubagentRunsOptions {
   /** 可注入根（测试）；生产勿传 path 查询参数 */
   root?: string;
