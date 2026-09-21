@@ -34,6 +34,22 @@ const PASSWORD = process.env.PIDANCE_TEST_PASSWORD ?? "";
 const AUTH_HEADER = PASSWORD ? { Authorization: `Basic ${Buffer.from(`pi:${PASSWORD}`).toString("base64")}` } : {};
 const SESSION = "pidance-regression";
 
+/**
+ * 清掉某个会话在**共享未读时钟**里的条目（#65）：服务端会在 run 结束时记 completedAt、客户端
+ * 打开会话记 readAt，所以跑完用例必须把测试会话的条目删掉，QA 才算不留痕。
+ */
+async function clearSessionUnreadClock(id) {
+  if (!id) return;
+  await fetch(`${URL_BASE}/api/preferences`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...AUTH_HEADER },
+    body: JSON.stringify({
+      prefs: { unreadSessionState: { completedAt: { [id]: null }, readAt: { [id]: null } } },
+    }),
+  }).catch(() => {});
+}
+
+
 /** 运行 agent-browser 命令并解析 JSON 输出。 */
 async function ab(args, { json = true } = {}) {
   const cmd = ["agent-browser", ...(json ? ["--json"] : []), ...args];
@@ -737,6 +753,7 @@ test("用例13：run 结束的权威快照回收乐观运行标记（侧栏不�
         headers: AUTH_HEADER,
       }).catch(() => {});
     }
+    await clearSessionUnreadClock(createdId);
   }
 });
 
@@ -936,15 +953,17 @@ test("A1/A2/A3/D6：运行中会话的列表运行态与时长、硬刷新恢复
       headers: { "Content-Type": "application/json", ...AUTH_HEADER },
       body: JSON.stringify({ prefs: { draftTargetCwd: draftBeforeA1 } }),
     }).catch(() => {});
+    await clearSessionUnreadClock(createdId);
   }
 });
 
-test("B4：未读时钟是本设备本地的；服务端残留的未读状态不得复活未读", { timeout: 300_000 }, async () => {
-  // #28 待办二 B4（多端未读多）：1b17161 的修复把未读时钟改成「每设备本地」并且
-  // 不再读写服务端 unreadSessionState。这里两层断言：
-  //   1) 正例：本设备观察到 run 完成 → 记为未读并落到本地存储；打开即已读、刷新仍是已读；
-  //   2) 反例：清空本地存储（模拟新设备/新浏览器）后，即使服务端仍带着旧未读时钟，
-  //      页面也不得凭空出现未读（控制项：注入的 locale 生效，证明这份载荷确实被应用了）。
+test("B4：未读时钟跨端（服务端记 completedAt、各端记 readAt，取并集判定未读）", { timeout: 300_000 }, async () => {
+  // #28 待办二 B4 + #65：未读时钟**跨端** —— 服务端在 run 结束时记 completedAt，各端打开会话时
+  // 记 readAt，未读 ⟺ completedAt > readAt。三层断言：
+  //   1) 正例：run 完成后显示未读，且**服务端**记下了 completedAt（不依赖任何浏览器开着）；
+  //   2) 打开即已读：本地有 readAt，且 readAt 推给了服务端（其它端才能看到已读）；刷新仍是已读；
+  //   3) 新设备（清空 localStorage）：服务端说未读 → 必须显示未读；服务端说他端已读 → 不得显示。
+  //      （3 的控制项：注入的 locale 生效，且注入的时钟确实落到客户端 —— 与徽标无关，避免空转。）
   let createdId = null;
   /** 跑前快照：本用例 mock 了 /api/preferences，注入字段可能被客户端整包 PUT 写回共享文件
    *  （见 issue #62 —— 实测把用户的 locale 从 zh-CN 泄漏成 en），所以跑完必须逐字还原。 */
@@ -965,29 +984,32 @@ test("B4：未读时钟是本设备本地的；服务端残留的未读状态不
     });
     assert.equal(res.ok, true, `还原共享偏好失败（HTTP ${res.status}）`);
   };
-  // 文案由页面语言推出（同 A1 用例的理由）
-  const readUiLabels = async () => {
-    const labels = await evalResult(`(() => {
-      const zh = String(document.documentElement.lang || "").toLowerCase().startsWith("zh");
-      return { running: zh ? "运行中" : "Running", unread: zh ? "活动" : "Activity" };
-    })()`);
-    assert.ok(labels && labels.unread, "无法确定页面语言（断言无法构造）");
-    return labels;
-  };
-  const unreadProbe = (id, L) => `(() => {
+  // 本地缓存 2026-09-21 起是**时钟 JSON**（#65：未读改跨端），不再是不带时间戳的 id 列表
+  const unreadProbe = (id) => `(() => {
+    const zh = String(document.documentElement.lang || "").toLowerCase().startsWith("zh");
+    // 文案在**页内**按当前语言推：本用例中途会把 language 注入成 en，外部算好的中文文案就失效了
+    const unreadLabel = zh ? "活动" : "Activity";
     const rows = [...document.querySelectorAll('[data-session-id="${id}"]')];
-    let stored = [];
+    let clock = null;
     try {
-      const raw = localStorage.getItem("pidance:unread-session-ids");
-      stored = raw ? JSON.parse(raw) : [];
-    } catch { stored = ["parse-error"]; }
+      const raw = localStorage.getItem("pidance:unread-session-clock");
+      clock = raw ? JSON.parse(raw) : null;
+    } catch { clock = { parseError: true }; }
     return {
       present: rows.length > 0,
-      badge: rows.some((row) => !!row.querySelector('[title=' + JSON.stringify(${JSON.stringify(L.unread)}) + ']')),
-      stored: Array.isArray(stored) ? stored : ["parse-error"],
+      badge: rows.some((row) => !!row.querySelector('[title=' + JSON.stringify(unreadLabel) + ']')),
+      localCompleted: Boolean(clock && clock.completedAt && clock.completedAt["${id}"]),
+      localRead: Boolean(clock && clock.readAt && clock.readAt["${id}"]),
       lang: document.documentElement.lang || null,
     };
   })()`;
+  /** 服务端未读时钟（#65：completedAt 由服务端写、readAt 由各端写）。 */
+  const serverClock = async () => {
+    const res = await fetch(`${URL_BASE}/api/preferences`, { headers: AUTH_HEADER });
+    const body = res.ok ? await res.json() : null;
+    const clock = body?.prefs?.unreadSessionState;
+    return clock && typeof clock === "object" ? clock : { completedAt: {}, readAt: {} };
+  };
   try {
     // 先开页面（并停在某个已有会话上），再建测试会话：只有「页面已在观察运行集」时才看得到
     // running → completed 的过渡，否则 run 在页面挂载前就结束了，未读永远不会出现。
@@ -995,8 +1017,6 @@ test("B4：未读时钟是本设备本地的；服务端残留的未读状态不
     await ab(["open", URL_BASE, "--session", SESSION], { json: false });
     await ensureAuthed();
     await new Promise((r) => setTimeout(r, 3000));
-    const L = await readUiLabels();
-
     const createRes = await fetch(`${URL_BASE}/api/agent/new`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...AUTH_HEADER },
@@ -1026,32 +1046,48 @@ test("B4：未读时钟是本设备本地的；服务端残留的未读状态不
     let positive = null;
     for (let i = 0; i < 60; i += 1) {
       await new Promise((r) => setTimeout(r, 500));
-      positive = await evalResult(unreadProbe(createdId, L));
+      positive = await evalResult(unreadProbe(createdId));
       if (positive?.badge) break;
     }
     assert.ok(positive?.present, "测试会话未出现在侧栏");
-    assert.ok(positive?.badge, "该会话完成后没有记为未读（本地时钟未生效：B4 前置不成立）");
-    assert.ok(
-      positive.stored.includes(createdId),
-      `未读 id 没有写进本设备存储: ${JSON.stringify(positive.stored)}`,
-    );
+    assert.ok(positive?.badge, "该会话完成后没有记为未读（时钟未生效：B4 前置不成立）");
+    // #65：完成时刻由**服务端**记录 —— 这样即使当时没开任何浏览器，未读也是准的。
+    let clockAfterRun = { completedAt: {}, readAt: {} };
+    for (let i = 0; i < 20; i += 1) {
+      clockAfterRun = await serverClock();
+      if (clockAfterRun.completedAt?.[createdId]) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    assert.ok(clockAfterRun.completedAt?.[createdId], "服务端没有记录该会话的 completedAt（跨端未读的权威来源缺失）");
 
     // ── 2) 打开即已读；刷新后仍是已读（readAt 是本设备本地状态） ──
     await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(createdId)}`, "--session", SESSION], { json: false });
     // 已读的两处投影（徽标、本地存储）由不同 effect 落地，逐项轮询到位再断言。
     let afterOpen = null;
-    let storedCleared = false;
+    let readMarked = false;
     for (let i = 0; i < 40; i += 1) {
       await new Promise((r) => setTimeout(r, 300));
-      afterOpen = await evalResult(unreadProbe(createdId, L));
-      storedCleared = Boolean(afterOpen) && !afterOpen.stored.includes(createdId);
-      if (afterOpen && !afterOpen.badge && storedCleared) break;
+      afterOpen = await evalResult(unreadProbe(createdId));
+      readMarked = Boolean(afterOpen?.localRead);
+      if (afterOpen && !afterOpen.badge && readMarked) break;
     }
     assert.equal(afterOpen?.badge, false, "打开该会话后未读没有清掉");
-    assert.equal(storedCleared, true, `已读后本地存储里仍留着未读 id: ${JSON.stringify(afterOpen?.stored)}`);
+    assert.equal(readMarked, true, `已读后本地缓存时钟里没有 readAt: ${JSON.stringify(afterOpen)}`);
+    // #65 的关键：readAt 必须推给服务端，其它端才能看到「已读」
+    let clockAfterRead = { completedAt: {}, readAt: {} };
+    for (let i = 0; i < 20; i += 1) {
+      clockAfterRead = await serverClock();
+      if (clockAfterRead.readAt?.[createdId]) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    assert.ok(clockAfterRead.readAt?.[createdId], "readAt 没有推给服务端（跨端已读不成立）");
+    assert.ok(
+      clockAfterRead.readAt[createdId] >= clockAfterRead.completedAt[createdId],
+      `服务端时钟里 readAt 应不早于 completedAt: ${JSON.stringify({ c: clockAfterRead.completedAt[createdId], r: clockAfterRead.readAt[createdId] })}`,
+    );
     await ab(["reload", "--session", SESSION], { json: false });
     await new Promise((r) => setTimeout(r, 4000));
-    const afterReload = await evalResult(unreadProbe(createdId, L));
+    const afterReload = await evalResult(unreadProbe(createdId));
     assert.equal(afterReload?.badge, false, "硬刷新后未读又回来了（readAt 没落本地）");
 
     // ── 3) 反例：新设备（本地存储清空）+ 服务端仍带旧未读时钟 → 不得复活未读 ──
@@ -1068,71 +1104,95 @@ test("B4：未读时钟是本设备本地的；服务端残留的未读状态不
     prefsSnapshotTaken = true;
     // 控制项必须「与当前相反」才能证明注入载荷真的生效（固定 "en" 在页面本来就是 en 时恒真）。
     bogusLocale = prefsSnapshot.locale === "en" ? "zh-CN" : "en";
-    const legacyPayload = {
-      prefs: {
-        ...realPrefs,
-        locale: bogusLocale,
-        unreadSessionState: { completedAt: { [createdId]: new Date().toISOString() }, readAt: {} },
-      },
-    };
-    await ab([
-      "network", "route", `${URL_BASE}/api/preferences`,
-      "--body", JSON.stringify(legacyPayload),
-      "--session", SESSION,
-    ], { json: false });
-    try {
-      // 必须停在不选中测试会话的落点：否则「当前会话立刻视为已读」会让反例空转。
+    const unreadPayload = (clock) => ({
+      prefs: { ...realPrefs, locale: bogusLocale, unreadSessionState: clock },
+    });
+    /** 在「本地存储已清空」（= 新设备）的页面上跑一次断言。 */
+    const probeFreshDevice = async (label, injected) => {
+      // 必须停在不选中测试会话的落点：否则「当前会话立刻视为已读」会让断言空转。
       await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(other)}`, "--session", SESSION], { json: false });
       let fresh = null;
       for (let i = 0; i < 40; i += 1) {
         await new Promise((r) => setTimeout(r, 500));
-        fresh = await evalResult(unreadProbe(createdId, L));
-        if (fresh?.lang === bogusLocale) break;
+        fresh = await evalResult(unreadProbe(createdId));
+        // 等待条件必须与「徽标」无关，否则就是在等自己想要的答案：
+        // 这里等的是「注入的时钟确实被客户端采纳了」（completedAt / readAt 落到本地时钟）。
+        const applied = injected === "completed" ? fresh?.localCompleted : fresh?.localRead;
+        if (fresh?.lang === bogusLocale && applied) break;
       }
-      assert.equal(fresh?.lang, bogusLocale, "注入的服务端偏好没有生效（控制项失败，反例会空转）");
+      assert.equal(fresh?.lang, bogusLocale, `${label}: 注入的服务端偏好没有生效（控制项失败，本步会空转）`);
       assert.equal(
-        fresh.stored.includes(createdId),
-        false,
-        "服务端残留的未读时钟把新设备也标成了未读（B4 回归：未读又变成跨端同步）",
+        injected === "completed" ? fresh?.localCompleted : fresh?.localRead,
+        true,
+        `${label}: 注入的未读时钟没有落到客户端（${injected}）`,
       );
-      assert.equal(fresh.badge, false, "新设备上出现了未读徽标（应当只由本设备时钟决定）");
+      assert.equal(fresh?.present, true, `${label}: 测试会话未出现在侧栏`);
       // 控制项之二：被 mock 的 /api/preferences 确实被页面请求过
       const requests = await ab(["network", "requests", "--json", "--session", SESSION]);
       const list = requests?.data?.requests ?? requests?.data ?? [];
       const hit = Array.isArray(list) && list.some((item) => String(item?.url ?? "").includes("/api/preferences"));
-      assert.equal(hit, true, "页面没有请求 /api/preferences（mock 未被使用，反例空转）");
-      // 共享偏好是用户数据：本用例跑完必须与跑前逐字一致（曾经因为 mock 缺字段把项目列表清空过）。
-      const afterPrefsRes = await fetch(`${URL_BASE}/api/preferences`, { headers: AUTH_HEADER });
-      const afterPrefs = afterPrefsRes.ok ? (await afterPrefsRes.json()).prefs : null;
+      assert.equal(hit, true, `${label}: 页面没有请求 /api/preferences（mock 未被使用，本步空转）`);
+      return fresh;
+    };
+
+    // ── 3a) 跨端未读：服务端说「完成晚于阅读」→ 新设备必须显示未读 ──
+    // （#65 之前这里是反过来的：未读只活在本机，服务端的时钟必须被忽略。语义已按产品决定反转。）
+    const completedNow = new Date().toISOString();
+    await ab(["network", "route", `${URL_BASE}/api/preferences`, "--body", JSON.stringify(unreadPayload({ completedAt: { [createdId]: completedNow }, readAt: {} })), "--session", SESSION], { json: false });
+    try {
+      const freshUnread = await probeFreshDevice("3a 跨端未读", "completed");
       assert.equal(
-        JSON.stringify(afterPrefs?.sidebarUi?.projectRoots ?? null),
-        projectRootsBefore,
-        "本用例改动了共享的项目列表（QA 不得留下痕迹）",
-      );
-      // 泄漏检测（不是断言）：整包 PUT 会把 mock 注入的字段捎回服务端，那是 #62 的应用侧缺陷，
-      // 由「脏键 PUT」根治；这里只负责**跑完不留痕**，所以先还原再断言。
-      const leaked = [];
-      if ((afterPrefs?.locale ?? null) !== prefsSnapshot.locale) leaked.push("locale");
-      if (JSON.stringify(afterPrefs?.unreadSessionState ?? null) !== JSON.stringify(prefsSnapshot.unreadSessionState)) leaked.push("unreadSessionState");
-      if (leaked.length > 0) {
-        console.warn(`[B4] 检出共享偏好泄漏（#62）：${leaked.join(", ")}；正在还原`);
-      }
-      await restoreSharedPrefs();
-      const restored = await (await fetch(`${URL_BASE}/api/preferences`, { headers: AUTH_HEADER })).json();
-      assert.equal(restored?.prefs?.locale ?? null, prefsSnapshot.locale, "跑完没能还原共享的 locale");
-      assert.equal(
-        JSON.stringify(restored?.prefs?.unreadSessionState ?? null),
-        JSON.stringify(prefsSnapshot.unreadSessionState),
-        "跑完没能还原共享的未读时钟",
-      );
-      assert.equal(
-        JSON.stringify(restored?.prefs?.sidebarUi?.projectRoots ?? null),
-        projectRootsBefore,
-        "跑完没能还原共享的项目列表",
+        freshUnread.badge,
+        true,
+        `新设备没有显示服务端记录的未读（跨端未读不成立：未读又只活在本机）probe=${JSON.stringify(freshUnread)}`,
       );
     } finally {
       await ab(["network", "unroute", `${URL_BASE}/api/preferences`, "--session", SESSION], { json: false }).catch(() => {});
     }
+
+    // ── 3b) 跨端已读：服务端说「阅读晚于完成」→ 新设备不得显示未读 ──
+    const completedOld = new Date(Date.now() - 60_000).toISOString();
+    const readNewer = new Date().toISOString();
+    await ab(["network", "route", `${URL_BASE}/api/preferences`, "--body", JSON.stringify(unreadPayload({ completedAt: { [createdId]: completedOld }, readAt: { [createdId]: readNewer } })), "--session", SESSION], { json: false });
+    try {
+      const freshRead = await probeFreshDevice("3b 跨端已读", "read");
+      assert.equal(
+        freshRead.badge,
+        false,
+        "另一台设备已读的会话在新设备上仍显示未读（跨端已读不成立）",
+      );
+    } finally {
+      await ab(["network", "unroute", `${URL_BASE}/api/preferences`, "--session", SESSION], { json: false }).catch(() => {});
+    }
+    // 共享偏好是用户数据：本用例跑完必须与跑前逐字一致（曾经因为 mock 缺字段把项目列表清空过）。
+    const afterPrefsRes = await fetch(`${URL_BASE}/api/preferences`, { headers: AUTH_HEADER });
+    const afterPrefs = afterPrefsRes.ok ? (await afterPrefsRes.json()).prefs : null;
+    assert.equal(
+      JSON.stringify(afterPrefs?.sidebarUi?.projectRoots ?? null),
+      projectRootsBefore,
+      "本用例改动了共享的项目列表（QA 不得留下痕迹）",
+    );
+    // 泄漏检测（不是断言）：整包 PUT 会把 mock 注入的字段捎回服务端，那是 #62 的应用侧缺陷，
+    // 由「脏键 PUT」根治；这里只负责**跑完不留痕**，所以先还原再断言。
+    const leaked = [];
+    if ((afterPrefs?.locale ?? null) !== prefsSnapshot.locale) leaked.push("locale");
+    if (JSON.stringify(afterPrefs?.unreadSessionState ?? null) !== JSON.stringify(prefsSnapshot.unreadSessionState)) leaked.push("unreadSessionState");
+    if (leaked.length > 0) {
+      console.warn(`[B4] 检出共享偏好泄漏（#62）：${leaked.join(", ")}；正在还原`);
+    }
+    await restoreSharedPrefs();
+    const restored = await (await fetch(`${URL_BASE}/api/preferences`, { headers: AUTH_HEADER })).json();
+    assert.equal(restored?.prefs?.locale ?? null, prefsSnapshot.locale, "跑完没能还原共享的 locale");
+    assert.equal(
+      JSON.stringify(restored?.prefs?.unreadSessionState ?? null),
+      JSON.stringify(prefsSnapshot.unreadSessionState),
+      "跑完没能还原共享的未读时钟",
+    );
+    assert.equal(
+      JSON.stringify(restored?.prefs?.sidebarUi?.projectRoots ?? null),
+      projectRootsBefore,
+      "跑完没能还原共享的项目列表",
+    );
   } finally {
     await ab(["network", "unroute", "--session", SESSION], { json: false }).catch(() => {});
     // 兜底：断言失败（例如还原断言自己红了）时也要把注入字段还原，别把用户的偏好留在脏状态。

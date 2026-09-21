@@ -4,7 +4,7 @@
  */
 import { cacheSessionPath, invalidateSessionListCache, resolveSessionPath } from "./session-reader";
 import { openSessionView } from "./pi-session-io";
-import { getPidancePref, readPidancePrefs, type PidancePrefs } from "./pidance-prefs-file";
+import { getPidancePref, readPidancePrefs, updatePidancePref, type PidancePrefs } from "./pidance-prefs-file";
 import { hasQueuedFollowUp } from "./session-queue";
 import { startSdkSessionHost, type SdkSessionHost } from "./sdk-session-host";
 import { getRunningStartedAt as getLocalRunningStartedAt } from "./running-state";
@@ -263,6 +263,14 @@ export function listPendingExtensionUi(): PendingExtensionUi[] {
 }
 
 let lastRunningSnapshot = "";
+/** 上一次广播出去的运行集（用来识别「本轮不再运行」的会话 → 写未读时钟的 completedAt）。 */
+let lastRunningIds: string[] = [];
+
+/**
+ * 新会话启动期的临时 key 前缀（真正 id 由 Pi 生成，见 session-service 的 startLockedSession）。
+ * 它只用于启动锁，会随 rekey 从运行集消失 —— 那不是「会话跑完了」，所以不能给它记完成时刻。
+ */
+export const PLACEHOLDER_SESSION_ID_PREFIX = "__new__";
 const ownedRunningLeases = new Set<string>();
 let runningLeaseHeartbeat: ReturnType<typeof setInterval> | null = null;
 const RUNNING_LEASE_HEARTBEAT_MS = 8_000;
@@ -306,6 +314,26 @@ export function notifyRunningChange(): void {
   });
   if (snapshot === lastRunningSnapshot) return;
   lastRunningSnapshot = snapshot;
+  // 未读改跨端（#65）：run 结束由**服务端**记时刻，这样即使当时没有任何浏览器开着，
+  // 未读也是准的；各端只负责写自己的 readAt（未读 ⟺ completedAt > readAt，两侧都是
+  // 单调时间戳取并集，不需要 CAS）。写盘挪到事件回调之外，避免拖住运行集广播。
+  const finished = lastRunningIds.filter(
+    (id) => !ids.includes(id) && !id.startsWith(PLACEHOLDER_SESSION_ID_PREFIX),
+  );
+  lastRunningIds = [...ids];
+  if (finished.length > 0) {
+    const at = new Date().toISOString();
+    setTimeout(() => {
+      for (const id of finished) {
+        try {
+          updatePidancePref(`unreadSessionState.completedAt.${id}`, at);
+        } catch (error) {
+          // 偏好文件写失败不该影响运行态；下一次 run 结束仍会尝试。
+          console.error("[pidance] failed to record unread completedAt:", error);
+        }
+      }
+    }, 0);
+  }
   for (const listener of getRunningListeners()) {
     try {
       listener(ids);

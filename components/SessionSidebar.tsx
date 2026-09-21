@@ -41,7 +41,7 @@ import {
 import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
 import { refreshSubagentActivity, useSubagentActivity } from "@/hooks/useSubagentActivity";
 import { createActivationRecovery } from "@/lib/activation-recovery";
-import { isServerPrefsLoaded, setServerPref, useServerPreferences } from "@/lib/server-preferences";
+import { getServerPref, isServerPrefsLoaded, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import {
   bumpGroupVisibleCount,
   derivePinnedSessions,
@@ -60,11 +60,12 @@ import { useProjectActions, useProjectIdentity } from "./ProjectProvider";
 
 import { useI18n } from "@/lib/i18n";
 import {
-  loadUnreadSessionIds,
+  loadUnreadSessionClock,
+  mergeUnreadSessionState,
   markSessionRead,
   parseUnreadSessionState,
   pruneUnreadSessionState,
-  saveUnreadSessionIds,
+  saveUnreadSessionClock,
   shouldApplyRunningReconciliation,
   unreadIdsFromState,
   type UnreadSessionState,
@@ -285,6 +286,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
    * 之前，只写 localStorage、不写服务端。
    */
   const serverWriteReadyRef = useRef<boolean>(hasStoredSidebarPreferences());
+  /** 已经推给服务端的 readAt（避免每次 tick 重复 PUT 同一批时间戳）。 */
+  const pushedReadAtRef = useRef<Record<string, string>>({});
   // 每个项目的展开条数均为瞬时态，不写偏好。
   const [groupVisibleCounts, setGroupVisibleCounts] = useState<Record<string, number>>({});
   // 会话级 child 折叠：保持瞬时（沿用原行为）
@@ -509,19 +512,32 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     // serverPrefs 只作“加载完成/远端变化”的重跑信号，不读其内容。
   }, [prefs.projectRootsMigrated, serverPrefs, updatePrefs]);
 
+  // 未读时钟改跨端（#65）：**服务端写 completedAt**（run 结束时，与本端是否开着无关），
+  // **各端写自己的 readAt**；未读 ⟺ completedAt > readAt，两侧都是单调时间戳、取并集，
+  // 天然不需要 CAS。本地那份降级为首屏缓存（旧的纯 id 列表会迁移成时钟）。
   useEffect(() => {
-    const local = parseUnreadSessionState([...loadUnreadSessionIds()]);
-    catalogStore.replaceUnread(local);
-  }, [catalogStore]);
+    const merged = mergeUnreadSessionState(
+      loadUnreadSessionClock(window.localStorage),
+      parseUnreadSessionState(getServerPref("unreadSessionState")),
+    );
+    catalogStore.replaceUnread(merged);
+  }, [catalogStore, serverPrefs]);
 
-  // 未读时钟为「每设备本地」状态：completedAt/readAt 仅存 localStorage。
-  // 不同设备/浏览器各自记录自己观察到的 run 完成时刻与阅读时刻，互不合并，
-  // 避免把桌面端的 completedAt 同步到手机造成「手机显示大量历史未读」。
   useEffect(() => {
     const unread = catalogStore.getState().unread;
-    const ids = unreadIdsFromState(unread);
-    saveUnreadSessionIds(ids);
-  }, [catalogTick, catalogStore]);
+    saveUnreadSessionClock(window.localStorage, unread);
+    // 只有**本端产生的阅读时刻**要推给服务端：completedAt 的事实由服务端记录，
+    // 客户端重复写同一事实没有意义（还会造成两边时间戳互相追着涨）。
+    const pushed = pushedReadAtRef.current;
+    for (const [id, at] of Object.entries(unread.readAt)) {
+      if (pushed[id] === at) continue;
+      // 只给**真实存在的会话**推：已删除的会话、以及新会话启动期的 `__new__…` 占位 id
+      // 都不该在服务端时钟里留下条目（否则就是永远清不掉的死数据）。
+      if (!allSessions.some((session) => session.id === id)) continue;
+      pushed[id] = at;
+      setServerPref(`unreadSessionState.readAt.${id}`, at);
+    }
+  }, [allSessions, catalogTick, catalogStore]);
 
   useEffect(() => {
     // Live running status via SSE — no polling. The server pushes the current

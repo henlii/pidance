@@ -36,6 +36,47 @@ export function loadUnreadSessionIds(): Set<string> {
   return loadUnreadSessionIdsFromStorage(window.localStorage);
 }
 
+/**
+ * 未读时钟的本地缓存键（#65）。与旧的 `pidance:unread-session-ids`（纯 id 列表）不同，
+ * 缓存的是 {completedAt, readAt} 时钟：只有时间戳才能跨端合并，纯 id 列表无法表达
+ * 「这台设备读到哪一刻」，会破坏「任一设备读过即全端已读」。
+ */
+export const UNREAD_SESSION_CLOCK_STORAGE_KEY = "pidance:unread-session-clock";
+
+/**
+ * 旧 id 列表迁移成时钟时用的时刻：取一个**明显早于任何真实时间**的值（1970），
+ * 这样「列表里 = 未读」的旧语义得以保留，而任何设备之后的 readAt（真实时间）都会
+ * 大于它 → 立刻变成已读。若用「迁移时的 now」，会把另一台设备早些时候的已读重新变回未读。
+ */
+const LEGACY_LIST_COMPLETED_AT = "1970-01-01T00:00:00.000Z";
+
+/** 读本地缓存时钟；没有新键时把旧 id 列表迁移成时钟（迁移结果不回写，由调用方决定）。 */
+export function loadUnreadSessionClock(storage: StorageLike): UnreadSessionState {
+  try {
+    const raw = storage.getItem(UNREAD_SESSION_CLOCK_STORAGE_KEY);
+    if (raw) return parseUnreadSessionState(JSON.parse(raw));
+  } catch {
+    // 损坏输入回退到下面的旧键/空时钟
+  }
+  try {
+    const legacy = parseUnreadSessionIds(storage.getItem(UNREAD_SESSIONS_STORAGE_KEY));
+    if (legacy.size === 0) return emptyUnreadSessionState();
+    const completedAt: Record<string, string> = {};
+    for (const id of legacy) completedAt[id] = LEGACY_LIST_COMPLETED_AT;
+    return { completedAt, readAt: {} };
+  } catch {
+    return emptyUnreadSessionState();
+  }
+}
+
+export function saveUnreadSessionClock(storage: StorageLike, state: UnreadSessionState): void {
+  try {
+    storage.setItem(UNREAD_SESSION_CLOCK_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // 存储不可用（隐私模式）：时钟只活在内存里，服务端那份仍是权威。
+  }
+}
+
 export function saveUnreadSessionIds(ids: Set<string>): void {
   if (typeof window === "undefined") return;
   try {

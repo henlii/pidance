@@ -61,7 +61,7 @@ import {
 import { computeTurnEnd } from "./turn-end";
 import type { SessionInfo } from "./types";
 import { shouldInheritModel } from "./model-selection";
-import { updatePidancePref } from "./pidance-prefs-file";
+import { readPidancePrefs, updatePidancePref } from "./pidance-prefs-file";
 import {
   acquireRunningLease,
   isRunningLeaseHeldByOther,
@@ -84,7 +84,7 @@ import {
 import { getRunningStartedAt as readRunningStartedAt } from "./running-state";
 import { buildUserMessageOutline, type UserMessageOutlineItem } from "./session-outline";
 import { sliceContextAfter, sliceContextAround } from "./session-context-window";
-import { getRunningStartedAtTable } from "./live-session-registry";
+import { getRunningStartedAtTable, PLACEHOLDER_SESSION_ID_PREFIX } from "./live-session-registry";
 import { SESSION_WRITER_BUSY_MESSAGE } from "./sdk-session-host";
 import { searchSessionsFulltext, type SessionSearchResult } from "./session-fulltext-search";
 
@@ -434,6 +434,26 @@ export function projectAgentState(
   return projected;
 }
 
+/**
+ * 会话删除后清掉它留在偏好文件里的按会话分桶数据：队列、hold、**未读时钟**（#65 —— 服务端
+ * 现在会在 run 结束时写 `unreadSessionState.completedAt.<id>`，不清就会给已删除会话留死条目）。
+ */
+function clearDeletedSessionPrefs(sessionId: string): void {
+  updatePidancePref(`sessionQueue.${sessionId}`, null);
+  updatePidancePref(`sessionQueueHold.${sessionId}`, null);
+  const prefs = readPidancePrefs();
+  const bucket = prefs.unreadSessionState;
+  if (bucket && typeof bucket === "object" && !Array.isArray(bucket)) {
+    const record = bucket as Record<string, unknown>;
+    if (record.completedAt && typeof record.completedAt === "object") {
+      updatePidancePref(`unreadSessionState.completedAt.${sessionId}`, null);
+    }
+    if (record.readAt && typeof record.readAt === "object") {
+      updatePidancePref(`unreadSessionState.readAt.${sessionId}`, null);
+    }
+  }
+}
+
 export function createSessionService(overrides: Partial<SessionServiceDeps> = {}): SessionService {
   const deps: SessionServiceDeps = { ...defaultDeps, ...overrides };
 
@@ -687,8 +707,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
           // 删除是幂等操作：对象已不存在时仍清理残留偏好/缓存，不把 ENOENT
           // 变成 500 或让客户端误以为服务进程失效。
           try {
-            updatePidancePref(`sessionQueue.${sessionId}`, null);
-            updatePidancePref(`sessionQueueHold.${sessionId}`, null);
+            clearDeletedSessionPrefs(sessionId);
           } catch (error) {
             console.error("[pidance] failed to clear queue prefs after missing delete:", error);
           }
@@ -765,10 +784,9 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
           invalidateSessionPathCache,
         );
 
-        // 5. 删除成功后才清队列/hold。
+        // 5. 删除成功后才清队列/hold/未读时钟。
         try {
-          updatePidancePref(`sessionQueue.${sessionId}`, null);
-          updatePidancePref(`sessionQueueHold.${sessionId}`, null);
+          clearDeletedSessionPrefs(sessionId);
         } catch (error) {
           console.error("[pidance] failed to clear queue prefs after delete:", error);
         }
@@ -1121,7 +1139,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       // 临时 key 只用于启动锁，真正 id 由 pi 生成。
       // 必须唯一：毫秒时间戳会在同毫秒的并发新建中碰撞，导致两个请求
       // 合并到同一个 host（cwd/配置混用）。
-      const tempKey = `__new__${randomUUID()}`;
+      const tempKey = `${PLACEHOLDER_SESSION_ID_PREFIX}${randomUUID()}`;
       const { session, realSessionId } = await deps.startRpcSession(
         tempKey,
         "",

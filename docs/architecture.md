@@ -108,6 +108,28 @@
 - 当前租约与离线写互斥并非无缺口，不能据此宣称任意并发写都安全。
 - `pi-session-io` 为提前落盘/重挂 parent 使用 `_rewriteFile` 与 `flushed` 私有实现，SDK 升级需要专门兼容检查。
 
+### 状态作用域与冲突规则
+
+偏好落在 `~/.pi/agent/pidance-preferences.json`（temp+rename 原子写，0600，跨进程 `wx` 锁串行化；服务端 `GET /api/preferences` 每次实时读文件、无缓存）。**没有文件 watcher**：手工编辑文件或另一进程写入不会即时生效，下一次读取才看到。
+
+**不变量**：客户端**永不**用整份内存快照或整对象回写共享键——写入只发「本次真正改动过的点路径」组成的 patch（`lib/server-preferences.ts` 的脏键集合），形状是服务端 `mergePidancePrefs` 支持的一层子对象（`{"sidebarUi":{"showRecentSessions":false}}`）；`null` 是墓碑（服务端删键）；`sessionQueue*` 是宿主独占键、永不由客户端回写。整包/整对象写入会用「本地这份可能过期或尚未水合的副本」覆盖别的客户端刚写的值——实测清空过用户的项目列表、把 `locale` 写歪（issue #62/#63）。
+
+| 键 | 作用域 | 权威方 | 冲突规则 |
+|---|---|---|---|
+| `sessionQueue`、`sessionQueueHold.*` | 会话运行态 | Host | revision CAS；客户端不整包写回 |
+| `unreadSessionState`（`completedAt`／`readAt`） | 跨端 | 服务端写 `completedAt`（run 结束时），各端写自己的 `readAt` | 单调时间戳取并集，无 CAS；未读 ⟺ `completedAt > readAt` |
+| `sidebarUi.*`（项目列表/置顶/未分组/折叠/排序） | 跨端 | 客户端按字段写 | 字段级 patch；**同一数组两标签各加一项仍是 LWW**（服务端只做一层合并，不要当 bug 修） |
+| `pluginLocks.*`、`skillLocks.*` | 跨端 | 客户端按子键写 | 逐插件/技能子键，避免整 map 互相覆盖 |
+| `drafts.*` | 跨端 | 客户端按草稿键写 | 按 key + `updatedAt` LWW，附 30 天/30 条 GC |
+| `thinkingLevel.<provider:model>` | 跨端（账号级默认） | 客户端按子键写 | LWW；**会话内实际思考档以 JSONL 为准** |
+| `theme`、`locale`、`streamingEnter`、`autoUpdateCheck`、`queueFlushAsOne` | 跨端 | 客户端 | 标量 LWW |
+| `footerCollapsed`、`draftTargetCwd` | **本机** | 本机 localStorage | 不进跨端偏好（窗口/「我这次要在哪建会话」都是设备局部） |
+| `fileTree.<cwd>`（`expanded`／`scrollTop`） | **本机** | 本机 localStorage | 不进跨端偏好（像素位置与展开态因设备而异） |
+| 侧栏/右栏宽度、面板开关、终端键盘垫、widget 折叠、更新条 | **本机** | 本机 localStorage | 不进跨端偏好 |
+| `trust.json`、`pidance-ui-sessions.json`、`pidance-running-leases/` | 服务端 sidecar | 服务端 | 见下文；设备注册表读-改-写在文件锁内 |
+
+**优先级链**：Host 运行态 > 字段级 patch > 账号级标量 LWW > 本机 UI。不要为一致性引入 CRDT；键级补丁 + 可合并值（时间戳并集）已足够。
+
 安全策略及不提供文件沙箱的限制见 [安全说明](security.md)。
 
 ## 5. 源码导航
