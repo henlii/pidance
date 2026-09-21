@@ -156,15 +156,15 @@ test("SSR select：不再渲染右上「关闭」（它与取消等价，且取�
   assert.ok(/aria-label="关闭"|aria-label="Close"/.test(input), "非 select 弹窗应保留「关闭」");
 });
 
-test("SSR：面板带展开/收回开关，初始为收回态", () => {
+test("SSR：面板带展开/收回开关，默认展开（可收回）", () => {
   const html = renderCard({
     request: request("select", { options: ["一"] }),
     onRespond: () => {},
   });
-  assert.match(html, /aria-expanded="false"/, "缺展开开关的初始态");
-  assert.ok(/aria-label="展开"|aria-label="Expand"/.test(html), "缺「展开」按钮");
-  assert.ok(!html.includes("extension-panel-shell--expanded"), "初始不应是展开态");
-  assert.ok(/aria-label="收回"|aria-label="Collapse"/.test(html) === false, "收回文案只在展开后出现");
+  assert.match(html, /aria-expanded="true"/, "缺展开开关的初始态");
+  assert.ok(/aria-label="收回"|aria-label="Collapse"/.test(html), "默认展开时应显示「收回」");
+  assert.ok(html.includes("extension-panel-shell--expanded"), "默认应为展开态（长提问默认能看全）");
+  assert.ok(!/aria-label="展开"/.test(html), "展开文案只在收回后出现");
 });
 
 test("CSS 契约：提问区可滚、展开态提高高度上限（含窄屏规则）", () => {

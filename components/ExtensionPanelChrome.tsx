@@ -24,8 +24,9 @@ export function ExtensionPanelChrome({
   const { t } = useI18n();
   const titleText = accessibilityLabel ?? (typeof title === "string" ? title : undefined);
   // 展开/收回：面板正文（提问与选项/预览）常常比默认高度长，窄屏下面板又会盖住大半个页面，
-  // 所以给一个显式的「占更多地方」开关。状态是每个面板自己的，不跨请求记忆。
-  const [expanded, setExpanded] = useState(false);
+  // 所以给一个显式的开关。**默认展开**——上限高不代表一定变高（高度仍由内容决定，短提问
+  // 不会因此占满屏），但长提问默认就能看全，用户嫌大再收回。状态是每个面板自己的，不跨请求记忆。
+  const [expanded, setExpanded] = useState(true);
   const className = [
     "extension-panel-shell",
     overlay ? "extension-panel-shell--overlay" : "",

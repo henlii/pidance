@@ -160,7 +160,7 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
    - 按钮按 `method` 固定：`select` 只有底部「取消」；`input`/`editor` 是「取消 + 提交」；`confirm` 是「取消 + 确认」。**`select` 不再渲染右上「关闭」**——它与「取消」发的是同一个 `cancelled` 响应（并且会中止这次执行），并排两个等价按钮只会让人以为「关闭」是温和的那个。
    - 「取消」的语义不止关窗：`hooks/useAgentSession.ts` 在 cancelled 之后若 agent 仍在跑会补发 `abort`（对齐 OpenChamber）。
    - **长提问可滚**：扩展经常把 preview / 说明折进 `title`，所以标题本身就是内容区（`.extension-panel-title`，`max-height: min(30vh, 240px); overflow-y: auto`）；正文（选项等）在 `.extension-panel-body` 里滚动。
-   - **展开/收回**：header 有「展开 / 收回」开关（`ExtensionPanelChrome` 的本地 state，不跨请求记忆）。展开同时抬高面板与提问区的上限（`.extension-panel-shell--expanded`，桌面 `min(78vh, 900px)` / 窄屏 `calc(100dvh - 96px - 安全区)`，提问区 60vh / 窄屏 56vh）——**只抬面板不抬提问区等于没解决「问题显示不全」**，这条改动两侧必须成对。
+   - **展开/收回，默认展开**：header 有「收回 / 展开」开关（`ExtensionPanelChrome` 的本地 state，不跨请求记忆，默认展开）。展开同时抬高面板与提问区的上限（`.extension-panel-shell--expanded`，桌面 `min(78vh, 900px)` / 窄屏 `calc(100dvh - 96px - 安全区)`，提问区 60vh / 窄屏 56vh）——**只抬面板不抬提问区等于没解决「问题显示不全」**，这条改动两侧必须成对。默认展开是安全的：`max-height` 只是上限，面板高度仍由内容决定，短提问不会因此占满屏。
    - 验收：`/tmp` 下的临时脚本 `extension-panel-readability.mjs`（CDP 拦截 `/state` 注入 `pendingExtensionRequests`，桌面 1280x900 + 窄屏 390x844 各 10 项）与单测 `components/ExtensionDialog.test.mjs` 的 CSS 契约。
 
 ---
