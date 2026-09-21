@@ -15,7 +15,7 @@ import type {
 import { preserveCustomRenderedLines } from "@/lib/custom-rendered-lines";
 import type { SessionActivity } from "@/lib/session-activity";
 import { isDefinitiveRejection, readAgentLiveFlag, sendAgentCommand } from "@/lib/agent-client";
-import { generateSubmissionId, isQueueablePromptReason, type PromptReason, type PromptReceipt, type QueueDispatchReceipt } from "@/lib/agent-commands";
+import { classifyPromptRejection, generateSubmissionId, isQueueablePromptReason, type PromptReason, type PromptReceipt, type QueueDispatchReceipt } from "@/lib/agent-commands";
 import { clearDraft, forgetDraftIfUnedited, getDraft, setDraft, type ChatDraft } from "@/lib/draft-store";
 import { getOrCreateBrowserSessionRuntimeRegistry, type RegistrySubscription } from "@/lib/browser-session-runtime-registry";
 import { createActivationRecovery } from "@/lib/activation-recovery";
@@ -2146,10 +2146,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sendStillCurrent = () => sendToken !== null && sameChatTargetToken(sendToken, currentTargetTokenRef.current);
     const failUnsent = (error?: string) => {
       if (!sendStillCurrent()) return false;
-      const locked = Boolean(error && error.includes("locked by another"));
+      // 与队列拒绝路径共用同一个归类器（一个概念一个写法）：服务端 409 的
+      // 「Session is locked by another Pidance process…」必须显示成 locked 文案，而不是
+      // 通用发送失败。**不能**再用本地子串判断 —— 那会漏掉同一类的其它措辞
+      //（例如 `running lease`），也会在 `lockedByOther` 还没刷新到客户端时误报。
+      const locked = classifyPromptRejection(error) === "locked";
       if (locked) setLockedByOther(true);
       addNotice({
         type: "error",
+        // 文案与队列拒绝路径（queueRejectionMessage 的 locked 分支）同一条 key，不新增 key；
+        // 直接取 t() 而不是调 queueRejectionMessage：后者声明在本文件更靠后，放进依赖数组会
+        // 在渲染时踩 TDZ，而它的文案只依赖 t（已在依赖里）。
         message: locked
           ? t("chat_sessionLocked")
           : (error && error !== "rejected" ? error : t("chat_sendFailed")),
@@ -2267,10 +2274,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       {
         const message = e instanceof Error ? e.message : String(e);
-        if (message.includes("locked by another")) setLockedByOther(true);
+        // 与其它发送失败路径共用归类器（#27）：对端持写租约的 409 必须显示 locked 文案。
+        const locked = classifyPromptRejection(message) === "locked";
+        if (locked) setLockedByOther(true);
         addNotice({
           type: "error",
-          message: message.includes("locked by another") ? t("chat_sessionLocked") : message,
+          message: locked ? t("chat_sessionLocked") : message,
         });
       }
       if (sendStillCurrent()) setAgentPhase(null);
@@ -3315,7 +3324,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     clearLiveActivities();
   }, [session?.id, newSessionCwd, commitExtensionUiState, extensionUiStateRef, clearLiveActivities]);
 
-  // 切离会话：不主动销毁 live host，交给 10 分钟 idle 自动释放（切回仍热启动）。
+  // 切离会话：不主动销毁 live host —— 正常 run 在 agent_settled 后已立即 dispose；
+  // 只有「起过但从未跑过 run」的 startup host 才靠 idle 定时器回收（默认 30s；有订阅者时不排）。
   // 仅取消上一会话的后台 wake，避免串台写 systemPrompt。
   const previousLiveSessionIdRef = useRef<string | null>(null);
   useEffect(() => {
