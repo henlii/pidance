@@ -453,6 +453,8 @@ test("用例11：添加空项目 → 侧栏显示并可新建会话（项目独�
   // （issue #62：用例结束只删目录，不摘列表，实测 11 → 12 条）。
   const prefsBefore = await (await fetch(`${URL_BASE}/api/preferences`, { headers: AUTH_HEADER })).json();
   const rootsBefore = prefsBefore?.prefs?.sidebarUi?.projectRoots ?? null;
+  // 建会话会把「上次新会话项目」写成这个临时目录，跑完必须还回去（#62：QA 不得留痕）
+  const draftBefore = prefsBefore?.prefs?.draftTargetCwd ?? null;
   try {
     // 打开添加项目弹窗
     await ab(["open", URL_BASE, "--session", SESSION], { json: false }).catch(() => {});
@@ -489,14 +491,17 @@ test("用例11：添加空项目 → 侧栏显示并可新建会话（项目独�
     assert.ok(text.includes(L.noSessionsYet) || text.includes(L.newSession), "空项目缺少新建会话入口");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
-    if (rootsBefore !== null) {
-      const res = await fetch(`${URL_BASE}/api/preferences`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", ...AUTH_HEADER },
-        body: JSON.stringify({ prefs: { sidebarUi: { projectRoots: rootsBefore } } }),
-      }).catch(() => null);
-      assert.ok(res?.ok, `还原共享项目列表失败（HTTP ${res?.status ?? "n/a"}）`);
-    }
+    const restore = await fetch(`${URL_BASE}/api/preferences`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...AUTH_HEADER },
+      body: JSON.stringify({
+        prefs: {
+          ...(rootsBefore !== null ? { sidebarUi: { projectRoots: rootsBefore } } : {}),
+          draftTargetCwd: draftBefore,
+        },
+      }),
+    }).catch(() => null);
+    assert.ok(restore?.ok, `还原共享偏好失败（HTTP ${restore?.status ?? "n/a"}）`);
   }
 });
 
@@ -740,6 +745,8 @@ test("A1/A2/A3/D6：运行中会话的列表运行态与时长、硬刷新恢复
   // A3「输入文字后停止消失」、D6「队列消息延迟显示」各自落成可重复的无头断言。
   // 一条真实 run（bash sleep）覆盖四项：不做真实模型回合以外的注入，也不 mock 应用代码。
   let createdId = null;
+  // 本用例在仓库目录建会话 → 会把「上次新会话项目」改掉，跑完还回去（#62）
+  const draftBeforeA1 = (await (await fetch(`${URL_BASE}/api/preferences`, { headers: AUTH_HEADER })).json())?.prefs?.draftTargetCwd ?? null;
   const MARK = "回归入队标记A1A3D6";
   // UI 文案随 locale 变（QA 浏览器可能是 en）：断言用的文案在**页面打开之后**由页面自身语言推出，
   // 否则「中文 profile 下通过、英文 profile 下永远匹配不到」——这不是产品缺陷，是断言脆弱。
@@ -923,6 +930,12 @@ test("A1/A2/A3/D6：运行中会话的列表运行态与时长、硬刷新恢复
         await new Promise((r) => setTimeout(r, 1000));
       }
     }
+    // 共享偏好：本用例建过会话，会把「上次新会话项目」改掉，跑完还回去（#62）
+    await fetch(`${URL_BASE}/api/preferences`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...AUTH_HEADER },
+      body: JSON.stringify({ prefs: { draftTargetCwd: draftBeforeA1 } }),
+    }).catch(() => {});
   }
 });
 
