@@ -41,6 +41,14 @@ import {
   type SidebarPreferences,
 } from "@/lib/ui-preferences";
 import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
+
+/**
+ * 会话列表请求的超时（#67）：超过就当作一次失败（走 error + 有界重试），
+ * 而不是把侧栏永远留在「Loading…」。
+ */
+const SESSION_LIST_TIMEOUT_MS = 10_000;
+const SESSION_LIST_MAX_RETRIES = 2;
+const SESSION_LIST_RETRY_DELAY_MS = 2_000;
 import { refreshSubagentActivity, useSubagentActivity } from "@/hooks/useSubagentActivity";
 import { createActivationRecovery } from "@/lib/activation-recovery";
 import { getServerPref, isServerPrefsLoaded, sendPrefOps, setServerPref, useServerPreferences } from "@/lib/server-preferences";
@@ -282,6 +290,21 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // 跨刷新偏好：显示模式 + 项目折叠集合（独立 seam）
   const [prefs, setPrefs] = useState<SidebarPreferences>(() => loadSidebarPreferences());
   /**
+   * 会话列表请求的超时与重试（#67）。
+   *
+   * 为什么必须有：列表请求卡住时（浏览器同源连接被多条 SSE 占满、响应迟到），而世代守卫又把
+   * **较早的那次响应**丢弃，侧栏就会永远停在「Loading… / No sessions yet」——不报错、不重试，
+   * 用户只能刷新页面（实测：`GET /api/sessions` 本身只要 10ms，但页面那次迟迟不返回）。
+   * 超时确保它不会永久停在加载态；有界重试让「连接腾出来之后」能自愈。
+   *
+   * 已知边界（审核记录）：若某个触发源在**不到 10s 的间隔内持续**让世代前进，每次超时的那次
+   * 都不是最新世代、会被守卫丢弃（既不判错也不排重试），理论上仍可能一直 loading。实际触发源
+   * （session 新建/删除、agent_end、切回前台、SSE 新 running、subagent 计划）都不是这种节奏；
+   * 真要根治应把列表请求串行/合并（另开）。
+   */
+  const sessionListRetryRef = useRef(0);
+  const sessionListRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
    * 可否把侧栏偏好写回服务端。共享偏好里的 sidebarUi 是跨端数据，而客户端的这份可能
    * 还空着（全新浏览器、清过缓存）或还没从服务端水合：此时写回就等于用空列表覆盖别人
    * 的项目列表（#63 实测）。所以「本地本来就有持久化偏好」或「已经从服务端水合过」
@@ -430,7 +453,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }
     catalogStore.beginListLoad();
     try {
-      const res = await fetch("/api/sessions");
+      const res = await fetch("/api/sessions", { signal: AbortSignal.timeout(SESSION_LIST_TIMEOUT_MS) });
       if (!mountedRef.current || !shouldApplySessionListResponse(gen, sessionListFetchGenRef.current)) return;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[]; runningStartedAt?: Record<string, number>; archivedSessions?: SessionInfo[]; archivedCount?: number };
@@ -445,6 +468,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         now: Date.now(),
       });
       saveCachedSessionList(data.sessions);
+      // 成功即收尾：清掉可能还挂着的重试定时器（否则成功之后还会空打一次请求）
+      sessionListRetryRef.current = 0;
+      if (sessionListRetryTimerRef.current) {
+        clearTimeout(sessionListRetryTimerRef.current);
+        sessionListRetryTimerRef.current = null;
+      }
       if (!showLoading) {
         setSessionRefreshDone(true);
         if (sessionRefreshTimerRef.current) clearTimeout(sessionRefreshTimerRef.current);
@@ -454,9 +483,22 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       }
     } catch (e) {
       if (!mountedRef.current || !shouldApplySessionListResponse(gen, sessionListFetchGenRef.current)) return;
+      // **先重试，用尽重试次数才判死**（#67 审核结论）：`applyListError` 会把
+      // `serverListLoaded` 置真 —— 恢复路由会立刻把「找不到会话」定案（聊天区进 error 终态、
+      // `?session=` 不再被选中），而这时其实只差一次重试。中间失败只排重试、保持加载态。
+      if (sessionListRetryRef.current < SESSION_LIST_MAX_RETRIES) {
+        const attempt = sessionListRetryRef.current + 1;
+        sessionListRetryRef.current = attempt;
+        if (sessionListRetryTimerRef.current) clearTimeout(sessionListRetryTimerRef.current);
+        sessionListRetryTimerRef.current = setTimeout(() => {
+          sessionListRetryTimerRef.current = null;
+          if (mountedRef.current) void loadSessionsRef.current(false);
+        }, SESSION_LIST_RETRY_DELAY_MS * attempt);
+        return;
+      }
+      // 重试都用完了：这才算「完整列表已判定」，否则 URL 恢复会永远停在等待态
+      // （聊天区既不恢复也不显示占位）。用户仍可刷新，且下一次激活会重新拉。
       catalogStore.applyListError(String(e));
-      // 服务器列表获取失败（网络/认证）：也视为“完整列表已判定”，
-      // 否则 URL 恢复会永远停留在等待态，聊天区既不恢复也不显示占位。
     }
   }, [catalogStore, serverListLoaded, serverSessionsRef]);
   // loadSessions 的身份会随 catalog 状态（serverListLoaded）变化，若把它列为依赖，
@@ -675,6 +717,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   useEffect(() => () => {
     mountedRef.current = false;
+    if (sessionListRetryTimerRef.current) clearTimeout(sessionListRetryTimerRef.current);
   }, []);
 
   /** 项目 = 目录：选中 cwd 就是项目根，identity 由 store 维持二者相等。 */
