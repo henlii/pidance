@@ -9,6 +9,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { mergeUnreadSessionState, parseUnreadSessionState } from "./unread-sessions-storage";
+import { subscribeAppEvents } from "./app-events-stream";
 
 export type ServerPrefs = Record<string, unknown>;
 
@@ -242,6 +243,35 @@ export function getServerPref<T = unknown>(key: string): T | undefined {
   return (target ?? undefined) as T | undefined;
 }
 
+/**
+ * 发送**命令**（#66）：集合类键用 add/remove/set，让服务端在文件锁内施加到**当前**内容上。
+ *
+ * 为什么不用 patch：patch 是整值语义（`projectRoots: [...]`），两个客户端各自基于自己的快照
+ * 加一项时，后写者会丢掉前者的项（服务端只做一层合并、数组整体替换）。命令表达意图，
+ * 所以并发加项不会互相覆盖。
+ *
+ * 成功后把响应里的 `changed` 立刻应用到本地快照（广播到达前的本地确认）；服务端的广播随后
+ * 以同样的值到达，天然幂等。
+ */
+export function sendPrefOps(
+  ops: readonly { key: string; op: "add" | "remove" | "set"; value?: unknown }[],
+): Promise<void> {
+  return fetch("/api/preferences", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ops }),
+  })
+    .then(async (res) => {
+      if (!res.ok) return;
+      const body = (await res.json().catch(() => null)) as { changed?: Record<string, unknown>; revision?: number } | null;
+      if (body?.changed) applyPrefChanges(body.changed);
+      if (typeof body?.revision === "number") lastSeenRevision = body.revision;
+    })
+    .catch((err) => {
+      console.error("[pidance] failed to send preference ops:", err);
+    });
+}
+
 /** 强制立即同步（页面隐藏/卸载时调用可减少丢失窗口）。 */
 export function flushServerPrefs(): void {
   // 有计时器就取消它，但**无论有没有计时器都要发**：上一次 PUT 失败时计时器已被清，
@@ -339,6 +369,10 @@ export function createActivationSyncController(deps: {
   isVisible: () => boolean;
   syncNow: () => void;
   flushNow: () => void;
+  /** 首个订阅者建立广播连接（#66，SSE）；缺省不动。 */
+  onFirstSubscriber?: () => void;
+  /** 最后一个订阅者退订时关闭广播连接；缺省不动。 */
+  onLastSubscriber?: () => void;
 }): ActivationSyncController {
   const onActivate = (): void => {
     if (!deps.isVisible()) return;
@@ -366,13 +400,19 @@ export function createActivationSyncController(deps: {
   return {
     retain() {
       count += 1;
-      if (count === 1) attach();
+      if (count === 1) {
+        attach();
+        deps.onFirstSubscriber?.();
+      }
       let released = false;
       return () => {
         if (released) return;
         released = true;
         count = Math.max(0, count - 1);
-        if (count === 0) detach();
+        if (count === 0) {
+          detach();
+          deps.onLastSubscriber?.();
+        }
       };
     },
     isAttached: () => attached,
@@ -412,6 +452,67 @@ export function syncServerPrefsFromServer(): Promise<void> {
   return syncPromise;
 }
 
+/** SSE 事件载荷（#66）：`hello` 报当前 (bootId, revision)，`prefs` 带本次变更。 */
+interface PrefsEventPayload {
+  type?: string;
+  bootId?: string;
+  revision?: number;
+  changed?: Record<string, unknown>;
+}
+
+/** 已应用到的广播版本（#66 对账：只应用更新的版本）。 */
+let lastSeenRevision = -1;
+let lastSeenBootId: string | null = null;
+let unsubscribePrefsEvents: (() => void) | null = null;
+
+/** 把广播/命令回执带来的变更写进内存快照；未 flush 的本地改动优先（别被广播盖掉）。 */
+function applyPrefChanges(changed: Record<string, unknown>): void {
+  const local = singletonPrefs;
+  const next: ServerPrefs = { ...(local ?? {}) };
+  for (const [path, value] of Object.entries(changed)) {
+    setPatchValue(next, path, value ?? null);
+  }
+  for (const path of new Set([...dirtyPaths].map(effectiveDirtyPath))) {
+    setPatchValue(next, path, (local ? getByDottedPath(local, path) : undefined) ?? null);
+  }
+  singletonPrefs = next;
+  notify();
+}
+
+/**
+ * 订阅偏好变更广播（#66，同后端进程内的 SSE）。
+ *
+ * - 只应用比自己见过的更新的 revision；
+ * - `bootId` 变化说明后端重启过（revision 从头开始）→ 先全量拉一次，避免因版本号回退而
+ *   忽略后续广播；
+ * - 断线/后台期间的变化由既有的「切回前台拉一次」兜底，所以这里不做重连补偿。
+ */
+function startPrefsEventStream(): void {
+  if (unsubscribePrefsEvents) return;
+  // 走**应用级共用流**（#66）：偏好与运行集共用一条 SSE，见 lib/app-events-stream.ts。
+  unsubscribePrefsEvents = subscribeAppEvents((raw) => {
+    const payload = raw as PrefsEventPayload | null;
+    if (!payload || payload.type !== "prefs") return;
+    const bootChanged = typeof payload.bootId === "string" && payload.bootId !== lastSeenBootId;
+    if (bootChanged) {
+      // 后端重启过：revision 从头开始，先全量拉一次补齐断线期间的变化，并把版本对齐。
+      lastSeenBootId = payload.bootId ?? null;
+      void syncServerPrefsFromServer();
+      // **不 return**：sync 可能复用一个已在途的请求（拿不到这次变更），所以本次载荷照常应用。
+    }
+    if (typeof payload.revision === "number") {
+      if (payload.revision <= lastSeenRevision) return;
+      lastSeenRevision = payload.revision;
+    }
+    if (payload.changed) applyPrefChanges(payload.changed);
+  });
+}
+
+function stopPrefsEventStream(): void {
+  unsubscribePrefsEvents?.();
+  unsubscribePrefsEvents = null;
+}
+
 /** 浏览器侧的激活同步单例（懒建：只在有订阅者时触碰 window/document）。 */
 let activationSync: ActivationSyncController | null = null;
 
@@ -426,6 +527,8 @@ function getActivationSync(): ActivationSyncController | null {
         void syncServerPrefsFromServer();
       },
       flushNow: flushServerPrefs,
+      onFirstSubscriber: startPrefsEventStream,
+      onLastSubscriber: stopPrefsEventStream,
     });
   }
   return activationSync;

@@ -67,6 +67,16 @@ function latestModified(sessions: SessionInfo[]): string {
  * 不在项目列表内的会话一律不在这里出现：它们由 buildUngroupedTree 归入未分组区
  * （选中但未加入列表的目录也不再造空项目行——它的会话现在有归宿，不必靠临时行留住）。
  */
+/** 侧栏里需要「命令语义」写入的集合字段（#66）：整值回写会丢并发加项。 */
+export const SIDEBAR_COLLECTION_FIELDS: ReadonlySet<string> = new Set([
+  "projectRoots",
+  "pinnedSessionIds",
+  "ungroupedSessionIds",
+  "collapsedProjectRoots",
+]);
+
+export type PrefOp = { key: string; op: "add" | "remove" | "set"; value?: unknown };
+
 export function buildSidebarTree(
   sessions: SessionInfo[],
   options: BuildSidebarTreeOptions = {},

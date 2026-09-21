@@ -20,6 +20,8 @@ import {
   filterSidebarTree,
   locateSessionInSidebarTree,
   locateSessionInUngroupedTree,
+  SIDEBAR_COLLECTION_FIELDS,
+  type PrefOp,
   moveProjectInOrder,
   pickProjectRootAfterClose,
   projectHasRunningSession,
@@ -41,7 +43,7 @@ import {
 import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
 import { refreshSubagentActivity, useSubagentActivity } from "@/hooks/useSubagentActivity";
 import { createActivationRecovery } from "@/lib/activation-recovery";
-import { getServerPref, isServerPrefsLoaded, setServerPref, useServerPreferences } from "@/lib/server-preferences";
+import { getServerPref, isServerPrefsLoaded, sendPrefOps, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import {
   bumpGroupVisibleCount,
   derivePinnedSessions,
@@ -339,10 +341,30 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         if (serverWriteReadyRef.current) {
           const before = sidebarUiFromPrefs(prev) as Record<string, unknown>;
           const after = sidebarUiFromPrefs(stored) as Record<string, unknown>;
+          const ops: PrefOp[] = [];
           for (const field of Object.keys(after)) {
             if (JSON.stringify(before[field]) === JSON.stringify(after[field])) continue;
+            if (field === "projectOrder") {
+              // 顺序是「位置语义」，整段替换才是对的
+              ops.push({ key: `sidebarUi.${field}`, op: "set", value: after[field] });
+              continue;
+            }
+            if (SIDEBAR_COLLECTION_FIELDS.has(field)) {
+              // 集合类键发**命令**（#66）：服务端把「加一项/删一项」施加到当前内容上，
+              // 于是两个客户端各自加一项不会互相覆盖（整值 patch 会丢其中一项）。
+              const beforeList = Array.isArray(before[field]) ? (before[field] as string[]) : [];
+              const afterList = Array.isArray(after[field]) ? (after[field] as string[]) : [];
+              for (const value of afterList.filter((item) => !beforeList.includes(item))) {
+                ops.push({ key: `sidebarUi.${field}`, op: "add", value });
+              }
+              for (const value of beforeList.filter((item) => !afterList.includes(item))) {
+                ops.push({ key: `sidebarUi.${field}`, op: "remove", value });
+              }
+              continue;
+            }
             setServerPref(`sidebarUi.${field}`, after[field] ?? null);
           }
+          if (ops.length > 0) void sendPrefOps(ops);
         }
       }
       return next;

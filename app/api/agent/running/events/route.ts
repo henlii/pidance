@@ -1,4 +1,5 @@
 import { sessionService } from "@/lib/session-service";
+import { getPidancePrefsBus } from "@/lib/pidance-prefs-bus";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +33,17 @@ export async function GET(req: Request) {
         }
       });
 
+      // 偏好变更也走这条流（#66）：**不再单独开一条 SSE** —— 浏览器同源并发连接有限，
+      // 多一条长连接会在「刷新页面」这种旧连接未关的时刻把普通请求挤住（实测踩过）。
+      const prefsBus = getPidancePrefsBus();
+      const unsubscribePrefs = prefsBus.subscribe((change) => {
+        try {
+          encode({ type: "prefs", ...change });
+        } catch {
+          /* controller already closed */
+        }
+      });
+
       encodeRunning(sessionService.getRunningIds());
 
       // Heartbeat to keep the connection alive through proxies/timeouts.
@@ -46,6 +58,7 @@ export async function GET(req: Request) {
       const cleanup = () => {
         clearInterval(heartbeat);
         unsubscribe();
+        unsubscribePrefs();
         try { controller.close(); } catch { /* already closed */ }
       };
 

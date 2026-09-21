@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "./pi-paths";
+import { applyPrefOps, type PidancePrefOp } from "./pidance-prefs-ops";
 
 export type PidancePrefs = Record<string, unknown>;
 
@@ -210,5 +211,74 @@ export function mergeAndWritePidancePrefs(
     const merged = mergePidancePrefs(current, patch);
     writePidancePrefsUnlocked(merged, agentDir);
     return merged;
+  });
+}
+
+/**
+ * 计算一次 patch 实际改动的点路径 → 变更后的值（供广播用，见 lib/pidance-prefs-bus.ts）。
+ *
+ * 粒度与合并语义对齐：patch 里的顶层键若是普通对象、且原值也是普通对象，就按**子键**逐个
+ * 比较（`sidebarUi.projectRoots`），否则整个顶层键算一处变更。这样客户端能按字段应用，
+ * 不必因为一个小改动重读整份偏好。
+ */
+export function diffPrefsPatch(
+  before: PidancePrefs,
+  patch: PidancePrefs,
+  after: PidancePrefs,
+): Record<string, unknown> {
+  const changed: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(patch)) {
+    const beforeValue = before[key];
+    const afterValue = after[key];
+    if (isPlainRecord(value) && isPlainRecord(beforeValue)) {
+      for (const subKey of Object.keys(value as PidancePrefs)) {
+        const path = `${key}.${subKey}`;
+        const beforeSub = (beforeValue as PidancePrefs)[subKey];
+        const afterSub = isPlainRecord(afterValue) ? (afterValue as PidancePrefs)[subKey] : undefined;
+        if (JSON.stringify(beforeSub) !== JSON.stringify(afterSub)) {
+          changed[path] = afterSub ?? null;
+        }
+      }
+      continue;
+    }
+    if (JSON.stringify(beforeValue) !== JSON.stringify(afterValue)) {
+      changed[key] = afterValue ?? null;
+    }
+  }
+  return changed;
+}
+
+/** API patch 的原子合并 + 返回实际变更（#66：变更用于广播）。 */
+export function mergeAndWritePidancePrefsWithDiff(
+  patch: PidancePrefs,
+  agentDir: string = getAgentDir(),
+): Record<string, unknown> {
+  return withPrefsLock(agentDir, () => {
+    const current = readPidancePrefs(agentDir);
+    const merged = mergePidancePrefs(current, patch);
+    const changed = diffPrefsPatch(current, patch, merged);
+    if (Object.keys(changed).length > 0) writePidancePrefsUnlocked(merged, agentDir);
+    return changed;
+  });
+}
+
+/**
+ * 命令语义的原子入口（#66）：在锁内把命令施加到**当前**文件内容上，并返回实际变更的键。
+ * 集合类键的并发加/删因此不会互相覆盖（整值 patch 会）。
+ */
+export function applyAndWritePidancePrefsOps(
+  ops: readonly PidancePrefOp[],
+  agentDir: string = getAgentDir(),
+): Record<string, unknown> {
+  return withPrefsLock(agentDir, () => {
+    const current = readPidancePrefs(agentDir);
+    const changedKeys = applyPrefOps(current, ops);
+    if (changedKeys.length === 0) return {};
+    writePidancePrefsUnlocked(current, agentDir);
+    const changed: Record<string, unknown> = {};
+    for (const key of changedKeys) {
+      changed[key] = getByDottedKey(current, key) ?? null;
+    }
+    return changed;
   });
 }

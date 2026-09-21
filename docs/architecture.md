@@ -118,7 +118,8 @@
 |---|---|---|---|
 | `sessionQueue`、`sessionQueueHold.*` | 会话运行态 | Host | revision CAS；客户端不整包写回 |
 | `unreadSessionState`（`completedAt`／`readAt`） | 跨端 | 服务端写 `completedAt`（run 结束时），各端写自己的 `readAt` | 单调时间戳取并集，无 CAS；未读 ⟺ `completedAt > readAt` |
-| `sidebarUi.*`（项目列表/置顶/未分组/折叠/排序） | 跨端 | 客户端按字段写 | 字段级 patch；**同一数组两标签各加一项仍是 LWW**（服务端只做一层合并，不要当 bug 修） |
+| `sidebarUi` 集合字段（`projectRoots`/`pinnedSessionIds`/`ungroupedSessionIds`/`collapsedProjectRoots`） | 跨端 | 服务端（锁内施命令） | **命令语义**：客户端发 `add`/`remove`（`op`），服务端在当前内容上施加 → 并发加项不会互相覆盖；`projectOrder` 用 `set`（顺序是位置语义） |
+| `sidebarUi` 标量字段（`displayMode`/`showRecentSessions`/`projectSort`/`projectAliases`…） | 跨端 | 客户端按字段写 | 字段级 patch（LWW）；服务端只做「顶层键 + 一层子键」合并，**不要用 patch 写集合**（数组整体替换会丢并发加项） |
 | `pluginLocks.*`、`skillLocks.*` | 跨端 | 客户端按子键写 | 逐插件/技能子键，避免整 map 互相覆盖 |
 | `drafts.*` | 跨端 | 客户端按草稿键写 | 按 key + `updatedAt` LWW，附 30 天/30 条 GC |
 | `thinkingLevel.<provider:model>` | 跨端（账号级默认） | 客户端按子键写 | LWW；**会话内实际思考档以 JSONL 为准** |
@@ -128,7 +129,21 @@
 | 侧栏/右栏宽度、面板开关、终端键盘垫、widget 折叠、更新条 | **本机** | 本机 localStorage | 不进跨端偏好 |
 | `trust.json`、`pidance-ui-sessions.json`、`pidance-running-leases/` | 服务端 sidecar | 服务端 | 见下文；设备注册表读-改-写在文件锁内 |
 
-**优先级链**：Host 运行态 > 字段级 patch > 账号级标量 LWW > 本机 UI。不要为一致性引入 CRDT；键级补丁 + 可合并值（时间戳并集）已足够。
+**优先级链**：Host 运行态 > 字段级 patch / 集合命令 > 账号级标量 LWW > 本机 UI。不要为一致性引入 CRDT；键级补丁 + 集合命令 + 可合并值（时间戳并集）已足够。
+
+### 偏好变更的实时同步（同后端内）
+
+- 写入成功后服务端**广播变更键**（`GET /api/preferences/events`，SSE；载荷只带本次变更的键与值），
+  同后端下的其它客户端亚秒级应用，不必等切回前台。
+- 广播带 `(bootId, revision)` 供对账：只应用更新的版本；`bootId` 变化（后端重启，revision 从头开始）
+  时先全量拉一次。**未 flush 的本地改动优先**，广播不得盖掉它。
+- 范围**只在同一后端进程内**：不做跨进程广播、不装 `fs.watch`（写文件的就是本进程）。手工编辑
+  文件或另一进程写入仍靠下一次 GET（加载 / 切回前台）。
+- **一个页面只有一条应用级 SSE**（`/api/agent/running/events`，见 `lib/app-events-stream.ts`）：
+  运行集与偏好变更都从它分发。浏览器对同一源（HTTP/1.1）只有 6 条并发连接，而重载页面时旧连接
+  尚未关闭、新连接就要建立 —— 再各开一条（偏好、文件监听…）会把 `/api/sessions/<id>/state`
+  这类普通请求挤在队里，于是「刷新后导入在跑的 run」失败（实测踩过：单独加偏好广播后 A2 稳定失败，
+  改回共用一条即恢复）。新增推送需求**沿用这条流**，不要新开端点。
 
 安全策略及不提供文件沙箱的限制见 [安全说明](security.md)。
 
