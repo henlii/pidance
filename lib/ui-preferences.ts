@@ -169,6 +169,19 @@ export const DEFAULT_SIDEBAR_PREFERENCES: SidebarPreferences = {
 
 export const STORAGE_KEY = "pidance:sidebar-preferences";
 
+/**
+ * 本地是否已经存过侧栏偏好。用于区分「老客户端（本地有列表，可以放心写服务端）」与
+ * 「全新/清过缓存的客户端（列表还空着，写服务端就会把别人的共享列表清空，见 #63）」。
+ */
+export function hasStoredSidebarPreferences(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(STORAGE_KEY) !== null;
+  } catch {
+    return false;
+  }
+}
+
 /** 可注入 storage，便于迁移单测。 */
 export type StorageLike = {
   getItem(key: string): string | null;

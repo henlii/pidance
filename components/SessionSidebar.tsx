@@ -29,6 +29,7 @@ import {
 } from "./session-sidebar-model";
 import {
   applySyncedSidebarUi,
+  hasStoredSidebarPreferences,
   loadSidebarPreferences,
   saveSidebarPreferences,
   sidebarUiFromPrefs,
@@ -277,6 +278,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [displayMenuOpen]);
   // 跨刷新偏好：显示模式 + 项目折叠集合（独立 seam）
   const [prefs, setPrefs] = useState<SidebarPreferences>(() => loadSidebarPreferences());
+  /**
+   * 可否把侧栏偏好写回服务端。共享偏好里的 sidebarUi 是跨端数据，而客户端的这份可能
+   * 还空着（全新浏览器、清过缓存）或还没从服务端水合：此时写回就等于用空列表覆盖别人
+   * 的项目列表（#63 实测）。所以「本地本来就有持久化偏好」或「已经从服务端水合过」
+   * 之前，只写 localStorage、不写服务端。
+   */
+  const serverWriteReadyRef = useRef<boolean>(hasStoredSidebarPreferences());
   // 每个项目的展开条数均为瞬时态，不写偏好。
   const [groupVisibleCounts, setGroupVisibleCounts] = useState<Record<string, number>>({});
   // 会话级 child 折叠：保持瞬时（沿用原行为）
@@ -322,7 +330,17 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         // 当前宽度，避免侧栏内存里的过期副本回写覆盖最近一次拖拽结果。
         const stored = { ...next, sidebarWidth: loadSidebarPreferences().sidebarWidth };
         saveSidebarPreferences(stored);
-        setServerPref("sidebarUi", sidebarUiFromPrefs(stored));
+        // **字段级写入**：只发本次真正变了的子键。写整份 sidebarUi 会用本地这份覆盖共享的
+        // 同名字段，而 projectRoots 之类是数组、服务端整值替换 —— 过期或空的一份就能把
+        // 用户的项目列表清掉（#63），也会把 locale 这类字段带歪（#62）。
+        if (serverWriteReadyRef.current) {
+          const before = sidebarUiFromPrefs(prev) as Record<string, unknown>;
+          const after = sidebarUiFromPrefs(stored) as Record<string, unknown>;
+          for (const field of Object.keys(after)) {
+            if (JSON.stringify(before[field]) === JSON.stringify(after[field])) continue;
+            setServerPref(`sidebarUi.${field}`, after[field] ?? null);
+          }
+        }
       }
       return next;
     });
@@ -348,6 +366,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       // projectRootsMigrated 不在同步载荷里，但它的变化要放行：否则「远端仍是旧模型」
       // 这条迁移信号会被当成无变化丢掉，项目区就永远等不到种子。
       const samePayload = JSON.stringify(sidebarUiFromPrefs(prev)) === JSON.stringify(sidebarUiFromPrefs(next));
+      // 服务端载荷到了：此后本地的列表就是「服务端的列表」，可以安全回写（见 #63）。
+      serverWriteReadyRef.current = true;
       if (samePayload && prev.projectRootsMigrated === next.projectRootsMigrated) {
         return prev;
       }

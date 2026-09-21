@@ -95,6 +95,63 @@ let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let syncPromise: Promise<void> | null = null;
 
 /**
+ * 尚未送达服务端的改动点路径（脏键）。
+ *
+ * 为什么需要它：偏好写入原本是**整包 PUT**（把整份内存快照发出去），而共享偏好里既有
+ * 「本机偏好」也有「跨端共享」的字段。一份过期的整包会把没改过的字段一起写回——实测把
+ * 用户的 `locale` 从 zh-CN 写成 en，以及把共享的项目列表清成 `[]`（见 issue #62 / #63）。
+ * 现在只发本次真正改动过的点路径，服务端一层深合并正好支持这个粒度。
+ */
+const dirtyPaths = new Set<string>();
+
+/**
+ * 脏路径的生效粒度：服务端 `mergePidancePrefs` 只做「顶层键 + 一层子键」的合并，
+ * 更深的路由会退化成整值替换并吃掉兄弟键，所以超过两段的路径收敛到其一级父键。
+ */
+function effectiveDirtyPath(path: string): string {
+  const parts = path.split(".");
+  return parts.length <= 2 ? path : `${parts[0]}.${parts[1]}`;
+}
+
+function getByDottedPath(prefs: ServerPrefs, path: string): unknown {
+  let node: unknown = prefs;
+  for (const part of path.split(".")) {
+    if (typeof node !== "object" || node === null || Array.isArray(node)) return undefined;
+    node = (node as Record<string, unknown>)[part];
+  }
+  return node;
+}
+
+/** 把「值」写进 patch 的嵌套位置；`null` 必须原样保留（服务端把 null 当墓碑删除）。 */
+function setPatchValue(patch: ServerPrefs, path: string, value: unknown): void {
+  const parts = path.split(".");
+  let node: ServerPrefs = patch;
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    const part = parts[i];
+    const next = node[part];
+    if (typeof next !== "object" || next === null || Array.isArray(next)) {
+      const created: ServerPrefs = {};
+      node[part] = created;
+      node = created;
+      continue;
+    }
+    node = next as ServerPrefs;
+  }
+  node[parts[parts.length - 1]] = value;
+}
+
+/** 由脏键构造「一层子对象」patch；`sessionQueue*` 是宿主独占键，永不回写。 */
+export function buildDirtyPrefPatch(prefs: ServerPrefs, paths: readonly string[]): ServerPrefs {
+  const patch: ServerPrefs = {};
+  for (const path of new Set(paths.map(effectiveDirtyPath))) {
+    const top = path.split(".")[0];
+    if (top === "sessionQueue" || top.startsWith("sessionQueue.")) continue;
+    setPatchValue(patch, path, getByDottedPath(prefs, path) ?? null);
+  }
+  return patch;
+}
+
+/**
  * 整包 PUT 的载荷：剥掉宿主持有的 `sessionQueue`。
  *
  * 本地快照可能停在投递前，而任何一次偏好写入（草稿/hold）都会带着整包快照回写；
@@ -110,18 +167,33 @@ function queueFreePrefsSnapshot(prefs: ServerPrefs): ServerPrefs {
   return body;
 }
 
+/** 发送累积的脏键；**成功才清**，失败保留等下一次（丢更新比多写一次严重得多）。 */
+async function sendDirtyPrefs(): Promise<void> {
+  if (dirtyPaths.size === 0) return;
+  const paths = [...dirtyPaths];
+  const patch = buildDirtyPrefPatch(readPrefs(), paths);
+  if (Object.keys(patch).length === 0) {
+    for (const path of paths) dirtyPaths.delete(path);
+    return;
+  }
+  try {
+    const res = await fetch("/api/preferences", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prefs: patch }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    for (const path of paths) dirtyPaths.delete(path);
+  } catch (err) {
+    console.error("[pidance] failed to save server preferences:", err);
+  }
+}
+
 function scheduleSave(): void {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    const prefs = queueFreePrefsSnapshot(readPrefs());
-    void fetch("/api/preferences", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prefs }),
-    }).catch((err) => {
-      console.error("[pidance] failed to save server preferences:", err);
-    });
+    void sendDirtyPrefs();
   }, SYNC_DEBOUNCE_MS);
 }
 
@@ -151,6 +223,7 @@ export function setServerPref(key: string, value: unknown): void {
   } else {
     target[last] = value;
   }
+  dirtyPaths.add(key);
   notify();
   scheduleSave();
 }
@@ -171,16 +244,13 @@ export function getServerPref<T = unknown>(key: string): T | undefined {
 
 /** 强制立即同步（页面隐藏/卸载时调用可减少丢失窗口）。 */
 export function flushServerPrefs(): void {
+  // 有计时器就取消它，但**无论有没有计时器都要发**：上一次 PUT 失败时计时器已被清，
+  // 此时脏键还在，不能在「没有待发计时器」时静默什么都不做。
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
-    const prefs = queueFreePrefsSnapshot(readPrefs());
-    void fetch("/api/preferences", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prefs }),
-    }).catch(() => undefined);
   }
+  void sendDirtyPrefs();
 }
 
 /** 收集对象深层所有值为 null 的点路径（如 drafts.abc → ["drafts.abc"]）。 */
@@ -324,7 +394,14 @@ export function syncServerPrefsFromServer(): Promise<void> {
   if (syncPromise) return syncPromise;
   syncPromise = fetchPrefs()
     .then((remote) => {
-      singletonPrefs = mergeSyncedServerPrefs(singletonPrefs, remote);
+      const before = singletonPrefs;
+      const merged = mergeSyncedServerPrefs(before, remote);
+      // 未 flush 的脏键以合并**前**的本地值为准：脏键已记、PUT 还在防抖里时切回前台，
+      // GET 会把本地刚改的值盖回旧值，随后按被盖过的内存发 patch —— 用户的改动就静默丢了。
+      for (const path of new Set([...dirtyPaths].map(effectiveDirtyPath))) {
+        setPatchValue(merged, path, (before ? getByDottedPath(before, path) : undefined) ?? null);
+      }
+      singletonPrefs = merged;
       singletonLoaded = true;
       notify();
     })
@@ -381,4 +458,13 @@ export function useServerPreferences(): ServerPrefs {
   }, []);
 
   return prefs;
+}
+
+/** 测试用：清空脏键集合与防抖计时器，避免用例之间互相影响。 */
+export function resetServerPrefsDirtyStateForTests(): void {
+  dirtyPaths.clear();
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
 }
