@@ -32,7 +32,67 @@ const exec = promisify(execFile);
 const URL_BASE = process.env.PIDANCE_TEST_URL ?? "http://127.0.0.1:31416";
 const PASSWORD = process.env.PIDANCE_TEST_PASSWORD ?? "";
 const AUTH_HEADER = PASSWORD ? { Authorization: `Basic ${Buffer.from(`pi:${PASSWORD}`).toString("base64")}` } : {};
-const SESSION = "pidance-regression";
+/**
+ * 当前用例的 agent-browser 会话名。**每条用例一个独立会话**（#64）：
+ * 共用会话会把 localStorage / cookie / 页面状态带到下一条（B4 会清 localStorage、用例11/12 会改
+ * 「上次新会话项目」与项目列表、displayMode 与折叠状态也会残留），而且 `open` 同一个 URL 并不会
+ * 真的重新加载 —— 结果就是「单跑都过、整跑每轮挂的不一样」。独立会话天然隔离，且每次都是冷加载。
+ */
+let SESSION = "pidance-regression";
+/** 上一条用例的会话名：开新用例时关掉它，避免同时挂着一堆 headless 浏览器。 */
+let previousSession = null;
+
+/**
+ * 轮询到页面里的表达式为真；超时用 `label` 失败（不吞掉断言，只是把「等」显式化）。
+ * 固定 sleep + 立刻断言在负载高时会把「还没渲染完」报成产品回归 —— 本套件踩过多次。
+ */
+async function waitForCondition(expression, label, { attempts = 20, stepMs = 500 } = {}) {
+  for (let i = 0; i < attempts; i += 1) {
+    let ok = false;
+    try {
+      ok = Boolean(await evalResult(`Boolean(${expression})`));
+    } catch {
+      ok = false;
+    }
+    if (ok) return true;
+    await new Promise((r) => setTimeout(r, stepMs));
+  }
+  assert.fail(label);
+}
+
+/** 轮询到主页外壳就绪（登录门 / 主页都算就绪，由各用例自己断言内容）。 */
+async function waitForShell({ attempts = 8, stepMs = 1500 } = {}) {
+  for (let i = 0; i < attempts; i += 1) {
+    let text = "";
+    try {
+      text = await snapshotText();
+    } catch {
+      text = "";
+    }
+    if (typeof text === "string" && /Pidance|添加项目|Add project|选择项目|Choose a project|密码|Password/.test(text)) return true;
+    await new Promise((r) => setTimeout(r, stepMs));
+  }
+  return false;
+}
+
+/**
+ * 用例入口：切到一个**独立**的 agent-browser 会话并把它带到「可开始操作」的状态。
+ * 统一设桌面视口（1280×720）——各用例需要的尺寸自己再设，否则会沿用浏览器默认（可能落到移动断点）。
+ */
+async function beginCase(label) {
+  if (previousSession && previousSession !== SESSION) {
+    await ab(["close", previousSession], { json: false }).catch(() => {});
+  }
+  SESSION = `pidance-regression-${label}`;
+  previousSession = SESSION;
+  // 清掉上一轮失败可能留下的同名会话，保证是全新实例（干净 localStorage/cookie）。
+  await ab(["close", SESSION], { json: false }).catch(() => {});
+  await ab(["open", URL_BASE, "--session", SESSION], { json: false }).catch(() => {});
+  await ensureAuthed();
+  await ab(["set", "viewport", "1280", "720", "--session", SESSION], { json: false }).catch(() => {});
+  const ready = await waitForShell();
+  assert.ok(ready, `用例前置失败：${SESSION} 打不开主页或外壳未就绪（URL=${URL_BASE}）`);
+}
 
 /**
  * 清掉某个会话在**共享未读时钟**里的条目（#65）：服务端会在 run 结束时记 completedAt、客户端
@@ -148,14 +208,12 @@ async function ensureAuthed() {
 let bootOk = false;
 
 before(async () => {
-  // 启动独立 session 打开主页（带 Basic Auth header）；首屏慢时重试。
-  await ab(["open", URL_BASE, "--session", SESSION], { json: false }).catch((e) => `ERR:${e.message}`);
-  await ensureAuthed();
-  bootOk = false;
-  for (let attempt = 0; attempt < 3 && !bootOk; attempt += 1) {
-    await new Promise((r) => setTimeout(r, 4000));
-    const text = await snapshotText();
-    bootOk = text.includes("Pidance") || text.includes("添加项目") || text.includes("选择项目");
+  // 服务可达性只在这里探一次（各用例自己 beginCase 开独立浏览器会话）。
+  try {
+    const res = await fetch(URL_BASE, { redirect: "manual" });
+    bootOk = res.status > 0;
+  } catch {
+    bootOk = false;
   }
 });
 
@@ -164,10 +222,12 @@ after(async () => {
 });
 
 test("前置：31416 服务可打开", async () => {
+  await beginCase("boot");
   assert.ok(bootOk, `主页未加载（URL=${URL_BASE}）。确认 31416 服务运行并已 local-deploy restart。`);
 });
 
 test("用例1：侧栏项目行点击可折叠/展开", async () => {
+  await beginCase("case1");
   const refs = await snapshotRefs();
   // 项目行是 generic clickable（name 常为空），折叠按钮更稳定：找「折叠」/「展开」按钮
   const collapseRef = Object.entries(refs).find(
@@ -195,6 +255,7 @@ test("用例1：侧栏项目行点击可折叠/展开", async () => {
 });
 
 test("用例2：会话 kebab 菜单可打开", async () => {
+  await beginCase("case2");
   // kebab 按钮 aria-label 均为「菜单」：项目行菜单（编辑项目/关闭项目）与
   // 会话行菜单（重命名/复制/导出/删除）共用文案。项目行按钮通常排在前面，
   // 逐个点击直到出现会话行菜单（最多 12 个，覆盖 8 个项目行 + 会话行）。
@@ -211,6 +272,7 @@ test("用例2：会话 kebab 菜单可打开", async () => {
 });
 
 test("用例3：打开会话并确认工具卡片渲染完整", async () => {
+  await beginCase("case3");
   const refs = await snapshotRefs();
   // 找一个会话行（generic clickable，含日期或条消息）
   const sessionRef = Object.entries(refs).find(
@@ -225,6 +287,7 @@ test("用例3：打开会话并确认工具卡片渲染完整", async () => {
 });
 
 test("用例4：硬刷新后页面仍可加载且不报错", async () => {
+  await beginCase("case4");
   // reload 会丢 Basic Auth header 落到登录页；用带认证的重新导航模拟硬刷新。
   await ab(["open", URL_BASE, "--session", SESSION], { json: false }).catch(() => {});
   await ensureAuthed();
@@ -234,6 +297,7 @@ test("用例4：硬刷新后页面仍可加载且不报错", async () => {
 });
 
 test("用例5：右栏 Git 更改面板可打开/关闭", async () => {
+  await beginCase("case5");
   const refs = await snapshotRefs();
   const gitRef = findButton(refs, "Git");
   if (!gitRef) return; // 面板入口不存在时跳过
@@ -248,6 +312,7 @@ test("用例5：右栏 Git 更改面板可打开/关闭", async () => {
 });
 
 test("用例6：搜索会话过滤", async () => {
+  await beginCase("case6");
   const refs = await snapshotRefs();
   const searchRef = findButton(refs, "搜索会话");
   if (!searchRef) return;
@@ -265,6 +330,7 @@ test("用例6：搜索会话过滤", async () => {
 });
 
 test("用例7：深色模式切换", async () => {
+  await beginCase("case7");
   const refs = await snapshotRefs();
   const toggleRef = Object.entries(refs).find(
     ([, info]) => info?.role === "button" && /深色|浅色/.test(info.name ?? ""),
@@ -277,6 +343,7 @@ test("用例7：深色模式切换", async () => {
 });
 
 test("用例8：新会话引导页可打开", async () => {
+  await beginCase("case8");
   const refs = await snapshotRefs();
   const newRef = Object.entries(refs).find(
     ([, info]) => info?.role === "button" && /新建会话/.test(info.name ?? ""),
@@ -290,6 +357,7 @@ test("用例8：新会话引导页可打开", async () => {
 });
 
 test("用例9：页面整体可交互（无渲染桥崩溃痕迹）", async () => {
+  await beginCase("case9");
   const res = await ab(["eval", "--json", "--session", SESSION, "document.title"], { json: false }).catch(() => "ERR");
   assert.ok(!res.startsWith("ERR"), `页面 eval 失败（渲染桥/JS 崩溃）: ${res}`);
   const text = await snapshotText("-i");
@@ -297,6 +365,7 @@ test("用例9：页面整体可交互（无渲染桥崩溃痕迹）", async () =
 });
 
 test("用例10：无认证访问受保护 API → 401（认证门禁）", async () => {
+  await beginCase("case10");
   // 服务端门禁：无认证请求 API 必须 401（浏览器 cookie 可能残留已登录态，
   // 页面登录门不作为本用例断言；API 401 是确定性边界）。
   const res = await fetch(`${URL_BASE}/api/runtime`, { redirect: "manual" });
@@ -310,6 +379,7 @@ test("用例10：无认证访问受保护 API → 401（认证门禁）", async 
 });
 
 test("A9：同一 ChatWindow 在真实 390px viewport 保持桌面最终 timeline 投影", async () => {
+  await beginCase("a9");
   await ab(["open", URL_BASE, "--session", SESSION], { json: false }).catch(() => {});
   await ensureAuthed();
   await new Promise((r) => setTimeout(r, 1800));
@@ -356,13 +426,21 @@ test("A9：同一 ChatWindow 在真实 390px viewport 保持桌面最终 timelin
 });
 
 test("A10：顶栏统计按钮只有一个 tooltip 源，且悬停期间文案跟随更新", async () => {
+  await beginCase("a10");
   await ab(["open", URL_BASE, "--session", SESSION], { json: false }).catch(() => {});
   await ensureAuthed();
-  await new Promise((r) => setTimeout(r, 1800));
+  // 等侧栏真的渲染出会话行再取 id：固定 sleep 在负载高时会取到 null（那不是产品问题）
+  await waitForCondition(
+    "document.querySelector('[data-session-id]') !== null",
+    "A10 前置：侧栏没有出现任何会话行",
+  );
   const sessionId = await evalResult("document.querySelector('[data-session-id]')?.getAttribute('data-session-id')");
   assert.ok(typeof sessionId === "string" && sessionId.length > 0, "A10 需要一个已有会话作为打开目标");
   await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(sessionId)}`, "--session", SESSION], { json: false });
-  await new Promise((r) => setTimeout(r, 2200));
+  await waitForCondition(
+    "document.querySelectorAll('[data-tooltip]').length > 0",
+    "A10 前置：页面里没有任何 data-tooltip 元素",
+  );
 
   // 原生 title 与 data-tooltip 同时存在 → 悬停出现两个气泡（回归：顶栏/侧栏/右栏 4 处）。
   const duplicates = await evalResult(
@@ -380,7 +458,10 @@ test("A10：顶栏统计按钮只有一个 tooltip 源，且悬停期间文案�
   assert.ok(attrs.aria, "顶栏统计缺少 aria-label");
 
   await evalResult("(() => { const btn = document.querySelector('.app-top-bar-stats'); btn.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); return true; })()");
-  await new Promise((r) => setTimeout(r, 300));
+  await waitForCondition(
+    "document.querySelector('.instant-tooltip-layer') !== null",
+    "悬停未显示自定义 tooltip（等不到 .instant-tooltip-layer）",
+  );
   const first = await evalResult(`(() => {
     const el = document.querySelector('.instant-tooltip-layer');
     return el ? { text: el.textContent, whiteSpace: getComputedStyle(el).whiteSpace } : null;
@@ -390,12 +471,17 @@ test("A10：顶栏统计按钮只有一个 tooltip 源，且悬停期间文案�
 
   // 悬停期间属性变化（上下文读数随运行更新）必须重读，不能停在打开时的旧文案。
   await evalResult("(() => { document.querySelector('.app-top-bar-stats').setAttribute('data-tooltip', 'live-update-probe'); return true; })()");
-  await new Promise((r) => setTimeout(r, 300));
+  // 文案更新是渲染后异步落地：等到它变成新值（断言本身不变，只是把等待显式化）
+  await waitForCondition(
+    "document.querySelector('.instant-tooltip-layer')?.textContent === 'live-update-probe'",
+    "tooltip 未跟随 data-tooltip 更新",
+  );
   const second = await evalResult("document.querySelector('.instant-tooltip-layer')?.textContent ?? null");
   assert.equal(second, "live-update-probe", "tooltip 未跟随 data-tooltip 更新");
 });
 
 test("A12：对端 writer 租约 → 锁定条出现并在释放后消失", { timeout: 120_000 }, async (t) => {
+  await beginCase("a12");
   // 专用会话 + 一个活着的 sleeper 进程持有 running 租约（模拟另一个 Pidance 进程
   // 正在写同一 JSONL）。租约目录是 31415/31416 共享的 agentDir。
   const fs = await import("node:fs");
@@ -432,13 +518,21 @@ test("A12：对端 writer 租约 → 锁定条出现并在释放后消失", { ti
     fs.writeFileSync(leasePath, `${JSON.stringify({ pid: sleeper.pid, sessionId: createdId, heartbeatAt: Date.now(), startedAt: Date.now() })}\n`);
 
     await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(createdId)}`, "--session", SESSION], { json: false });
+    // 锁定条由客户端按 /state 的 lockedByOther 渲染（挂载一次 + 短轮询）：等待窗口要覆盖冷加载，
+    // 窗口太短会把「页面还没加载完」报成「没显示锁定条」。
     let lockedText = "";
-    for (let i = 0; i < 20 && !lockedText; i += 1) {
+    for (let i = 0; i < 40 && !lockedText; i += 1) {
       await new Promise((r) => setTimeout(r, 700));
       const status = await evalResult("document.querySelector('[role=\"status\"][aria-label=\"另一个 Pidance 实例正在使用此会话\"]') ? document.body.innerText : ''");
       if (typeof status === "string" && status.includes("另一个 Pidance 实例正在使用此会话")) lockedText = status;
     }
-    assert.ok(lockedText, "对端持锁时未显示锁定条");
+    if (!lockedText) {
+      const state = await fetch(`${URL_BASE}/api/sessions/${encodeURIComponent(createdId)}/state`, { headers: AUTH_HEADER })
+        .then((r) => r.json())
+        .catch(() => null);
+      const leaseExists = fs.existsSync(leasePath);
+      assert.fail(`对端持锁时未显示锁定条（lease=${leaseExists} live=${state?.live} lockedByOther=${state?.lockedByOther}）`);
+    }
 
     // 释放（进程退出 + 租约文件删除）：锁定条应在短轮询窗口内消失。
     sleeper.kill("SIGKILL");
@@ -462,6 +556,7 @@ test("A12：对端 writer 租约 → 锁定条出现并在释放后消失", { ti
 });
 
 test("用例11：添加空项目 → 侧栏显示并可新建会话（项目独立于会话）", async () => {
+  await beginCase("case11");
   const dir = `/tmp/pidance-e2e-${Date.now()}`;
   const fs = await import("node:fs");
   fs.mkdirSync(dir, { recursive: true });
@@ -522,6 +617,7 @@ test("用例11：添加空项目 → 侧栏显示并可新建会话（项目独�
 });
 
 test("用例12：引导页项目下拉跟随侧栏「新建会话」目标", { timeout: 120_000 }, async (t) => {
+  await beginCase("case12");
   // issue 回归：停在引导页时点会话列表里其他项目的「新建会话」，项目下拉必须
   // 立刻切到该项目（引导页是条件渲染，同一实例内目标被外部改写）——而不是
   // 靠组件重挂载（下面用标记属性证明是同一 select 节点）。
@@ -649,6 +745,7 @@ test("用例12：引导页项目下拉跟随侧栏「新建会话」目标", { t
 });
 
 test("用例13：run 结束的权威快照回收乐观运行标记（侧栏不残留运行中）", { timeout: 180_000 }, async () => {
+  await beginCase("case13");
   // issue 回归：乐观 starting 标记由当前 chat 上报；chat 切走后 run 仍会结束，
   // 权威 running 快照不再含该 id → 标记必须回收，否则列表一直显示运行中。
   // 为使其可判定，先屏蔽侧栏的 running SSE，避免「含该 id 的快照」提前把标记消掉（那会
@@ -758,6 +855,7 @@ test("用例13：run 结束的权威快照回收乐观运行标记（侧栏不�
 });
 
 test("A1/A2/A3/D6：运行中会话的列表运行态与时长、硬刷新恢复、输入保持、队列即时显示", { timeout: 300_000 }, async () => {
+  await beginCase("a1");
   // #28 待办二：A1「回复后列表仍 running/时长增长」、A2「刷新后打开运行中会话卡死」、
   // A3「输入文字后停止消失」、D6「队列消息延迟显示」各自落成可重复的无头断言。
   // 一条真实 run（bash sleep）覆盖四项：不做真实模型回合以外的注入，也不 mock 应用代码。
@@ -855,14 +953,30 @@ test("A1/A2/A3/D6：运行中会话的列表运行态与时长、硬刷新恢复
     const beforeReload = await evalResult(chatProbe(L));
     assert.ok(beforeReload?.chat, "刷新前该会话的 chat 视图未挂载");
     await ab(["reload", "--session", SESSION], { json: false });
+    // 冷加载 + 导入在跑的 run 是**异步且分几步**（chat 先挂载，再导入 run 拿到停止入口）：
+    // 所以等待条件必须包含「停止入口出现」本身，否则会在中间态取样、把正常时序报成回归。
     let afterReload = null;
-    for (let i = 0; i < 40; i += 1) {
+    for (let i = 0; i < 60; i += 1) {
       await new Promise((r) => setTimeout(r, 500));
       afterReload = await evalResult(chatProbe(L));
-      if (afterReload?.chat && afterReload?.textarea) break;
+      if (afterReload?.chat && afterReload?.textarea && afterReload?.stop) break;
     }
     assert.ok(afterReload?.chat, "刷新后 chat 视图未挂载（A2 无法判定）");
-    assert.ok(afterReload?.stop, "刷新后运行中的会话没有停止入口（A2：未导入在跑的 run）");
+    if (!afterReload?.stop) {
+      // 失败时带上上下文（页面 URL、服务端是否仍在跑），便于区分「产品没导入」与「环境/时序」
+      const pageDiag = await evalResult("({ search: location.search, hasChat: !!document.querySelector('[data-pidance-chat]') })");
+      const runningDiag = await fetch(`${URL_BASE}/api/agent/running`, { headers: AUTH_HEADER }).then((r) => r.json()).catch(() => null);
+      const stateDiag = await fetch(`${URL_BASE}/api/sessions/${encodeURIComponent(createdId)}/state`, { headers: AUTH_HEADER }).then((r) => r.json()).catch(() => null);
+      assert.fail(
+        "刷新后运行中的会话没有停止入口（A2：未导入在跑的 run）diag="
+        + JSON.stringify({
+          ...pageDiag,
+          inRunningSet: (runningDiag?.runningSessionIds ?? []).includes(createdId),
+          activeRun: stateDiag?.activeRun ?? null,
+          streaming: stateDiag?.state?.isStreaming ?? null,
+        }),
+      );
+    }
 
     // ── A3：运行中输入文字不得把停止入口挤掉 ──
     const typed = await evalResult(`(() => {
@@ -958,6 +1072,7 @@ test("A1/A2/A3/D6：运行中会话的列表运行态与时长、硬刷新恢复
 });
 
 test("B4：未读时钟跨端（服务端记 completedAt、各端记 readAt，取并集判定未读）", { timeout: 300_000 }, async () => {
+  await beginCase("b4");
   // #28 待办二 B4 + #65：未读时钟**跨端** —— 服务端在 run 结束时记 completedAt，各端打开会话时
   // 记 readAt，未读 ⟺ completedAt > readAt。三层断言：
   //   1) 正例：run 完成后显示未读，且**服务端**记下了 completedAt（不依赖任何浏览器开着）；
@@ -1039,12 +1154,18 @@ test("B4：未读时钟跨端（服务端记 completedAt、各端记 readAt，�
     const listRes = await fetch(`${URL_BASE}/api/sessions`, { headers: AUTH_HEADER });
     const listBody = listRes.ok ? await listRes.json() : null;
     const items = Array.isArray(listBody) ? listBody : (listBody?.sessions ?? listBody?.data ?? []);
-    const other = items.map((item) => item?.id).find((id) => id && id !== createdId);
+    // 落点只用来「不选中测试会话」，但**必须是条小会话**：挑列表第一条会撞上几千条消息的
+    // 大会话，冷加载它会把页面卡在「Loading…」→ 侧栏一直不渲染会话行（实测踩过：3a/3b 的
+    // present 永远为 false）。按 messageCount 取最小的一条。
+    const other = items
+      .filter((item) => item?.id && item.id !== createdId && item.readOnly !== true)
+      .sort((a, b) => (a.messageCount ?? 0) - (b.messageCount ?? 0))[0]?.id;
     assert.ok(other, "列表里没有其它会话可作落点（无法构造「不选中测试会话」）");
 
     // ── 1) 本设备观察到完成 → 未读 ──
     let positive = null;
-    for (let i = 0; i < 60; i += 1) {
+    // 覆盖「模型回合 + sleep 15 + 落盘」的整个窗口：窗口太短会误报（断言不变，只是等得更久）
+    for (let i = 0; i < 120; i += 1) {
       await new Promise((r) => setTimeout(r, 500));
       positive = await evalResult(unreadProbe(createdId));
       if (positive?.badge) break;
@@ -1053,7 +1174,9 @@ test("B4：未读时钟跨端（服务端记 completedAt、各端记 readAt，�
     assert.ok(positive?.badge, "该会话完成后没有记为未读（时钟未生效：B4 前置不成立）");
     // #65：完成时刻由**服务端**记录 —— 这样即使当时没开任何浏览器，未读也是准的。
     let clockAfterRun = { completedAt: {}, readAt: {} };
-    for (let i = 0; i < 20; i += 1) {
+    // 服务端写 completedAt 在 run 离开运行集之后（实测 <1s），但整套连跑时事件循环很忙：
+    // 给足窗口，避免把「慢一拍」报成「没写」。
+    for (let i = 0; i < 60; i += 1) {
       clockAfterRun = await serverClock();
       if (clockAfterRun.completedAt?.[createdId]) break;
       await new Promise((r) => setTimeout(r, 500));
@@ -1065,7 +1188,7 @@ test("B4：未读时钟跨端（服务端记 completedAt、各端记 readAt，�
     // 已读的两处投影（徽标、本地存储）由不同 effect 落地，逐项轮询到位再断言。
     let afterOpen = null;
     let readMarked = false;
-    for (let i = 0; i < 40; i += 1) {
+    for (let i = 0; i < 120; i += 1) {
       await new Promise((r) => setTimeout(r, 300));
       afterOpen = await evalResult(unreadProbe(createdId));
       readMarked = Boolean(afterOpen?.localRead);
@@ -1075,7 +1198,7 @@ test("B4：未读时钟跨端（服务端记 completedAt、各端记 readAt，�
     assert.equal(readMarked, true, `已读后本地缓存时钟里没有 readAt: ${JSON.stringify(afterOpen)}`);
     // #65 的关键：readAt 必须推给服务端，其它端才能看到「已读」
     let clockAfterRead = { completedAt: {}, readAt: {} };
-    for (let i = 0; i < 20; i += 1) {
+    for (let i = 0; i < 60; i += 1) {
       clockAfterRead = await serverClock();
       if (clockAfterRead.readAt?.[createdId]) break;
       await new Promise((r) => setTimeout(r, 500));
@@ -1112,13 +1235,14 @@ test("B4：未读时钟跨端（服务端记 completedAt、各端记 readAt，�
       // 必须停在不选中测试会话的落点：否则「当前会话立刻视为已读」会让断言空转。
       await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(other)}`, "--session", SESSION], { json: false });
       let fresh = null;
-      for (let i = 0; i < 40; i += 1) {
+      for (let i = 0; i < 60; i += 1) {
         await new Promise((r) => setTimeout(r, 500));
         fresh = await evalResult(unreadProbe(createdId));
         // 等待条件必须与「徽标」无关，否则就是在等自己想要的答案：
-        // 这里等的是「注入的时钟确实被客户端采纳了」（completedAt / readAt 落到本地时钟）。
+        // 这里等的是「会话行已渲染」+「注入的时钟确实被客户端采纳了」（completedAt/readAt 落到本地时钟）。
+        // 侧栏列表本身是异步加载的，早期取样会拿到 present=false（冷加载未完成，不是回归）。
         const applied = injected === "completed" ? fresh?.localCompleted : fresh?.localRead;
-        if (fresh?.lang === bogusLocale && applied) break;
+        if (fresh?.lang === bogusLocale && applied && fresh?.present) break;
       }
       assert.equal(fresh?.lang, bogusLocale, `${label}: 注入的服务端偏好没有生效（控制项失败，本步会空转）`);
       assert.equal(
@@ -1126,7 +1250,23 @@ test("B4：未读时钟跨端（服务端记 completedAt、各端记 readAt，�
         true,
         `${label}: 注入的未读时钟没有落到客户端（${injected}）`,
       );
-      assert.equal(fresh?.present, true, `${label}: 测试会话未出现在侧栏`);
+      if (!fresh?.present) {
+        const diag = await evalResult(`(() => ({
+          search: location.search,
+          rows: document.querySelectorAll('.sidebar-row').length,
+          sessionRows: document.querySelectorAll('[data-session-id]').length,
+          headers: [...document.querySelectorAll('.sidebar-row')].map((el) => (el.textContent || '').trim().slice(0, 18)).slice(0, 12),
+          hasSearchBox: !!document.querySelector('input[type=search], input[placeholder*="搜索"]'),
+          recentVisible: (document.body.innerText || '').includes('最近会话'),
+          err: (document.body.innerText || '').slice(0, 120),
+          apiCalls: performance.getEntriesByType('resource').filter((e) => e.name.includes('/api/')).map((e) => e.name.replace(location.origin, '') + ' ' + Math.round(e.duration) + 'ms').slice(-10),
+          savedList: (() => { try { const raw = localStorage.getItem('pidance.sessionList.v1'); if (!raw) return 'no-cache'; const parsed = JSON.parse(raw); const arr = Array.isArray(parsed) ? parsed : (parsed.sessions ?? []); return arr.length; } catch { return 'err'; } })(),
+          clientPrefs: (() => { try { const raw = localStorage.getItem('pidance:sidebar-preferences'); if (!raw) return 'no-prefs'; const j = JSON.parse(raw); return { roots: (j.projectRoots ?? []).length, showRecent: j.showRecentSessions, ungrouped: (j.ungroupedSessionIds ?? []).length }; } catch { return 'err'; } })(),
+          ungroupedHeader: [...document.querySelectorAll('.sidebar-row')].some((el) => (el.textContent || '').includes('未分组')),
+          loginForm: !!document.querySelector('input[type=password]'),
+        }))()`);
+        assert.fail(`${label}: 测试会话未出现在侧栏 diag=${JSON.stringify(diag)}`);
+      }
       // 控制项之二：被 mock 的 /api/preferences 确实被页面请求过
       const requests = await ab(["network", "requests", "--json", "--session", SESSION]);
       const list = requests?.data?.requests ?? requests?.data ?? [];
