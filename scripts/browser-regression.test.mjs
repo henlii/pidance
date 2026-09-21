@@ -81,6 +81,8 @@ async function waitForShell({ attempts = 8, stepMs = 1500 } = {}) {
  */
 async function beginCase(label) {
   if (previousSession && previousSession !== SESSION) {
+    // 先登出再关浏览器：登出会删掉该设备记录（#62），否则每次跑用例都留一条 10 年期记录
+    await logoutCurrentSession(previousSession);
     await ab(["close", previousSession], { json: false }).catch(() => {});
   }
   SESSION = `pidance-regression-${label}`;
@@ -193,11 +195,36 @@ function findButton(refs, keyword) {
 
 
 /** 页面内登录：检测到密码框则填入密码登录（真实用户路径，不依赖 header 注入）。 */
+/**
+ * 登录走页面表单（它带跳转，页面自然进入已登录状态；不额外加重载——本机负载已经很高）。
+ *
+ * 代价：表单默认「信任本设备」→ 会在 `~/.pi/agent/pidance-ui-sessions.json` 留一条**10 年期**
+ * 设备记录（永不过期，跑几轮就堆几百条，实测 386 条）。所以配套加了两处清理：
+ * `logoutCurrentSession()` 在**切走每条用例前**调一次登出（登出会删掉该设备记录），
+ * 以及 `after()` 里给最后一条收尾。见 #62。
+ */
+async function logoutCurrentSession(sessionName) {
+  if (!PASSWORD || !sessionName) return;
+  await ab([
+    "eval",
+    `(async () => (await fetch("/api/auth/ui-session", { method: "DELETE" })).status)()`,
+    "--session", sessionName,
+  ], { json: false }).catch(() => {});
+}
+
 async function ensureAuthed() {
   if (!PASSWORD) return;
   const refs = await snapshotRefs();
   const pwdRef = Object.entries(refs).find(([, i]) => i?.name === "密码")?.[0];
   if (!pwdRef) return; // 已认证
+  // 取消「信任本设备」（默认勾选）：勾上会登记 **10 年期**设备记录且永不过期，跑几轮套件就堆出
+  // 几百条脏数据（实测 386 条）。取消后只登记默认的 12 小时 TTL，天然可回收。见 #62。
+  await evalResult(`(() => {
+    const box = [...document.querySelectorAll('input[type=checkbox]')].find((el) => el.checked === true);
+    if (!box) return false;
+    box.click();
+    return true;
+  })()`);
   await ab(["fill", pwdRef, PASSWORD, "--session", SESSION], { json: false });
   const refs2 = await snapshotRefs();
   const loginRef = Object.entries(refs2).find(([, i]) => i?.role === "button" && i?.name === "登录")?.[0];
@@ -218,6 +245,7 @@ before(async () => {
 });
 
 after(async () => {
+  await logoutCurrentSession(SESSION);
   await ab(["close", "--all"], { json: false }).catch(() => {});
 });
 
