@@ -3,6 +3,7 @@
  * 主路径固定为同进程 SdkSessionHost。
  */
 import { cacheSessionPath, invalidateSessionListCache, resolveSessionPath } from "./session-reader";
+import { isPlaceholderSessionId } from "./session-id";
 import { openSessionView } from "./pi-session-io";
 import { getPidancePref, readPidancePrefs, updatePidancePref, type PidancePrefs } from "./pidance-prefs-file";
 import { hasQueuedFollowUp } from "./session-queue";
@@ -269,8 +270,9 @@ let lastRunningIds: string[] = [];
 /**
  * 新会话启动期的临时 key 前缀（真正 id 由 Pi 生成，见 session-service 的 startLockedSession）。
  * 它只用于启动锁，会随 rekey 从运行集消失 —— 那不是「会话跑完了」，所以不能给它记完成时刻。
+ * 常量本体在 `lib/session-id`（浏览器侧也要用，不能从服务端模块导入）。
  */
-export const PLACEHOLDER_SESSION_ID_PREFIX = "__new__";
+export { PLACEHOLDER_SESSION_ID_PREFIX, isPlaceholderSessionId } from "./session-id";
 const ownedRunningLeases = new Set<string>();
 let runningLeaseHeartbeat: ReturnType<typeof setInterval> | null = null;
 const RUNNING_LEASE_HEARTBEAT_MS = 8_000;
@@ -317,9 +319,7 @@ export function notifyRunningChange(): void {
   // 未读改跨端（#65）：run 结束由**服务端**记时刻，这样即使当时没有任何浏览器开着，
   // 未读也是准的；各端只负责写自己的 readAt（未读 ⟺ completedAt > readAt，两侧都是
   // 单调时间戳取并集，不需要 CAS）。写盘挪到事件回调之外，避免拖住运行集广播。
-  const finished = lastRunningIds.filter(
-    (id) => !ids.includes(id) && !id.startsWith(PLACEHOLDER_SESSION_ID_PREFIX),
-  );
+  const finished = lastRunningIds.filter((id) => !ids.includes(id) && !isPlaceholderSessionId(id));
   lastRunningIds = [...ids];
   if (finished.length > 0) {
     const at = new Date().toISOString();

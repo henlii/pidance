@@ -13,6 +13,7 @@ import { SessionInfoPanel } from "./SessionInfoPanel";
 import { SettingsView } from "./SettingsView";
 import { CommandPalette } from "./CommandPalette";
 import type { SettingsPageId } from "./settings-nav";
+import { useDesktopBridge } from "@/hooks/useDesktopBridge";
 import { AboutDialog } from "./AboutDialog";
 import { InstantTooltipHost } from "./InstantTooltipHost";
 import { UpdateBanner } from "./UpdateBanner";
@@ -159,6 +160,16 @@ function AppShellInner() {
   const [pendingHighlightId, setPendingHighlightId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPageId | null>(null);
+  // 桌面壳托盘里的「桌面版设置…」会发 desktop-settings:open（#51）：此前 Web 端没人订阅，
+  // 所以那个菜单项点了没反应。这里把窗口切到设置页的「桌面版」。
+  const desktopBridge = useDesktopBridge();
+  useEffect(() => {
+    if (!desktopBridge) return;
+    return desktopBridge.onOpenSettings(() => {
+      setSettingsInitialPage("desktop");
+      setSettingsOpen(true);
+    });
+  }, [desktopBridge]);
   /** Ctrl/Cmd+K 命令面板 */
   /** Ctrl/Cmd+K 命令面板 */
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -1122,7 +1133,12 @@ function AppShellInner() {
       <div style={{ padding: "6px 8px", flexShrink: 0, display: "flex", alignItems: "center", gap: 4 }}>
         <button
           type="button"
-          onClick={() => setSettingsOpen(true)}
+          onClick={() => {
+            // 初始页是**一次性意图**（托盘「桌面版设置…」/命令面板）：不清掉的话，
+            // 之后每次从侧栏打开设置都会被钉在上次那个页，覆盖「记住最近页」。
+            setSettingsInitialPage(null);
+            setSettingsOpen(true);
+          }}
           data-tooltip={t("app_settings")}
           aria-label={t("app_settings")}
           className="sidebar-icon-btn tooltip-up"
@@ -1546,6 +1562,7 @@ function AppShellInner() {
         sessionId={selectedSession?.id ?? null}
         onClose={() => {
           setSettingsOpen(false);
+          setSettingsInitialPage(null); // 一次性意图用完即清（见侧栏入口处的注释）
           setModelsRefreshKey((key) => key + 1);
         }}
         onModelsChanged={() => {

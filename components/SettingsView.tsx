@@ -16,6 +16,8 @@ import { getServerPref, setServerPref, useServerPreferences } from "@/lib/server
 import { useI18n, type Locale } from "@/lib/i18n";
 import type { TranslationKey } from "@/lib/locales/en";
 import { SettingsPageFooter } from "./SettingsPageFooter";
+import { DesktopSettingsPage } from "./DesktopSettingsPage";
+import { useDesktopBridge } from "@/hooks/useDesktopBridge";
 import { loadAutoUpdateCheck, saveAutoUpdateCheck } from "@/lib/ui-preferences";
 import {
   SETTINGS_PAGE_STORAGE_KEY,
@@ -58,7 +60,8 @@ function settingsPageLabelKey(id: SettingsPageId) {
       return "common_skills";
     case "plugins":
       return "common_plugins";
-      return "common_trust";
+    case "desktop":
+      return "common_desktop";
   }
 }
 
@@ -813,7 +816,12 @@ export function SettingsView({ cwd, sessionId, onClose, onModelsChanged, onAuthS
   }, [activePage]);
 
   const hasCwd = Boolean(cwd);
-  const pages = useMemo(() => getSettingsPages(hasCwd), [hasCwd]);
+  // 桌面版页只在桌面壳里出现（Web 上没有 preload 注入的桥，见 hooks/useDesktopBridge）。
+  const desktopBridge = useDesktopBridge();
+  const pages = useMemo(
+    () => getSettingsPages(hasCwd, { hasDesktop: Boolean(desktopBridge) }),
+    [hasCwd, desktopBridge],
+  );
   const activePageInfo = pages.find((page) => page.id === activePage) ?? pages[0];
 
   const selectPage = useCallback((page: SettingsPageId) => {
@@ -843,6 +851,9 @@ export function SettingsView({ cwd, sessionId, onClose, onModelsChanged, onAuthS
         return <SkillsConfig embedded globalOnly cwd={cwd!} onClose={onClose} />;
       case "plugins":
         return <PluginsConfig embedded cwd={cwd!} sessionId={sessionId} onClose={onClose} onReloaded={onPluginsReloaded} />;
+      case "desktop":
+        // 只有桌面壳里才会枚举到这一页，因此这里 bridge 必然存在。
+        return desktopBridge ? <DesktopSettingsPage bridge={desktopBridge} onClose={onClose} /> : null;
     }
   };
 

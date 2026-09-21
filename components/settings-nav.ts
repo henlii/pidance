@@ -4,7 +4,7 @@
  * 全部为纯函数，方便 node:test 定向覆盖。
  */
 
-export type SettingsPageId = "general" | "appearance" | "models" | "defaults" | "prompts" | "skills" | "plugins";
+export type SettingsPageId = "general" | "appearance" | "models" | "defaults" | "prompts" | "skills" | "plugins" | "desktop";
 
 export interface SettingsPageInfo {
   id: SettingsPageId;
@@ -17,8 +17,10 @@ export interface SettingsPageInfo {
   unavailableHint?: "skills" | "plugins";
 }
 
-// general / appearance / models / defaults / trust 无 cwd 也可看全局；skills/plugins 需要项目。
-const PAGE_ORDER: SettingsPageId[] = ["general", "appearance", "models", "defaults", "prompts", "skills", "plugins"];
+// general / appearance / models / defaults / trust 无 cwd 也可看全局；skills/plugins 需要项目；
+// desktop 只在桌面壳里存在（Web 上没有 window.pidanceDesktop）。
+const PAGE_ORDER: SettingsPageId[] = ["general", "appearance", "models", "defaults", "prompts", "skills", "plugins", "desktop"];
+const DESKTOP_ONLY_PAGES: ReadonlySet<SettingsPageId> = new Set(["desktop"]);
 
 /** 无 cwd 提示：保留导航项，内容区显示具体指引，不静默隐藏。 */
 const PAGE_NO_CWD_HINT: Partial<Record<SettingsPageId, "skills" | "plugins">> = { skills: "skills", plugins: "plugins" };
@@ -51,8 +53,12 @@ export function loadStoredSettingsPage(storage: StorageLike): SettingsPageId {
 }
 
 /** 页面清单：general/appearance/models/defaults/trust 无 cwd 可用；skills/plugins 无 cwd 时给出提示。 */
-export function getSettingsPages(hasCwd: boolean): SettingsPageInfo[] {
-  return PAGE_ORDER.map((id) => {
+export function getSettingsPages(
+  hasCwd: boolean,
+  options: { hasDesktop?: boolean } = {},
+): SettingsPageInfo[] {
+  const order = PAGE_ORDER.filter((id) => !DESKTOP_ONLY_PAGES.has(id) || options.hasDesktop === true);
+  return order.map((id) => {
     const requiresCwd = id === "skills" || id === "plugins";
     const available = !requiresCwd || hasCwd;
     return {

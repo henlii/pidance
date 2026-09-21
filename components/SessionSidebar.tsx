@@ -41,6 +41,9 @@ import {
   type SidebarPreferences,
 } from "@/lib/ui-preferences";
 import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
+import { shouldNotifyRunCompletion } from "@/lib/desktop-bridge";
+import { isPlaceholderSessionId } from "@/lib/session-id";
+import { useDesktopBridge } from "@/hooks/useDesktopBridge";
 
 /**
  * 会话列表请求的超时（#67）：超过就当作一次失败（走 error + 有界重试），
@@ -324,6 +327,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const prevSelectedScrollIdRef = useRef<string | null>(null);
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   const previousEffectiveRunningSessionIdsRef = useRef<Set<string>>(new Set());
+  /** 桌面壳桥（#51）：Web 上为 null，通知分支自然不生效。 */
+  const desktopBridge = useDesktopBridge();
   // SSE 或 /api/agent/running 一旦返回，旧 /api/sessions 快照不得再覆盖运行态。
   const runningSnapshotAuthoritativeRef = useRef(false);
   // 任一较新运行快照都会使在途 GET 失效；请求序号同时处理多个恢复请求乱序。
@@ -683,12 +688,40 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     if (sessionRefreshDone) refreshSubagentActivity();
   }, [sessionRefreshDone]);
   useEffect(() => {
+    // 桌面通知（#51）：**服务端 running 快照里消失**的会话算「跑完了」——与未读同一口径
+    // （不用本地 optimistic 状态，否则切走聊天会误报完成）。只在窗口不在前台时发，
+    // 且不发用户正在看的那个会话（见 lib/desktop-bridge 的判定）。
+    const finished = [...previousRunningSessionIdsRef.current].filter(
+      (id) => !runningSessionIds.has(id),
+    );
+    if (finished.length > 0) {
+      for (const id of finished) {
+        // 占位键（`__new__…`）会随 rekey 从运行集消失，那不是「会话跑完了」；
+        // 不跳过的话通知标题会显示成内部 id（实测踩过）。
+        if (isPlaceholderSessionId(id)) continue;
+        if (!shouldNotifyRunCompletion({
+          hidden: document.visibilityState === "hidden",
+          sessionId: id,
+          visibleSessionId: selectedSessionId,
+          // 主进程侧还会再查一次开关；这里默认放行，避免为了一个布尔多等一次 IPC。
+          notificationsEnabled: true,
+        })) continue;
+        const title = serverSessionsRef.current.find((s) => s.id === id)?.name
+          || serverSessionsRef.current.find((s) => s.id === id)?.firstMessage
+          || id;
+        try {
+          void desktopBridge?.notify(t("desktop_runFinishedTitle"), t("desktop_runFinishedBody", { title }));
+        } catch {
+          // 通知失败不该影响任何状态
+        }
+      }
+    }
     // 未读只由服务器 running 快照的真实移除生成（catalog store 内部按 epoch 处理）；
     // 切换聊天导致 optimistic running 消失时，服务端 host 仍可能在执行，不能把
     // 局部 UI 状态当成完成事件——store 的 applyRunningSnapshot 只认证 server 变化。
     previousRunningSessionIdsRef.current = new Set(runningSessionIds);
     previousEffectiveRunningSessionIdsRef.current = new Set(effectiveRunningSessionIds);
-  }, [effectiveRunningSessionIds, runningSessionIds]);
+  }, [desktopBridge, effectiveRunningSessionIds, runningSessionIds, selectedSessionId, t]);
 
   // SSE 确认 running（prompt 已接受并 invalidate 列表缓存）后再拉服务端列表对齐。
   const prevSseRunningRef = useRef<Set<string>>(new Set());

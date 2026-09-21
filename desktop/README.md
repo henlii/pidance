@@ -125,7 +125,9 @@ CI（[`.github/workflows/desktop-win.yml`](../.github/workflows/desktop-win.yml)
 
 托盘菜单提供：显示窗口、开机启动、关闭窗口时最小化到托盘、桌面通知、检查更新、关于、退出。
 设置保存在 Electron `userData`（`desktop-settings.json`），不写入 Web/Pidance 配置文件。
-Web 端目前没有消费这些 IPC 的设置页；壳自身的行为（托盘、开机启动、关窗最小化）不受影响。
+Web 端**已经消费**这些 IPC：设置里的「桌面版」页读写这三个开关（`getSettings` / `setSetting`），
+托盘「桌面版设置…」会打开该页（`onOpenSettings`），会话在后台跑完时页面调用 `notify` 发系统通知。
+页面侧只通过 preload 暴露的白名单方法访问，桥不存在时（普通浏览器）该页不出现、通知也不发。
 
 ## 开发模式
 
