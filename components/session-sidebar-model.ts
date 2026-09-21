@@ -1,8 +1,10 @@
 /**
  * 会话栏树模型（纯函数，无副作用）。
  *
- * 层级固定：Project → Session → child。
+ * 层级固定：项目区（Project → Session → child）+ 底部未分组区（Session → child）。
  * - 项目 = 目录（一对一）：项目根就是会话 `cwd`，不再按 Git linked worktree 归并；
+ * - 项目区**只列项目列表内的目录**；其余会话（从未加入过项目的目录、关闭项目后
+ *   留下的会话）归未分组区，不再被隐藏（#53）；
  * - 组内会话树复用 buildSessionDisplayTree，fork/subagent child 语义、
  *   孤儿/循环降级原样保留，本文件绝不修改 SessionInfo 或 Pi schema。
  */
@@ -26,14 +28,26 @@ export interface SidebarProjectNode {
 }
 
 export interface BuildSidebarTreeOptions {
-  /** 当前选中 cwd：无会话时也必须作为可用项目项出现。 */
+  /**
+   * 当前选中 cwd：仅用于「刚进入的空项目置顶」排序（列表内的项目才会有空项目行）。
+   */
   selectedCwd?: string | null;
   /**
-   * 侧栏项目根列表（持久化，唯一来源）：只有列表里的项目出现在侧栏，无会话也显示
-   * 为空项目行。不在列表内的项目即使有会话也不显示——当前选中的项目例外，
-   * 正在看的上下文不能凭空消失。
+   * 侧栏项目根列表（持久化，唯一来源）：只有列表里的项目出现在项目区，无会话也显示
+   * 为空项目行；不在列表内的目录，其会话归未分组区（见 buildUngroupedTree），不再隐藏。
    */
   projectRoots?: readonly string[];
+  /**
+   * 显式未分组标记（关闭项目时记录）：被标记的会话即使 `cwd` 在项目列表内也留在未分组区，
+   * 即「重新添加该目录不回迁旧会话」。
+   */
+  ungroupedSessionIds?: ReadonlySet<string> | readonly string[];
+}
+
+/** 把 id 集合入参统一成 Set（数组/Set 均可，纯函数不修改入参）。 */
+function toIdSet(ids: ReadonlySet<string> | readonly string[] | undefined): ReadonlySet<string> {
+  if (!ids) return new Set<string>();
+  return ids instanceof Set ? ids : new Set(ids);
 }
 
 function latestModified(sessions: SessionInfo[]): string {
@@ -45,37 +59,34 @@ function latestModified(sessions: SessionInfo[]): string {
 }
 
 /**
- * 由全部会话构建项目树。
+ * 由全部会话构建项目树（**项目区**：只含项目列表内的目录）。
  *
  * 排序：项目按最近活动降序；唯一例外是无会话的 selectedCwd 空项目——
  * 它是用户当前上下文，置顶保证「刚添加的项目立即可见」。
+ *
+ * 不在项目列表内的会话一律不在这里出现：它们由 buildUngroupedTree 归入未分组区
+ * （选中但未加入列表的目录也不再造空项目行——它的会话现在有归宿，不必靠临时行留住）。
  */
 export function buildSidebarTree(
   sessions: SessionInfo[],
   options: BuildSidebarTreeOptions = {},
 ): SidebarProjectNode[] {
   const { selectedCwd = null } = options;
+  const listedRoots = new Set(options.projectRoots ?? []);
+  const ungroupedIds = toIdSet(options.ungroupedSessionIds);
 
   const projectBuckets = new Map<string, SessionInfo[]>();
   for (const session of sessions) {
+    // 显式未分组标记：即使目录仍在项目列表里也留在未分组区（不回迁）。
+    if (ungroupedIds.has(session.id)) continue;
+    if (!listedRoots.has(session.cwd)) continue;
     const bucket = projectBuckets.get(session.cwd);
     if (bucket) bucket.push(session);
     else projectBuckets.set(session.cwd, [session]);
   }
-
-  // 选中的空项目（无会话，刚通过「添加项目」加入）：创建空桶，
-  // 让项目行可见并可开始新会话（渲染层已支持空态占位）。
-  if (selectedCwd && !projectBuckets.has(selectedCwd)) {
-    projectBuckets.set(selectedCwd, []);
-  }
-  // 项目列表里的项目：即使无会话、未被选中也持续显示（项目独立于会话存在）。
-  for (const root of options.projectRoots ?? []) {
+  // 项目列表里的项目：即使无会话也持续显示（项目独立于会话存在）。
+  for (const root of listedRoots) {
     if (!projectBuckets.has(root)) projectBuckets.set(root, []);
-  }
-  // 项目列表是项目区的唯一来源：会话发现的、不在列表里的项目不显示。
-  const listedRoots = new Set([...(options.projectRoots ?? []), ...(selectedCwd ? [selectedCwd] : [])]);
-  for (const root of [...projectBuckets.keys()]) {
-    if (!listedRoots.has(root)) projectBuckets.delete(root);
   }
 
   const projects: SidebarProjectNode[] = [];
@@ -95,6 +106,63 @@ export function buildSidebarTree(
     return b.latestActivity.localeCompare(a.latestActivity);
   });
   return projects;
+}
+
+// ── 未分组会话区（#53） ──────────────────────────────────────────────────
+
+/**
+ * 未分组区的 group key：折叠集合（collapsedProjectRoots）与分页 map 共用。
+ * 它只作为 key 参与相等比较，不会被当成目录路径使用。
+ */
+export const UNGROUPED_GROUP_KEY = "__ungrouped__";
+
+export interface UngroupedSessionsOptions {
+  /** 侧栏项目根列表：不在其中的 `cwd` 即派生为未分组。 */
+  projectRoots?: readonly string[];
+  /** 显式未分组标记（关闭项目时记录）；与派生规则取并集。 */
+  ungroupedSessionIds?: ReadonlySet<string> | readonly string[];
+}
+
+/**
+ * 未分组会话集合（派生 ∪ 显式）：
+ * - 派生：`cwd` 不在项目列表里的会话（覆盖从未加入过项目的目录、关闭项目后的目录）；
+ * - 显式：关闭项目那一刻记录下来的会话 id —— 该目录被重新添加后它们仍留在未分组，
+ *   而该目录下的新会话按派生规则回到项目区。
+ *
+ * 只做过滤与并集，不排序（顺序语义留给 buildSessionDisplayTree）；不改输入数组。
+ */
+export function collectUngroupedSessions(
+  sessions: readonly SessionInfo[],
+  options: UngroupedSessionsOptions = {},
+): SessionInfo[] {
+  const listedRoots = new Set(options.projectRoots ?? []);
+  const ungroupedIds = toIdSet(options.ungroupedSessionIds);
+  return sessions.filter((session) => ungroupedIds.has(session.id) || !listedRoots.has(session.cwd));
+}
+
+/**
+ * 未分组区的展示树：与项目内会话同一套 fork/subagent 语义与排序（modified 降序），
+ * subagent 标记的会话同样不进入展示树。
+ */
+export function buildUngroupedTree(
+  sessions: readonly SessionInfo[],
+  options: UngroupedSessionsOptions = {},
+): SessionDisplayNode[] {
+  return buildSessionDisplayTree(collectUngroupedSessions(sessions, options));
+}
+
+/**
+ * 在未分组树中定位会话：命中返回其会话级祖先链（不含自身，可能为空数组），
+ * 未找到返回 null。调用方据此展开未分组区与祖先层级——否则选中一个未分组会话时
+ * 它可能在折叠的区里不可见。
+ */
+export function locateSessionInUngroupedTree(
+  nodes: SessionDisplayNode[],
+  sessionId: string,
+): string[] | null {
+  const ancestors = getDisplayNodeAncestorIds(nodes, sessionId);
+  if (ancestors.length > 0) return ancestors;
+  return nodes.some((node) => node.session.id === sessionId) ? [] : null;
 }
 
 const PROJECT_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
@@ -276,11 +344,17 @@ export function locateSessionInSidebarTree(
 /**
  * 收集树中全部可折叠的项目根 id（Collapse all 写入偏好的内容）。
  * Expand all 无需 helper：直接清空集合。
+ *
+ * `includeUngrouped` 为真时把未分组区的 key 一并列入：Collapse all / Expand all
+ * 对未分组区与项目区行为一致。
  */
-export function collectAllCollapseIds(projects: SidebarProjectNode[]): {
-  projectRoots: string[];
-} {
-  return { projectRoots: projects.map((project) => project.root) };
+export function collectAllCollapseIds(
+  projects: SidebarProjectNode[],
+  options: { includeUngrouped?: boolean } = {},
+): { projectRoots: string[] } {
+  const ids = projects.map((project) => project.root);
+  if (options.includeUngrouped) ids.push(UNGROUPED_GROUP_KEY);
+  return { projectRoots: ids };
 }
 
 /**
@@ -288,10 +362,15 @@ export function collectAllCollapseIds(projects: SidebarProjectNode[]): {
  */
 export function collectSubagentParentIdsFromSidebarTree(
   projects: SidebarProjectNode[],
+  /** 附加的展示树（未分组区）：侧栏有两块区域，默认收起规则必须覆盖两边。 */
+  additionalTrees: readonly SessionDisplayNode[][] = [],
 ): string[] {
   const ids: string[] = [];
   for (const project of projects) {
     ids.push(...collectSubagentParentIds(project.tree));
+  }
+  for (const tree of additionalTrees) {
+    ids.push(...collectSubagentParentIds(tree));
   }
   return ids;
 }

@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import type { SessionInfo } from "@/lib/types";
 import { displayCwd, getRecentProjects, projectDisplayName } from "@/lib/project-context";
 import {
+  filterSessionDisplayTree,
   isSessionNodeEffectivelyCollapsed,
   normalizeSessionQuery,
   type SessionDisplayNode,
@@ -12,14 +13,18 @@ import {
 } from "./session-tree";
 import {
   buildSidebarTree,
+  buildUngroupedTree,
   collectAllCollapseIds,
   collectSubagentParentIdsFromSidebarTree,
+  filterSessionDisplayTreeByIds,
   filterSidebarTree,
   locateSessionInSidebarTree,
+  locateSessionInUngroupedTree,
   moveProjectInOrder,
   pickProjectRootAfterClose,
   projectHasRunningSession,
   sortSidebarProjects,
+  UNGROUPED_GROUP_KEY,
   type SidebarProjectNode,
 } from "./session-sidebar-model";
 import {
@@ -34,12 +39,12 @@ import {
 } from "@/lib/ui-preferences";
 import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
 import { refreshSubagentActivity, useSubagentActivity } from "@/hooks/useSubagentActivity";
+import { createActivationRecovery } from "@/lib/activation-recovery";
 import { isServerPrefsLoaded, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import {
   bumpGroupVisibleCount,
   derivePinnedSessions,
   deriveRecentSessions,
-  filterSessionsByVisibleRoots,
   nextRecentVisibleCount,
   planSubagentDiscoveryRefresh,
   RECENT_SESSIONS_LIMIT,
@@ -74,6 +79,7 @@ import {
   DisplayMenuItem,
   FolderIcon,
   HistoryIcon,
+  LayersIcon,
   PinIcon,
   FolderPlusIcon,
   formatRelativeTime,
@@ -446,14 +452,17 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // 会话列表刷新为事件驱动（新会话/agent_end/删除/fork 经 refreshKey 触发；
   // 窗口重新聚焦时补一次），不做定时轮询（openchamber 同语义）。
   useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState === "visible") loadSessionsRef.current(false);
+    // 同一次激活的 focus + visibilitychange 合并成一次列表刷新（见 lib/activation-recovery）。
+    const recovery = createActivationRecovery({ perform: () => loadSessionsRef.current(false) });
+    const onActivate = () => {
+      if (document.visibilityState === "visible") recovery.notify();
     };
-    document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("focus", onVisible);
+    document.addEventListener("visibilitychange", onActivate);
+    window.addEventListener("focus", onActivate);
     return () => {
-      document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("focus", onVisible);
+      document.removeEventListener("visibilitychange", onActivate);
+      window.removeEventListener("focus", onActivate);
+      recovery.dispose();
     };
   }, []);
 
@@ -554,11 +563,17 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         })
         .catch(() => undefined);
     };
-    window.addEventListener("focus", refreshRunning);
-    document.addEventListener("visibilitychange", refreshRunning);
+    // 同一批 focus + visibilitychange 合并成一次运行集对齐（见 lib/activation-recovery）。
+    const recovery = createActivationRecovery({ perform: refreshRunning });
+    const onActivate = () => {
+      if (document.visibilityState === "visible") recovery.notify();
+    };
+    window.addEventListener("focus", onActivate);
+    document.addEventListener("visibilitychange", onActivate);
     return () => {
-      window.removeEventListener("focus", refreshRunning);
-      document.removeEventListener("visibilitychange", refreshRunning);
+      window.removeEventListener("focus", onActivate);
+      document.removeEventListener("visibilitychange", onActivate);
+      recovery.dispose();
     };
   }, [commitRunningSnapshot]);
 
@@ -757,25 +772,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   /** 置顶会话 id 集合：置顶会话从最近区排除（不重复出现）。 */
   const pinnedIds = useMemo(() => new Set(prefs.pinnedSessionIds), [prefs.pinnedSessionIds]);
 
+  /** 显式未分组标记：关闭项目时记下的会话 id；重新添加目录也不回迁（#53）。 */
+  const ungroupedSessionIds = useMemo(() => new Set(prefs.ungroupedSessionIds), [prefs.ungroupedSessionIds]);
+
   /**
-   * 侧栏可见目录：项目列表 ∪ 当前选中 cwd。项目区、最近区、置顶区共用同一集合，
-   * 不在其中的会话（例如没加入项目的旁路 checkout）整个侧栏都不出现。
+   * 归档视图列出全部归档会话（不再按目录过滤）：归档是用户显式动作，
+   * 归档时可见的会话不该因为项目被关闭就失去恢复/删除入口（#53 D5）。
    */
-  const visibleRoots = useMemo(
-    () => new Set([...prefs.projectRoots, ...(selectedCwd ? [selectedCwd] : [])]),
-    [prefs.projectRoots, selectedCwd],
-  );
 
-  /** 归档视图：同一可见集合；计数与列表同源，不用 CSS 藏。 */
-  const visibleArchivedSessions = useMemo(
-    () => filterSessionsByVisibleRoots(archivedSessions, visibleRoots),
-    [archivedSessions, visibleRoots],
-  );
-
-  /** 置顶会话：按置顶顺序（最新置顶在前）；仅显示仍存在、可见的会话。 */
+  /** 置顶会话：按置顶顺序（最新置顶在前）；仅显示仍存在的会话（不按目录过滤）。 */
   const pinnedSessions = useMemo(
-    () => derivePinnedSessions({ sessions: allSessions, visibleRoots, pinnedSessionIds: prefs.pinnedSessionIds }),
-    [allSessions, visibleRoots, prefs.pinnedSessionIds],
+    () => derivePinnedSessions({ sessions: allSessions, pinnedSessionIds: prefs.pinnedSessionIds }),
+    [allSessions, prefs.pinnedSessionIds],
   );
 
   /** 置顶/取消置顶：唯一写入入口经偏好 seam；新置顶插到最前。 */
@@ -790,8 +798,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   /** 最近会话：按 modified 降序取 top 20 候选；UI 默认展示 5、每次加载更多 5。 */
   const recentSessions = useMemo(
-    () => deriveRecentSessions({ sessions: allSessions, visibleRoots, excludeIds: pinnedIds, limit: RECENT_SESSIONS_LIMIT }),
-    [allSessions, visibleRoots, pinnedIds],
+    () => deriveRecentSessions({ sessions: allSessions, excludeIds: pinnedIds, limit: RECENT_SESSIONS_LIMIT }),
+    [allSessions, pinnedIds],
   );
   // 池变短时收敛可见条数，避免 slice 空档
   useEffect(() => {
@@ -884,10 +892,25 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     return () => clearTimeout(timer);
   }, [searchOpen, searchMode, sessionQuery]);
 
-  // 全项目树：分组/排序/空态补齐全部在纯模型内完成（项目 = cwd 目录）。
+  // 项目区树：分组/排序/空态补齐全部在纯模型内完成（项目 = cwd 目录，只列项目列表）。
   const sidebarTree = useMemo(
-    () => buildSidebarTree(allSessions, { selectedCwd, projectRoots: prefs.projectRoots }),
-    [allSessions, selectedCwd, prefs.projectRoots],
+    () => buildSidebarTree(allSessions, {
+      selectedCwd,
+      projectRoots: prefs.projectRoots,
+      ungroupedSessionIds,
+    }),
+    [allSessions, selectedCwd, prefs.projectRoots, ungroupedSessionIds],
+  );
+  /**
+   * 未分组区树（派生 ∪ 显式）：不在项目列表里的会话与关闭项目时标记的会话。
+   * 与项目区同级放在侧栏底部；为空时不渲染。
+   */
+  const ungroupedTree = useMemo(
+    () => buildUngroupedTree(allSessions, {
+      projectRoots: prefs.projectRoots,
+      ungroupedSessionIds,
+    }),
+    [allSessions, prefs.projectRoots, ungroupedSessionIds],
   );
   // 会话 id → 树节点映射（含 children）：最近区行用与项目树相同的
   // SessionTreeItem 渲染，折叠/展开行为完全一致（共享 collapsedSessionIds）。
@@ -900,8 +923,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       }
     };
     for (const project of sidebarTree) walk(project.tree);
+    // 未分组区的行也用同一渲染（最近/置顶区取出节点时可展开其 fork 子会话）。
+    walk(ungroupedTree);
     return map;
-  }, [sidebarTree]);
+  }, [sidebarTree, ungroupedTree]);
   // 项目区已只包含列表内项目（buildSidebarTree 负责），搜索管线直接用树。
   const openTree = sidebarTree;
   const normalizedSessionQuery = normalizeSessionQuery(sessionQuery);
@@ -915,17 +940,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     : normalizedSessionQuery.length > 0;
 
   /**
-   * 全文命中片段：只保留可见目录下的会话（与项目区/最近区/置顶区同一集合）。
-   * 命中来自服务端全盘搜索，未加入项目、又没被选中的目录在这里同样不露出。
+   * 全文命中片段：服务端全盘搜索结果原样展示，不再按目录过滤——命中未分组区的会话
+   * 也要能点开（#53 D4）。命中行点击走 openSessionById（按 id 打开，与目录无关）。
    */
-  const visibleFulltextHits = useMemo(() => {
-    if (!fulltextModeActive) return fulltextHits;
-    const cwdById = new Map(allSessions.map((s) => [s.id, s.cwd]));
-    return fulltextHits.filter((hit) => {
-      const cwd = cwdById.get(hit.sessionId);
-      return cwd !== undefined && visibleRoots.has(cwd);
-    });
-  }, [fulltextModeActive, fulltextHits, allSessions, visibleRoots]);
   // 项目 alias 参与元数据搜索；全文模式按命中 id 保留祖先链。
   const sortedOpenTree = useMemo(
     () => sortSidebarProjects(openTree, {
@@ -945,6 +962,22 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     ),
     [sortedOpenTree, normalizedSessionQuery, projectAliases, fulltextMatchIds, fulltextModeActive],
   );
+  /**
+   * 未分组区的搜索过滤：与项目区同规则（元搜索按会话字段；全文按命中 id 保留祖先链）。
+   * 项目路径/别名命中只作用于项目区——未分组区没有项目身份可匹配。
+   */
+  const visibleUngroupedTree = useMemo(
+    () => (fulltextModeActive
+      ? filterSessionDisplayTreeByIds(ungroupedTree, fulltextMatchIds ?? new Set<string>())
+      : filterSessionDisplayTree(ungroupedTree, normalizedSessionQuery)),
+    [ungroupedTree, fulltextModeActive, fulltextMatchIds, normalizedSessionQuery],
+  );
+  /** 未分组区折叠状态与项目区同一套持久化（collapsedProjectRoots 里的保留 key），搜索期强制展开。 */
+  const ungroupedCollapsed = isSessionNodeEffectivelyCollapsed(
+    collapsedProjectRoots,
+    UNGROUPED_GROUP_KEY,
+    searchActive,
+  );
 
   /** 全文命中深链：按 id 打开已加载会话；列表尚未包含时忽略（refresh 后可再点）。 */
   const openSessionById = useCallback((sessionId: string) => {
@@ -956,7 +989,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // 默认收起「有 subagent 子节点」的父会话；不写 localStorage。
   // 用户手动展开/折叠过的 id 不覆盖；选中子会话时会展开祖先（见下）。
   useEffect(() => {
-    const defaults = collectSubagentParentIdsFromSidebarTree(sidebarTree);
+    const defaults = collectSubagentParentIdsFromSidebarTree(sidebarTree, [ungroupedTree]);
     if (defaults.length === 0) return;
     setCollapsedSessionIds((current) => {
       let changed = false;
@@ -970,33 +1003,37 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       }
       return changed ? next : current;
     });
-  }, [sidebarTree]);
+  }, [sidebarTree, ungroupedTree]);
 
   // 选中或 URL 恢复会话时自动展开 project/session 两级祖先，
   // 避免「已选中但列表里不可见」；这是显式选中驱动，与搜索强制展开无关。
   useEffect(() => {
     if (!selectedSessionId) return;
     const location = locateSessionInSidebarTree(sidebarTree, selectedSessionId);
-    if (!location) return;
+    // 项目区没有就找未分组区：选中未分组会话时同样要展开折叠的区与祖先链。
+    const ungroupedAncestors = location ? null : locateSessionInUngroupedTree(ungroupedTree, selectedSessionId);
+    if (!location && ungroupedAncestors === null) return;
+    const collapseKey = location ? location.projectRoot : UNGROUPED_GROUP_KEY;
+    const ancestors = location ? location.ancestors : (ungroupedAncestors ?? []);
     updatePrefs((prev) => {
-      if (!prev.collapsedProjectRoots.includes(location.projectRoot)) return prev;
+      if (!prev.collapsedProjectRoots.includes(collapseKey)) return prev;
       return {
         ...prev,
-        collapsedProjectRoots: prev.collapsedProjectRoots.filter((root) => root !== location.projectRoot),
+        collapsedProjectRoots: prev.collapsedProjectRoots.filter((root) => root !== collapseKey),
       };
     });
-    if (location.ancestors.length > 0) {
-      for (const id of location.ancestors) {
+    if (ancestors.length > 0) {
+      for (const id of ancestors) {
         userTouchedSessionCollapseRef.current.add(id);
       }
       setCollapsedSessionIds((current) => {
-        if (!location.ancestors.some((id) => current.has(id))) return current;
+        if (!ancestors.some((id) => current.has(id))) return current;
         const next = new Set(current);
-        location.ancestors.forEach((id) => next.delete(id));
+        ancestors.forEach((id) => next.delete(id));
         return next;
       });
     }
-  }, [selectedSessionId, sidebarTree, updatePrefs]);
+  }, [selectedSessionId, sidebarTree, ungroupedTree, updatePrefs]);
 
   // 仅首次 URL 恢复或目标确实超出可视区时滚动，不打断用户正常浏览位置。
   useLayoutEffect(() => {
@@ -1039,9 +1076,17 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }));
   }, [updatePrefs]);
 
+  /** 未分组区折叠：与项目折叠同一个偏好集合、同一条写入路径。 */
+  const toggleUngroupedCollapse = useCallback(() => {
+    toggleProjectCollapse(UNGROUPED_GROUP_KEY);
+  }, [toggleProjectCollapse]);
+
   /**
-   * 关闭项目：只把 root 从项目列表移除（项目区与项目信任都据此收敛）——绝不删除
-   * 目录、会话、AgentSession 或 Git 数据；重新添加同路径项目即恢复。
+   * 关闭项目：把 root 从项目列表移除（项目区与项目信任都据此收敛），同时把该目录下的
+   * 会话 id 记入未分组显式集合——它们随后归到侧栏底部的未分组区，而不是消失；
+   * 重新添加同路径目录时这些旧会话仍留在未分组（不回迁），该目录的新会话回到项目区。
+   *
+   * 只动偏好：绝不删除目录、会话、AgentSession 或 Git 数据。
    */
   const handleCloseProject = useCallback((root: string) => {
     setOpenProjectMenuRoot(null);
@@ -1052,9 +1097,20 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       return;
     }
     setCloseProjectError(null);
-    updatePrefs((prev) => (prev.projectRoots.includes(root)
-      ? { ...prev, projectRoots: prev.projectRoots.filter((item) => item !== root) }
-      : prev));
+    // 记录与移除在同一次偏好更新里完成：不会出现「列表已移除、标记还没写」的中间态。
+    const closingIds = allSessions.filter((session) => session.cwd === root).map((session) => session.id);
+    updatePrefs((prev) => {
+      if (!prev.projectRoots.includes(root) && closingIds.length === 0) return prev;
+      const known = new Set(prev.ungroupedSessionIds);
+      const added = closingIds.filter((id) => !known.has(id));
+      return {
+        ...prev,
+        projectRoots: prev.projectRoots.filter((item) => item !== root),
+        ungroupedSessionIds: added.length > 0
+          ? [...prev.ungroupedSessionIds, ...added]
+          : prev.ungroupedSessionIds,
+      };
+    });
     // 关闭当前项目：切换到列表里的下一个项目；无剩余则置空 cwd 并回到
     // 新会话/空工作区，避免继续显示已关闭项目的当前会话。
     if (selectedProject === root) {
@@ -1122,9 +1178,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [updatePrefs, visibleTree]);
 
   const collapseAll = useCallback(() => {
-    const ids = collectAllCollapseIds(openTree);
+    const ids = collectAllCollapseIds(openTree, { includeUngrouped: visibleUngroupedTree.length > 0 });
     updatePrefs((prev) => ({ ...prev, collapsedProjectRoots: ids.projectRoots }));
-  }, [openTree, updatePrefs]);
+  }, [openTree, visibleUngroupedTree, updatePrefs]);
 
   const expandAll = useCallback(() => {
     updatePrefs((prev) => (prev.collapsedProjectRoots.length === 0
@@ -1352,10 +1408,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               <div style={{ marginTop: 6, fontSize: 10.5, color: "var(--text-dim)", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 {fulltextLoading && <span>{t("sidebar_searchFulltextLoading")}</span>}
                 {!fulltextLoading && fulltextSource === "fts" && (
-                  <span>{t("sidebar_searchFulltextSourceFts")} · {t("sidebar_searchFulltextHits", { count: visibleFulltextHits.length })}</span>
+                  <span>{t("sidebar_searchFulltextSourceFts")} · {t("sidebar_searchFulltextHits", { count: fulltextHits.length })}</span>
                 )}
                 {!fulltextLoading && fulltextSource === "jsonl" && (
-                  <span>{t("sidebar_searchFulltextSourceJsonl")} · {t("sidebar_searchFulltextHits", { count: visibleFulltextHits.length })}</span>
+                  <span>{t("sidebar_searchFulltextSourceJsonl")} · {t("sidebar_searchFulltextHits", { count: fulltextHits.length })}</span>
                 )}
                 {fulltextError && <span style={{ color: "var(--status-danger)" }}>{fulltextError}</span>}
               </div>
@@ -1366,12 +1422,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       </div>
 
       {/* 全文命中片段：点击深链打开对应会话 */}
-      {!archiveViewOpen && searchOpen && searchMode === "fulltext" && visibleFulltextHits.length > 0 && (
+      {!archiveViewOpen && searchOpen && searchMode === "fulltext" && fulltextHits.length > 0 && (
         <div style={{
           flex: "0 0 auto", maxHeight: 160, overflowY: "auto", overflowX: "hidden",
           borderBottom: "1px solid var(--border)", padding: "4px 0",
         }}>
-          {visibleFulltextHits.slice(0, 12).map((hit, index) => (
+          {fulltextHits.slice(0, 12).map((hit, index) => (
             <button
               key={`${hit.sessionId}-${hit.timestamp}-${index}`}
               type="button"
@@ -1400,11 +1456,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       )}
 
       {/* Archive 视图：侧栏内替换项目树（首版列表 + 恢复 + 删除；打开只读浏览为后续）。
-          数据源为 /api/sessions 默认响应的 archivedSessions，按侧栏可见目录过滤。 */}
+          数据源为 /api/sessions 默认响应的 archivedSessions，列全部归档会话（不按目录过滤）。 */}
       {archiveViewOpen ? (
         <ArchiveView
-          sessions={visibleArchivedSessions}
-          count={visibleArchivedSessions.length}
+          sessions={archivedSessions}
+          count={archivedSessions.length}
           homeDir={homeDir}
           loading={loading}
           onRefresh={loadSessions}
@@ -1429,7 +1485,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             {error}
           </div>
         )}
-        {!loading && !error && visibleTree.length === 0 && (
+        {!loading && !error && visibleTree.length === 0 && visibleUngroupedTree.length === 0 && (
           (searchMode === "meta" ? normalizedSessionQuery.length > 0 : fulltextModeActive && !fulltextLoading) ? (
             <div style={{ padding: "18px 14px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.55 }}>
               {t("sidebar_searchEmpty", { query: sessionQuery.trim() })}
@@ -1625,6 +1681,80 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             onProjectDrop={searchActive ? undefined : handleProjectDrop}
            />
          ))}
+        {/* 未分组会话区（#53）：不在项目列表里的目录（从未加入过的、关闭项目后的）会话
+            与项目区同级放在底部：同样可折叠、有分页与搜索过滤、行渲染同源；无会话不渲染。 */}
+        {visibleUngroupedTree.length > 0 && (
+          <div style={{ borderTop: "1px solid var(--border)", marginTop: 5, paddingTop: 5 }}>
+            <div
+              className="sidebar-row"
+              data-sidebar-depth={0}
+              role="button"
+              tabIndex={0}
+              aria-expanded={!ungroupedCollapsed}
+              aria-label={ungroupedCollapsed ? t("sidebar_expandUngroupedSessions") : t("sidebar_collapseUngroupedSessions")}
+              onClick={toggleUngroupedCollapse}
+              onKeyDown={(event) => {
+                if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+                event.preventDefault();
+                toggleUngroupedCollapse();
+              }}
+              style={{
+                display: "flex", alignItems: "center", gap: 6, height: 32,
+                margin: "1px 6px", paddingLeft: sidebarRowPaddingLeft(0), paddingRight: 8,
+                color: "var(--text-muted)", fontSize: 12.5, fontWeight: 600,
+                position: "relative", cursor: "pointer", borderRadius: 6,
+              }}
+              onMouseEnter={(event) => { event.currentTarget.style.background = "var(--bg-hover)"; }}
+              onMouseLeave={(event) => { event.currentTarget.style.background = "transparent"; }}
+            >
+              <ChevronButton
+                collapsed={ungroupedCollapsed}
+                label={ungroupedCollapsed ? t("sidebar_expandUngroupedSessions") : t("sidebar_collapseUngroupedSessions")}
+                left={sidebarIndicatorLeft(0)}
+                onClick={(event) => { event.stopPropagation(); toggleUngroupedCollapse(); }}
+              />
+              <span aria-hidden="true" className="sidebar-indicator-icon" style={{ position: "absolute", left: sidebarIndicatorLeft(0), top: "50%", display: "flex", width: SIDEBAR_INDICATOR_SLOT, height: 20, alignItems: "center", justifyContent: "center", transform: "translateY(-50%)", color: "var(--text-dim)" }}><LayersIcon size={13} /></span>
+              <span style={{ flex: 1, fontSize: 12.5, fontWeight: 600 }}>{t("sidebar_ungroupedSessions")}</span>
+            </div>
+            {!ungroupedCollapsed && (
+              <div>
+                {getVisibleTopLevelNodes(
+                  visibleUngroupedTree,
+                  getGroupVisibleCount(groupVisibleCounts, UNGROUPED_GROUP_KEY),
+                  searchActive,
+                ).map((node) => (
+                  <SessionTreeItem
+                    key={node.session.id}
+                    node={node}
+                    selectedSessionId={selectedSessionId}
+                    runningSessionIds={effectiveRunningSessionIds}
+                    subagentRunningIds={subagentRunningIds}
+                    unreadSessionIds={unreadSessionIds}
+                    onSelectSession={handleSelectSessionFromList}
+                    onRenamed={loadSessions}
+                    onSessionDeleted={handleSessionDeletedLocal}
+                    onSessionArchive={handleArchiveSession}
+                    isSessionPinned={(id) => pinnedIds.has(id)}
+                    onTogglePin={togglePinSession}
+                    depth={0}
+                    collapsedSessionIds={collapsedSessionIds}
+                    searchActive={searchActive}
+                    onToggleCollapse={toggleSessionCollapse}
+                    displayMode={displayMode}
+                  />
+                ))}
+                <GroupPagination
+                  groupKey={UNGROUPED_GROUP_KEY}
+                  total={visibleUngroupedTree.length}
+                  visibleCount={getGroupVisibleCount(groupVisibleCounts, UNGROUPED_GROUP_KEY)}
+                  searchActive={searchActive}
+                  onShowMore={(groupKey) => setGroupVisibleCounts((counts) => bumpGroupVisibleCount(counts, groupKey))}
+                  onShowFewer={(groupKey) => setGroupVisibleCounts((counts) => resetGroupVisibleCount(counts, groupKey))}
+                />
+              </div>
+            )}
+          </div>
+        )}
        </div>
        </>
       )}

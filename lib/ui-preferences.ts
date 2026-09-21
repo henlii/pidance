@@ -135,6 +135,12 @@ export interface SidebarPreferences {
   showRecentSessions: boolean;
   /** 置顶会话 id（有序：最新置顶在前）。置顶会话从最近区排除，显示在最近区上方。 */
   pinnedSessionIds: string[];
+  /**
+   * 显式未分组会话 id（有序，最新记录在后）：关闭项目时把该项目目录下的会话记进来，
+   * 之后重新添加该目录也不回迁（它们的 `cwd` 已在项目列表内，靠这份标记留在未分组区）。
+   * 本期只增不减。
+   */
+  ungroupedSessionIds: string[];
   /** 文件树按 cwd 记忆的展开路径与滚动位置。 */
   fileExplorerState: FileExplorerState;
   /** 侧栏项目排序：近期 / 名称 / 固定。 */
@@ -155,6 +161,7 @@ export const DEFAULT_SIDEBAR_PREFERENCES: SidebarPreferences = {
   changesPanelWidth: CHANGES_PANEL_WIDTH_DEFAULT,
   showRecentSessions: true,
   pinnedSessionIds: [],
+  ungroupedSessionIds: [],
   fileExplorerState: {},
   projectSort: "recent",
   projectOrder: [],
@@ -173,6 +180,31 @@ export type StorageLike = {
 function parsePathList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === "string");
+}
+
+/**
+ * 未分组会话显式标记的体积上限。本期集合只增不减（没有「移回项目」动作），
+ * 靠上限兜住无界增长：超限时丢弃最早写入的标记——那些会话的目录通常也早已不在
+ * 项目列表里，仍按派生规则留在未分组。
+ */
+export const UNGROUPED_SESSION_IDS_LIMIT = 1000;
+
+/**
+ * 容错解析会话 id 列表（未分组显式标记）：过滤非 string、trim、去空、保序去重，
+ * 超限保留最后写入的部分。绝不抛异常。
+ */
+export function parseUngroupedSessionIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const id = item.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out.length > UNGROUPED_SESSION_IDS_LIMIT ? out.slice(-UNGROUPED_SESSION_IDS_LIMIT) : out;
 }
 
 /**
@@ -223,6 +255,8 @@ export function parseSidebarPreferences(raw: unknown): SidebarPreferences {
     showRecentSessions: parseShowRecentSessions(record.showRecentSessions),
     // 旧数据无置顶字段：默认空列表。
     pinnedSessionIds: parsePathList(record.pinnedSessionIds),
+    // 旧数据无未分组标记字段：默认空列表。
+    ungroupedSessionIds: parseUngroupedSessionIds(record.ungroupedSessionIds),
     // 旧数据无文件树记忆字段：默认空表。
     fileExplorerState: parseFileExplorerState(record.fileExplorerState),
     projectSort: parseProjectSortMode(record.projectSort),
@@ -314,6 +348,7 @@ export function serializeSidebarPreferences(prefs: SidebarPreferences): string {
     changesPanelWidth: clampChangesPanelWidth(prefs.changesPanelWidth),
     showRecentSessions: parseShowRecentSessions(prefs.showRecentSessions),
     pinnedSessionIds: parsePathList(prefs.pinnedSessionIds),
+    ungroupedSessionIds: parseUngroupedSessionIds(prefs.ungroupedSessionIds),
     fileExplorerState: parseFileExplorerState(prefs.fileExplorerState),
     projectSort: parseProjectSortMode(prefs.projectSort),
     projectOrder: parsePathList(prefs.projectOrder),
@@ -361,6 +396,7 @@ export type SyncedSidebarUi = {
   pinnedSessionIds: string[];
   projectSort: ProjectSortMode;
   projectOrder: string[];
+  ungroupedSessionIds: string[];
 };
 
 export function sidebarUiFromPrefs(prefs: SidebarPreferences): SyncedSidebarUi {
@@ -372,6 +408,7 @@ export function sidebarUiFromPrefs(prefs: SidebarPreferences): SyncedSidebarUi {
     pinnedSessionIds: prefs.pinnedSessionIds,
     projectSort: prefs.projectSort,
     projectOrder: prefs.projectOrder,
+    ungroupedSessionIds: prefs.ungroupedSessionIds,
   };
 }
 
@@ -406,6 +443,7 @@ export function applySyncedSidebarUi(prefs: SidebarPreferences, remote: unknown)
     pinnedSessionIds: parsed.pinnedSessionIds,
     projectSort: parsed.projectSort,
     projectOrder: parsed.projectOrder,
+    ungroupedSessionIds: parsed.ungroupedSessionIds,
   };
 }
 

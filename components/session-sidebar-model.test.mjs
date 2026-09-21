@@ -126,13 +126,20 @@ test("搜索命中项目根路径保留整个项目；命中会话字段保留�
   assert.deepEqual(filterSidebarTree(tree, "no-such-thing"), []);
 });
 
-test("无会话的 selectedCwd 也必须显示为可用项目项（置顶）", async () => {
+test("#53 选中但未加入列表的目录不再造空项目行；列表内的空项目仍置顶", async () => {
   const existing = session("a", { cwd: "/repo-a" });
-  const tree = await treeOf([existing], { selectedCwd: "/new-project" });
-  assert.equal(tree.length, 2);
-  assert.equal(tree[0].root, "/new-project");
-  assert.equal(tree[0].tree.length, 0);
-  assert.equal(tree[0].latestActivity, "");
+  // 项目区只列项目列表内的目录：未加入的 selectedCwd 不再例外地造出空项目行
+  // （它的会话现在归未分组区，不需要靠临时项目行留住）。
+  const unlisted = await treeOf([existing], { selectedCwd: "/new-project" });
+  assert.deepEqual(unlisted.map((p) => p.root), ["/repo-a"]);
+  // 刚通过「添加项目」加入的空项目（在列表里）仍然置顶且可用
+  const listed = await treeOf([existing], {
+    selectedCwd: "/new-project",
+    projectRoots: ["/new-project", "/repo-a"],
+  });
+  assert.equal(listed[0].root, "/new-project");
+  assert.equal(listed[0].tree.length, 0);
+  assert.equal(listed[0].latestActivity, "");
 });
 
 test("projectRoots：列表里的项目即使无会话也显示；不在列表里的（含已有会话）不显示", async () => {
@@ -151,6 +158,22 @@ test("projectRoots：列表里的项目即使无会话也显示；不在列表�
   const other = await treeOf([existing], { projectRoots: ["/empty-project"] });
   assert.deepEqual(other.map((p) => p.root), ["/empty-project"]);
   assert.equal(other[0].tree.length, 0);
+});
+
+test("#53 Collapse all / Expand all 一并覆盖未分组区", async () => {
+  const { collectAllCollapseIds, UNGROUPED_GROUP_KEY } = await jiti.import("./session-sidebar-model.ts");
+  const main = session("m", { cwd: "/repo" });
+  const loose = session("l", { cwd: "/tmp/scratch" });
+  const tree = await treeOf([main, loose], { projectRoots: ["/repo"] });
+  assert.deepEqual(collectAllCollapseIds(tree).projectRoots, ["/repo"]);
+  const withUngrouped = collectAllCollapseIds(tree, { includeUngrouped: true }).projectRoots;
+  assert.deepEqual(withUngrouped, ["/repo", UNGROUPED_GROUP_KEY]);
+  // 未分组区为空时不写入它的 key（避免折叠一个不存在的区）
+  assert.deepEqual(
+    collectAllCollapseIds(collectAllCollapseIds(tree).projectRoots.map((root) => ({ root, tree: [], latestActivity: "" })))
+      .projectRoots,
+    ["/repo"],
+  );
 });
 
 test("Collapse all 收集全部项目根；Expand all 即清空集合", async () => {
@@ -247,6 +270,22 @@ test("collectSubagentParentIdsFromSidebarTree：含子节点的父会话默认�
   assert.deepEqual(collectSubagentParentIdsFromSidebarTree(tree).sort(), ["fo"]);
 });
 
+test("collectSubagentParentIdsFromSidebarTree：未分组区的父会话同样默认收起（#53）", async () => {
+  const {
+    collectSubagentParentIdsFromSidebarTree,
+    buildUngroupedTree,
+  } = await jiti.import("./session-sidebar-model.ts");
+  const projectParent = session("pp", { cwd: "/repo" });
+  const projectChild = session("pc", { cwd: "/repo", parentSessionId: "pp" });
+  const looseParent = session("lp", { cwd: "/loose" });
+  const looseChild = session("lc", { cwd: "/loose", parentSessionId: "lp" });
+  const tree = await treeOf([projectParent, projectChild]);
+  // 只走项目树时未分组的父会话会被漏掉（/loose 不在 projectRoots 里）。
+  assert.deepEqual(collectSubagentParentIdsFromSidebarTree(tree).sort(), ["pp"]);
+  const ungrouped = buildUngroupedTree([projectParent, projectChild, looseParent, looseChild], { projectRoots: ["/repo"] });
+  assert.deepEqual(collectSubagentParentIdsFromSidebarTree(tree, [ungrouped]).sort(), ["lp", "pp"]);
+});
+
 test("全文模式：按 session id 集合保留祖先链，不按 name/alias 整树匹配", async () => {
   const { filterSidebarTree } = await jiti.import("./session-sidebar-model.ts");
   const parent = session("p", { cwd: "/repo", name: "main work" });
@@ -295,18 +334,87 @@ test("projectHasRunningSession：只认本目录的 running，旁路 checkout �
   assert.equal(projectHasRunningSession(sessions, [], "/repo"), false);
 });
 
-test("projectRoots：不在列表里的项目即使有会话也不显示；当前选中的项目例外", async () => {
-  const { buildSidebarTree } = await jiti.import("./session-sidebar-model.ts");
+test("#53 不在列表里的目录不进项目区（无论是否选中）；它的会话由未分组区承接", async () => {
+  const { buildSidebarTree, buildUngroupedTree } = await jiti.import("./session-sidebar-model.ts");
   const existing = session("x", { cwd: "/existing" });
   assert.deepEqual(
     buildSidebarTree([existing], { projectRoots: ["/listed"] }).map((p) => p.root),
     ["/listed"],
   );
+  // 选中也不进项目区（旧行为是造一个临时项目行）
   assert.deepEqual(
-    buildSidebarTree([existing], {
-      projectRoots: ["/listed"],
-      selectedCwd: "/existing",
-    }).map((p) => p.root).sort(),
-    ["/existing", "/listed"],
+    buildSidebarTree([existing], { projectRoots: ["/listed"], selectedCwd: "/existing" }).map((p) => p.root),
+    ["/listed"],
   );
+  assert.deepEqual(
+    buildUngroupedTree([existing], { projectRoots: ["/listed"] }).map((n) => n.session.id),
+    ["x"],
+  );
+});
+
+// ── #53 未分组会话区 ──────────────────────────────────────────────────────
+
+test("#53 派生未分组：cwd 不在项目列表的会话进未分组（含从未加入过的目录）", async () => {
+  const m = await modelModule;
+  const inside = session("in", { cwd: "/repo" });
+  const listed = session("in2", { cwd: "/other", modified: "2026-07-08T00:00:00.000Z" });
+  const loose = session("loose", { cwd: "/tmp/scratch" });
+  const sessions = [inside, listed, loose];
+  const projectTree = m.buildSidebarTree(sessions, { projectRoots: ["/repo", "/other"] });
+  assert.deepEqual(projectTree.map((p) => p.root).sort(), ["/other", "/repo"]);
+  assert.deepEqual(
+    m.buildUngroupedTree(sessions, { projectRoots: ["/repo", "/other"] }).map((n) => n.session.id),
+    ["loose"],
+  );
+  // 项目列表为空时全部会话都在未分组区
+  assert.deepEqual(
+    m.buildUngroupedTree(sessions, { projectRoots: [] }).map((n) => n.session.id).sort(),
+    ["in", "in2", "loose"],
+  );
+});
+
+test("#53 显式未分组标记优先于派生：目录重新加入后旧会话仍留未分组，新会话进项目", async () => {
+  const m = await modelModule;
+  const old = session("old", { cwd: "/repo", modified: "2026-07-01T00:00:00.000Z" });
+  const fresh = session("fresh", { cwd: "/repo", modified: "2026-07-05T00:00:00.000Z" });
+  const options = { projectRoots: ["/repo"], ungroupedSessionIds: new Set(["old"]) };
+  const projectTree = m.buildSidebarTree([old, fresh], options);
+  assert.deepEqual(projectTree.map((p) => p.root), ["/repo"]);
+  assert.deepEqual(projectTree[0].tree.map((n) => n.session.id), ["fresh"]);
+  assert.deepEqual(m.buildUngroupedTree([old, fresh], options).map((n) => n.session.id), ["old"]);
+  // 数组形式同样接受，且不改输入
+  const asArray = ["old"];
+  assert.deepEqual(
+    m.buildUngroupedTree([old, fresh], { projectRoots: ["/repo"], ungroupedSessionIds: asArray })
+      .map((n) => n.session.id),
+    ["old"],
+  );
+  assert.deepEqual(asArray, ["old"]);
+});
+
+test("#53 未分组树沿用 fork/subagent 语义与排序：子会话挂父下、subagent 不展示", async () => {
+  const m = await modelModule;
+  const parent = session("up", { cwd: "/tmp/scratch", modified: "2026-07-09T00:00:00.000Z" });
+  const forkChild = session("uc", { cwd: "/tmp/scratch", parentSessionId: "up", modified: "2026-07-10T00:00:00.000Z" });
+  const sub = session("usub", {
+    cwd: "/tmp/scratch",
+    modified: "2026-07-11T00:00:00.000Z",
+    subagent: { parentSessionId: "up", runId: "r", runIndex: 1 },
+  });
+  const other = session("uother", { cwd: "/tmp/two", modified: "2026-07-08T00:00:00.000Z" });
+  const tree = m.buildUngroupedTree([parent, forkChild, sub, other], { projectRoots: [] });
+  assert.deepEqual(tree.map((n) => n.session.id), ["up", "uother"]);
+  assert.deepEqual(tree[0].children.map((n) => n.session.id), ["uc"]);
+  assert.equal(tree[0].children[0].relation, "fork");
+  assert.equal(tree.some((n) => n.session.id === "usub"), false);
+});
+
+test("#53 未分组定位：命中返回祖先链（含空链），未找到返回 null", async () => {
+  const m = await modelModule;
+  const parent = session("up", { cwd: "/tmp/scratch" });
+  const child = session("uc", { cwd: "/tmp/scratch", parentSessionId: "up" });
+  const tree = m.buildUngroupedTree([parent, child], { projectRoots: [] });
+  assert.deepEqual(m.locateSessionInUngroupedTree(tree, "up"), []);
+  assert.deepEqual(m.locateSessionInUngroupedTree(tree, "uc"), ["up"]);
+  assert.equal(m.locateSessionInUngroupedTree(tree, "missing"), null);
 });

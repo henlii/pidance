@@ -100,6 +100,7 @@ export const zhCN: Record<TranslationKey, string> = {
   sidebar_displayOptions: '显示选项',
   sidebar_loadMoreRecent: '加载更多（+{count} · {shown}/{total}）',
   sidebar_recentSessions: '最近会话',
+  sidebar_ungroupedSessions: '未分组会话',
   sidebar_pinnedSessions: '置顶会话',
   sidebar_pinSession: '置顶会话',
   sidebar_unpinSession: '取消置顶',
@@ -198,6 +199,8 @@ export const zhCN: Record<TranslationKey, string> = {
   lineage_switcherLabel: '切换子代理：{title}',
   sidebar_expandRecentSessions: '展开最近会话',
   sidebar_collapseRecentSessions: '折叠最近会话',
+  sidebar_expandUngroupedSessions: '展开未分组会话',
+  sidebar_collapseUngroupedSessions: '折叠未分组会话',
   // 归档
   sidebar_archive: '归档',
   sidebar_archiveSession: '归档会话',

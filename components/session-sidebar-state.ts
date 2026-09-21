@@ -4,7 +4,7 @@
  * 职责边界：
  * - 分组可见条数（show more / show fewer / 搜索全量）
  * - 乐观会话列表合并（server ↔ pending，stale 保护）
- * - 最近会话/置顶会话派生（只暴露项目列表与当前选中目录内的会话）
+ * - 最近会话/置顶会话派生（全量会话，不再按目录过滤：#53 未分组区接管了归属）
  *
  * 树投影仍由 session-sidebar-model 负责；本文件只产出可接入的状态切片。
  */
@@ -235,8 +235,6 @@ export function planSubagentDiscoveryRefresh(input: {
 export interface DeriveRecentSessionsInput {
   /** 全量会话列表（服务端 + 乐观合并后）；排序语义由本函数内部保证。 */
   sessions: readonly SessionInfo[];
-  /** 允许出现在侧栏的目录集合（项目列表 ∪ 当前选中 cwd）。 */
-  visibleRoots: ReadonlySet<string>;
   /** 附加排除 id（如已删除、仅显示占位等）。 */
   excludeIds?: ReadonlySet<string>;
   /** 展示条数上限；损坏/负数回退默认 RECENT_SESSIONS_LIMIT（20）。 */
@@ -249,60 +247,45 @@ export interface DeriveRecentSessionsInput {
  *
  * 排除规则：
  * - subagent 子会话（`session.subagent` 存在）——子会话只读、不参与最近区
- * - cwd 不在 visibleRoots 内的会话——未加入项目、又没被选中的目录不进侧栏
  * - `excludeIds` 显式排除的 id
  *
+ * 不按目录过滤：不在项目列表里的会话归侧栏底部未分组区，最近区照常显示（#53）。
  * 本函数不修改输入数组；输入是否已排序不影响结果（内部先稳定排序）。
  */
 export function deriveRecentSessions(input: DeriveRecentSessionsInput): SessionInfo[] {
-  const { sessions, visibleRoots, excludeIds, limit = RECENT_SESSIONS_LIMIT } = input;
+  const { sessions, excludeIds, limit = RECENT_SESSIONS_LIMIT } = input;
   const n = Math.max(0, Math.floor(limit));
   const filtered = sessions.filter((s) => {
     if (s.subagent) return false;
     if (excludeIds?.has(s.id)) return false;
-    if (!visibleRoots.has(s.cwd)) return false;
     return true;
   });
   const sorted = filtered.slice().sort(compareSessionsByActivity);
   return sorted.slice(0, n);
 }
 
-/**
- * 按可见目录过滤会话（保持原顺序）。侧栏所有会话入口共用同一集合：
- * visibleRoots = 项目列表 ∪ 当前选中 cwd；不在其中的会话一律不列出。
- */
-export function filterSessionsByVisibleRoots<T extends { cwd: string }>(
-  sessions: readonly T[],
-  visibleRoots: ReadonlySet<string>,
-): T[] {
-  return sessions.filter((session) => visibleRoots.has(session.cwd));
-}
-
 export interface DerivePinnedSessionsInput {
   /** 全量会话列表（服务端 + 乐观合并后）。 */
   sessions: readonly SessionInfo[];
-  /** 允许出现在侧栏的目录集合（项目列表 ∪ 当前选中 cwd）。 */
-  visibleRoots: ReadonlySet<string>;
   /** 置顶 id 顺序（最新置顶在前）；结果按此顺序输出。 */
   pinnedSessionIds: readonly string[];
 }
 
 /**
- * 置顶会话派生（纯逻辑）：按 pinnedSessionIds 顺序输出仍存在且可见的会话。
+ * 置顶会话派生（纯逻辑）：按 pinnedSessionIds 顺序输出仍存在的会话。
  *
  * 排除规则：
  * - 已不在 sessions 中的 id（会话已删除/归档）——静默跳过
  * - subagent 子会话（只读、不参与置顶）
- * - cwd 不在 visibleRoots 内的会话——同项目区规则，整个侧栏一致
  *
+ * 不按目录过滤：置顶是用户显式动作，被置顶的会话一定可见（#53）。
  * 本函数不修改输入数组；不存在/被排除的 id 不报错。
  */
 export function derivePinnedSessions(input: DerivePinnedSessionsInput): SessionInfo[] {
-  const { sessions, visibleRoots, pinnedSessionIds } = input;
+  const { sessions, pinnedSessionIds } = input;
   const byId = new Map<string, SessionInfo>();
   for (const s of sessions) {
     if (s.subagent) continue;
-    if (!visibleRoots.has(s.cwd)) continue;
     byId.set(s.id, s);
   }
   const result: SessionInfo[] = [];

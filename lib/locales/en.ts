@@ -100,6 +100,7 @@ export const en = {
   sidebar_displayOptions: 'Display options',
   sidebar_loadMoreRecent: 'Load more (+{count} · {shown}/{total})',
   sidebar_recentSessions: 'Recent',
+  sidebar_ungroupedSessions: 'Ungrouped sessions',
   sidebar_pinnedSessions: 'Pinned',
   sidebar_pinSession: 'Pin session',
   sidebar_unpinSession: 'Unpin session',
@@ -198,6 +199,8 @@ export const en = {
   lineage_switcherLabel: 'Switch subagent: {title}',
   sidebar_expandRecentSessions: 'Expand recent sessions',
   sidebar_collapseRecentSessions: 'Collapse recent sessions',
+  sidebar_expandUngroupedSessions: 'Expand ungrouped sessions',
+  sidebar_collapseUngroupedSessions: 'Collapse ungrouped sessions',
   // archive
   sidebar_archive: 'Archive',
   sidebar_archiveSession: 'Archive session',

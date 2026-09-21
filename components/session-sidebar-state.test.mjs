@@ -200,14 +200,13 @@ test("最近会话：按 modified 降序取 top N，默认 20；不修改输入�
     session("mid2", { modified: "2026-07-06T00:00:00.000Z" }),
     session("sixth", { modified: "2026-07-04T00:00:00.000Z" }),
   ];
-  const visibleRoots = new Set(["/repo"]);
-  const recent = m.deriveRecentSessions({ sessions: list, visibleRoots });
+  const recent = m.deriveRecentSessions({ sessions: list });
   // 仅 6 条时默认 limit=20 返回全部 6 条（按 modified 降序）
   assert.deepEqual(recent.map((s) => s.id), ["newest", "newer", "mid2", "mid", "sixth", "old"]);
   // 输入未被修改
   assert.equal(list.length, 6);
   // 自定义 limit
-  const top3 = m.deriveRecentSessions({ sessions: list, visibleRoots, limit: 3 });
+  const top3 = m.deriveRecentSessions({ sessions: list, limit: 3 });
   assert.deepEqual(top3.map((s) => s.id), ["newest", "newer", "mid2"]);
 });
 
@@ -219,12 +218,12 @@ test("最近会话：输入乱序也能正确派生（内部稳定排序）", as
     session("c", { modified: "2026-07-10T00:00:00.000Z" }),
   ];
   assert.deepEqual(
-    m.deriveRecentSessions({ sessions: list, visibleRoots: new Set(["/repo"]), limit: 2 }).map((s) => s.id),
+    m.deriveRecentSessions({ sessions: list, limit: 2 }).map((s) => s.id),
     ["a", "c"],
   );
 });
 
-test("最近会话：排除 subagent 子会话与不在项目列表/未选中目录内的会话", async () => {
+test("#53 最近会话：只排除 subagent 子会话，不再按目录过滤（未分组会话照常出现）", async () => {
   const m = await load();
   const list = [
     session("root-recent", { modified: "2026-07-12T00:00:00.000Z" }),
@@ -236,62 +235,32 @@ test("最近会话：排除 subagent 子会话与不在项目列表/未选中目
     // 陈旧缓存：projectRoot 指向 /repo，但 cwd 是旁路目录 —— 仍按 cwd 判定。
     session("stale-cache", { modified: "2026-07-10T00:00:00.000Z", cwd: "/repo-worktrees/feat", projectRoot: "/repo" }),
   ];
-  // 整个侧栏一致：项目区、最近区、置顶区都只显示 visibleRoots 内的会话。
-  const visibleRoots = new Set(["/repo", "/repo-worktrees/feat"]);
-  const recent = m.deriveRecentSessions({ sessions: list, visibleRoots });
-  assert.deepEqual(recent.map((s) => s.id), ["root-recent", "stale-cache"]);
-  // 选中目录也进 visibleRoots（当前上下文不能凭空消失）。
-  const onlySelected = m.deriveRecentSessions({ sessions: list, visibleRoots: new Set(["/repo-closed"]) });
-  assert.deepEqual(onlySelected.map((s) => s.id), ["closed-project"]);
+  const recent = m.deriveRecentSessions({ sessions: list });
+  assert.deepEqual(recent.map((s) => s.id), ["root-recent", "closed-project", "stale-cache"]);
+  // 已删除/归档（不在 sessions 里）的会话自然不会出现；subagent 仍被排除。
+  assert.equal(recent.some((s) => s.id === "subagent"), false);
 });
 
-test("filterSessionsByVisibleRoots：侧栏所有会话入口共用同一可见目录集合", async () => {
+test("#53 最近/置顶不再按目录过滤：陈旧 projectRoot 不影响，置顶的会话一定可见", async () => {
   const m = await load();
-  const list = [
-    session("main", { cwd: "/repo" }),
-    session("side", { cwd: "/repo-worktrees/feat", projectRoot: "/repo" }),
-    session("sub", { cwd: "/repo", subagent: { parentSessionId: "p", runId: "r", runIndex: 0 } }),
-  ];
-  // 陈旧 projectRoot 不算数；不在集合内的目录一律不列出（含归档/全文命中行同源调用）
-  assert.deepEqual(
-    m.filterSessionsByVisibleRoots(list, new Set(["/repo"])).map((s) => s.id),
-    ["main", "sub"],
-  );
-  assert.deepEqual(
-    m.filterSessionsByVisibleRoots(list, new Set(["/repo", "/repo-worktrees/feat"])).map((s) => s.id),
-    ["main", "side", "sub"],
-  );
-  assert.deepEqual(m.filterSessionsByVisibleRoots(list, new Set()), []);
-  // 不修改输入数组
-  assert.equal(list.length, 3);
-});
-
-test("最近/置顶：陈旧 projectRoot 不参与判定，只有 cwd 在 visibleRoots 才出现", async () => {
-  const m = await load();
-  // 客户端旧缓存：cwd 在旁路 checkout，projectRoot 仍指向主仓
+  // 客户端旧缓存：cwd 在旁路 checkout，projectRoot 仍指向主仓 —— 分组只看 cwd，展示不看目录
   const stale = session("stale", {
     cwd: "/repo-worktrees/feat",
     projectRoot: "/repo",
     modified: "2026-07-12T00:00:00.000Z",
   });
-  const mainOnly = [session("main", { modified: "2026-07-11T00:00:00.000Z" }), stale];
-  // visibleRoots 只有主仓：陈旧 root 不得把旁路会话带进最近区 / 置顶区
-  assert.deepEqual(m.deriveRecentSessions({ sessions: mainOnly, visibleRoots: new Set(["/repo"]) }).map((s) => s.id), ["main"]);
+  const sessions = [session("main", { modified: "2026-07-11T00:00:00.000Z" }), stale];
+  assert.deepEqual(m.deriveRecentSessions({ sessions }).map((s) => s.id), ["stale", "main"]);
   assert.deepEqual(
-    m.derivePinnedSessions({ sessions: mainOnly, visibleRoots: new Set(["/repo"]), pinnedSessionIds: ["stale", "main"] }).map((s) => s.id),
-    ["main"],
-  );
-  // 把目录加入项目（两个 root 都可见）后，两个会话都出现
-  const both = new Set(["/repo", "/repo-worktrees/feat"]);
-  assert.deepEqual(m.deriveRecentSessions({ sessions: mainOnly, visibleRoots: both }).map((s) => s.id), ["stale", "main"]);
-  assert.deepEqual(
-    m.derivePinnedSessions({ sessions: mainOnly, visibleRoots: both, pinnedSessionIds: ["main", "stale"] }).map((s) => s.id),
+    m.derivePinnedSessions({ sessions, pinnedSessionIds: ["main", "stale"] }).map((s) => s.id),
     ["main", "stale"],
   );
-  // 当前选中的是旁路目录（visibleRoots 只有它）：只剩该目录的会话
+  // 项目被关闭后（会话 cwd 已不在项目列表）仍然出现在最近/置顶：它们归未分组区。
+  const closedOnly = [session("closed", { cwd: "/repo-closed", modified: "2026-07-12T00:00:00.000Z" })];
+  assert.deepEqual(m.deriveRecentSessions({ sessions: closedOnly }).map((s) => s.id), ["closed"]);
   assert.deepEqual(
-    m.deriveRecentSessions({ sessions: mainOnly, visibleRoots: new Set(["/repo-worktrees/feat"]) }).map((s) => s.id),
-    ["stale"],
+    m.derivePinnedSessions({ sessions: closedOnly, pinnedSessionIds: ["closed"] }).map((s) => s.id),
+    ["closed"],
   );
 });
 
@@ -344,17 +313,15 @@ test("最近会话：excludeIds 与损坏 limit 容错", async () => {
     session("b", { modified: "2026-07-11T00:00:00.000Z" }),
     session("c", { modified: "2026-07-10T00:00:00.000Z" }),
   ];
-  const visibleRoots = new Set(["/repo"]);
   assert.deepEqual(
-    m.deriveRecentSessions({ sessions: list, visibleRoots, excludeIds: new Set(["a"]) }).map((s) => s.id),
+    m.deriveRecentSessions({ sessions: list, excludeIds: new Set(["a"]) }).map((s) => s.id),
     ["b", "c"],
   );
-  assert.deepEqual(m.deriveRecentSessions({ sessions: list, visibleRoots, limit: 0 }).map((s) => s.id), []);
-  assert.deepEqual(m.deriveRecentSessions({ sessions: list, visibleRoots, limit: -3 }).map((s) => s.id), []);
-  assert.deepEqual(m.deriveRecentSessions({ sessions: list, visibleRoots, limit: 2.9 }).map((s) => s.id), ["a", "b"]);
-  // 空输入 / 空 visibleRoots 安全空态
-  assert.deepEqual(m.deriveRecentSessions({ sessions: [], visibleRoots }), []);
-  assert.deepEqual(m.deriveRecentSessions({ sessions: list, visibleRoots: new Set() }), []);
+  assert.deepEqual(m.deriveRecentSessions({ sessions: list, limit: 0 }).map((s) => s.id), []);
+  assert.deepEqual(m.deriveRecentSessions({ sessions: list, limit: -3 }).map((s) => s.id), []);
+  assert.deepEqual(m.deriveRecentSessions({ sessions: list, limit: 2.9 }).map((s) => s.id), ["a", "b"]);
+  // 空输入安全空态
+  assert.deepEqual(m.deriveRecentSessions({ sessions: [] }), []);
   assert.equal(m.RECENT_SESSIONS_LIMIT, 20);
   assert.equal(m.RECENT_SESSIONS_INITIAL_VISIBLE, 5);
   assert.equal(m.RECENT_SESSIONS_LOAD_MORE, 5);
@@ -362,7 +329,7 @@ test("最近会话：excludeIds 与损坏 limit 容错", async () => {
 
 // ── 置顶会话 ──────────────────────────────────────────────────────────────
 
-test("置顶会话：按 pinnedSessionIds 顺序输出仍存在、可见的会话", async () => {
+test("置顶会话：按 pinnedSessionIds 顺序输出仍存在的会话（不按目录过滤）", async () => {
   const m = await load();
   const list = [
     session("first", { cwd: "/repo-a" }),
@@ -372,34 +339,31 @@ test("置顶会话：按 pinnedSessionIds 顺序输出仍存在、可见的会�
       subagent: { parentSessionId: "p", runId: "r1", runIndex: 1 },
     }),
   ];
-  // 顺序 = pinnedSessionIds 顺序（最新置顶在前）；已删除/归档（不在 sessions）、
-  // subagent 与不在项目列表/未选中目录内的会话跳过。
+  // 顺序 = pinnedSessionIds 顺序（最新置顶在前）；已删除/归档（不在 sessions）
+  // 与 subagent 会话跳过；项目被关闭的目录不再让它从置顶区消失。
   const pinned = m.derivePinnedSessions({
     sessions: list,
-    visibleRoots: new Set(["/repo", "/repo-a"]),
     pinnedSessionIds: ["second", "gone", "first", "closed", "sub"],
   });
-  assert.deepEqual(pinned.map((s) => s.id), ["second", "first"]);
+  assert.deepEqual(pinned.map((s) => s.id), ["second", "first", "closed"]);
   // 不修改输入数组
   assert.equal(list.length, 4);
 });
 
 test("置顶会话：空置顶列表与空会话列表安全空态", async () => {
   const m = await load();
-  const visibleRoots = new Set(["/repo"]);
-  assert.deepEqual(m.derivePinnedSessions({ sessions: [], visibleRoots, pinnedSessionIds: [] }), []);
+  assert.deepEqual(m.derivePinnedSessions({ sessions: [], pinnedSessionIds: [] }), []);
   assert.deepEqual(
-    m.derivePinnedSessions({ sessions: [session("a")], visibleRoots, pinnedSessionIds: [] }),
+    m.derivePinnedSessions({ sessions: [session("a")], pinnedSessionIds: [] }),
     [],
   );
   assert.deepEqual(
-    m.derivePinnedSessions({ sessions: [], visibleRoots, pinnedSessionIds: ["ghost"] }),
+    m.derivePinnedSessions({ sessions: [], pinnedSessionIds: ["ghost"] }),
     [],
   );
   // 重复 id 不重复输出
   const dup = m.derivePinnedSessions({
     sessions: [session("a")],
-    visibleRoots,
     pinnedSessionIds: ["a", "a"],
   });
   assert.deepEqual(dup.map((s) => s.id), ["a"]);
