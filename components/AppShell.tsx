@@ -48,6 +48,13 @@ import type { TurnMetrics } from "@/lib/browser-session-runtime-registry";
 import { getOrCreateBrowserSessionRuntimeRegistry } from "@/lib/browser-session-runtime-registry";
 import { ProjectProvider, useProjectActions, useProjectIdentity } from "./ProjectProvider";
 import {
+  getWindowTitleState,
+  resolveWindowTitle,
+  setWindowTitleBase,
+  subscribeWindowTitle,
+  windowTitleOverrideRemainingMs,
+} from "@/lib/window-title";
+import {
   CHANGES_PANEL_WIDTH_DEFAULT,
   CHANGES_PANEL_WIDTH_MAX,
   CHANGES_PANEL_WIDTH_MIN,
@@ -1066,15 +1073,41 @@ function AppShellInner() {
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
   const windowTitle = activeCwdName ? `${activeCwdName} - Pidance` : "Pidance";
 
+  // 窗口标题：AppShell 是唯一写者。base = 「<目录名> - Pidance」；扩展的 setTitle 走
+  // lib/window-title 的临时覆盖（带 TTL，切项目/会话即作废），到期在这里回落。
   useEffect(() => {
-    const syncWindowTitle = () => {
-      if (document.title !== windowTitle) document.title = windowTitle;
+    setWindowTitleBase(windowTitle);
+    const apply = () => {
+      const next = resolveWindowTitle(getWindowTitleState(), Date.now());
+      if (document.title !== next) document.title = next;
     };
-
-    syncWindowTitle();
-    const observer = new MutationObserver(syncWindowTitle);
+    let revertTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleRevert = () => {
+      if (revertTimer) clearTimeout(revertTimer);
+      revertTimer = null;
+      const remaining = windowTitleOverrideRemainingMs(getWindowTitleState(), Date.now());
+      if (remaining <= 0) return;
+      revertTimer = setTimeout(() => {
+        revertTimer = null;
+        apply();
+        scheduleRevert();
+      }, remaining);
+    };
+    apply();
+    scheduleRevert();
+    const unsubscribe = subscribeWindowTitle(() => {
+      apply();
+      scheduleRevert();
+    });
+    // 兜底：别处（扩展直接写 document.title）动了标题就拉回「应当的标题」。
+    // 写的是解析后的值，因此不会把仍在有效期内的扩展标题打掉。
+    const observer = new MutationObserver(apply);
     observer.observe(document.head, { childList: true, subtree: true, characterData: true });
-    return () => observer.disconnect();
+    return () => {
+      unsubscribe();
+      if (revertTimer) clearTimeout(revertTimer);
+      observer.disconnect();
+    };
   }, [windowTitle]);
 
   const sidebarContent = (

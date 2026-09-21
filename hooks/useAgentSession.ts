@@ -18,6 +18,8 @@ import { isDefinitiveRejection, readAgentLiveFlag, sendAgentCommand } from "@/li
 import { generateSubmissionId, isQueueablePromptReason, type PromptReason, type PromptReceipt, type QueueDispatchReceipt } from "@/lib/agent-commands";
 import { clearDraft, forgetDraftIfUnedited, getDraft, setDraft, type ChatDraft } from "@/lib/draft-store";
 import { getOrCreateBrowserSessionRuntimeRegistry, type RegistrySubscription } from "@/lib/browser-session-runtime-registry";
+import { createActivationRecovery } from "@/lib/activation-recovery";
+import { setExtensionWindowTitle } from "@/lib/window-title";
 import {
   captureChatTargetToken,
   sameChatTargetToken,
@@ -1561,7 +1563,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           addLiveActivity(activity);
         }
       } else if (effect.type === "setTitle") {
-        document.title = effect.title;
+        // 交给 lib/window-title 的临时覆盖（AppShell 是窗口标题唯一写者）：
+        // 直接写 document.title 会被 AppShell 的兜底 observer 立刻拉回项目名。
+        setExtensionWindowTitle(effect.title);
       } else {
         opts.chatInputRef?.current?.insertText(effect.text);
       }
@@ -1831,8 +1835,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         })
         .catch(() => undefined);
     };
+    // 同一次激活的 focus + visibilitychange 合并成一次锁刷新（见 lib/activation-recovery）：
+    // 两个事件一起到时不重复打 /state。轮询是独立周期，直接调 refreshLock，不经过合并器。
+    const recovery = createActivationRecovery({ perform: refreshLock });
     const onVisible = () => {
-      if (document.visibilityState === "visible") refreshLock();
+      if (document.visibilityState === "visible") recovery.notify();
     };
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", onVisible);
@@ -1843,22 +1850,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       cancelled = true;
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
+      recovery.dispose();
       if (interval) window.clearInterval(interval);
     };
   }, [session?.id, session?.readOnly, isNew, lockedByOther]);
 
   useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void syncOnTabReturn();
+    // focus 与 visibilitychange 通常同时到；syncOnTabReturn 会强制重连 SSE + 对账 + 重拉
+    // 尾页，走两遍既浪费又会互相打断。用激活合并器：同批只跑一次，执行期间又来的激活
+    // 结束后补跑一次（宁可多一次也不漏）。
+    const recovery = createActivationRecovery({ perform: () => syncOnTabReturn() });
+    const onActivate = () => {
+      if (document.visibilityState === "visible") recovery.notify();
     };
-    const onFocus = () => {
-      if (document.visibilityState === "visible") void syncOnTabReturn();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onActivate);
+    window.addEventListener("focus", onActivate);
     return () => {
-      document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onActivate);
+      window.removeEventListener("focus", onActivate);
+      recovery.dispose();
     };
   }, [syncOnTabReturn]);
 
