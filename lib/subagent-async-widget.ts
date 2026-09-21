@@ -52,6 +52,47 @@ export interface SubagentAsyncSnapshot {
   byteLimitExceeded: boolean;
 }
 
+// ── pi-subagents 的 fleet-status 文本改写（belowEditor widget） ──────────────
+//
+// TUI 里那行是 `1 active agent · ↓ 0 tokens · ↓/← to inspect`：最后一段是**终端键位提示**，
+// 浏览器里没有意义（Web 的子代理入口在顶栏谱系下拉）。这里只去掉键位提示段，保留有用信息
+// （在跑的 agent 数、token 读数）；认不出形状时返回 null，调用方保持原样。
+
+/** ANSI SGR / 光标序列（渲染桥转出来的行带颜色）。 */
+const ANSI_PATTERN = /\u001b\[[0-9;?]*[A-Za-z]/g;
+
+/** 键位提示段：带方向键字形且提到「查看/导航/选择」之类动作。 */
+const TERMINAL_KEY_HINT_PATTERN = /[↓↑←→].*(?:inspect|查看|导航|选择|navigate|select)/i;
+
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_PATTERN, "");
+}
+
+/**
+ * 改写 fleet-status 的行：去掉终端键位提示段。
+ * - 返回 null：不是这个形状（没有键位提示可去），调用方原样渲染；
+ * - 返回 []：去掉后没有内容了，调用方不要渲染这个 widget；
+ * - 返回非空数组：改写后的行（纯文本，无 ANSI）。
+ */
+export function rewriteFleetStatusLines(lines: readonly string[] | null | undefined): string[] | null {
+  if (!lines || lines.length === 0) return null;
+  let sawHint = false;
+  const out: string[] = [];
+  for (const raw of lines) {
+    if (typeof raw !== "string") continue;
+    const plain = stripAnsi(raw);
+    const segments = plain.split("·").map((segment) => segment.trim()).filter(Boolean);
+    const kept = segments.filter((segment) => {
+      if (!TERMINAL_KEY_HINT_PATTERN.test(segment)) return true;
+      sawHint = true;
+      return false;
+    });
+    if (kept.length > 0) out.push(kept.join(" · "));
+  }
+  if (!sawHint) return null;
+  return out;
+}
+
 /** 侧栏/谱系里也在用的“进行中”状态集合语义。 */
 export const SUBAGENT_ACTIVE_STATES: ReadonlySet<SubagentAsyncState> = new Set(["running", "queued", "paused"]);
 

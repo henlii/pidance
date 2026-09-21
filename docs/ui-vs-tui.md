@@ -153,8 +153,8 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
    解析失败时**不显示原始载荷**（宁可空着，也不把 JSON 糊到界面上）。
    子代理全部结束后 pi-subagents 会 `setWidget(key, undefined)`，面板消失。
 4. **仍存在的差异**：
-   - `subagent-fleet-status`（placement `belowEditor`）是 TUI 组件，经渲染桥转成文本，里面的 `↓/← to inspect` 是终端键位，在 Web 里没有意义（尚未处理）。
-   - 新开页面拿不到“已经存在”的 widget：widget 目前只走 SSE 实时投影，状态水合不带它，所以打开一个正在跑子代理的会话要等下一次 widget 更新才出现（另见后续 issue）。
+   - `subagent-fleet-status`（placement `belowEditor`）是 TUI 组件，经渲染桥转成文本，里面的 `↓/← to inspect` 是终端键位。Web 侧现在改写这行：去掉键位提示段，保留 agent 数与 token 读数（`rewriteFleetStatusLines`）；整行只剩提示时不渲染该 widget。
+   - ~~新开页面拿不到已存在的 widget~~ **已核实不是问题**：widget 会随状态水合（`/api/sessions/<id>/state` 的 `state.extensionWidgets`）在打开会话时出现。此前判定「拿不到」是探针口径造成的误判——探针找的是 widget 卡片的折叠按钮，而 `subagent-async` 在 01a1086 之后改由专用面板渲染，已经没有折叠按钮了。
 4. **状态条与 widget 不区分“谁提供”**：Web 侧只按 key 渲染与折叠（折叠状态存 `localStorage` 的 `pidance.collapsedWidgetKeys.v1`）。
 
 ---
@@ -163,7 +163,7 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
 
 | 分叉 | 原因 |
 |---|---|
-| 侧栏项目树 / 未分组会话区 | Web 专属导航面；项目 = 目录，一对一 |
+| 侧栏项目树 / 未分组会话区 | Web 专属导航面；项目 = 目录，一对一；项目区只列项目列表，其余会话（从未加入过项目的目录、关闭项目后留下的）归底部未分组区，最近/置顶/全文/归档不再按目录过滤（#53） |
 | 顶栏谱系下拉（子会话导航） | 侧栏刻意隐藏子代理会话，页头下拉是它们唯一的入口 |
 | 文件 / Git / 终端 / 设置面板 | 终端里由命令与其输出承担，Web 做成了面板 |
 | 手机抽屉与安全区适配 | 窄视口下三栏并排不可用 |
