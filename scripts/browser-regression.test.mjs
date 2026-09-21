@@ -51,6 +51,37 @@ async function abSync(args) {
   return execFileSync(cmd[0], cmd.slice(1), { maxBuffer: 64 * 1024 * 1024, encoding: "utf8" });
 }
 
+/**
+ * 断言用的 UI 文案必须**随页面语言**取，不能硬编码中文（issue #61）：
+ * QA 浏览器与共享偏好都可能是 en，硬编码会让「找不到元素」被误报成产品回归。
+ * 仓库里 A1/B4 早先就用这个套路，这里提成公共 helper。
+ */
+async function uiLabels({ attempts = 40, stepMs = 250 } = {}) {
+  // 语言必须等页面挂载后才定（应用在 I18nProvider 里设 documentElement.lang）：
+  // 太早取会拿到空串，回退成 en 的文案去对中文界面，把「找不到元素」误报成产品回归。
+  let lang = "";
+  for (let i = 0; i < attempts && !lang; i += 1) {
+    lang = String((await evalResult("document.documentElement.lang || ''")) ?? "");
+    if (!lang) await new Promise((r) => setTimeout(r, stepMs));
+  }
+  assert.ok(lang, "页面未设置 documentElement.lang（无法推断 UI 文案）");
+  const low = lang.toLowerCase();
+  assert.ok(low.startsWith("zh") || low.startsWith("en"), `未知页面语言 ${lang}：文案断言只覆盖 zh/en`);
+  const zh = low.startsWith("zh");
+  return {
+    lang,
+    addProject: zh ? "添加项目" : "Add project",
+    projectPath: zh ? "项目路径" : "Project path",
+    add: zh ? "添加" : "Add",
+    noSessionsYet: zh ? "暂无会话" : "No sessions yet",
+    newSession: zh ? "新建会话" : "New session",
+    newSessionInPrefix: zh ? "在 " : "New session in",
+    chooseProject: zh ? "选择项目" : "Choose a project",
+    running: zh ? "运行中" : "Running",
+    stop: zh ? "停止" : "Stop",
+  };
+}
+
 async function evalResult(script) {
   const result = await ab(["eval", "--session", SESSION, script]);
   return result?.data?.result;
@@ -418,41 +449,54 @@ test("用例11：添加空项目 → 侧栏显示并可新建会话（项目独�
   const dir = `/tmp/pidance-e2e-${Date.now()}`;
   const fs = await import("node:fs");
   fs.mkdirSync(dir, { recursive: true });
+  // 本用例会在 UI 里「添加项目」→ 共享 projectRoots 与 trust 都会长一条。跑前快照，跑完还原
+  // （issue #62：用例结束只删目录，不摘列表，实测 11 → 12 条）。
+  const prefsBefore = await (await fetch(`${URL_BASE}/api/preferences`, { headers: AUTH_HEADER })).json();
+  const rootsBefore = prefsBefore?.prefs?.sidebarUi?.projectRoots ?? null;
   try {
     // 打开添加项目弹窗
     await ab(["open", URL_BASE, "--session", SESSION], { json: false }).catch(() => {});
     await ensureAuthed();
     await ab(["set", "viewport", "1280", "720", "--session", SESSION], { json: false });
+    const L = await uiLabels();
     let addRef = null;
     for (let attempt = 0; attempt < 3 && !addRef; attempt += 1) {
       await new Promise((r) => setTimeout(r, 2500));
       const refs = await snapshotRefs();
-      addRef = Object.entries(refs).find(([, i]) => i?.role === "button" && (i.name ?? "").includes("添加项目"))?.[0] ?? null;
+      addRef = Object.entries(refs).find(([, i]) => i?.role === "button" && (i.name ?? "").includes(L.addProject))?.[0] ?? null;
     }
     assert.ok(addRef, "未找到添加项目按钮（重试 3 次后仍无）");
     // 语义定位避免 ref 被重渲染；DOM click 仍走 React 的真实 onClick，
     // 但不受悬浮 tooltip 命中测试遮挡的影响。
-    const clicked = await evalResult("(() => { const button = document.querySelector('button[aria-label=\"添加项目\"]'); if (!button) return false; button.click(); return true; })()");
+    const clicked = await evalResult(`(() => { const button = document.querySelector('button[aria-label="${L.addProject}"]'); if (!button) return false; button.click(); return true; })()`);
     assert.equal(clicked, true, "添加项目按钮不可点击");
     await new Promise((r) => setTimeout(r, 1200));
     // 填路径 + Enter 浏览 + 添加
     const refs2 = await snapshotRefs();
-    const inputRef = Object.entries(refs2).find(([, i]) => i?.name === "项目路径")?.[0];
+    const inputRef = Object.entries(refs2).find(([, i]) => i?.name === L.projectPath)?.[0];
     assert.ok(inputRef, "未找到项目路径输入框");
     await ab(["fill", inputRef, dir, "--session", SESSION], { json: false });
     await ab(["press", "Enter", "--session", SESSION], { json: false });
     await new Promise((r) => setTimeout(r, 1200));
     const refs3 = await snapshotRefs();
-    const addBtn = Object.entries(refs3).find(([, i]) => i?.role === "button" && i?.name === "添加")?.[0];
+    const addBtn = Object.entries(refs3).find(([, i]) => i?.role === "button" && i?.name === L.add)?.[0];
     assert.ok(addBtn, "添加按钮不可用（应先浏览路径）");
     await ab(["click", addBtn, "--session", SESSION], { json: false });
     await new Promise((r) => setTimeout(r, 1500));
     const text = await snapshotText();
     const projectName = dir.split("/").at(-1) ?? dir;
     assert.ok(text.includes(projectName) || text.includes(dir), `空项目未显示在侧栏（dir=${dir}）`);
-    assert.ok(text.includes("暂无会话") || text.includes("新建会话"), "空项目缺少新建会话入口");
+    assert.ok(text.includes(L.noSessionsYet) || text.includes(L.newSession), "空项目缺少新建会话入口");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+    if (rootsBefore !== null) {
+      const res = await fetch(`${URL_BASE}/api/preferences`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...AUTH_HEADER },
+        body: JSON.stringify({ prefs: { sidebarUi: { projectRoots: rootsBefore } } }),
+      }).catch(() => null);
+      assert.ok(res?.ok, `还原共享项目列表失败（HTTP ${res?.status ?? "n/a"}）`);
+    }
   }
 });
 
@@ -463,6 +507,7 @@ test("用例12：引导页项目下拉跟随侧栏「新建会话」目标", { t
   await ab(["open", URL_BASE, "--session", SESSION], { json: false }).catch(() => {});
   await ensureAuthed();
   await ab(["set", "viewport", "1280", "720", "--session", SESSION], { json: false });
+  const L = await uiLabels();
 
   // 该用例会改写共享的「上次新会话项目」：先读回原值，结束后还原（仅当期间
   // 没有真实用户改写时才写回，避免盖掉用户手动选择）。
@@ -476,7 +521,7 @@ test("用例12：引导页项目下拉跟随侧栏「新建会话」目标", { t
   const originalDraft = await readDraft();
 
   const guideState = `(() => {
-    const s = document.querySelector('select.guide-select[aria-label="选择项目"]');
+    const s = document.querySelector('select.guide-select');
     if (!s) return null;
     const rows = [...document.querySelectorAll('.sidebar-row[title]')]
       .filter((r) => r.getAttribute('data-sidebar-depth') === '0'
@@ -490,6 +535,7 @@ test("用例12：引导页项目下拉跟随侧栏「新建会话」目标", { t
       switchable: [...s.options].map((o) => o.value).filter((v) => v && rows.includes(v)),
       // 同一实例（未重挂载）的标记：切换后仍应在
       marked: s.dataset.guideProbe === '1',
+      label: s.getAttribute('aria-label'),
     };
   })()`;
   /** 有限次轮询直到条件成立（避免固定睡眠把"未加载完"当成终态）。 */
@@ -505,19 +551,35 @@ test("用例12：引导页项目下拉跟随侧栏「新建会话」目标", { t
 
   try {
     // 1) 停到引导页（侧栏顶部新建会话 = 当前项目），等项目列表加载完
+    // 侧栏那个按钮在没有选中项目时是禁用的「选择项目」：必须**等它变成可点的
+    // 「在 <项目> 中新建会话」**再点，否则会把「还没自动选中项目」当成产品回归
+    // （issue #61：这条用例此前就是这么红的）。
+    const newSessionProbe = `(() => {
+      const b = [...document.querySelectorAll('button.sidebar-icon-btn')].find((el) => {
+        const label = el.getAttribute('aria-label') ?? '';
+        return (label.startsWith(${JSON.stringify(L.newSessionInPrefix)}) || label.includes(${JSON.stringify(L.newSession)}));
+      });
+      if (!b || b.disabled) return null;
+      return b.getAttribute('aria-label');
+    })()`;
+    let newSessionLabel = null;
+    for (let i = 0; i < 40 && !newSessionLabel; i += 1) {
+      newSessionLabel = await evalResult(newSessionProbe);
+      if (!newSessionLabel) await new Promise((r) => setTimeout(r, 500));
+    }
+    assert.ok(newSessionLabel, "未找到可点的侧栏新建会话按钮（一直停在「选择项目」/禁用 = 没有自动选中项目）");
     const opened = await evalResult(
-      "(() => { const b = [...document.querySelectorAll('button.sidebar-icon-btn')]"
-      + ".find((b) => !b.className.includes('--hover') && (b.getAttribute('aria-label') ?? '').includes('新建会话'));"
-      + "if (!b) return false; b.click(); return true; })()",
+      `(() => { const b = [...document.querySelectorAll('button.sidebar-icon-btn')].find((el) => el.getAttribute('aria-label') === ${JSON.stringify(newSessionLabel)}); if (!b) return false; b.click(); return true; })()`,
     );
     assert.equal(opened, true, "未找到侧栏新建会话按钮");
     const ready = await waitFor((s) => !s.loading && s.options.length > 1 && s.switchable.length > 0);
     assert.ok(ready && !ready.loading, "新会话引导页项目下拉未就绪（未加载完 ≠ 没有项目）");
+    assert.equal(ready.label, L.chooseProject, "引导页项目下拉的 aria-label 与当前语言不一致");
     if (ready.switchable.length < 2) return t.skip("环境只有一个侧栏可见项目，无法验证切换");
 
     // 标记当前 select 节点：React 原地更新时标记保留，重挂载则丢失
     await evalResult(
-      "(() => { const s = document.querySelector('select.guide-select[aria-label=\"选择项目\"]');"
+      "(() => { const s = document.querySelector('select.guide-select');"
       + "if (!s) return false; s.dataset.guideProbe = '1'; return true; })()",
     );
 
@@ -525,7 +587,7 @@ test("用例12：引导页项目下拉跟随侧栏「新建会话」目标", { t
     const a = ready.switchable.find((v) => v === ready.value) ?? ready.switchable[0];
     if (a !== ready.value) {
       await evalResult(
-        "(() => { const s = document.querySelector('select.guide-select[aria-label=\"选择项目\"]');"
+        "(() => { const s = document.querySelector('select.guide-select');"
         + "const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;"
         + `set.call(s, ${JSON.stringify(a)}); s.dispatchEvent(new Event('change', { bubbles: true })); return s.value; })()`,
       );
@@ -592,16 +654,19 @@ test("用例13：run 结束的权威快照回收乐观运行标记（侧栏不�
     createdId = created?.sessionId ?? null;
     assert.ok(createdId, `测试会话创建失败: ${createRes.status} ${JSON.stringify(created)}`);
 
+    // 侧栏「运行中」与 chat「停止」的文案随语言变，先按页面语言取词（issue #61）
+    const L = await uiLabels();
+
     const rowState = `(() => {
       const row = document.querySelector('[data-session-id="${createdId}"]');
-      return { present: !!row, running: row ? !!row.querySelector('[aria-label="运行中"]') : false };
+      return { present: !!row, running: row ? !!row.querySelector('[aria-label="' + ${JSON.stringify(L.running)} + '"]') : false };
     })()`;
     // chat 视图必须确实挂在该会话且正在跑：乐观标记由当前 chat 上报，
     // 只看侧栏圆环无法区分标记还是服务端 running 集。
     const viewRunning = `(() => ({
       onSession: location.search.includes(${JSON.stringify(createdId)}),
       chat: !!document.querySelector('[data-pidance-chat="true"]'),
-      stop: [...document.querySelectorAll('button')].some((b) => (b.textContent || '').trim().startsWith('停止')),
+      stop: [...document.querySelectorAll('button')].some((b) => (b.textContent || '').trim().startsWith(${JSON.stringify(L.stop)})),
     }))()`;
 
     await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(createdId)}`, "--session", SESSION], { json: false });
