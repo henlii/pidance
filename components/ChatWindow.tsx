@@ -36,7 +36,6 @@ import { TodoPanel } from "./TodoPanel";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
 import { useI18n } from "@/lib/i18n";
-import { getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -259,13 +258,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   const handleDraftTargetChange = useCallback((cwd: string | null) => {
     setDraftTargetCwd(cwd);
     try {
-      if (cwd) {
-        localStorage.setItem("pidance.draftTargetCwd", cwd);
-        setServerPref("draftTargetCwd", cwd);
-      } else {
-        localStorage.removeItem("pidance.draftTargetCwd");
-        setServerPref("draftTargetCwd", null);
-      }
+      // 只存本机（#65）：「我正要在哪个项目里建会话」是这台设备当下的动作，不是账号级偏好。
+      // 跨端同步的后果是别人的引导目标被另一台设备（甚至一条空值）拽走，而收益为零。
+      if (cwd) localStorage.setItem("pidance.draftTargetCwd", cwd);
+      else localStorage.removeItem("pidance.draftTargetCwd");
     } catch {
       // localStorage 不可用时仅内存生效
     }
@@ -406,14 +402,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   useEffect(() => {
     setTodosCollapsed(true);
   }, [todoCollapseScope]);
-
-  const serverPrefs = useServerPreferences();
-  useEffect(() => {
-    const remoteDraft = getServerPref<unknown>("draftTargetCwd");
-    if (typeof remoteDraft === "string" && remoteDraft && remoteDraft !== draftTargetCwd && !guideDefaultCwd) {
-      setDraftTargetCwd(remoteDraft);
-    }
-  }, [serverPrefs]);
 
   // 阻塞弹窗（dialog）expiresAt 到达：按 id 从 FIFO 清理并推进；不发送
   // extension_ui_response（服务端 timeout 自结算）。

@@ -584,6 +584,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         blockingQueue: queue,
         ...projectBlockingHead(queue),
       });
+    } else if (state.pendingExtensionRequests !== undefined && queue.length === 0 && current.length > 0) {
+      // 只在服务端**显式**说「没有待答请求」时清本地投影（#65）。`undefined`（本次快照不带
+      // 该字段）必须保持现状，否则会把刚通过 SSE 到达、还没被快照采纳的问答抹掉（#34 的竞态）。
+      patchExtensionUiState({ blockingQueue: [], dialog: null });
     }
     applyActiveCustomUi(state.activeCustomUi);
   }, [applyActiveCustomUi, extensionUiStateRef, patchExtensionUiState]);

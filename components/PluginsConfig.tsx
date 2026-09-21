@@ -784,10 +784,12 @@ export function PluginsConfig({
     return raw && typeof raw === "object" ? raw : {};
   });
   const toggleLock = useCallback((key: string) => {
+    // 逐插件写子键（#65）：整 map 回写时，两台设备同时锁不同插件会丢掉其中一个改动；
+    // 服务端 merge 只做「顶层键 + 一层子键」，所以 `pluginLocks.<id>` 正好是安全的粒度。
     setLocks((prev) => {
-      const next = { ...prev, [key]: !prev[key] };
-      setServerPref("pluginLocks", next);
-      return next;
+      const next = !prev[key];
+      setServerPref(`pluginLocks.${key}`, next);
+      return { ...prev, [key]: next };
     });
   }, []);
 

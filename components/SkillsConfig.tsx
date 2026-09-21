@@ -630,10 +630,11 @@ export function SkillsConfig({
     return raw && typeof raw === "object" ? { ...raw } : {};
   });
   const toggleLock = useCallback((key: string) => {
+    // 逐技能写子键（#65），理由同 PluginsConfig：整 map 回写会互相覆盖。
     setLocks((prev) => {
-      const next = { ...prev, [key]: !prev[key] };
-      setServerPref("skillLocks", next);
-      return next;
+      const next = !prev[key];
+      setServerPref(`skillLocks.${key}`, next);
+      return { ...prev, [key]: next };
     });
   }, []);
 

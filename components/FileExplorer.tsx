@@ -962,10 +962,10 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   }, [cwd, gitFiles]);
 
   const persistExplorerState = useCallback((expanded: Set<string>, scrollTop: number) => {
-    const state = { expanded: [...expanded], scrollTop };
-    saveFileExplorerState(cwd, state);
-    // 服务端持久化（跨客户端同步）
-    setServerPref(`fileTree.${cwd}`, state);
+    // 只存本机（#65）：文件树展开集合与滚动位置是**设备局部**状态 —— 每台机器的窗口大小、
+    // 屏幕位置都不同，跨端同步只会让别的设备吃到不相干的像素位置与展开态。服务端上可能
+    // 还留着历史值，但既然不再读它，那些残留就是惰性数据。
+    saveFileExplorerState(cwd, { expanded: [...expanded], scrollTop });
   }, [cwd]);
 
   const handleToggleExpanded = useCallback((fullPath: string, open: boolean) => {
@@ -1172,11 +1172,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         });
       }
       // 恢复新 cwd 的展开/滚动；滚动在 roots 渲染完成后应用。
-      // 服务端为跨客户端权威：先取 server，其次 localStorage。
-      let saved = getServerPref<{ expanded: string[]; scrollTop: number }>(`fileTree.${cwd}`);
-      if (!saved || !Array.isArray(saved.expanded)) {
-        saved = loadSidebarPreferences().fileExplorerState[cwd] ?? { expanded: [], scrollTop: 0 };
-      }
+      // 只读本机（#65）：不再从服务端取，避免把其它设备的像素位置/展开态搬过来。
+      const saved = loadSidebarPreferences().fileExplorerState[cwd] ?? { expanded: [], scrollTop: 0 };
       setExpandedPaths(new Set(saved.expanded));
       pendingScrollTopRef.current = saved.scrollTop;
       setHighlightedPaths(new Set());

@@ -308,6 +308,11 @@ export type DeviceFileStore = {
   writeFileSync: (p: string, data: string, opts: { mode: number }) => void;
   renameSync: (from: string, to: string) => void;
   mkdirSync: (p: string, opts: { recursive: boolean }) => void;
+  /** 跨进程锁原语（可选）：注入的测试 store 不带锁时直接执行，不参与进程间互斥。 */
+  openSync?: (p: string, flags: string, mode: number) => number;
+  closeSync?: (fd: number) => void;
+  unlinkSync?: (p: string) => void;
+  statSync?: (p: string) => { mtimeMs: number };
 };
 
 const defaultDeviceStore: DeviceFileStore = {
@@ -316,7 +321,62 @@ const defaultDeviceStore: DeviceFileStore = {
   writeFileSync: (p, data, opts) => fs.writeFileSync(p, data, opts),
   renameSync: (from, to) => fs.renameSync(from, to),
   mkdirSync: (p, opts) => { fs.mkdirSync(p, opts); },
+  openSync: (p, flags, mode) => fs.openSync(p, flags, mode),
+  closeSync: (fd) => fs.closeSync(fd),
+  unlinkSync: (p) => fs.unlinkSync(p),
+  statSync: (p) => fs.statSync(p),
 };
+
+const DEVICE_LOCK_SUFFIX = ".lock";
+const DEVICE_LOCK_WAIT_MS = 10;
+const DEVICE_LOCK_TIMEOUT_MS = 5_000;
+const DEVICE_LOCK_STALE_MS = 30_000;
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * 设备注册表的跨进程锁（#65）：登录/登出都是「读-改-写」，两个并发请求（或者 QA 与真人
+ * 同时登录）读同一份、各自写回，就会丢掉其中一条设备行。与偏好文件同款做法：lock 文件
+ * `wx` 抢占、陈旧锁按 mtime 回收、超时抛错。缺锁原语的注入 store 直接执行。
+ */
+function withDeviceLock<T>(filePath: string, store: DeviceFileStore, action: () => T): T {
+  const { openSync, closeSync, unlinkSync, statSync } = store;
+  if (!openSync || !closeSync || !unlinkSync || !statSync) return action();
+  store.mkdirSync(path.dirname(filePath), { recursive: true });
+  const lockPath = `${filePath}${DEVICE_LOCK_SUFFIX}`;
+  const deadline = Date.now() + DEVICE_LOCK_TIMEOUT_MS;
+  let fd: number | null = null;
+  while (fd === null) {
+    try {
+      fd = openSync(lockPath, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > DEVICE_LOCK_STALE_MS) unlinkSync(lockPath);
+      } catch {
+        // 持有者可能在 stat/unlink 之间释放了锁
+      }
+      if (Date.now() >= deadline) throw new Error("Timed out acquiring ui sessions lock");
+      sleepSync(DEVICE_LOCK_WAIT_MS);
+    }
+  }
+  try {
+    return action();
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      /* ignore */
+    }
+    try {
+      unlinkSync(lockPath);
+    } catch {
+      /* ignore */
+    }
+  }
+}
 
 export function uiSessionsFilePath(agentDir?: string): string {
   const root = agentDir
@@ -383,11 +443,13 @@ export function saveUiSessionDevice(
   store: DeviceFileStore = defaultDeviceStore,
   nowMs = Date.now(),
 ): void {
-  const devices = readUiSessionDevices(filePath, store, nowMs);
-  const index = devices.findIndex((d) => d.id === device.id);
-  if (index >= 0) devices[index] = device;
-  else devices.push(device);
-  writeDevices(devices, filePath, store);
+  withDeviceLock(filePath, store, () => {
+    const devices = readUiSessionDevices(filePath, store, nowMs);
+    const index = devices.findIndex((d) => d.id === device.id);
+    if (index >= 0) devices[index] = device;
+    else devices.push(device);
+    writeDevices(devices, filePath, store);
+  });
 }
 
 /**
@@ -411,8 +473,10 @@ export function removeUiSessionDevice(
   store: DeviceFileStore = defaultDeviceStore,
   nowMs = Date.now(),
 ): void {
-  const devices = readUiSessionDevices(filePath, store, nowMs).filter((d) => d.id !== id);
-  writeDevices(devices, filePath, store);
+  withDeviceLock(filePath, store, () => {
+    const devices = readUiSessionDevices(filePath, store, nowMs).filter((d) => d.id !== id);
+    writeDevices(devices, filePath, store);
+  });
 }
 
 /** 清空设备注册表（改密码轮换 secret 后所有旧会话已失效，同步清列表）。 */
@@ -420,7 +484,7 @@ export function clearUiSessionDevices(
   filePath = uiSessionsFilePath(),
   store: DeviceFileStore = defaultDeviceStore,
 ): void {
-  writeDevices([], filePath, store);
+  withDeviceLock(filePath, store, () => writeDevices([], filePath, store));
 }
 
 /** 从 User-Agent 生成设备标签（浏览器 + 系统），不可解析时回退 "Unknown device"。 */

@@ -72,7 +72,6 @@ import {
   saveSidebarWidth,
 } from "@/lib/ui-preferences";
 import { useI18n } from "@/lib/i18n";
-import { getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { hydrateSessionById } from "@/lib/session-hydrate";
 import {
   createNewSessionIntent,
@@ -110,26 +109,19 @@ function AppShellInner() {
       return false;
     }
   });
-  // 本页用户手动开合过 footer：此后不再采用远端值（切回前台同步到的旧值会把折叠掀开）
-  const footerChosenRef = useRef(false);
-  const footerServerPrefs = useServerPreferences();
-  useEffect(() => {
-    if (footerChosenRef.current) return;
-    const remoteFooter = getServerPref<unknown>("footerCollapsed");
-    if (typeof remoteFooter === "boolean" && remoteFooter !== footerCollapsed) {
-      setFooterCollapsed(remoteFooter);
-    }
-  }, [footerServerPrefs, footerCollapsed]);
+  /**
+   * footer 折叠是**窗口级偏好，只存本机**（#65）：窗口大小/使用习惯因设备而异，跨端同步
+   * 只会让另一台设备莫名其妙被掀开或折叠（这里原先用 `footerChosenRef` 拒绝远端值，
+   * 其实已经承认了这一点）。服务端上若还留着历史值，也不再读，属惰性数据。
+   */
   const handleFooterToggle = () => {
     const next = !footerCollapsed;
-    footerChosenRef.current = true;
     setFooterCollapsed(next);
     try {
       localStorage.setItem("pidance.footerCollapsed", next ? "1" : "0");
     } catch {
       /* localStorage 不可用时仅内存生效 */
     }
-    setServerPref("footerCollapsed", next);
   };
   const navigationStoreRef = useRef(createSessionNavigationStore());
   const catalogStoreRef = useRef(createSessionCatalogStore());
