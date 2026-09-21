@@ -518,6 +518,8 @@ export const en = {
   extension_widgetExpand: 'Expand {name} panel',
   extension_confirm: 'Confirm',
   extension_submit: 'Submit',
+  extension_panelExpand: 'Expand',
+  extension_panelCollapse: 'Collapse',
   extension_other: 'Other',
   extension_selectAnOption: 'Select an option',
   extension_otherPlaceholder: 'Enter a custom value',

@@ -518,6 +518,8 @@ export const zhCN: Record<TranslationKey, string> = {
   extension_widgetExpand: '展开 {name} 面板',
   extension_confirm: '确认',
   extension_submit: '提交',
+  extension_panelExpand: '展开',
+  extension_panelCollapse: '收回',
   extension_other: '其他',
   extension_selectAnOption: '请选择一项',
   extension_otherPlaceholder: '输入自定义内容',

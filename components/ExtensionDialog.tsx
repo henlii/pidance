@@ -136,7 +136,9 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
       <ExtensionPanelChrome
         title={<MarkdownBody className="markdown-body--extension">{request.title}</MarkdownBody>}
         accessibilityLabel={request.title}
-        onClose={() => respondOnce({ cancelled: true })}
+        // select 不给「关闭」：它与「取消」发的是同一个 cancelled 响应（且会中止执行），
+        // 并排两个等价按钮只会让人以为「关闭」是温和的那个。
+        onClose={request.method === "select" ? undefined : () => respondOnce({ cancelled: true })}
         footer={(
           <>
             {footer}

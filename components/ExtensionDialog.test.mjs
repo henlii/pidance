@@ -136,3 +136,50 @@ test("SSR/source：面板与输入框同宽同中线，内容区可滚动", () =
   assert.ok(block.includes("CHAT_INPUT_SIDE_PADDING"), "扩展面板未按输入框同款内边距包裹");
   assert.ok(block.includes("maxWidth: CHAT_COLUMN_MAX_WIDTH"), "扩展面板未按输入框同款宽度包裹");
 });
+
+// ── 提问区可读性：右上「关闭」只留给非 select；面板可展开/收回 ────────────────
+
+test("SSR select：不再渲染右上「关闭」（它与取消等价，且取消会中止执行）", () => {
+  const select = renderCard({
+    request: request("select", { options: ["一"] }),
+    onRespond: () => {},
+  });
+  assert.ok(!/>关闭</.test(select) && !/>Close</.test(select), "select 仍渲染「关闭」按钮");
+  assert.ok(!/aria-label="关闭"/.test(select), "select 的「关闭」按钮仍在 DOM 里");
+  assert.ok(/aria-label="取消"|aria-label="Cancel"/.test(select), "select 丢了「取消」按钮");
+
+  // 非 select（input/editor/confirm）保留「关闭」：那是它们唯一的取消入口之外的习惯动作
+  const input = renderCard({
+    request: request("input", { placeholder: "写点什么" }),
+    onRespond: () => {},
+  });
+  assert.ok(/aria-label="关闭"|aria-label="Close"/.test(input), "非 select 弹窗应保留「关闭」");
+});
+
+test("SSR：面板带展开/收回开关，初始为收回态", () => {
+  const html = renderCard({
+    request: request("select", { options: ["一"] }),
+    onRespond: () => {},
+  });
+  assert.match(html, /aria-expanded="false"/, "缺展开开关的初始态");
+  assert.ok(/aria-label="展开"|aria-label="Expand"/.test(html), "缺「展开」按钮");
+  assert.ok(!html.includes("extension-panel-shell--expanded"), "初始不应是展开态");
+  assert.ok(/aria-label="收回"|aria-label="Collapse"/.test(html) === false, "收回文案只在展开后出现");
+});
+
+test("CSS 契约：提问区可滚、展开态提高高度上限（含窄屏规则）", () => {
+  const css = readFileSync(fileURLToPath(new URL("../app/globals.css", import.meta.url)), "utf8");
+  // 规则从行首开始才是基础规则（避免匹配到 `.extension-panel-shell--expanded .extension-panel-title`）
+  const titleMatch = /^\.extension-panel-title \{([^}]*)\}/m.exec(css);
+  assert.ok(titleMatch, "找不到 .extension-panel-title");
+  const titleRule = titleMatch[1];
+  assert.match(titleRule, /overflow-y:\s*auto/, "提问区（标题）不可滚动 —— 长提问会被外壳裁掉");
+  assert.match(titleRule, /max-height:\s*min\(30vh, 240px\)/, "提问区缺高度上限");
+  assert.match(css, /\.extension-panel-shell--expanded\s*\{\s*max-height:\s*min\(78vh, 900px\)/, "缺展开态高度");
+  // 展开必须同时抬高提问区上限，否则长提问仍停在收起态的小滚动区里
+  assert.match(css, /\.extension-panel-shell--expanded \.extension-panel-title\s*\{\s*max-height:\s*60vh/, "展开态未抬高提问区上限");
+  assert.ok(
+    css.includes("calc(100dvh - 96px - env(safe-area-inset-top) - env(safe-area-inset-bottom))"),
+    "缺窄屏展开态高度（移动端展开后要顶到视口可用高度）",
+  );
+});

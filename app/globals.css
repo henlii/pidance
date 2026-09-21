@@ -1257,10 +1257,25 @@ span.linenumber {
 .extension-panel-title {
   min-width: 0;
   flex: 1;
+  /* 提问/说明都压在标题里（扩展把 preview 折进标题），长文本必须自己可滚，
+     否则会被外壳的 overflow:hidden 直接切掉。 */
+  max-height: min(30vh, 240px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   color: var(--text);
   font-size: 14px;
   font-weight: 650;
   line-height: 1.4;
+}
+
+/* 展开态：占用更多空间，同时把提问区的上限一起抬高 —— 只抬面板上限的话，
+   长提问仍然停在 30vh 的滚动区里，「问题显示不全」并没有解决。
+   （窄屏的面板高度覆盖规则见文件末尾的 @media 块） */
+.extension-panel-shell--expanded {
+  max-height: min(78vh, 900px);
+}
+.extension-panel-shell--expanded .extension-panel-title {
+  max-height: 60vh;
 }
 .extension-panel-header-actions {
   display: flex;
@@ -1373,6 +1388,13 @@ span.linenumber {
 @media (max-width: 640px) {
   .extension-panel-shell {
     max-height: min(70vh, calc(100dvh - 24px - env(safe-area-inset-bottom)));
+  }
+  /* 窄屏展开：顶到视口可用高度（面板内联在输入区，留出上边距与安全区） */
+  .extension-panel-shell--expanded {
+    max-height: calc(100dvh - 96px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  }
+  .extension-panel-shell--expanded .extension-panel-title {
+    max-height: 56vh;
   }
   .extension-option-btn,
   .extension-card-btn {

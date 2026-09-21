@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-column";
 import { useI18n } from "@/lib/i18n";
 
@@ -23,18 +23,35 @@ export function ExtensionPanelChrome({
 }) {
   const { t } = useI18n();
   const titleText = accessibilityLabel ?? (typeof title === "string" ? title : undefined);
+  // 展开/收回：面板正文（提问与选项/预览）常常比默认高度长，窄屏下面板又会盖住大半个页面，
+  // 所以给一个显式的「占更多地方」开关。状态是每个面板自己的，不跨请求记忆。
+  const [expanded, setExpanded] = useState(false);
+  const className = [
+    "extension-panel-shell",
+    overlay ? "extension-panel-shell--overlay" : "",
+    expanded ? "extension-panel-shell--expanded" : "",
+  ].filter(Boolean).join(" ");
   return (
     <section
       role="dialog"
       aria-modal="true"
       aria-label={titleText}
-      className={overlay ? "extension-panel-shell extension-panel-shell--overlay" : "extension-panel-shell"}
+      className={className}
       style={{ width: `min(${CHAT_COLUMN_MAX_WIDTH}px, 100%)` }}
     >
       <header className="extension-panel-header">
         <div className="extension-panel-title">{title}</div>
         <div className="extension-panel-header-actions">
           {extraHeader}
+          <button
+            type="button"
+            className="extension-card-btn"
+            onClick={() => setExpanded((value) => !value)}
+            aria-expanded={expanded}
+            aria-label={expanded ? t("extension_panelCollapse") : t("extension_panelExpand")}
+          >
+            {expanded ? t("extension_panelCollapse") : t("extension_panelExpand")}
+          </button>
           {onClose ? (
             <button
               type="button"
