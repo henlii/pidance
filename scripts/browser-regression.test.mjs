@@ -669,3 +669,407 @@ test("用例13：run 结束的权威快照回收乐观运行标记（侧栏不�
     }
   }
 });
+
+test("A1/A2/A3/D6：运行中会话的列表运行态与时长、硬刷新恢复、输入保持、队列即时显示", { timeout: 300_000 }, async () => {
+  // #28 待办二：A1「回复后列表仍 running/时长增长」、A2「刷新后打开运行中会话卡死」、
+  // A3「输入文字后停止消失」、D6「队列消息延迟显示」各自落成可重复的无头断言。
+  // 一条真实 run（bash sleep）覆盖四项：不做真实模型回合以外的注入，也不 mock 应用代码。
+  let createdId = null;
+  const MARK = "回归入队标记A1A3D6";
+  // UI 文案随 locale 变（QA 浏览器可能是 en）：断言用的文案在**页面打开之后**由页面自身语言推出，
+  // 否则「中文 profile 下通过、英文 profile 下永远匹配不到」——这不是产品缺陷，是断言脆弱。
+  let stopLabel = null;
+  const readUiLabels = async () => {
+    const labels = await evalResult(`(() => {
+      const zh = String(document.documentElement.lang || "").toLowerCase().startsWith("zh");
+      return {
+        running: zh ? "运行中" : "Running",
+        unread: zh ? "活动" : "Activity",
+        stop: zh ? "停止" : "Stop",
+        send: zh ? "发送" : "Send",
+      };
+    })()`);
+    assert.ok(labels && labels.running, "无法确定页面语言（断言无法构造）");
+    stopLabel = labels.stop;
+    return labels;
+  };
+  const rowProbe = (id, L) => `(() => {
+    // 同一会话在侧栏可能出现两次（最近区 + 项目区），逐份取；行里 title=<运行中> 的
+    // 元素也有两个（状态圆点无文本、运行时长文本有数字），所以取「有数字的那个」。
+    const rows = [...document.querySelectorAll('[data-session-id="${id}"]')];
+    const texts = rows.flatMap((row) => [...row.querySelectorAll('[title=' + JSON.stringify(${JSON.stringify(L.running)}) + ']')]
+      .map((el) => (el.textContent || '').trim()));
+    return {
+      present: rows.length > 0,
+      copies: rows.length,
+      running: texts.length > 0,
+      duration: texts.find((text) => /[0-9]/.test(text)) ?? "",
+    };
+  })()`;
+  const chatProbe = (L) => `(() => ({
+    chat: !!document.querySelector('[data-pidance-chat="true"]'),
+    textarea: !!document.querySelector('textarea'),
+    stop: [...document.querySelectorAll('button')].some((b) => (b.textContent || '').trim() === ${JSON.stringify(L.stop)}),
+  }))()`;
+  try {
+    const createRes = await fetch(`${URL_BASE}/api/agent/new`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...AUTH_HEADER },
+      body: JSON.stringify({
+        cwd: process.cwd(),
+        type: "prompt",
+        message: "请用 bash 工具执行 sleep 45（一次调用，不要拆开），完成后只回复 done。",
+      }),
+    });
+    const created = await createRes.json();
+    createdId = created?.sessionId ?? null;
+    assert.ok(createdId, `测试会话创建失败: ${createRes.status} ${JSON.stringify(created)}`);
+
+    // 前置：服务端 running 集确实含该会话（页面态是它的投影）
+    let serverRunning = false;
+    for (let i = 0; i < 60 && !serverRunning; i += 1) {
+      await new Promise((r) => setTimeout(r, 500));
+      const res = await fetch(`${URL_BASE}/api/agent/running`, { headers: AUTH_HEADER });
+      const body = res.ok ? await res.json() : {};
+      serverRunning = (body?.runningSessionIds ?? body?.sessionIds ?? []).includes(createdId);
+    }
+    assert.ok(serverRunning, "测试会话未进入服务端 running 集（前置条件不成立）");
+
+    await ab(["set", "viewport", "1280", "720", "--session", SESSION], { json: false });
+    await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(createdId)}`, "--session", SESSION], { json: false });
+    await ensureAuthed();
+    const L = await readUiLabels();
+
+    // ── A1：列表该项显示运行中，且时长在增长（不是卡住的假标记） ──
+    let first = null;
+    for (let i = 0; i < 40; i += 1) {
+      await new Promise((r) => setTimeout(r, 500));
+      first = await evalResult(rowProbe(createdId, L));
+      if (first?.present && first.running && /\d/.test(first.duration ?? "")) break;
+    }
+    assert.ok(first?.present, "测试会话未出现在侧栏");
+    assert.ok(first?.running, "运行中的会话未在侧栏显示运行中（A1 前置不成立）");
+    const firstSeconds = Number((first.duration ?? "").match(/\d+/)?.[0] ?? NaN);
+    assert.ok(Number.isFinite(firstSeconds), `运行中时长文本不可解析: ${JSON.stringify(first.duration)}`);
+
+    await new Promise((r) => setTimeout(r, 4000));
+    const later = await evalResult(rowProbe(createdId, L));
+    const laterSeconds = Number((later?.duration ?? "").match(/\d+/)?.[0] ?? NaN);
+    assert.ok(later?.running, "4 秒后该会话不再显示运行中（run 提前结束？）");
+    assert.ok(
+      Number.isFinite(laterSeconds) && laterSeconds > firstSeconds,
+      `运行时长没有增长（${first.duration} → ${later?.duration}）`,
+    );
+    console.log(`[browser-regression] A1 运行中时长 ${first.duration} → ${later.duration}`);
+
+    // ── A2：硬刷新后仍在跑 → 必须导入在跑的 run（有停止入口、可继续操作） ──
+    const beforeReload = await evalResult(chatProbe(L));
+    assert.ok(beforeReload?.chat, "刷新前该会话的 chat 视图未挂载");
+    await ab(["reload", "--session", SESSION], { json: false });
+    let afterReload = null;
+    for (let i = 0; i < 40; i += 1) {
+      await new Promise((r) => setTimeout(r, 500));
+      afterReload = await evalResult(chatProbe(L));
+      if (afterReload?.chat && afterReload?.textarea) break;
+    }
+    assert.ok(afterReload?.chat, "刷新后 chat 视图未挂载（A2 无法判定）");
+    assert.ok(afterReload?.stop, "刷新后运行中的会话没有停止入口（A2：未导入在跑的 run）");
+
+    // ── A3：运行中输入文字不得把停止入口挤掉 ──
+    const typed = await evalResult(`(() => {
+      const ta = document.querySelector('textarea');
+      if (!ta) return "no-textarea";
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+      if (!setter) return "no-setter";
+      setter.call(ta, ${JSON.stringify(MARK)});
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      return ta.value === ${JSON.stringify(MARK)} ? "ok" : "mismatch";
+    })()`);
+    assert.equal(typed, "ok", "无法把文本写进输入框（A3 无法判定）");
+    await new Promise((r) => setTimeout(r, 600));
+    const afterTyping = await evalResult(chatProbe(L));
+    assert.ok(afterTyping?.stop, "输入文字后停止入口消失（A3）");
+
+    // ── D6：运行中发送 → 队列块必须**早于服务端回执**出现（乐观显示，不是等到确认） ──
+    // 纯时间上界抓不住「等服务端回来才显示」（本机往返很快）；所以页内同时记录
+    // 发送 POST 的开始/结算时刻与队列行出现的时刻，断言「出现不晚于结算」。
+    const d6 = await evalResult(`(async () => {
+      const MARK = ${JSON.stringify(MARK)};
+      const post = { startedAt: null, settledAt: null };
+      const realFetch = window.fetch;
+      window.fetch = (...args) => {
+        const url = String(args[0]?.url ?? args[0] ?? "");
+        const promise = realFetch.apply(window, args);
+        if (url.includes("/api/agent/") && !url.includes("/events") && String(args[1]?.method ?? "").toUpperCase() === "POST") {
+          post.startedAt = performance.now();
+          const settle = () => { if (post.settledAt === null) post.settledAt = performance.now(); };
+          promise.then(settle, settle);
+        }
+        return promise;
+      };
+      const hasRow = () => [...document.querySelectorAll("div[title]")]
+        .some((el) => (el.getAttribute("title") || "").includes(MARK));
+      if (hasRow()) return { error: "发送前就已有队列行" };
+      const btn = [...document.querySelectorAll("button")].find((b) => (b.textContent || "").trim() === ${JSON.stringify(L.send)});
+      if (!btn || btn.disabled) return { error: "运行中没有可用的发送按钮" };
+      const t0 = performance.now();
+      btn.click();
+      const seenAtAbs = await new Promise((resolve) => {
+        const deadline = t0 + 3000;
+        const check = () => {
+          if (hasRow()) return resolve(performance.now());
+          if (performance.now() > deadline) return resolve(null);
+          requestAnimationFrame(check);
+        };
+        check();
+      });
+      window.fetch = realFetch;
+      return {
+        t0,
+        seenAfterMs: seenAtAbs === null ? null : seenAtAbs - t0,
+        postStartedAfterMs: post.startedAt === null ? null : post.startedAt - t0,
+        // null = 采样时 POST 还没结算（队列行在请求在途时就出现了，乐观更强）
+        postSettledAfterMs: post.settledAt === null ? null : post.settledAt - t0,
+      };
+    })()`);
+    assert.ok(d6 && !d6.error, `D6 无法判定：${JSON.stringify(d6)}`);
+    assert.notEqual(d6.seenAfterMs, null, "运行中入队后队列块始终没有出现（D6）");
+    assert.notEqual(d6.postStartedAfterMs, null, "没有观察到入队的 POST（D6 的结构断言会空转）");
+    const appearedBeforeSettle = d6.postSettledAfterMs === null || d6.seenAfterMs <= d6.postSettledAfterMs;
+    console.log(`[browser-regression] D6 队列块出现 ${d6.seenAfterMs.toFixed(0)}ms`
+      + `（POST 开始 ${d6.postStartedAfterMs.toFixed(0)}ms / `
+      + `结算 ${d6.postSettledAfterMs === null ? "仍在途" : `${d6.postSettledAfterMs.toFixed(0)}ms`}）`);
+    assert.equal(appearedBeforeSettle, true, "队列块在服务端回执之后才出现（D6：缺少乐观显示）");
+    assert.ok(d6.seenAfterMs <= 2000, `队列块出现太慢（${d6.seenAfterMs.toFixed(0)}ms > 2000ms）`);
+  } finally {
+    // 收尾：运行中的会话删不掉，先点停止；仍不行就等它自然结束
+    await evalResult(`(() => {
+      const b = [...document.querySelectorAll('button')].find((el) => (el.textContent || '').trim() === ${JSON.stringify(stopLabel ?? "Stop")});
+      if (b) b.click();
+      return !!b;
+    })()`).catch(() => {});
+    if (createdId) {
+      for (let i = 0; i < 90; i += 1) {
+        const res = await fetch(`${URL_BASE}/api/sessions/${encodeURIComponent(createdId)}`, {
+          method: "DELETE",
+          headers: AUTH_HEADER,
+        }).catch(() => null);
+        if (res && res.ok) break;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+  }
+});
+
+test("B4：未读时钟是本设备本地的；服务端残留的未读状态不得复活未读", { timeout: 300_000 }, async () => {
+  // #28 待办二 B4（多端未读多）：1b17161 的修复把未读时钟改成「每设备本地」并且
+  // 不再读写服务端 unreadSessionState。这里两层断言：
+  //   1) 正例：本设备观察到 run 完成 → 记为未读并落到本地存储；打开即已读、刷新仍是已读；
+  //   2) 反例：清空本地存储（模拟新设备/新浏览器）后，即使服务端仍带着旧未读时钟，
+  //      页面也不得凭空出现未读（控制项：注入的 locale 生效，证明这份载荷确实被应用了）。
+  let createdId = null;
+  /** 跑前快照：本用例 mock 了 /api/preferences，注入字段可能被客户端整包 PUT 写回共享文件
+   *  （见 issue #62 —— 实测把用户的 locale 从 zh-CN 泄漏成 en），所以跑完必须逐字还原。 */
+  const prefsSnapshot = { locale: null, unreadSessionState: null, projectRoots: null };
+  let prefsSnapshotTaken = false;
+  let bogusLocale = "en";
+  const prefsHeaders = { ...AUTH_HEADER, "Content-Type": "application/json" };
+  /** 还原本用例可能撞到的键（null = 墓碑删除，与服务端 merge 语义一致）。
+   *  快照没拿到就什么都不做：否则会把用户的 locale 直接删掉。 */
+  const restoreSharedPrefs = async () => {
+    if (!prefsSnapshotTaken) return;
+    const res = await fetch(`${URL_BASE}/api/preferences`, {
+      method: "PUT",
+      headers: prefsHeaders,
+      body: JSON.stringify({
+        prefs: { locale: prefsSnapshot.locale, unreadSessionState: prefsSnapshot.unreadSessionState },
+      }),
+    });
+    assert.equal(res.ok, true, `还原共享偏好失败（HTTP ${res.status}）`);
+  };
+  // 文案由页面语言推出（同 A1 用例的理由）
+  const readUiLabels = async () => {
+    const labels = await evalResult(`(() => {
+      const zh = String(document.documentElement.lang || "").toLowerCase().startsWith("zh");
+      return { running: zh ? "运行中" : "Running", unread: zh ? "活动" : "Activity" };
+    })()`);
+    assert.ok(labels && labels.unread, "无法确定页面语言（断言无法构造）");
+    return labels;
+  };
+  const unreadProbe = (id, L) => `(() => {
+    const rows = [...document.querySelectorAll('[data-session-id="${id}"]')];
+    let stored = [];
+    try {
+      const raw = localStorage.getItem("pidance:unread-session-ids");
+      stored = raw ? JSON.parse(raw) : [];
+    } catch { stored = ["parse-error"]; }
+    return {
+      present: rows.length > 0,
+      badge: rows.some((row) => !!row.querySelector('[title=' + JSON.stringify(${JSON.stringify(L.unread)}) + ']')),
+      stored: Array.isArray(stored) ? stored : ["parse-error"],
+      lang: document.documentElement.lang || null,
+    };
+  })()`;
+  try {
+    // 先开页面（并停在某个已有会话上），再建测试会话：只有「页面已在观察运行集」时才看得到
+    // running → completed 的过渡，否则 run 在页面挂载前就结束了，未读永远不会出现。
+    await ab(["set", "viewport", "1280", "720", "--session", SESSION], { json: false });
+    await ab(["open", URL_BASE, "--session", SESSION], { json: false });
+    await ensureAuthed();
+    await new Promise((r) => setTimeout(r, 3000));
+    const L = await readUiLabels();
+
+    const createRes = await fetch(`${URL_BASE}/api/agent/new`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...AUTH_HEADER },
+      body: JSON.stringify({
+        cwd: process.cwd(),
+        type: "prompt",
+        // 留出观察窗口：模型回合 + 15 秒 sleep，页面来得及看到它「跑起来」再「结束」。
+        message: "请用 bash 工具执行 sleep 15（一次调用，不要拆开），完成后只回复 done。",
+      }),
+    });
+    const created = await createRes.json();
+    createdId = created?.sessionId ?? null;
+    assert.ok(createdId, `测试会话创建失败: ${createRes.status} ${JSON.stringify(created)}`);
+
+    // 页面当前选中不能是测试会话（否则完成即已读，未读永远不会出现）
+    const selectedIsTest = await evalResult(`location.search.includes(${JSON.stringify(createdId)})`);
+    assert.equal(selectedIsTest, false, "当前选中的竟是测试会话（未读会被立刻视为已读）");
+
+    // 步骤 3 需要一个「不选中测试会话」的落点
+    const listRes = await fetch(`${URL_BASE}/api/sessions`, { headers: AUTH_HEADER });
+    const listBody = listRes.ok ? await listRes.json() : null;
+    const items = Array.isArray(listBody) ? listBody : (listBody?.sessions ?? listBody?.data ?? []);
+    const other = items.map((item) => item?.id).find((id) => id && id !== createdId);
+    assert.ok(other, "列表里没有其它会话可作落点（无法构造「不选中测试会话」）");
+
+    // ── 1) 本设备观察到完成 → 未读 ──
+    let positive = null;
+    for (let i = 0; i < 60; i += 1) {
+      await new Promise((r) => setTimeout(r, 500));
+      positive = await evalResult(unreadProbe(createdId, L));
+      if (positive?.badge) break;
+    }
+    assert.ok(positive?.present, "测试会话未出现在侧栏");
+    assert.ok(positive?.badge, "该会话完成后没有记为未读（本地时钟未生效：B4 前置不成立）");
+    assert.ok(
+      positive.stored.includes(createdId),
+      `未读 id 没有写进本设备存储: ${JSON.stringify(positive.stored)}`,
+    );
+
+    // ── 2) 打开即已读；刷新后仍是已读（readAt 是本设备本地状态） ──
+    await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(createdId)}`, "--session", SESSION], { json: false });
+    // 已读的两处投影（徽标、本地存储）由不同 effect 落地，逐项轮询到位再断言。
+    let afterOpen = null;
+    let storedCleared = false;
+    for (let i = 0; i < 40; i += 1) {
+      await new Promise((r) => setTimeout(r, 300));
+      afterOpen = await evalResult(unreadProbe(createdId, L));
+      storedCleared = Boolean(afterOpen) && !afterOpen.stored.includes(createdId);
+      if (afterOpen && !afterOpen.badge && storedCleared) break;
+    }
+    assert.equal(afterOpen?.badge, false, "打开该会话后未读没有清掉");
+    assert.equal(storedCleared, true, `已读后本地存储里仍留着未读 id: ${JSON.stringify(afterOpen?.stored)}`);
+    await ab(["reload", "--session", SESSION], { json: false });
+    await new Promise((r) => setTimeout(r, 4000));
+    const afterReload = await evalResult(unreadProbe(createdId, L));
+    assert.equal(afterReload?.badge, false, "硬刷新后未读又回来了（readAt 没落本地）");
+
+    // ── 3) 反例：新设备（本地存储清空）+ 服务端仍带旧未读时钟 → 不得复活未读 ──
+    await ab(["storage", "local", "clear", "--session", SESSION], { json: false });
+    // mock 必须带上**真实**的服务端偏好再叠加要注入的字段：只回注入字段会让客户端内存里的
+    // sidebarUi 变成默认值，之后任何一次 PUT 都会把用户的项目列表与信任面清空（实测踩过）。
+    const realPrefsRes = await fetch(`${URL_BASE}/api/preferences`, { headers: AUTH_HEADER });
+    const realPrefs = realPrefsRes.ok ? (await realPrefsRes.json()).prefs : null;
+    assert.ok(realPrefs && typeof realPrefs === "object", "读取真实服务端偏好失败（mock 无法安全构造）");
+    const projectRootsBefore = JSON.stringify(realPrefs.sidebarUi?.projectRoots ?? null);
+    prefsSnapshot.locale = typeof realPrefs.locale === "string" ? realPrefs.locale : null;
+    prefsSnapshot.unreadSessionState = realPrefs.unreadSessionState ?? null;
+    prefsSnapshot.projectRoots = realPrefs.sidebarUi?.projectRoots ?? null;
+    prefsSnapshotTaken = true;
+    // 控制项必须「与当前相反」才能证明注入载荷真的生效（固定 "en" 在页面本来就是 en 时恒真）。
+    bogusLocale = prefsSnapshot.locale === "en" ? "zh-CN" : "en";
+    const legacyPayload = {
+      prefs: {
+        ...realPrefs,
+        locale: bogusLocale,
+        unreadSessionState: { completedAt: { [createdId]: new Date().toISOString() }, readAt: {} },
+      },
+    };
+    await ab([
+      "network", "route", `${URL_BASE}/api/preferences`,
+      "--body", JSON.stringify(legacyPayload),
+      "--session", SESSION,
+    ], { json: false });
+    try {
+      // 必须停在不选中测试会话的落点：否则「当前会话立刻视为已读」会让反例空转。
+      await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(other)}`, "--session", SESSION], { json: false });
+      let fresh = null;
+      for (let i = 0; i < 40; i += 1) {
+        await new Promise((r) => setTimeout(r, 500));
+        fresh = await evalResult(unreadProbe(createdId, L));
+        if (fresh?.lang === bogusLocale) break;
+      }
+      assert.equal(fresh?.lang, bogusLocale, "注入的服务端偏好没有生效（控制项失败，反例会空转）");
+      assert.equal(
+        fresh.stored.includes(createdId),
+        false,
+        "服务端残留的未读时钟把新设备也标成了未读（B4 回归：未读又变成跨端同步）",
+      );
+      assert.equal(fresh.badge, false, "新设备上出现了未读徽标（应当只由本设备时钟决定）");
+      // 控制项之二：被 mock 的 /api/preferences 确实被页面请求过
+      const requests = await ab(["network", "requests", "--json", "--session", SESSION]);
+      const list = requests?.data?.requests ?? requests?.data ?? [];
+      const hit = Array.isArray(list) && list.some((item) => String(item?.url ?? "").includes("/api/preferences"));
+      assert.equal(hit, true, "页面没有请求 /api/preferences（mock 未被使用，反例空转）");
+      // 共享偏好是用户数据：本用例跑完必须与跑前逐字一致（曾经因为 mock 缺字段把项目列表清空过）。
+      const afterPrefsRes = await fetch(`${URL_BASE}/api/preferences`, { headers: AUTH_HEADER });
+      const afterPrefs = afterPrefsRes.ok ? (await afterPrefsRes.json()).prefs : null;
+      assert.equal(
+        JSON.stringify(afterPrefs?.sidebarUi?.projectRoots ?? null),
+        projectRootsBefore,
+        "本用例改动了共享的项目列表（QA 不得留下痕迹）",
+      );
+      // 泄漏检测（不是断言）：整包 PUT 会把 mock 注入的字段捎回服务端，那是 #62 的应用侧缺陷，
+      // 由「脏键 PUT」根治；这里只负责**跑完不留痕**，所以先还原再断言。
+      const leaked = [];
+      if ((afterPrefs?.locale ?? null) !== prefsSnapshot.locale) leaked.push("locale");
+      if (JSON.stringify(afterPrefs?.unreadSessionState ?? null) !== JSON.stringify(prefsSnapshot.unreadSessionState)) leaked.push("unreadSessionState");
+      if (leaked.length > 0) {
+        console.warn(`[B4] 检出共享偏好泄漏（#62）：${leaked.join(", ")}；正在还原`);
+      }
+      await restoreSharedPrefs();
+      const restored = await (await fetch(`${URL_BASE}/api/preferences`, { headers: AUTH_HEADER })).json();
+      assert.equal(restored?.prefs?.locale ?? null, prefsSnapshot.locale, "跑完没能还原共享的 locale");
+      assert.equal(
+        JSON.stringify(restored?.prefs?.unreadSessionState ?? null),
+        JSON.stringify(prefsSnapshot.unreadSessionState),
+        "跑完没能还原共享的未读时钟",
+      );
+      assert.equal(
+        JSON.stringify(restored?.prefs?.sidebarUi?.projectRoots ?? null),
+        projectRootsBefore,
+        "跑完没能还原共享的项目列表",
+      );
+    } finally {
+      await ab(["network", "unroute", `${URL_BASE}/api/preferences`, "--session", SESSION], { json: false }).catch(() => {});
+    }
+  } finally {
+    await ab(["network", "unroute", "--session", SESSION], { json: false }).catch(() => {});
+    // 兜底：断言失败（例如还原断言自己红了）时也要把注入字段还原，别把用户的偏好留在脏状态。
+    await restoreSharedPrefs().catch(() => {});
+    if (createdId) {
+      for (let i = 0; i < 90; i += 1) {
+        const res = await fetch(`${URL_BASE}/api/sessions/${encodeURIComponent(createdId)}`, {
+          method: "DELETE",
+          headers: AUTH_HEADER,
+        }).catch(() => null);
+        if (res && res.ok) break;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+    // 收尾：把被测试改动的本地状态清回来（语言/未读），避免影响同套件的其它用例
+    await ab(["storage", "local", "clear", "--session", SESSION], { json: false }).catch(() => {});
+  }
+});

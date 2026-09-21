@@ -444,6 +444,24 @@ function defaultRestoreDraft(draftKey: string, draft: { value: string; images: A
   setDraft(draftKey, { value: draft.value, images: draft.images });
 }
 
+/**
+ * 弱网自动重连的判据（#28 C5）。
+ *
+ * 只有「本 slot 认为 agent 仍在跑」且「页面可见」时才自动重连：
+ * - 空闲会话（host 已 dispose、404）不无限重试，避免对空会话反复握手；
+ * - 页面藏在后台时不自作主张重连，切回前台由既有激活路径负责（见 #52）。
+ * 抽成导出纯函数是为了让这三条语义有可重复断言（接线见 createBrowserSessionRuntimeRegistry）。
+ */
+export function shouldAutoReconnectEventStream(input: {
+  agentRunning: boolean;
+  /** 页面可见性；非浏览器/SSR 环境传 undefined（视为可见，允许重连）。 */
+  visibilityState?: string;
+}): boolean {
+  if (!input.agentRunning) return false;
+  if (typeof input.visibilityState === "undefined") return true;
+  return input.visibilityState !== "hidden";
+}
+
 export function createBrowserSessionRuntimeRegistry(
   deps: BrowserSessionRuntimeRegistryDeps,
 ): BrowserSessionRuntimeRegistry {
@@ -931,11 +949,10 @@ export function createBrowserSessionRuntimeRegistry(
       : createEventStreamManager({
         // 弱网自动重连：仅当 slot 认为 agent 仍在跑且页面可见时自动重连；
         // 404/无 host（空闲 dispose 后）不无限重试，避免对空会话反复握手。
-        shouldAutoReconnect: () => {
-          if (!slot.snapshot.agentRunning) return false;
-          if (typeof document === "undefined") return true;
-          return document.visibilityState !== "hidden";
-        },
+        shouldAutoReconnect: () => shouldAutoReconnectEventStream({
+          agentRunning: slot.snapshot.agentRunning,
+          visibilityState: typeof document === "undefined" ? undefined : document.visibilityState,
+        }),
       });
     slot.eventStream = manager;
     void manager.ensureConnected(slot.sessionId, onEvent).catch(() => {

@@ -140,7 +140,16 @@ function buildInitScript(sessionId) {
   const SCHEDULE = ${JSON.stringify(REPLAY_EVENTS)};
   const FINAL_MARKER = ${JSON.stringify(FINAL_MARKER)};
   const STREAM_MARKER = ${JSON.stringify(STREAM_MARKER)};
-  const probe = { dispatched: [], streamSeen: null, finalSeen: null, done: false, errors: [] };
+  const probe = {
+    dispatched: [], streamSeen: null, finalSeen: null, done: false, errors: [],
+    // D7：队列投递（follow_up_flushed）之后是否仍保持贴底。
+    flushDelivered: false, flushAt: null, scrollerSeen: false, maxOverflow: 0, maxPostFlushDistance: null,
+    postFlushSamples: 0, framesAboveThreshold: 0, maxConsecutiveAboveThreshold: 0,
+    consecutiveAboveThreshold: 0,
+    aboveThresholdFirstAt: null, aboveThresholdLastAt: null, distanceAtLastSample: null,
+  };
+  /** 贴底容差（px）：超过它即视为「这一帧没跟上」。 */
+  const FOLLOW_TOLERANCE = 8;
   window.__sseReplay = probe;
 
   // 标记比较前去掉所有空白：innerText 与协议文本的换行/缩进不一定逐字相同。
@@ -148,10 +157,38 @@ function buildInitScript(sessionId) {
   const FINAL = normalize(FINAL_MARKER);
   const STREAM = normalize(STREAM_MARKER);
   const chatText = () => normalize(document.querySelector('[data-pidance-chat="true"]')?.innerText ?? "");
+  const scroller = () => document.querySelector('[data-pidance-chat="true"]')?.querySelector('[data-chat-scroller="true"]') ?? null;
   const tick = () => {
     const text = chatText();
     if (probe.streamSeen === null && STREAM && text.includes(STREAM)) probe.streamSeen = performance.now();
     if (probe.finalSeen === null && FINAL && text.includes(FINAL)) probe.finalSeen = performance.now();
+    // D7 采样：队列投递之后每一帧记录「距底距离」的峰值，投递后跟丢会立刻抬起来。
+    const el = scroller();
+    if (el) {
+      probe.scrollerSeen = true;
+      const overflow = el.scrollHeight - el.clientHeight;
+      if (overflow > probe.maxOverflow) probe.maxOverflow = overflow;
+      if (probe.flushAt !== null) {
+        const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+        const at = performance.now();
+        probe.postFlushSamples += 1;
+        probe.distanceAtLastSample = distance;
+        if (probe.maxPostFlushDistance === null || distance > probe.maxPostFlushDistance) {
+          probe.maxPostFlushDistance = distance;
+        }
+        if (distance > FOLLOW_TOLERANCE) {
+          probe.framesAboveThreshold += 1;
+          if (probe.aboveThresholdFirstAt === null) probe.aboveThresholdFirstAt = at - probe.flushAt;
+          probe.aboveThresholdLastAt = at - probe.flushAt;
+          probe.consecutiveAboveThreshold += 1;
+          if (probe.consecutiveAboveThreshold > probe.maxConsecutiveAboveThreshold) {
+            probe.maxConsecutiveAboveThreshold = probe.consecutiveAboveThreshold;
+          }
+        } else {
+          probe.consecutiveAboveThreshold = 0;
+        }
+      }
+    }
     if (probe.finalSeen === null && !probe.stopped) requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
@@ -178,6 +215,10 @@ function buildInitScript(sessionId) {
     }
     _emit(event, kind) {
       probe.dispatched.push({ type: event.type, kind: kind ?? null, at: performance.now() });
+      if (event.type === "follow_up_flushed") {
+        probe.flushDelivered = true;
+        probe.flushAt = performance.now();
+      }
       try { this.onmessage && this.onmessage({ data: JSON.stringify(event) }); }
       catch (e) { probe.errors.push(String(e)); }
     }
@@ -211,6 +252,17 @@ function chatSnapshotScript() {
           lastDeltaAt: updates.at(-1)?.at ?? null,
           updateCount: updates.length,
           streamSeen: window.__sseReplay?.streamSeen ?? null,
+          flushDelivered: window.__sseReplay?.flushDelivered === true,
+          flushAt: window.__sseReplay?.flushAt ?? null,
+          scrollerSeen: window.__sseReplay?.scrollerSeen === true,
+          maxOverflow: window.__sseReplay?.maxOverflow ?? 0,
+          maxPostFlushDistance: window.__sseReplay?.maxPostFlushDistance ?? null,
+          postFlushSamples: window.__sseReplay?.postFlushSamples ?? 0,
+          framesAboveThreshold: window.__sseReplay?.framesAboveThreshold ?? 0,
+          maxConsecutiveAboveThreshold: window.__sseReplay?.maxConsecutiveAboveThreshold ?? 0,
+          aboveThresholdFirstAt: window.__sseReplay?.aboveThresholdFirstAt ?? null,
+          aboveThresholdLastAt: window.__sseReplay?.aboveThresholdLastAt ?? null,
+          distanceAtLastSample: window.__sseReplay?.distanceAtLastSample ?? null,
           messageEnds: dispatched
             .filter((item) => typeof item.kind === 'string' && item.kind.startsWith('message_end:'))
             .map((item) => ({ role: item.kind.slice('message_end:'.length), at: item.at })),
@@ -390,14 +442,59 @@ test("固定 recording 在桌面与 390px 回放出同一 timeline，且移动�
   );
   assert.ok(extraFinal <= 250, `390px 最终 delta 额外客户端延迟 ${extraFinal.toFixed(1)}ms > 250ms`);
 
-  // 跟随语义：回放结束时仍在底部（#28 队列投递 + 流式期间不得丢失跟随）。
+  // ── #28 D7：队列投递（follow_up_flushed）之后不得丢失跟随 ─────────────────────
+  // 这条断言原先是 `if (pinned && pinned.overflow > 40) assert(...)`：滚动容器没找到、
+  // 内容没撑出滚动条、或录制里压根没有队列投递时，三种情况都会静默跳过 —— 等于空转。
+  // 现在把「前提」本身变成断言：投递确实发生、容器确实存在、内容确实超出，再判距离。
+  for (const [name, run] of [["desktop", desktop], ["mobile", mobile]]) {
+    assert.equal(
+      run.probe.flushDelivered,
+      true,
+      `${name}：录制里的 follow_up_flushed 没有被投递（D7 断言会空转）`,
+    );
+    assert.equal(
+      run.probe.scrollerSeen,
+      true,
+      `${name}：回放期间没有找到 [data-chat-scroller]（滚动断言无法成立）`,
+    );
+    assert.ok(
+      run.probe.maxOverflow > 40,
+      `${name}：聊天区始终没有可滚动内容（最大 overflow=${run.probe.maxOverflow}px），贴底断言会空转`,
+    );
+    assert.ok(
+      run.probe.postFlushSamples >= 20,
+      `${name}：队列投递后只采样到 ${run.probe.postFlushSamples} 帧，贴底判定会空转`,
+    );
+    console.log(
+      `[sse-replay] ${name} 队列投递 ${run.probe.flushAt?.toFixed?.(0) ?? run.probe.flushAt}ms `
+      + `投递后距底峰值 ${run.probe.maxPostFlushDistance}px（overflow 峰值 ${run.probe.maxOverflow}px）| `
+      + `采样 ${run.probe.postFlushSamples} 帧，超容差 ${run.probe.framesAboveThreshold} 帧，`
+      + `最长连续 ${run.probe.maxConsecutiveAboveThreshold} 帧，`
+      + `首次 ${run.probe.aboveThresholdFirstAt?.toFixed?.(0)}ms → 末次 ${run.probe.aboveThresholdLastAt?.toFixed?.(0)}ms，`
+      + `末帧距底 ${run.probe.distanceAtLastSample}px`,
+    );
+    // 「跟丢」的定义是**持续**离开底部：内容追加后允许 1–2 帧的追赶（实测最长连续 2 帧，
+    // 峰值 182/240px 都在这两帧内被追平），但连续超过 4 帧（≈66ms）就是丢跟随了。
+    assert.ok(
+      run.probe.maxConsecutiveAboveThreshold <= 4,
+      `${name}：队列投递后持续离开底部（最长连续 ${run.probe.maxConsecutiveAboveThreshold} 帧距底 >8px）`,
+    );
+    assert.ok(
+      run.probe.distanceAtLastSample !== null && run.probe.distanceAtLastSample <= 8,
+      `${name}：队列投递后直到回放结束都没回到贴底（末次采样距底 ${run.probe.distanceAtLastSample}px）`,
+    );
+  }
+
+  // 收尾仍要贴底：投递后的新一轮正文全部到达时不能停在半路。
   const pinned = await evalResult(`(() => {
     const scroller = document.querySelector('[data-pidance-chat="true"]')?.querySelector('[data-chat-scroller="true"]') ?? null;
     if (!scroller) return null;
     return { distance: scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight, overflow: scroller.scrollHeight - scroller.clientHeight };
   })()`);
   console.log(`[sse-replay] scroll ${JSON.stringify(pinned)}`);
-  if (pinned && pinned.overflow > 40) {
-    assert.ok(pinned.distance <= 8, `流式/队列投递后聊天区未保持在底部（距底 ${pinned.distance}px）`);
-  }
+  assert.ok(pinned, "回放结束时找不到聊天区滚动容器（#28 D7 断言无法成立）");
+  assert.ok(
+    pinned.distance <= 8,
+    `流式/队列投递后聊天区未保持在底部（距底 ${pinned.distance}px，overflow ${pinned.overflow}px）`,
+  );
 });
