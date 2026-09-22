@@ -62,17 +62,6 @@ const SCROLL_HINT_HALF_WIDTH = 4;
 const SCROLL_HINT_HEIGHT = 5;
 /** 轨道太矮（横线挤在一起）则整条隐藏。 */
 const MIN_USABLE_HEIGHT_PX = 120;
-/**
- * 铺满模式：短横线首尾贴住轨道的上下内缩位置（与消息列 py-4 对齐），
- * 中间按数量均分 —— 这样一条横线的纵向位置就对应它在会话里的先后，
- * 贴底时「当前」那条自然落在轨道最下面。
- */
-const RAIL_VERTICAL_INSET_PX = 16;
-/**
- * 铺满模式允许的最小行距：再密横线就连成一条线、也点不准，
- * 此时退回「限高 + 居中 + 内部滚动」（旧行为，长会话仍可用）。
- */
-const MIN_SPREAD_PITCH_PX = 8;
 /** 信息卡最大宽高：超出省略号截断，避免长消息把卡片撑爆。 */
 const CARD_MAX_WIDTH = 340;
 const CARD_MAX_HEIGHT = 180;
@@ -629,11 +618,6 @@ export function MessageNavRail({
   // 横线数量 × 间距 超出轨道高度 → 允许滚动（否则首尾被裁掉、点不到）
   const listHeight = outline.length * (14 + DASH_GAP) - DASH_GAP;
   const listOverflows = listHeight > LIST_MAX_HEIGHT_PX;
-  const listLayout = railListLayout({
-    count: outline.length,
-    availableHeight: railHeight - RAIL_VERTICAL_INSET_PX * 2,
-  });
-  const spreading = listLayout.mode === "spread";
   const hoveredPosition = hovered === null ? null : outline.findIndex((item) => item.ordinal === hovered);
   const activePosition = activeEntryId === null
     ? -1
@@ -661,11 +645,10 @@ export function MessageNavRail({
       <div
         style={{
           position: "absolute",
-          top: spreading ? RAIL_VERTICAL_INSET_PX : "50%",
-          bottom: spreading ? RAIL_VERTICAL_INSET_PX : undefined,
-          transform: spreading ? undefined : "translateY(-50%)",
+          top: "50%",
+          transform: "translateY(-50%)",
           left: DASH_LEFT_INSET_PX,
-          maxHeight: spreading ? undefined : `min(${LIST_MAX_HEIGHT_PX}px, 100%)`,
+          maxHeight: `min(${LIST_MAX_HEIGHT_PX}px, 100%)`,
           display: "flex",
           flexDirection: "column",
         }}
@@ -697,11 +680,9 @@ export function MessageNavRail({
           flexDirection: "column",
           // 悬浮加长（12 → 24px）比轨道宽：靠左对齐，加长部分向右伸出而不被裁
           alignItems: "flex-start",
-          justifyContent: spreading ? "space-between" : (listOverflows ? "flex-start" : "center"),
-          // 铺满时格子首尾相接（行高即行距），间距交给 space-between 的 0 余量
-          gap: spreading ? 0 : DASH_GAP,
-          flex: spreading ? 1 : undefined,
-          overflowY: spreading ? "visible" : "auto",
+          justifyContent: listOverflows ? "flex-start" : "center",
+          gap: DASH_GAP,
+          overflowY: "auto",
           scrollbarWidth: "none",
         }}
       >
@@ -727,8 +708,7 @@ export function MessageNavRail({
               style={{
                 // 按钮定宽 = 悬浮加长后的宽度：加长时不会撑出横向滚动，也不会被裁
                 width: DASH_WIDTH * 2,
-                // 铺满时行高 = 行距（贴着排满整条轨道）；否则固定 14
-                height: spreading ? listLayout.pitch : 14,
+                height: 14,
                 flexShrink: 0,
                 padding: 0,
                 border: "none",
@@ -860,24 +840,6 @@ export function railScrollBehavior(
 ): ScrollBehavior {
   if (input.reducedMotion) return "auto";
   return Math.abs(input.targetTop - input.currentTop) < smallDeltaPx ? "auto" : "smooth";
-}
-
-/**
- * 导航条列表布局模式（纯函数，便于单测）。
- *
- * - `spread`：提问条数能按可用高度排开（每格高度 ≥ 下限）→ 铺满轨道，
- *   格子首尾贴住上下内缩位置；贴底时当前项就落在轨道最下面。
- * - `scroll`：条数太多（每格矮于点得中）→ 退回限高 320px + 居中 + 内部滚动。
- */
-export type RailListLayout = { mode: "spread"; height: number; pitch: number } | { mode: "scroll" };
-
-export function railListLayout(input: { count: number; availableHeight: number }): RailListLayout {
-  const { count, availableHeight } = input;
-  if (count < 2) return { mode: "scroll" };
-  if (!Number.isFinite(availableHeight) || availableHeight <= 0) return { mode: "scroll" };
-  const pitch = availableHeight / count;
-  if (pitch < MIN_SPREAD_PITCH_PX) return { mode: "scroll" };
-  return { mode: "spread", height: availableHeight, pitch };
 }
 
 /**
