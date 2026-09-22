@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { createJiti } from "jiti";
 
@@ -6,11 +8,51 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { messageNavPreview, centeredRailScrollTop, railFollowPlan, railScrollHints, railScrollBehavior, easeInOutCubic, RAIL_SCROLL_DURATION_MS } = await jiti.import("./MessageNavRail.tsx");
+const { messageNavPreview, centeredRailScrollTop, railFollowPlan, railScrollHints, railScrollBehavior, easeInOutCubic, RAIL_SCROLL_DURATION_MS, railListLayout } = await jiti.import("./MessageNavRail.tsx");
 
 // 说明：导航条改为「服务端完整大纲 + 懒加载跳转」后，节点不再由 DOM 测量得出
 // （见 lib/session-outline.ts 与 MessageNavRail 的 outline 驱动）。
 // 这里只保留组件自身的纯函数契约。
+
+// ---------------------------------------------------------------------------
+// 用户反馈：进长会话时「导航条选中的不是最下面的」—— 旧版整条居中、限高 320px，
+// 贴底时当前横线落在屏幕中部，看不出「当前在哪」与「会话到哪」的关系。
+// 改为：能排开就铺满轨道（位置对应提问先后），排不下才退回旧行为。
+// ---------------------------------------------------------------------------
+
+test("railListLayout：能排开时铺满轨道，贴底时最后一条在最下面", () => {
+  const layout = railListLayout({ count: 52, availableHeight: 729 });
+  assert.equal(layout.mode, "spread");
+  // 52 格均分 729px：格子首尾相接正好排满，末格底边落在轨道底部
+  assert.ok(Math.abs(layout.pitch - 729 / 52) < 1e-9);
+  assert.equal(52 * layout.pitch, layout.height, "格子必须正好排满整条轨道");
+  const lastTop = (52 - 1) * layout.pitch;
+  assert.ok(lastTop + layout.pitch === layout.height, "最后一条的底边 = 轨道底部");
+});
+
+test("railListLayout：数量多到行距不足时退回限高滚动（旧行为）", () => {
+  // 729 / 8px 每格 ≈ 91 条为上限；再密就点不中，退回内部滚动
+  assert.equal(railListLayout({ count: 90, availableHeight: 729 }).mode, "spread");
+  assert.equal(railListLayout({ count: 92, availableHeight: 729 }).mode, "scroll");
+  assert.equal(railListLayout({ count: 200, availableHeight: 729 }).mode, "scroll");
+  assert.equal(railListLayout({ count: 500, availableHeight: 729 }).mode, "scroll");
+});
+
+test("railListLayout：单条与无可用高度都退回旧行为（居中/不铺）", () => {
+  assert.equal(railListLayout({ count: 1, availableHeight: 729 }).mode, "scroll");
+  assert.equal(railListLayout({ count: 0, availableHeight: 729 }).mode, "scroll");
+  assert.equal(railListLayout({ count: 52, availableHeight: 0 }).mode, "scroll");
+  assert.equal(railListLayout({ count: 52, availableHeight: Number.NaN }).mode, "scroll");
+});
+
+test("源码契约：铺满模式用 space-between 且不再限高，退回模式才允许内部滚动", () => {
+  const source = readFileSync(fileURLToPath(new URL("./MessageNavRail.tsx", import.meta.url)), "utf8");
+  assert.match(source, /justifyContent: spreading \? "space-between"/);
+  assert.match(source, /gap: spreading \? 0 : DASH_GAP/);
+  assert.match(source, /height: spreading \? listLayout\.pitch : 14/);
+  assert.match(source, /overflowY: spreading \? "visible" : "auto"/);
+  assert.match(source, /maxHeight: spreading \? undefined : `min\(\$\{LIST_MAX_HEIGHT_PX\}px, 100%\)`/);
+});
 
 test("messageNavPreview：单行化并截断（aria-label 用）", () => {
   assert.equal(messageNavPreview("  多行\n文本   带空格  "), "多行 文本 带空格");
