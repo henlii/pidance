@@ -1012,6 +1012,41 @@ span.linenumber {
   }
 }
 
+/*
+ * 会话内容区宽度把手：层不接收指针事件，只有两条把手收；位置由内容列宽度
+ * （CSS 变量 --pidance-chat-column-width）算出，贴在内容列左右缘、不压住正文。
+ */
+.chat-column-resize-layer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  pointer-events: none;
+  z-index: 31;
+}
+.chat-column-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  border-radius: 3px;
+  cursor: col-resize;
+  pointer-events: auto;
+  touch-action: none;
+}
+.chat-column-resize-handle:hover,
+.chat-column-resize-handle.dragging {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.chat-column-resize-handle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+@media (max-width: 640px) {
+  .chat-column-resize-layer {
+    display: none;
+  }
+}
+
 /* 分组分页：Show more / Show fewer 小文本按钮，层级低于会话行 */
 .sidebar-pagination-btn {
   display: inline-flex;

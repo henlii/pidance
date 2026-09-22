@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
-import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-column";
+import { CHAT_COLUMN_MAX_WIDTH_CSS } from "@/lib/chat-column";
 import { useI18n } from "@/lib/i18n";
 
 export function ExtensionPanelChrome({
@@ -38,7 +38,7 @@ export function ExtensionPanelChrome({
       aria-modal="true"
       aria-label={titleText}
       className={className}
-      style={{ width: `min(${CHAT_COLUMN_MAX_WIDTH}px, 100%)` }}
+      style={{ width: CHAT_COLUMN_MAX_WIDTH_CSS }}
     >
       <header className="extension-panel-header">
         <div className="extension-panel-title">{title}</div>

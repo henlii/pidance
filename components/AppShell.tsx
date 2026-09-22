@@ -69,10 +69,23 @@ import {
   clampSidebarWidth,
   loadSidebarPreferences,
   saveChangesPanelPreferences,
+  saveChatColumnWidthRatio,
   saveRightPanelPreferences,
   saveSidebarWidth,
 } from "@/lib/ui-preferences";
 import { useI18n } from "@/lib/i18n";
+import {
+  CHAT_COLUMN_MAX_WIDTH_CSS,
+  CHAT_GUTTER,
+  CHAT_COLUMN_WIDTH_CSS_VAR,
+  CHAT_COLUMN_WIDTH_DEFAULT_RATIO,
+  CHAT_COLUMN_WIDTH_MAX,
+  CHAT_COLUMN_WIDTH_MIN,
+  chatColumnAvailableWidth,
+  chatColumnRatioFromWidth,
+  clampChatColumnWidth,
+  resolveChatColumnWidth,
+} from "@/lib/chat-column";
 import { hydrateSessionById } from "@/lib/session-hydrate";
 import {
   createNewSessionIntent,
@@ -246,6 +259,92 @@ function AppShellInner() {
     applySidebarWidth(SIDEBAR_WIDTH_DEFAULT);
   }, [applySidebarWidth]);
 
+  /**
+   * 会话内容区宽度：**唯一 owner 是 AppShell**（布局 owner），存的是比例、按视口算像素。
+   * 拖拽只改这一个量；消息列/输入栏/扩展面板/widget/底栏通过 CSS 变量共用
+   * （见 lib/chat-column.ts 的宽度模型）。
+   */
+  const chatAreaRef = useRef<HTMLDivElement | null>(null);
+  const [chatColumnRatio, setChatColumnRatio] = useState(CHAT_COLUMN_WIDTH_DEFAULT_RATIO);
+  /** 会话区可用宽度（容器宽 - 两侧竖条）；由 ResizeObserver 维护，窗口/侧栏变化都会到。 */
+  const [chatColumnAvailable, setChatColumnAvailable] = useState(0);
+  const [chatColumnDragging, setChatColumnDragging] = useState(false);
+  const chatColumnDragRef = useRef<{ startX: number; startWidth: number; side: "left" | "right" } | null>(null);
+
+  // 宽度由「可用宽度 × 比例」导出：窗口或侧栏尺寸变了自动跟着变（存的是比例）。
+  const chatColumnWidth = useMemo(
+    () => resolveChatColumnWidth({ availableWidth: chatColumnAvailable, ratio: chatColumnRatio }),
+    [chatColumnAvailable, chatColumnRatio],
+  );
+  const chatColumnWidthRef = useRef(chatColumnWidth);
+  chatColumnWidthRef.current = chatColumnWidth;
+  const chatColumnAvailableRef = useRef(chatColumnAvailable);
+  chatColumnAvailableRef.current = chatColumnAvailable;
+
+  useEffect(() => {
+    const el = chatAreaRef.current;
+    if (!el) return;
+    const update = () => setChatColumnAvailable(chatColumnAvailableWidth(el.clientWidth, isMobile));
+    update();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [isMobile]);
+
+  const applyChatColumnWidth = useCallback((width: number) => {
+    const clamped = clampChatColumnWidth(width);
+    const ratio = chatColumnRatioFromWidth({ width: clamped, availableWidth: chatColumnAvailableRef.current });
+    setChatColumnRatio(ratio);
+    saveChatColumnWidthRatio(ratio);
+  }, []);
+
+  const handleChatColumnResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (isMobile) return;
+    e.preventDefault();
+    const side = e.currentTarget.dataset.side === "left" ? "left" : "right";
+    chatColumnDragRef.current = { startX: e.clientX, startWidth: chatColumnWidthRef.current, side };
+    setChatColumnDragging(true);
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }, [isMobile]);
+
+  const handleChatColumnResizeMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = chatColumnDragRef.current;
+    if (!drag) return;
+    // 内容列居中：被拖那条边要跟手，宽度变化即 2×位移（两侧对称让位）。
+    const dx = e.clientX - drag.startX;
+    applyChatColumnWidth(drag.startWidth + (drag.side === "right" ? dx : -dx) * 2);
+  }, [applyChatColumnWidth]);
+
+  const handleChatColumnResizeEnd = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!chatColumnDragRef.current) return;
+    chatColumnDragRef.current = null;
+    setChatColumnDragging(false);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+  }, []);
+
+  // 与侧栏同一套键盘口径：Arrow 微调（Shift 大步）、Home/End 直达边界、双击回默认。
+  const handleChatColumnResizeKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = e.shiftKey ? 64 : 16;
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      applyChatColumnWidth(chatColumnWidthRef.current - step);
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      applyChatColumnWidth(chatColumnWidthRef.current + step);
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      applyChatColumnWidth(CHAT_COLUMN_WIDTH_MIN);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      applyChatColumnWidth(CHAT_COLUMN_WIDTH_MAX);
+    }
+  }, [applyChatColumnWidth]);
+
+  const handleChatColumnResizeReset = useCallback(() => {
+    applyChatColumnWidth(resolveChatColumnWidth({ availableWidth: chatColumnAvailableRef.current, ratio: CHAT_COLUMN_WIDTH_DEFAULT_RATIO }));
+  }, [applyChatColumnWidth]);
+
   useEffect(() => {
     const prefs = loadSidebarPreferences();
     setSidebarWidth(prefs.sidebarWidth);
@@ -253,6 +352,7 @@ function AppShellInner() {
     setRightPanelWidth(prefs.rightPanelWidth);
     // changesPanelOpen 由文件 tab 唯一驱动，不从偏好恢复（刷新后 fileTabs 恒为空）。
     setChangesPanelWidth(prefs.changesPanelWidth);
+    setChatColumnRatio(prefs.chatColumnWidthRatio);
   }, []);
 
   // 右栏内容宽度/桌面开关的唯一写入口：AppShell 是布局 owner，变更即时落盘。
@@ -1404,8 +1504,46 @@ function AppShellInner() {
 
         {/* Chat 固定主区：打开文件/diff/会话信息只展开右栏，Chat 始终可见且保持挂载，
             SSE/流式状态与滚动不丢失（P1 分屏语义，不再有互斥隐藏）。 */}
-        <div style={{ flex: 1, minHeight: 0, overflow: "hidden", position: "relative" }}>
+        <div
+          ref={chatAreaRef}
+          style={{
+            flex: 1, minHeight: 0, overflow: "hidden", position: "relative",
+            // 会话内容区宽度在这里一处写下，所有同宽区域继承同一个变量
+            [CHAT_COLUMN_WIDTH_CSS_VAR]: `${chatColumnWidth}px`,
+          } as React.CSSProperties}
+        >
           <div style={{ height: "100%", minHeight: 0, overflow: "hidden", position: "relative" }}>
+            {/* 内容区宽度拖拽把手：贴着内容列左右缘（列居中，拖任一侧对称改宽）。 */}
+            {showChat && !isMobile && (
+              <div className="chat-column-resize-layer" style={{ left: CHAT_GUTTER, right: CHAT_GUTTER }}>
+                {(["left", "right"] as const).map((side) => (
+                  <div
+                    key={side}
+                    data-side={side}
+                    className={`chat-column-resize-handle${chatColumnDragging ? " dragging" : ""}`}
+                    role="separator"
+                    aria-orientation="vertical"
+                    tabIndex={0}
+                    title={t("app_chatColumnResizeHandle")}
+                    aria-label={t("app_chatColumnResizeHandle")}
+                    aria-valuenow={chatColumnWidth}
+                    aria-valuemin={CHAT_COLUMN_WIDTH_MIN}
+                    aria-valuemax={CHAT_COLUMN_WIDTH_MAX}
+                    style={{
+                      left: side === "left"
+                        ? `calc(50% - ${CHAT_COLUMN_MAX_WIDTH_CSS} / 2 - 6px)`
+                        : `calc(50% + ${CHAT_COLUMN_MAX_WIDTH_CSS} / 2)`,
+                    }}
+                    onPointerDown={handleChatColumnResizeStart}
+                    onPointerMove={handleChatColumnResizeMove}
+                    onPointerUp={handleChatColumnResizeEnd}
+                    onPointerCancel={handleChatColumnResizeEnd}
+                    onKeyDown={handleChatColumnResizeKeyDown}
+                    onDoubleClick={handleChatColumnResizeReset}
+                  />
+                ))}
+              </div>
+            )}
             {showChat ? (
               <ChatWindow
                 key={sessionKey}

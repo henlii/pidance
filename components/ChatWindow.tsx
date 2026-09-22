@@ -18,7 +18,7 @@ import {
   loadedUserOutlineSeeds,
   outlineForSession,
 } from "@/lib/session-outline";
-import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE, CHAT_COLUMN_MAX_WIDTH, CHAT_GUTTER } from "@/lib/chat-column";
+import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE, CHAT_COLUMN_MAX_WIDTH_CSS, CHAT_GUTTER } from "@/lib/chat-column";
 
 /**
  * 输入区/面板/底栏的左右内边距：与消息列逐像素对齐。
@@ -686,7 +686,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
             padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px 8px`,
           }}
         >
-          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS, margin: "0 auto" }}>
             <ExtensionDialog
               request={extensionDialog}
               disabled={writesDisabled || !sessionIdRef.current}
@@ -759,7 +759,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
         padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px`,
       }}
     >
-      <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+      <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS, margin: "0 auto" }}>
         <TodoPanel
           todos={todos}
           collapsed={todosCollapsed}
@@ -905,7 +905,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
             pointerEvents: "none",
           }}
         >
-          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS, margin: "0 auto" }}>
             <NoticeShelf notices={notices} activities={visibleActivities} onDismiss={dismissNotice} onTogglePin={toggleNoticePin} floating align="right" />
           </div>
         </div>
@@ -949,7 +949,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
             padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px`,
           }}
         >
-          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS, margin: "0 auto" }}>
             {/* 状态条与 aboveEditor widget 已移至输入区（对齐 TUI footer/editor 布局） */}
 
             {(() => {
@@ -1196,7 +1196,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
             padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px`,
           }}
         >
-          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS, margin: "0 auto" }}>
             <ExtensionWidgets widgets={aboveEditorWidgets} />
           </div>
         </div>
@@ -1226,7 +1226,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
               padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px`,
             }}
           >
-            <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+            <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS, margin: "0 auto" }}>
               {!footerCollapsed && (
                 <>
                   <ExtensionWidgets widgets={belowEditorWidgets} />
@@ -1251,7 +1251,7 @@ function LockedSessionBar({ isMobile }: { isMobile: boolean }) {
   const { t } = useI18n();
   return (
     <div style={{ flexShrink: 0, padding: `0 ${isMobile ? 16 : CHAT_INPUT_SIDE_PADDING}px 8px` }}>
-      <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+      <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS, margin: "0 auto" }}>
         <div
           role="status"
           aria-label={t("chat_sessionWriteLocked")}
@@ -1291,7 +1291,7 @@ function ReadOnlySessionBar({ session, isMobile }: { session: SessionInfo; isMob
   return (
     // 与 ChatInput 相同的外边距节奏（桌面端两侧让出 18px 竖条）。
     <div style={{ flexShrink: 0, padding: `0 ${isMobile ? 16 : CHAT_INPUT_SIDE_PADDING}px 8px` }}>
-      <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+      <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS, margin: "0 auto" }}>
         <div
           role="note"
           aria-label={t("chat_readOnlySession")}

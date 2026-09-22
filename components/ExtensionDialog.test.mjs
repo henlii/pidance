@@ -123,7 +123,8 @@ test("SSR/source：面板与输入框同宽同中线，内容区可滚动", () =
     request: request("select", { options: ["一"] }),
     onRespond: () => {},
   });
-  assert.match(html, /width:min\(\d+px, 100%\)/, "面板未使用与输入框一致的宽度（取自共享常量）");
+  // 宽度改由共享的 CSS 变量表达式给出（min(var(--pidance-chat-column-width, 兜底), 100%)）
+  assert.match(html, /width:min\(var\(--pidance-chat-column-width, \d+px\), 100%\)/, "面板未使用与输入框一致的宽度（取自共享表达式）");
   assert.ok(!html.includes("min(560px, 100%)"), "面板仍保留旧的窄栏宽度");
   assert.ok(html.includes("extension-panel-body"), "内容区走 GUI 外壳滚动区");
   assert.ok(html.includes("extension-panel-footer"), "操作区固定在面板底部");
@@ -134,7 +135,7 @@ test("SSR/source：面板与输入框同宽同中线，内容区可滚动", () =
     chatWindow.indexOf("const aboveEditorWidgets"),
   );
   assert.ok(block.includes("CHAT_INPUT_SIDE_PADDING"), "扩展面板未按输入框同款内边距包裹");
-  assert.ok(block.includes("maxWidth: CHAT_COLUMN_MAX_WIDTH"), "扩展面板未按输入框同款宽度包裹");
+  assert.ok(block.includes("maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS"), "扩展面板未按输入框同款宽度包裹");
 });
 
 // ── 提问区可读性：右上「关闭」只留给非 select；面板可展开/收回 ────────────────

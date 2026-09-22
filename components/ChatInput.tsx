@@ -33,7 +33,7 @@ import {
   type StreamingEnterAction,
 } from "@/lib/ui-preferences";
 import { isAudioPath, isImagePath, isVideoPath } from "@/lib/file-types";
-import { CHAT_COLUMN_MAX_WIDTH, CHAT_GUTTER } from "@/lib/chat-column";
+import { CHAT_COLUMN_MAX_WIDTH_CSS, CHAT_GUTTER } from "@/lib/chat-column";
 import { sessionExceedsModelWindow, DEFAULT_COMPACTION_RESERVE_TOKENS } from "@/lib/session-context-window";
 
 export type { AttachedImage, ChatInputHandle } from "@/lib/types";
@@ -1710,7 +1710,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           e.target.value = "";
         }}
       />
-      <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+      <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS, margin: "0 auto" }}>
         <fieldset
           disabled={blocked}
           aria-disabled={blocked || undefined}
