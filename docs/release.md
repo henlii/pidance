@@ -17,8 +17,16 @@
 1. 确认工作区改动归属，目标版本在 npm/tag 中未占用。
 2. 同步主包 `package.json`、`package-lock.json` 的版本，以及中英 README 版本行。
 3. 新增 `docs/release-notes/v<version>.md`，中文在上、英文在下，写明包名、CLI、变更与验收范围；补齐 [发布记录索引](release-notes/README.md)。
-4. 执行 `npm run check`，通过后显式创建 `chore(release)` 提交。
-5. 桌面壳与主包**同版本**：把 `desktop/package.json` 的 `version` 与 `@henlii/pidance` 依赖同步到目标版本，用 `npm install --package-lock-only` 同步 lockfile；不一致时桌面 workflow 的输入校验会直接失败。桌面壳必须与主包一起提交。
+4. 执行发布前门禁：`npm run typecheck` + `npm test` + 主浏览器套件 + 31416 部署冒烟，
+   通过后显式创建 `chore(release)` 提交。（`npm run check` 还含 lint 段；本仓当前有 14 个既有的
+   React Compiler memo error 会让它在 lint 处停下，门禁现状与处理口径见
+   [.agents/skills/pidance-development/references/release.md](.agents/skills/pidance-development/references/release.md)。）
+5. 桌面壳与主包**同版本**：改 `desktop/package.json` 的 `version` 与 `@henlii/pidance` 依赖，
+   以及 `desktop/package-lock.json` 的顶层 `version`、`packages.""` 的 `version` 与依赖声明。
+   **lockfile 里 `node_modules/@henlii/pidance` 条目：`version` 跟到新版本，`resolved`/`integrity`
+   仍指向上一版正式 tgz** —— 目标版本此刻还没发布，指向它会让桌面 workflow 的 `npm ci` 直接 404；
+   而条目版本停在旧版则会在 lockfileVersion 3 下 ETARGET。发行完成、npm 传播结束后，再补一次
+   `chore(desktop): lockfile 指向 <version> 的正式 tgz` 提交把条目对齐。桌面壳必须与主包一起提交。
 
 当前 release workflow 不运行 `npm run check`，因此不能跳过发布前本地质量门禁。
 
@@ -55,7 +63,10 @@ gh run watch <run-id> --repo henlii/pidance
 6. 对真实 tgz 执行生成后审计，再生成 SHA-256。
 7. 使用 npm Trusted Publishing / OIDC 发布到官方源并附 provenance；需要发布方配置对应 trusted publisher，不使用长期 token。
 8. 优先采用 `docs/release-notes/<tag>.md`，缺失时回退 commit 列表。
-9. `gh release create` 上传同一 tgz 和 sha256。
+9. 发布后核验：registry 的 tgz 与 Release 资产逐字节一致（`sha256sum` 相同、`dist.integrity` 吻合），
+   `dist-tags.latest` 已切到新版本；Windows 安装包与 `sha256.txt` 一致。新版本 tarball 发布后约
+   2–4 分钟才可下载，下游 job 在此期间失败应等传播完成再重跑，不要改 lockfile 或动 tag。
+10. `gh release create` 上传同一 tgz 和 sha256。
 
 同一个 `v*` tag 还会触发 [`.github/workflows/desktop-win.yml`](../.github/workflows/desktop-win.yml)（Windows 桌面壳）：只出 NSIS 安装版（不做便携 zip）→ 瘦身 → 打包 → 在 electron-builder 留下的 `dist/*-unpacked` 应用目录上验证（页面 + `_next` 静态资源 + `/api/about` 版本 + node-pty + SDK 会话 + 可停）→ 真实 Electron 壳冒烟 → 静默安装/卸载验证 → 等 Release 建好后用 `gh release upload` 把 Setup exe 与 sha256 挂到**同一个 Release**。桌面壳与主包同版本，但不会自动更新已安装的桌面版：用户在托盘里手动「检查更新」。
 
