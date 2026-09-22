@@ -124,15 +124,17 @@ function planItemStableKey(
   return messageKeys[idx] ?? `idx:${idx}`;
 }
 
-// 过程详情默认持续展开（Issue #13）：外层不再默认隐藏整个 user→answer 过程；
-// 用户仍可主动收起/展开，局部 thinking / tool 明细保持各自的按需折叠。
+// 过程详情默认**收起**（2026-09-22 产品口径：除智能体直接输出以外一律默认折叠）。
+// 组内只有中间过程（thinking / 工具调用与结果 / 被折叠的子代理回复），末尾那条
+// 正式回答由 compositor 单独渲染在组外，所以收起不会藏掉智能体直接输出。
+// 此前是「默认持续展开」（Issue #13），本条按用户要求改回收起。
 //
 // 性能（不改可见效果）：展开态的内容改为**进视口才挂载**。child 元素本身的构造很便宜
 // （renderMessage 只拼 JSX），贵的是 React 把整棵子树渲染进 DOM —— 长会话里一轮过程
 // 动辄 40–50 条消息、47 次工具调用，按 entryId 跳到历史后整页可达 2.7 万 DOM 节点、
 // 秒级长任务。不把子树交给 React，就不会付这份代价。
 export function ProcessDetailsGroup({ messageCount, toolCallCount, children, t, eager = false }: { messageCount: number; toolCallCount: number; children: ReactNode; t: ReturnType<typeof useI18n>["t"]; eager?: boolean }) {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   const holderRef = useRef<HTMLDivElement>(null);
   // 无 IntersectionObserver 时直接挂载。eager 只给收尾刚收成的最后一轮：
   // 首帧必须是真实内容。更早的历史组仍先占位，进视口再挂载。

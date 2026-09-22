@@ -25,14 +25,15 @@ function renderGroup(children = React.createElement("div", null, "PROCESS_BODY")
   );
 }
 
-test("ProcessDetailsGroup 默认展开：过程内容直接可见", () => {
+test("ProcessDetailsGroup 默认收起：只留一行摘要，过程内容不渲染", () => {
   const html = renderGroup();
 
-  assert.ok(html.includes("PROCESS_BODY"), "过程子内容默认必须渲染");
-  assert.ok(html.includes('aria-expanded="true"'));
-  // 展开态下切换按钮的提示应为“隐藏”键
-  assert.ok(html.includes('title="chat_hideProcess"'));
-  // 摘要行保留 message/toolCall 计数键
+  // 2026-09-22 产品口径：除智能体直接输出外一律默认折叠（末条正式回答在组外，不受影响）。
+  assert.ok(html.includes('aria-expanded="false"'));
+  assert.ok(!html.includes("PROCESS_BODY"), "收起时过程子内容不应渲染");
+  // 收起态下切换按钮的提示应为“显示”键
+  assert.ok(html.includes('title="chat_showProcess"'));
+  // 摘要行保留 message/toolCall 计数键（收起时也要能看出这一轮有多少过程）
   assert.ok(html.includes("chat_processDetails"));
   assert.ok(html.includes("chat_messages"));
   assert.ok(html.includes("chat_toolCalls"));
@@ -40,16 +41,16 @@ test("ProcessDetailsGroup 默认展开：过程内容直接可见", () => {
 
 test("ProcessDetailsGroup 保留用户主动收起/展开按钮", () => {
   const html = renderGroup();
-  assert.match(html, /<button[^>]*aria-expanded="true"/);
+  assert.match(html, /<button[^>]*aria-expanded="false"/);
 
   // 源码契约：切换仍走同一个 setExpanded 取反（收起能力未被删除），
-  // 且初始状态为展开。
+  // 且初始状态为收起。
   const source = readFileSync(fileURLToPath(new URL("./ChatWindow.tsx", import.meta.url)), "utf8");
   const groupSource = source.slice(
     source.indexOf("function ProcessDetailsGroup"),
     source.indexOf("export function ChatWindow"),
   );
-  assert.match(groupSource, /useState\(true\)/);
+  assert.match(groupSource, /const \[expanded, setExpanded\] = useState\(false\)/);
   assert.match(groupSource, /onClick=\{\(\) => setExpanded\(\(v\) => !v\)\}/);
 });
 

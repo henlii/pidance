@@ -100,9 +100,9 @@
 |---|---|---|---|
 | header（会话/模型/目录） | 顶栏谱系面包屑 + 统计按钮 | `components/SessionLineage.tsx`、`components/AppShell.tsx` | Web 把“当前会话在树里的位置”做成可点的下拉（子会话导航），TUI 无等价物 |
 | 会话内容时间序 | 消息区 | `components/ChatWindow.tsx`、`components/MessageView.tsx` | 同序；Web 增加了滚动锚定/自动跟随 |
-| thinking 块 | assistant 块内的折叠段 | `components/MessageView.tsx`、`lib/thinking-content.ts` | 同 |
-| 工具调用块 | 过程分组（process group，可折叠） | `components/ChatWindow.tsx`（`ProcessDetailsGroup`）、`lib/message-display.ts` | Web 按“一轮”分组，TUI 按事件平铺 |
-| 压缩/分支摘要 | 独立系统块；**压缩块默认收起**（标题行整行可点，`aria-expanded`） | `components/MessageView.tsx`（`CompactionMessageView` / `BranchSummaryView`） | 同；Web 上一段压缩摘要可达上千像素，默认收成一行 |
+| thinking 块 | assistant 块内的折叠段，默认收起 | `components/MessageView.tsx`、`lib/thinking-content.ts` | 同 |
+| 工具调用块 | 过程分组（process group，**默认收起**） | `components/ChatWindow.tsx`（`ProcessDetailsGroup`）、`lib/message-display.ts` | Web 按“一轮”分组，TUI 按事件平铺 |
+| 压缩/分支摘要 | 独立系统块；压缩块与分支摘要**都默认收起**（标题行整行可点，`aria-expanded`） | `components/MessageView.tsx`（`CompactionMessageView` / `BranchSummaryMessageView`） | 同；Web 上一段压缩摘要可达上千像素，默认收成一行 |
 | editor（输入框） | 输入区 | `components/ChatInput.tsx` | TUI 键位；Web 按钮 + slash/@ 菜单 + 附件 |
 | aboveEditor widget | 输入框**上方**卡片 | `components/ChatWindow.tsx`（`ExtensionWidgets`，placement ≠ belowEditor） | 见 §5（含 pi-subagents 案例） |
 | belowEditor widget | 输入框**下方**卡片 | 同上（placement === belowEditor） | 同 |
@@ -155,9 +155,11 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
 4. **仍存在的差异**：
    - `subagent-fleet-status`（placement `belowEditor`）是 TUI 组件，经渲染桥转成文本，里面的 `↓/← to inspect` 是终端键位。Web 侧现在改写这行：去掉键位提示段，保留 agent 数与 token 读数（`rewriteFleetStatusLines`）；整行只剩提示时不渲染该 widget。
    - ~~新开页面拿不到已存在的 widget~~ **已核实不是问题**：widget 会随状态水合（`/api/sessions/<id>/state` 的 `state.extensionWidgets`）在打开会话时出现。此前判定「拿不到」是探针口径造成的误判。
+   - **左侧用户消息导航条铺满整列**（2026-09-22 决定）：短横线首尾贴住列内缩位置、中间按条数均分，**一条横线的纵向位置就对应它在会话里的先后** —— 贴底时「当前」那条落在轨道最下面（此前整条限高 320px、垂直居中，当前项落在屏幕中部，看不出与会话位置的关系）。条数多到每格矮于 8px（点不中）时退回旧的「限高 + 居中 + 内部滚动」，此时才显示上下小三角。
    - **侧栏里的 fork 子会话平铺显示**（2026-09-22 决定）：Pi 原生 fork 出来的会话是**独立会话**，与父平级各占一行，侧栏不再有「展开/折叠子会话」；父行下也不再嵌 fork 子行。此前把它嵌在父下，而 fork 会连标题一起复制，于是看起来像「同一个会话显示了好几行」。subagent 子会话仍然整体隐藏（只在顶栏「子会话谱系」里）。
    - **折叠属于槽位外壳，不属于内容**：所有 `setWidget` 部件（含 `subagent-async` 这种机器载荷）都由 `ExtensionWidgets` 的**同一个卡片模板**渲染标题行 —— 折叠按钮、`aria-expanded`、展开/折叠文案、按 widget key 持久化的折叠状态只有一处。所以**任何插件用这个槽位都自动能折叠**，不需要各自实现。标题也是外壳给的：机器载荷用友好名（`异步子代理 <agent>`，副标题带「后台 / N queued / 另有 N 个 / 截断」），其余部件仍显示自己的 widget key；面板组件只负责正文（状态行）。
    - **子代理通知消息块**（`subagent-notify` / `subagent-incremental-child-notify` 这类扩展自定义消息）：标题显示为「子代理通知」而**不露出内部 customType**，折叠开关在卡片头部（默认收起），展开后才显示通知正文。
+   - **折叠总规则（2026-09-22 决定）**：会话时间线里**只有智能体直接输出的正文默认展开**；除此之外的块（thinking、工具调用、过程分组、压缩、分支摘要、扩展自定义消息、子代理通知）一律可折叠且**默认收起**。过程分组只包中间过程（thinking / 工具 / 子代理回复），每轮末尾的正式回答由 compositor 渲染在组外，所以收起不会藏掉智能体输出。
 4. **状态条与 widget 不区分“谁提供”**：Web 侧只按 key 渲染与折叠（折叠状态存 `localStorage` 的 `pidance.collapsedWidgetKeys.v1`）。
 5. **阻塞弹窗（`ExtensionDialog`）的按钮与可读性由 Web 侧定**：协议只传 `title` / `options` / `placeholder` 这类纯文本字段，插件无法定制样式与按钮。现状：
    - 按钮按 `method` 固定：`select` 只有底部「取消」；`input`/`editor` 是「取消 + 提交」；`confirm` 是「取消 + 确认」。**`select` 不再渲染右上「关闭」**——它与「取消」发的是同一个 `cancelled` 响应（并且会中止这次执行），并排两个等价按钮只会让人以为「关闭」是温和的那个。

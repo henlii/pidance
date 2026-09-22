@@ -1898,6 +1898,9 @@ function BranchSummaryMessageView({ message }: { message: CustomMessage }) {
   const readFiles = structuredFiles?.readFiles ?? parsedSummary.readFiles;
   const modifiedFiles = structuredFiles?.modifiedFiles ?? parsedSummary.modifiedFiles;
   const time = formatTime(message.timestamp);
+  // 与压缩块同款：系统生成的块默认收起，摘要正文按需展开。
+  const [expanded, setExpanded] = useState(false);
+  const toggleLabel = expanded ? t("message_collapse") : t("message_expand");
 
   return (
     <div style={{ marginBottom: 16 }}>
@@ -1910,17 +1913,39 @@ function BranchSummaryMessageView({ message }: { message: CustomMessage }) {
           background: "var(--bg)",
         }}
       >
-        <div
+        {/* 标题行整行可点：收起时它是进入摘要的唯一入口。 */}
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          title={`${t("message_branchSummary")} · ${toggleLabel}`}
+          aria-label={`${t("message_branchSummary")} · ${toggleLabel}`}
           style={{
             display: "flex",
             alignItems: "center",
             gap: 8,
+            width: "100%",
             padding: "7px 10px",
-            borderBottom: "1px solid var(--border)",
+            border: "none",
+            borderBottom: expanded ? "1px solid var(--border)" : "none",
             background: "var(--bg-panel)",
             color: "var(--text-muted)",
+            fontFamily: "inherit",
+            fontSize: 12,
+            textAlign: "left",
+            cursor: "pointer",
           }}
         >
+          <ChevronDown
+            size={12}
+            strokeWidth={1.8}
+            aria-hidden="true"
+            style={{
+              flexShrink: 0,
+              transform: expanded ? "none" : "rotate(-90deg)",
+              transition: "transform 0.15s ease",
+            }}
+          />
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <line x1="6" y1="3" x2="6" y2="15" />
             <circle cx="18" cy="6" r="3" />
@@ -1931,19 +1956,21 @@ function BranchSummaryMessageView({ message }: { message: CustomMessage }) {
             {t("message_branchSummary")}
           </span>
           {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
-        </div>
+        </button>
 
-        <div style={{ padding: "11px 13px 12px" }}>
-          <div style={{ marginBottom: 10, color: "var(--text-muted)", fontSize: 13, lineHeight: 1.5 }}>
-            {t("message_branchSummaryDescription")}
+        {expanded && (
+          <div style={{ padding: "11px 13px 12px" }}>
+            <div style={{ marginBottom: 10, color: "var(--text-muted)", fontSize: 13, lineHeight: 1.5 }}>
+              {t("message_branchSummaryDescription")}
+            </div>
+            {parsedSummary.body ? (
+              <MarkdownBody className="markdown-compaction-message">{parsedSummary.body}</MarkdownBody>
+            ) : (
+              <span style={{ color: "var(--text-dim)", fontSize: 12 }}>({t("message_noSummary")})</span>
+            )}
+            <FileContextMetadata readFiles={readFiles} modifiedFiles={modifiedFiles} />
           </div>
-          {parsedSummary.body ? (
-            <MarkdownBody className="markdown-compaction-message">{parsedSummary.body}</MarkdownBody>
-          ) : (
-            <span style={{ color: "var(--text-dim)", fontSize: 12 }}>({t("message_noSummary")})</span>
-          )}
-          <FileContextMetadata readFiles={readFiles} modifiedFiles={modifiedFiles} />
-        </div>
+        )}
       </div>
     </div>
   );
@@ -2148,7 +2175,8 @@ function PidanceActivityView({ message, activity }: { message: CustomMessage; ac
 function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessage; cwd?: string; onOpenFile?: (filePath: string) => void }) {
   const { t } = useI18n();
   const isHiddenDisplay = message.display === false;
-  const [contentExpanded, setContentExpanded] = useState(!isHiddenDisplay);
+  // 默认收起：扩展自记的消息（记录/状态之类）不是智能体直接输出，先只留一行标题。
+  const [contentExpanded, setContentExpanded] = useState(false);
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
   const text = getMessageText(message.content);

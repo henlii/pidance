@@ -209,6 +209,35 @@ test("custom fallback 语义保持：compaction 仍走专用压缩卡片，且�
   assert.ok(!html.includes("summary body"), "收起时摘要正文不渲染");
 });
 
+test("branch_summary 也是可折叠块，且默认收起", () => {
+  const html = renderMessage({
+    role: "custom",
+    customType: "branch_summary",
+    content: "branch summary body",
+    display: true,
+    details: {},
+  });
+
+  assert.ok(html.includes(">Branch summary</span>"), "标题行应显示分支摘要标签");
+  assert.ok(html.includes('aria-expanded="false"'), "初始应为收起态");
+  assert.ok(!html.includes("branch summary body"), "收起时摘要正文不渲染");
+});
+
+test("扩展自定义消息默认收起：正文不整段渲染，只给一行预览", () => {
+  const html = renderMessage({
+    role: "custom",
+    customType: "some-extension.record",
+    content: "extension record body",
+    display: true,
+    details: {},
+  });
+
+  assert.ok(html.includes(">some-extension.record</span>"), "标题行仍显示自定义类型");
+  // 收起态：走预览按钮（一行），不整段渲染 markdown 正文
+  assert.ok(!html.includes("markdown-custom-message"), "非智能体直接输出的块默认不整段渲染");
+  assert.ok(html.includes("extension record body"), "收起态给一行预览，便于判断要不要展开");
+});
+
 test("源码契约：MessageView 不使用 dangerouslySetInnerHTML", () => {
   const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
   assert.ok(!source.includes("dangerouslySetInnerHTML"));
