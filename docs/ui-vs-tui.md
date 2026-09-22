@@ -156,7 +156,7 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
    - `subagent-fleet-status`（placement `belowEditor`）是 TUI 组件，经渲染桥转成文本，里面的 `↓/← to inspect` 是终端键位。Web 侧现在改写这行：去掉键位提示段，保留 agent 数与 token 读数（`rewriteFleetStatusLines`）；整行只剩提示时不渲染该 widget。
    - ~~新开页面拿不到已存在的 widget~~ **已核实不是问题**：widget 会随状态水合（`/api/sessions/<id>/state` 的 `state.extensionWidgets`）在打开会话时出现。此前判定「拿不到」是探针口径造成的误判。
    - **侧栏里的 fork 子会话平铺显示**（2026-09-22 决定）：Pi 原生 fork 出来的会话是**独立会话**，与父平级各占一行，侧栏不再有「展开/折叠子会话」；父行下也不再嵌 fork 子行。此前把它嵌在父下，而 fork 会连标题一起复制，于是看起来像「同一个会话显示了好几行」。subagent 子会话仍然整体隐藏（只在顶栏「子会话谱系」里）。
-   - **折叠沿用通用部件那一套**：`subagent-async` 的折叠开关就在面板标题行里（`aria-expanded` + `extension_widgetExpand/Collapse` 文案），状态与普通扩展部件**共用同一个 `collapsedWidgetKeys` 项**（按 widget key 持久化）——此前它的标题由数据给、绕过了通用卡片头，于是**不能折叠**、样式也与其它部件不一致。
+   - **折叠属于槽位外壳，不属于内容**：所有 `setWidget` 部件（含 `subagent-async` 这种机器载荷）都由 `ExtensionWidgets` 的**同一个卡片模板**渲染标题行 —— 折叠按钮、`aria-expanded`、展开/折叠文案、按 widget key 持久化的折叠状态只有一处。所以**任何插件用这个槽位都自动能折叠**，不需要各自实现。标题也是外壳给的：机器载荷用友好名（`异步子代理 <agent>`，副标题带「后台 / N queued / 另有 N 个 / 截断」），其余部件仍显示自己的 widget key；面板组件只负责正文（状态行）。
    - **子代理通知消息块**（`subagent-notify` / `subagent-incremental-child-notify` 这类扩展自定义消息）：标题显示为「子代理通知」而**不露出内部 customType**，折叠开关在卡片头部（默认收起），展开后才显示通知正文。
 4. **状态条与 widget 不区分“谁提供”**：Web 侧只按 key 渲染与折叠（折叠状态存 `localStorage` 的 `pidance.collapsedWidgetKeys.v1`）。
 5. **阻塞弹窗（`ExtensionDialog`）的按钮与可读性由 Web 侧定**：协议只传 `title` / `options` / `placeholder` 这类纯文本字段，插件无法定制样式与按钮。现状：

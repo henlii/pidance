@@ -234,6 +234,35 @@ export interface SubagentAsyncSummary {
  * 把快照压成面板要显示的行：运行中优先、其次排队、最后已结束（与 TUI widget 的顺序一致），
  * 每个 run 之后跟它的子步骤。超过 `maxRows` 的顶层 run 计入 `hidden`。
  */
+/**
+ * 面板标题信息（供**通用槽位外壳**渲染标题行用，纯数据、不做 i18n）。
+ *
+ * 为什么由外壳渲染标题：折叠开关属于「槽位」的职责（任何插件用这个槽位都该能折叠），
+ * 所以标题行由外壳统一画；面板组件只负责正文（状态行）。这里给出外壳需要的那几个字段。
+ */
+export interface SubagentAsyncHeading {
+  /** 只有一个 run 时它的 label（用于「异步子代理 <name>」），多个 run 时为 null。 */
+  singleLabel: string | null;
+  running: number;
+  queued: number;
+  /** 被上限截掉的行数（>0 时提示「另有 N 个」）。 */
+  hidden: number;
+  /** 上游因字节上限截断了载荷。 */
+  byteLimitExceeded: boolean;
+}
+
+export function subagentAsyncHeading(snapshot: SubagentAsyncSnapshot): SubagentAsyncHeading {
+  const summary = summarizeSubagentAsyncSnapshot(snapshot);
+  const runs = Array.isArray(snapshot.runs) ? snapshot.runs : [];
+  return {
+    singleLabel: runs.length === 1 ? (runs[0]?.label ?? null) : null,
+    running: summary.running,
+    queued: summary.queued,
+    hidden: summary.hidden,
+    byteLimitExceeded: summary.byteLimitExceeded,
+  };
+}
+
 export function summarizeSubagentAsyncSnapshot(
   snapshot: SubagentAsyncSnapshot,
   options: { now?: number; maxRows?: number } = {},

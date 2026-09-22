@@ -71,12 +71,13 @@ function stateLabelKey(state: SubagentAsyncState): SubagentStateLabelKey {
   }
 }
 
-export function SubagentAsyncWidget({ snapshot, collapsed = false, onToggleCollapse }: {
-  snapshot: SubagentAsyncSnapshot;
-  /** 折叠开关（与通用扩展部件共用同一套折叠状态，按 widget key 持久化）。 */
-  collapsed?: boolean;
-  onToggleCollapse?: () => void;
-}) {
+/**
+ * 异步子代理面板的**正文**（状态行）。
+ *
+ * 标题行与折叠开关由**通用槽位外壳**渲染（`components/ChatWindow.tsx` 的 `ExtensionWidgets`）：
+ * 折叠属于槽位的职责 —— 这样任何插件用这个槽位都自动能折叠，面板组件不必各自实现一遍。
+ */
+export function SubagentAsyncWidget({ snapshot }: { snapshot: SubagentAsyncSnapshot }) {
   const { t } = useI18n();
   const summary = useMemo(() => summarizeSubagentAsyncSnapshot(snapshot), [snapshot]);
   const single = snapshot.runs.length === 1 ? snapshot.runs[0] : null;
@@ -95,50 +96,7 @@ export function SubagentAsyncWidget({ snapshot, collapsed = false, onToggleColla
 
   return (
     <div style={{ padding: "7px 9px", display: "flex", flexDirection: "column", gap: 3 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, lineHeight: 1.4 }}>
-        <span aria-hidden="true" style={{ color: active ? "var(--accent)" : "var(--text-dim)", fontSize: 11 }}>◆</span>
-        <span style={{ color: active ? "var(--accent)" : "var(--text-dim)", fontSize: 12, fontWeight: 600 }}>
-          {single ? t("subagent_widgetSingle", { name: single.label }) : t("subagent_widgetTitle")}
-        </span>
-        <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
-          {t("subagent_widgetBackground")}
-          {summary.queued > 0 ? ` · ${t("subagent_widgetQueued", { count: summary.queued })}` : ""}
-          {summary.hidden > 0 ? ` · ${t("subagent_widgetMore", { count: summary.hidden })}` : ""}
-          {summary.byteLimitExceeded ? ` · ${t("subagent_widgetTruncated")}` : ""}
-        </span>
-        {onToggleCollapse ? (
-          // 与通用扩展部件同一套折叠语义（aria-expanded + 展开/折叠文案），
-          // 只是把开关放在标题行里 —— 这个面板的标题由数据给，不走通用卡片头。
-          <button
-            type="button"
-            onClick={onToggleCollapse}
-            aria-expanded={!collapsed}
-            title={collapsed ? t("extension_widgetExpand", { name: t("subagent_widgetTitle") }) : t("extension_widgetCollapse", { name: t("subagent_widgetTitle") })}
-            aria-label={collapsed ? t("extension_widgetExpand", { name: t("subagent_widgetTitle") }) : t("extension_widgetCollapse", { name: t("subagent_widgetTitle") })}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              marginLeft: "auto",
-              padding: "1px 5px",
-              border: "none",
-              background: "transparent",
-              color: "var(--text-dim)",
-              cursor: "pointer",
-            }}
-          >
-            <svg
-              width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor"
-              strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
-              style={{ transform: collapsed ? "none" : "rotate(90deg)", transition: "transform 0.15s ease" }}
-            >
-              <polyline points="4 2.5 7.5 6 4 9.5" />
-            </svg>
-          </button>
-        ) : null}
-      </div>
-
-      {collapsed ? null : summary.rows.map((row) => {
+      {summary.rows.map((row) => {
         const { glyph, color } = stateGlyph(row.state);
         const elapsed = formatDuration(row.elapsedMs);
         const details = detailOf(row);

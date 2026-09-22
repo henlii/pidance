@@ -30,7 +30,7 @@ const CHAT_INPUT_SIDE_PADDING_MOBILE = 16;
 import { ExtensionDialog } from "./ExtensionDialog";
 import { ExtensionCustomPanel } from "./ExtensionCustomPanel";
 import { SubagentAsyncWidget } from "./SubagentAsyncWidget";
-import { ASYNC_STATUS_SNAPSHOT_PREFIX, parseSubagentAsyncSnapshot, rewriteFleetStatusLines } from "@/lib/subagent-async-widget";
+import { ASYNC_STATUS_SNAPSHOT_PREFIX, parseSubagentAsyncSnapshot, rewriteFleetStatusLines, subagentAsyncHeading } from "@/lib/subagent-async-widget";
 import { NewSessionGuide } from "./NewSessionGuide";
 import { TodoPanel } from "./TodoPanel";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
@@ -1387,31 +1387,26 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
     <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
       {parsed.map(({ widget, snapshot, machinePayload, drop }) => {
         if (drop) return null;
-        // 机器载荷：解析成功就按数据渲染（标题由面板自己给，不用原始 widget key）；
-        // 解析失败说明格式变了，宁可什么都不显示，也不把载荷当文本糊在界面上。
+        // 机器载荷：解析成功就按数据渲染；解析失败说明格式变了，宁可什么都不显示，
+        // 也不把载荷当文本糊在界面上。
+        if (machinePayload && !snapshot) return null;
         const collapsed = collapsedKeys.has(widget.key);
-        if (machinePayload) {
-          if (!snapshot) return null;
-          return (
-            <div
-              key={widget.key}
-              style={{
-                border: "1px solid var(--border)",
-                borderRadius: 7,
-                background: "var(--bg-panel)",
-                overflow: "hidden",
-              }}
-            >
-              {/* 折叠状态与通用部件**同一个 key、同一套机制**（此前这个专用面板绕过了通用卡片头，
-                  于是不能折叠，样式也和别的部件不一致 —— #用户反馈）。 */}
-              <SubagentAsyncWidget
-                snapshot={snapshot}
-                collapsed={collapsed}
-                onToggleCollapse={() => toggleCollapse(widget.key)}
-              />
-            </div>
-          );
-        }
+        // **标题与副标题由槽位外壳决定**（折叠也是外壳的职责）：已知的机器载荷用友好名字，
+        // 其余扩展部件仍显示自己的 widget key。
+        const heading = snapshot ? subagentAsyncHeading(snapshot) : null;
+        const title = heading
+          ? (heading.singleLabel
+            ? t("subagent_widgetSingle", { name: heading.singleLabel })
+            : t("subagent_widgetTitle"))
+          : widget.key;
+        const subtitle = heading
+          ? [
+            t("subagent_widgetBackground"),
+            heading.queued > 0 ? t("subagent_widgetQueued", { count: heading.queued }) : "",
+            heading.hidden > 0 ? t("subagent_widgetMore", { count: heading.hidden }) : "",
+            heading.byteLimitExceeded ? t("subagent_widgetTruncated") : "",
+          ].filter(Boolean).join(" · ")
+          : null;
         return (
           <div
             key={widget.key}
@@ -1422,12 +1417,13 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
               overflow: "hidden",
             }}
           >
+            {/* 槽位外壳的标题行：任何插件用这个槽位都自带折叠（不用各自实现）。 */}
             <button
               type="button"
               onClick={() => toggleCollapse(widget.key)}
               aria-expanded={!collapsed}
-              aria-label={collapsed ? t("extension_widgetExpand", { name: widget.key }) : t("extension_widgetCollapse", { name: widget.key })}
-              title={collapsed ? t("extension_widgetExpand", { name: widget.key }) : t("extension_widgetCollapse", { name: widget.key })}
+              aria-label={collapsed ? t("extension_widgetExpand", { name: title }) : t("extension_widgetCollapse", { name: title })}
+              title={collapsed ? t("extension_widgetExpand", { name: title }) : t("extension_widgetCollapse", { name: title })}
               style={{
                 display: "flex",
                 width: "100%",
@@ -1459,17 +1455,24 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
               >
                 <polyline points="4 2.5 7.5 6 4 9.5" />
               </svg>
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{widget.key}</span>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</span>
+              {subtitle ? (
+                <span style={{ color: "var(--text-dim)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</span>
+              ) : null}
             </button>
             {!collapsed && (
-              <pre style={{ margin: 0, padding: "8px 9px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--font-mono)", maxHeight: bodyMaxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y" }}>
-                {(Array.isArray(widget.lines) ? widget.lines : []).map((line, index, lines) => (
-                  <Fragment key={index}>
-                    {renderAnsiLine(line, `widget-${widget.key}-line-${index}`)}
-                    {index < lines.length - 1 ? "\n" : null}
-                  </Fragment>
-                ))}
-              </pre>
+              snapshot ? (
+                <SubagentAsyncWidget snapshot={snapshot} />
+              ) : (
+                <pre style={{ margin: 0, padding: "8px 9px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--font-mono)", maxHeight: bodyMaxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y" }}>
+                  {(Array.isArray(widget.lines) ? widget.lines : []).map((line, index, lines) => (
+                    <Fragment key={index}>
+                      {renderAnsiLine(line, `widget-${widget.key}-line-${index}`)}
+                      {index < lines.length - 1 ? "\n" : null}
+                    </Fragment>
+                  ))}
+                </pre>
+              )
             )}
           </div>
         );
