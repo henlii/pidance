@@ -4,7 +4,9 @@ import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouse
 import { createPortal } from "react-dom";
 import { Download, Minus, Plus, RotateCcw } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
-import { closeImagePreview, openImagePreview, useImagePreview } from "@/lib/image-preview-store";
+import { closeImagePreview, isImageDownloaded, markImageDownloaded, openImagePreview, useImagePreview } from "@/lib/image-preview-store";
+import { filePathFromApiUrl } from "@/lib/file-paths";
+import { SaveAsDialog } from "./SaveAsDialog";
 import { readDialogViewportRect } from "@/components/ui/ViewportDialog";
 import type { ImageContent } from "@/lib/types";
 
@@ -198,6 +200,10 @@ export function ImagePreviewOverlay() {
   const { t } = useI18n();
   const preview = useImagePreview();
   const [zoom, setZoom] = useState(MIN_ZOOM);
+  /** 「下载原图」点过之后按钮变「另存为」（同一张图在同一页面生命周期内只算一次）。 */
+  const [downloaded, setDownloaded] = useState(false);
+  const [saveAsOpen, setSaveAsOpen] = useState(false);
+  const saveAsPath = preview ? filePathFromApiUrl(preview.downloadHref) : null;
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [viewport, setViewport] = useState(() => readDialogViewportRect());
   // 记录是否发生拖动：拖完不应被当成「点击背景」而误关闭。
@@ -248,7 +254,9 @@ export function ImagePreviewOverlay() {
   useEffect(() => {
     resetView();
     dragRef.current = null;
-  }, [preview?.id, resetView]);
+    setDownloaded(preview ? isImageDownloaded(preview.downloadHref) : false);
+    setSaveAsOpen(false);
+  }, [preview?.id, preview, resetView]);
 
   useEffect(() => () => closeImagePreview(), []);
 
@@ -406,7 +414,26 @@ export function ImagePreviewOverlay() {
         <button type="button" onClick={resetView} aria-label={t("message_resetZoom")} title={t("message_resetZoom")} style={overlayControlStyle}>
           <RotateCcw size={14} strokeWidth={1.9} aria-hidden="true" />
         </button>
-        <a href={preview.downloadHref} download={preview.downloadName} aria-label={t("message_downloadImage")} title={t("message_downloadImage")} style={{ ...overlayControlStyle, gap: 5, textDecoration: "none", fontSize: 12 }}>
+        {downloaded && saveAsPath ? (
+          <button
+            type="button"
+            onClick={() => setSaveAsOpen(true)}
+            aria-label={t("message_saveImageAs")}
+            title={t("message_saveImageAs")}
+            style={{ ...overlayControlStyle, gap: 5, fontSize: 12 }}
+          >
+            <Download size={14} strokeWidth={1.9} aria-hidden="true" />
+            <span className="hidden sm:inline">{t("message_saveImageAs")}</span>
+          </button>
+        ) : null}
+        <a
+          href={preview.downloadHref}
+          download={preview.downloadName}
+          onClick={() => { markImageDownloaded(preview.downloadHref); setDownloaded(true); }}
+          aria-label={t("message_downloadImage")}
+          title={t("message_downloadImage")}
+          style={{ ...overlayControlStyle, gap: 5, textDecoration: "none", fontSize: 12, display: downloaded ? "none" : "inline-flex" }}
+        >
           <Download size={14} strokeWidth={1.9} aria-hidden="true" />
           <span className="hidden sm:inline">{t("message_downloadImage")}</span>
         </a>
@@ -461,6 +488,13 @@ export function ImagePreviewOverlay() {
           }}
         />
       </div>
+      {saveAsPath ? (
+        <SaveAsDialog
+          open={saveAsOpen}
+          sourcePath={saveAsPath}
+          onClose={() => setSaveAsOpen(false)}
+        />
+      ) : null}
     </div>,
     document.body,
   );

@@ -15,6 +15,22 @@ export interface ImagePreviewState {
 let snapshot: ImagePreviewState | null = null;
 const listeners = new Set<() => void>();
 
+/**
+ * 已经点过「下载原图」的图片（按下载 href 记）。
+ *
+ * 只活在这个页面里：按钮要从「下载原图」变成「另存为」，这是同一张图的一次性动作，
+ * 刷新后重来一遍没有副作用（浏览器下载本来就落在它自己的下载目录）。
+ */
+const downloadedHrefs = new Set<string>();
+
+export function markImageDownloaded(href: string): void {
+  if (href) downloadedHrefs.add(href);
+}
+
+export function isImageDownloaded(href: string): boolean {
+  return Boolean(href) && downloadedHrefs.has(href);
+}
+
 function notify(): void {
   for (const listener of listeners) listener();
 }

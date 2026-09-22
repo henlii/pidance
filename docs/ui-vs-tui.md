@@ -102,6 +102,7 @@
 | 会话内容时间序 | 消息区 | `components/ChatWindow.tsx`、`components/MessageView.tsx` | 同序；Web 增加了滚动锚定/自动跟随 |
 | thinking 块 | assistant 块内的折叠段，默认收起 | `components/MessageView.tsx`、`lib/thinking-content.ts` | 同 |
 | 工具调用块 | 过程分组（process group，**默认收起**） | `components/ChatWindow.tsx`（`ProcessDetailsGroup`）、`lib/message-display.ts` | Web 按“一轮”分组，TUI 按事件平铺 |
+| 图片预览（消息媒体） | 全屏预览层：缩放/拖动 + **下载原图 → 另存为** | `components/MessageImage.tsx`、`lib/image-preview-store.ts`、`components/SaveAsDialog.tsx`、`app/api/files/save-as/route.ts` | 下载走浏览器自己的下载目录（web 缓存）；点过之后按钮变「另存为」，由**服务端**把原文件复制到所选目录（同名自动加 ` (n)`，原文件保留）。只有拿得到服务端路径的媒体才有「另存为」（纯 base64 图没有可复制的源文件） |
 | 压缩/分支摘要 | 独立系统块；压缩块与分支摘要**都默认收起**（标题行整行可点，`aria-expanded`） | `components/MessageView.tsx`（`CompactionMessageView` / `BranchSummaryMessageView`） | 同；Web 上一段压缩摘要可达上千像素，默认收成一行 |
 | editor（输入框） | 输入区 | `components/ChatInput.tsx` | TUI 键位；Web 按钮 + slash/@ 菜单 + 附件 |
 | aboveEditor widget | 输入框**上方**卡片 | `components/ChatWindow.tsx`（`ExtensionWidgets`，placement ≠ belowEditor） | 见 §5（含 pi-subagents 案例） |
