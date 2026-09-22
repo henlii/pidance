@@ -261,7 +261,14 @@ export function deriveRecentSessions(input: DeriveRecentSessionsInput): SessionI
     return true;
   });
   const sorted = filtered.slice().sort(compareSessionsByActivity);
-  return sorted.slice(0, n);
+  const top = sorted.slice(0, n);
+  // fork 子会话在**父行下嵌套**渲染（最近区与项目树同一渲染）：父**也在这段列表里**时，
+  // 子不能再单独出一行 —— 否则同一会话会出现两行（一行是它自己、一行嵌在父行下），
+  // 而 fork 会连标题一起复制，看起来就像「同一个会话显示了好几行」。
+  // 只按「父也在这段列表里」判断，而不是按「父存在」：父不在最近区时子必须自己出列，
+  // 否则会话会从最近区凭空消失。
+  const visible = new Set(top.map((s) => s.id));
+  return top.filter((s) => !(s.parentSessionId && visible.has(s.parentSessionId)));
 }
 
 export interface DerivePinnedSessionsInput {
@@ -288,14 +295,17 @@ export function derivePinnedSessions(input: DerivePinnedSessionsInput): SessionI
     if (s.subagent) continue;
     byId.set(s.id, s);
   }
+  const pinnedSet = new Set(pinnedSessionIds);
   const result: SessionInfo[] = [];
   const seen = new Set<string>();
   for (const id of pinnedSessionIds) {
     const s = byId.get(id);
-    if (s && !seen.has(id)) {
-      seen.add(id);
-      result.push(s);
-    }
+    if (!s || seen.has(id)) continue;
+    // 与最近区同一条规则：**父也被置顶**时子会话会嵌在父行下，不再单独出一行；
+    // 只钉了子会话时必须保留它自己那一行（否则这次置顶就白钉了、会话也不可见）。
+    if (s.parentSessionId && pinnedSet.has(s.parentSessionId) && byId.has(s.parentSessionId)) continue;
+    seen.add(id);
+    result.push(s);
   }
   return result;
 }

@@ -1389,6 +1389,7 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
         if (drop) return null;
         // 机器载荷：解析成功就按数据渲染（标题由面板自己给，不用原始 widget key）；
         // 解析失败说明格式变了，宁可什么都不显示，也不把载荷当文本糊在界面上。
+        const collapsed = collapsedKeys.has(widget.key);
         if (machinePayload) {
           if (!snapshot) return null;
           return (
@@ -1401,11 +1402,16 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
                 overflow: "hidden",
               }}
             >
-              <SubagentAsyncWidget snapshot={snapshot} />
+              {/* 折叠状态与通用部件**同一个 key、同一套机制**（此前这个专用面板绕过了通用卡片头，
+                  于是不能折叠，样式也和别的部件不一致 —— #用户反馈）。 */}
+              <SubagentAsyncWidget
+                snapshot={snapshot}
+                collapsed={collapsed}
+                onToggleCollapse={() => toggleCollapse(widget.key)}
+              />
             </div>
           );
         }
-        const collapsed = collapsedKeys.has(widget.key);
         return (
           <div
             key={widget.key}

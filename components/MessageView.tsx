@@ -2128,7 +2128,12 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
   const images = getMessageImages(message.content);
   const hasDetails = message.details !== undefined;
   const detailsText = hasDetails ? safeJson(message.details) : "";
-  const title = message.customType || t("message_extensionDefaultType");
+  // pi-subagents 的自定义消息（subagent-notify / subagent-incremental-child-notify）内部类型名
+  // 对用户没有意义，给一个友好名字；其余扩展消息仍显示自己的 customType。
+  const isSubagentNotice = typeof message.customType === "string" && message.customType.startsWith("subagent-");
+  const title = isSubagentNotice
+    ? t("message_subagentNotice")
+    : (message.customType || t("message_extensionDefaultType"));
   const time = formatTime(message.timestamp);
   const renderedLines = getRenderableAnsiLines(message.renderedLines);
 
@@ -2167,6 +2172,28 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
           </span>
           {isHiddenDisplay && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("message_hiddenExtensionMessage")}</span>}
           {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
+          {isHiddenDisplay && !renderedLines ? (
+            <button
+              type="button"
+              onClick={() => setContentExpanded((v) => !v)}
+              aria-expanded={contentExpanded}
+              title={contentExpanded ? t("message_collapse") : t("message_expand")}
+              aria-label={contentExpanded ? t("message_collapse") : t("message_expand")}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: "2px 6px",
+                border: "1px solid var(--border)",
+                borderRadius: 6,
+                background: "transparent",
+                color: "var(--text-dim)",
+                cursor: "pointer",
+              }}
+            >
+              {contentExpanded ? <ChevronUp size={12} strokeWidth={1.8} /> : <ChevronDown size={12} strokeWidth={1.8} />}
+            </button>
+          ) : null}
         </div>
 
         {renderedLines ? (
@@ -2253,7 +2280,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
               {copied ? <Check size={11} strokeWidth={1.8} /> : <Copy size={11} strokeWidth={1.8} />}
             </button>
           ) : null}
-          {(hasDetails || isHiddenDisplay) && (
+          {hasDetails && !isHiddenDisplay && (
             <button
               onClick={() => {
                 if (isHiddenDisplay) setContentExpanded((v) => !v);
