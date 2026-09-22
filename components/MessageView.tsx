@@ -1781,6 +1781,9 @@ function CompactionMessageView({ message }: { message: CustomMessage }) {
   const summary = getMessageText(message.content);
   const parsedSummary = useMemo(() => parseCompactionSummary(summary), [summary]);
   const time = formatTime(message.timestamp);
+  // 默认收起：压缩摘要通常是一大段 markdown，先把卡片收成一行，展开与否由用户决定。
+  const [expanded, setExpanded] = useState(false);
+  const toggleLabel = expanded ? t("message_collapse") : t("message_expand");
 
   return (
     <div style={{ marginBottom: 16 }}>
@@ -1792,37 +1795,61 @@ function CompactionMessageView({ message }: { message: CustomMessage }) {
           background: "var(--bg)",
         }}
       >
-        <div
+        {/* 标题行整行可点：收起时它是进入摘要的唯一入口。 */}
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          title={`${t("message_compaction")} · ${toggleLabel}`}
+          aria-label={`${t("message_compaction")} · ${toggleLabel}`}
           style={{
             display: "flex",
             alignItems: "center",
             gap: 8,
+            width: "100%",
             padding: "7px 10px",
-            borderBottom: "1px solid var(--border)",
+            border: "none",
+            borderBottom: expanded ? "1px solid var(--border)" : "none",
             background: "var(--bg-panel)",
             color: "var(--text-muted)",
+            fontFamily: "inherit",
+            fontSize: 12,
+            textAlign: "left",
+            cursor: "pointer",
           }}
         >
+          <ChevronDown
+            size={12}
+            strokeWidth={1.8}
+            aria-hidden="true"
+            style={{
+              flexShrink: 0,
+              transform: expanded ? "none" : "rotate(-90deg)",
+              transition: "transform 0.15s ease",
+            }}
+          />
           <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>
             {t("message_compaction")}
           </span>
           {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
-        </div>
+        </button>
 
-        <div style={{ padding: "11px 13px 12px" }}>
-          <div style={{ color: "var(--text)", fontSize: 15, fontWeight: 700, lineHeight: 1.35 }}>
-            {t("message_conversationCompacted")}
+        {expanded && (
+          <div style={{ padding: "11px 13px 12px" }}>
+            <div style={{ color: "var(--text)", fontSize: 15, fontWeight: 700, lineHeight: 1.35 }}>
+              {t("message_conversationCompacted")}
+            </div>
+            <div style={{ marginTop: 3, marginBottom: 10, color: "var(--text)", fontSize: 14, lineHeight: 1.5 }}>
+              {t("message_conversationCompactedDescription")}
+            </div>
+            {parsedSummary.body ? (
+              <MarkdownBody className="markdown-compaction-message">{parsedSummary.body}</MarkdownBody>
+            ) : (
+              <span style={{ color: "var(--text-dim)", fontSize: 12 }}>({t("message_noSummary")})</span>
+            )}
+            <FileContextMetadata readFiles={parsedSummary.readFiles} modifiedFiles={parsedSummary.modifiedFiles} />
           </div>
-          <div style={{ marginTop: 3, marginBottom: 10, color: "var(--text)", fontSize: 14, lineHeight: 1.5 }}>
-            {t("message_conversationCompactedDescription")}
-          </div>
-          {parsedSummary.body ? (
-            <MarkdownBody className="markdown-compaction-message">{parsedSummary.body}</MarkdownBody>
-          ) : (
-            <span style={{ color: "var(--text-dim)", fontSize: 12 }}>({t("message_noSummary")})</span>
-          )}
-          <FileContextMetadata readFiles={parsedSummary.readFiles} modifiedFiles={parsedSummary.modifiedFiles} />
-        </div>
+        )}
       </div>
     </div>
   );

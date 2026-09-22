@@ -189,7 +189,7 @@ test("custom 渲染桥：空数组和非法载荷回退现有文本与详情逻�
   }
 });
 
-test("custom fallback 语义保持：compaction 仍走专用压缩卡片", () => {
+test("custom fallback 语义保持：compaction 仍走专用压缩卡片，且默认收起", () => {
   const message = {
     role: "custom",
     customType: "compaction",
@@ -199,8 +199,14 @@ test("custom fallback 语义保持：compaction 仍走专用压缩卡片", () =>
   };
   const html = renderMessage(message);
 
-  assert.ok(html.includes("Conversation compacted"));
+  // 走专用卡片（不是通用扩展消息回退），标题行可见、可展开。
+  assert.ok(html.includes(">Compaction</span>"), "标题行应显示压缩标签");
   assert.ok(!html.includes(">pidance.activity</span>"));
+  // 默认收起：折叠开关是收起态，摘要正文不渲染（首屏就是一行）。
+  assert.ok(html.includes('aria-expanded="false"'), "初始应为收起态");
+  assert.ok(html.includes('aria-label="Compaction · Expand"'));
+  assert.ok(!html.includes("Conversation compacted"), "收起时正文不渲染");
+  assert.ok(!html.includes("summary body"), "收起时摘要正文不渲染");
 });
 
 test("源码契约：MessageView 不使用 dangerouslySetInnerHTML", () => {

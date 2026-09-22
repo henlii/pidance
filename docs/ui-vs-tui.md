@@ -102,7 +102,7 @@
 | 会话内容时间序 | 消息区 | `components/ChatWindow.tsx`、`components/MessageView.tsx` | 同序；Web 增加了滚动锚定/自动跟随 |
 | thinking 块 | assistant 块内的折叠段 | `components/MessageView.tsx`、`lib/thinking-content.ts` | 同 |
 | 工具调用块 | 过程分组（process group，可折叠） | `components/ChatWindow.tsx`（`ProcessDetailsGroup`）、`lib/message-display.ts` | Web 按“一轮”分组，TUI 按事件平铺 |
-| 压缩/分支摘要 | 独立系统块 | `lib/chat-compositor.ts`、`lib/session-activity.ts` | 同 |
+| 压缩/分支摘要 | 独立系统块；**压缩块默认收起**（标题行整行可点，`aria-expanded`） | `components/MessageView.tsx`（`CompactionMessageView` / `BranchSummaryView`） | 同；Web 上一段压缩摘要可达上千像素，默认收成一行 |
 | editor（输入框） | 输入区 | `components/ChatInput.tsx` | TUI 键位；Web 按钮 + slash/@ 菜单 + 附件 |
 | aboveEditor widget | 输入框**上方**卡片 | `components/ChatWindow.tsx`（`ExtensionWidgets`，placement ≠ belowEditor） | 见 §5（含 pi-subagents 案例） |
 | belowEditor widget | 输入框**下方**卡片 | 同上（placement === belowEditor） | 同 |
