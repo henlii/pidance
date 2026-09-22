@@ -15,7 +15,6 @@ import {
   buildSidebarTree,
   buildUngroupedTree,
   collectAllCollapseIds,
-  collectSubagentParentIdsFromSidebarTree,
   filterSessionDisplayTreeByIds,
   filterSidebarTree,
   locateSessionInSidebarTree,
@@ -1120,24 +1119,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     handleSelectSessionFromList(target);
   }, [allSessions, handleSelectSessionFromList]);
 
-  // 默认收起「有 subagent 子节点」的父会话；不写 localStorage。
-  // 用户手动展开/折叠过的 id 不覆盖；选中子会话时会展开祖先（见下）。
-  useEffect(() => {
-    const defaults = collectSubagentParentIdsFromSidebarTree(sidebarTree, [ungroupedTree]);
-    if (defaults.length === 0) return;
-    setCollapsedSessionIds((current) => {
-      let changed = false;
-      const next = new Set(current);
-      for (const id of defaults) {
-        if (userTouchedSessionCollapseRef.current.has(id)) continue;
-        if (!next.has(id)) {
-          next.add(id);
-          changed = true;
-        }
-      }
-      return changed ? next : current;
-    });
-  }, [sidebarTree, ungroupedTree]);
 
   // 选中或 URL 恢复会话时自动展开 project/session 两级祖先，
   // 避免「已选中但列表里不可见」；这是显式选中驱动，与搜索强制展开无关。

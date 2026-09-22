@@ -12,7 +12,6 @@ import type { SessionInfo } from "@/lib/types";
 import type { ProjectAliases, ProjectSortMode } from "@/lib/ui-preferences";
 import {
   buildSessionDisplayTree,
-  collectSubagentParentIds,
   filterSessionDisplayTree,
   getDisplayNodeAncestorIds,
   type SessionDisplayNode,
@@ -367,20 +366,3 @@ export function collectAllCollapseIds(
   return { projectRoots: ids };
 }
 
-/**
- * 收集侧栏树中「默认应收起的 subagent 父会话」id。只读、不写偏好。
- */
-export function collectSubagentParentIdsFromSidebarTree(
-  projects: SidebarProjectNode[],
-  /** 附加的展示树（未分组区）：侧栏有两块区域，默认收起规则必须覆盖两边。 */
-  additionalTrees: readonly SessionDisplayNode[][] = [],
-): string[] {
-  const ids: string[] = [];
-  for (const project of projects) {
-    ids.push(...collectSubagentParentIds(project.tree));
-  }
-  for (const tree of additionalTrees) {
-    ids.push(...collectSubagentParentIds(tree));
-  }
-  return ids;
-}

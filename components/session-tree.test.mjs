@@ -19,19 +19,17 @@ function session(id, overrides = {}) {
   };
 }
 
-test("subagent 子会话不展示：仅 fork 子会话进入树，subagent 整体跳过", async () => {
+test("fork 子会话平铺为独立根项；subagent 整体跳过", async () => {
   const { buildSessionDisplayTree } = await jiti.import("./session-tree.ts");
   const parent = session("p", { modified: "2026-07-09T00:00:00.000Z" });
   const fork = session("f1", { parentSessionId: "p", modified: "2026-07-08T00:00:00.000Z" });
   const sub2 = session("s2", { subagent: { parentSessionId: "p", runId: "abcd1234", runIndex: 2 }, readOnly: true });
   const sub0 = session("s0", { subagent: { parentSessionId: "p", runId: "abcd1234", runIndex: 0 }, readOnly: true });
   const roots = buildSessionDisplayTree([parent, fork, sub2, sub0]);
-  assert.equal(roots.length, 1);
-  assert.equal(roots[0].session.id, "p");
-  assert.equal(roots[0].relation, null);
-  // subagent 子会话不进入展示树；fork 子会话按 modified 降序保留。
-  assert.deepEqual(roots[0].children.map((n) => n.session.id), ["f1"]);
-  assert.deepEqual(roots[0].children.map((n) => n.relation), ["fork"]);
+  // fork 是独立会话：与父平级，各自一个根项（2026-09-22 起不再嵌套）；subagent 不进入展示树。
+  assert.deepEqual(roots.map((n) => n.session.id), ["p", "f1"]);
+  assert.deepEqual(roots.map((n) => n.relation), [null, null]);
+  assert.ok(roots.every((n) => n.children.length === 0), "fork 不该挂到父下面");
 });
 
 test("嵌套 subagent 整体隐藏：父会话下不残留任何 subagent 后代", async () => {
@@ -57,20 +55,17 @@ test("subagent 会话不产生孤儿根项：父缺失的 subagent 同样被隐�
   assert.equal(roots[0].relation, null);
 });
 
-test("fork 祖先缺失时沿链上溯到集合内最近祖先（保留原有语义）", async () => {
+test("fork 链不再上溯：任何 fork 子会话都平铺为根项（父在不在都一样）", async () => {
   const { buildSessionDisplayTree } = await jiti.import("./session-tree.ts");
   const grandparent = session("gp");
-  // "mid" 不在集合内：f 的 fork 链 gp <- mid <- f，应直接挂到 gp。
   const fork = session("f", { parentSessionId: "mid" });
-  grandparent.parentSessionId = undefined;
   const withMid = session("mid", { parentSessionId: "gp" });
-  const rootsOrphanChain = buildSessionDisplayTree([grandparent, fork]);
-  assert.equal(rootsOrphanChain.length, 2); // mid 缺失且 gp 与 f 无链关系 → 两个根
-  const roots = buildSessionDisplayTree([grandparent, withMid, fork]);
-  assert.equal(roots.length, 1);
-  assert.equal(roots[0].children[0].session.id, "mid");
-  assert.equal(roots[0].children[0].children[0].session.id, "f");
-  assert.equal(roots[0].children[0].children[0].relation, "fork");
+  // 三种情况都必须是「平铺、无嵌套」：父缺失、父在、隔代父在。
+  for (const list of [[grandparent, fork], [grandparent, withMid, fork], [fork]]) {
+    const roots = buildSessionDisplayTree(list);
+    assert.equal(roots.length, list.length, `列表里每个会话都该是根项：${list.map((x) => x.id)}`);
+    assert.ok(roots.every((n) => n.children.length === 0 && n.relation === null), "不该有任何嵌套关系");
+  }
 });
 
 test("subagent 关系成环时相关节点被过滤：展示树为空", async () => {
@@ -81,12 +76,11 @@ test("subagent 关系成环时相关节点被过滤：展示树为空", async ()
   assert.deepEqual(roots, []);
 });
 
-test("fork/subagent 混合环：subagent 成员过滤后 fork 侧按常规降级", async () => {
+test("fork/subagent 混合：subagent 过滤后 fork 仍是根项（不会因成环被丢）", async () => {
   const { buildSessionDisplayTree } = await jiti.import("./session-tree.ts");
   const a = session("a", { parentSessionId: "b" });
   const b = session("b", { subagent: { parentSessionId: "a", runId: "r1", runIndex: 0 }, readOnly: true });
   const roots = buildSessionDisplayTree([a, b]);
-  // b 为 subagent 被隐藏；a 的 fork 父缺失，降级为可访问根项。
   assert.equal(roots.length, 1);
   assert.equal(roots[0].session.id, "a");
   assert.equal(roots[0].relation, null);
@@ -137,7 +131,7 @@ test("同层 subagent 的多个 run 全部隐藏，父会话无子节点", async
 
 // ── 会话搜索 helper ──────────────────────────────────────────────────────
 
-test("搜索命中 child 时保留完整祖先链（fork 链）；subagent 不再命中", async () => {
+test("搜索命中 fork 子会话时它就是一条根行（平铺）；subagent 不再命中", async () => {
   const { buildSessionDisplayTree, filterSessionDisplayTree } = await jiti.import("./session-tree.ts");
   const parent = session("p", { name: "main work" });
   const fork = session("f1", { parentSessionId: "p", firstMessage: "investigate flaky test" });
@@ -147,15 +141,13 @@ test("搜索命中 child 时保留完整祖先链（fork 链）；subagent 不�
   });
   const other = session("x", { name: "unrelated" });
   const tree = buildSessionDisplayTree([parent, fork, sub, other]);
-  // 命中 subagent 的 agent 名：该节点不展示，搜索也无命中。
   assert.deepEqual(filterSessionDisplayTree(tree, "explore"), []);
-  // 命中 fork 的 firstMessage：祖先链 p ← f1 完整保留，无关节点被剪掉。
+  // fork 平铺：命中它时只有它自己一条根行（父不被"保留祖先链"带出来）。
   const filtered = filterSessionDisplayTree(tree, "flaky");
   assert.equal(filtered.length, 1);
-  assert.equal(filtered[0].session.id, "p");
-  assert.equal(filtered[0].children.length, 1);
-  assert.equal(filtered[0].children[0].session.id, "f1");
-  assert.equal(filtered[0].children[0].relation, "fork");
+  assert.equal(filtered[0].session.id, "f1");
+  assert.equal(filtered[0].children.length, 0);
+  assert.equal(filtered[0].relation, null);
 });
 
 test("搜索可命中 name/firstMessage/id/subagent run", async () => {
@@ -188,9 +180,9 @@ test("搜索过滤不变异原树：节点与 children 数组均为新对象", a
   const filtered = filterSessionDisplayTree(tree, "child");
   assert.notEqual(filtered[0], tree[0]);
   assert.notEqual(filtered[0].children, beforeChildren);
-  // 原树结构不变。
-  assert.equal(tree[0].children.length, 1);
-  assert.equal(beforeChildren[0].session.id, "c");
+  // 原树结构不变（fork 平铺：两个都是根项、都没有子节点）。
+  assert.equal(tree[0].children.length, 0);
+  assert.equal(tree.length, 2);
   // 空查询直接返回原数组引用（调用方不做过滤）。
   assert.equal(filterSessionDisplayTree(tree, ""), tree);
 });
@@ -201,15 +193,14 @@ test("无匹配时返回空数组（由 UI 显示空状态）", async () => {
   assert.deepEqual(filterSessionDisplayTree(tree, "zzz-no-match"), []);
 });
 
-test("getDisplayNodeAncestorIds 返回自根向父的祖先链；subagent 不在树中", async () => {
+test("getDisplayNodeAncestorIds：平铺后所有会话都无祖先链；subagent 不在树中", async () => {
   const { buildSessionDisplayTree, getDisplayNodeAncestorIds } = await jiti.import("./session-tree.ts");
   const parent = session("p");
   const child = session("c", { parentSessionId: "p" });
   const grand = session("g", { subagent: { parentSessionId: "c", runId: "r1", runIndex: 0 }, readOnly: true });
   const tree = buildSessionDisplayTree([parent, child, grand]);
-  // g 为 subagent，不展示 → 无祖先链。
-  assert.deepEqual(getDisplayNodeAncestorIds(tree, "g"), []);
-  assert.deepEqual(getDisplayNodeAncestorIds(tree, "c"), ["p"]);
+  assert.deepEqual(getDisplayNodeAncestorIds(tree, "g"), [], "subagent 不在树里");
+  assert.deepEqual(getDisplayNodeAncestorIds(tree, "c"), [], "fork 子会话是根项，没有祖先链");
   assert.deepEqual(getDisplayNodeAncestorIds(tree, "p"), []);
   assert.deepEqual(getDisplayNodeAncestorIds(tree, "missing"), []);
 });
@@ -226,20 +217,15 @@ test("折叠与搜索展开分离：搜索强制展开但不写折叠集合", as
   assert.deepEqual([...collapsed].sort(), ["a", "b"]);
 });
 
-test("collectSubagentParentIds：所有含子节点的父会话均默认收起", async () => {
-  const { buildSessionDisplayTree, collectSubagentParentIds } = await jiti.import("./session-tree.ts");
+test("平铺后没有任何「含子节点的父会话」（不再需要默认收起）", async () => {
+  const { buildSessionDisplayTree } = await jiti.import("./session-tree.ts");
   const parent = session("p");
   const sub = session("s", { subagent: { parentSessionId: "p", runId: "r1", runIndex: 0 }, readOnly: true });
-  const nestedParent = session("np");
-  const nestedSub = session("ns", { subagent: { parentSessionId: "np", runId: "r2", runIndex: 0 }, readOnly: true });
-  // nestedParent 作为 subagent 挂在 p 下时：整链不展示，收集不涉及。
-  nestedParent.subagent = { parentSessionId: "p", runId: "r0", runIndex: 1 };
-  nestedParent.readOnly = true;
-  nestedSub.subagent = { parentSessionId: "np", runId: "r2", runIndex: 0 };
+  const nestedParent = session("np", { subagent: { parentSessionId: "p", runId: "r0", runIndex: 1 }, readOnly: true });
   const forkOnly = session("fo");
   const forkChild = session("fc", { parentSessionId: "fo" });
-  const tree = buildSessionDisplayTree([parent, sub, nestedParent, nestedSub, forkOnly, forkChild]);
-  // subagent 节点不再进入展示树；仅 fork 子节点的父会话（fo）进入默认收起集合。
-  assert.deepEqual(collectSubagentParentIds(tree).sort(), ["fo"]);
-  assert.equal(tree.find((n) => n.session.id === "fo")?.children.length, 1);
+  const tree = buildSessionDisplayTree([parent, sub, nestedParent, forkOnly, forkChild]);
+  assert.ok(tree.every((n) => n.children.length === 0), "平铺后不该存在父子嵌套");
+  // 顺序按 modified 降序，与语义无关：先排序再比较
+  assert.deepEqual([...tree].map((n) => n.session.id).sort(), ["fc", "fo", "p"]);
 });

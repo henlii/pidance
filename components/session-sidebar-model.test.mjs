@@ -66,9 +66,10 @@ test("fork child 语义在项目内保留；subagent 子会话不展示", async 
   });
   const tree = await treeOf([parent, fork, sub]);
   const nodes = tree[0].tree;
-  assert.equal(nodes.length, 1);
-  // subagent 子会话被过滤，仅 fork 子会话保留。
-  assert.deepEqual(nodes[0].children.map((n) => [n.session.id, n.relation]), [["f", "fork"]]);
+  // fork 平铺：父与 fork 各一条根行、都不挂子节点；subagent 子会话仍被过滤。
+  assert.deepEqual([...nodes].map((n) => n.session.id).sort(), ["f", "p"]);
+  assert.ok(nodes.every((n) => n.children.length === 0), "fork 不该嵌套在父行下");
+  assert.ok(nodes.every((n) => n.relation === null));
   // 输入 SessionInfo 不被修改。
   assert.equal(sub.parentSessionId, undefined);
 });
@@ -83,7 +84,7 @@ test("subagent 会话不展示：不留孤儿根项", async () => {
   assert.equal(tree[0].tree.length, 0);
 });
 
-test("搜索命中 fork child 时保留完整 project → session 祖先链；subagent 不参与", async () => {
+test("搜索命中 fork 子会话时它就是一条根行（平铺）；subagent 不参与", async () => {
   const { filterSidebarTree } = await jiti.import("./session-sidebar-model.ts");
   const parent = session("p", { cwd: "/repo", name: "main work" });
   const fork = session("f", { cwd: "/repo", parentSessionId: "p", firstMessage: "investigate flaky" });
@@ -102,12 +103,13 @@ test("搜索命中 fork child 时保留完整 project → session 祖先链；su
   const tree = await treeOf([parent, fork, wtParent, wtChild, wtSub, otherProject]);
   // subagent 的 agent 名不再可命中（节点不展示）。
   assert.deepEqual(filterSidebarTree(tree, "explore"), []);
-  // 命中 fork child 的 firstMessage：保留项目与祖先链；另一个项目被剪掉。
+  // 命中 fork 子会话的 firstMessage：平铺语义下它就是那个项目里的一条根行；
+  // 同项目里没命中的父会话被剪掉，另一个项目整体被剪掉。
   const filtered = filterSidebarTree(tree, "ordinary");
   assert.equal(filtered.length, 1);
   assert.equal(filtered[0].root, "/repo-worktrees/feat");
-  assert.equal(filtered[0].tree[0].session.id, "wp");
-  assert.equal(filtered[0].tree[0].children[0].session.id, "wc");
+  assert.deepEqual(filtered[0].tree.map((n) => n.session.id), ["wc"]);
+  assert.equal(filtered[0].tree[0].children.length, 0, "平铺后没有再嵌套一层子行");
 });
 
 test("搜索命中项目根路径保留整个项目；命中会话字段保留祖先链", async () => {
@@ -185,7 +187,7 @@ test("Collapse all 收集全部项目根；Expand all 即清空集合", async ()
   assert.deepEqual(ids.projectRoots.sort(), ["/other", "/repo"]);
 });
 
-test("会话定位：返回项目根与会话级祖先链", async () => {
+test("会话定位：返回项目根；平铺后没有会话级祖先链", async () => {
   const { locateSessionInSidebarTree } = await jiti.import("./session-sidebar-model.ts");
   const parent = session("p", { cwd: "/repo" });
   const child = session("c", { cwd: "/repo", parentSessionId: "p" });
@@ -193,8 +195,9 @@ test("会话定位：返回项目根与会话级祖先链", async () => {
   const otherGrand = session("og", { cwd: "/other", parentSessionId: "op" });
   const tree = await treeOf([parent, child, otherParent, otherGrand]);
   assert.deepEqual(locateSessionInSidebarTree(tree, "p"), { projectRoot: "/repo", ancestors: [] });
-  assert.deepEqual(locateSessionInSidebarTree(tree, "c"), { projectRoot: "/repo", ancestors: ["p"] });
-  assert.deepEqual(locateSessionInSidebarTree(tree, "og"), { projectRoot: "/other", ancestors: ["op"] });
+  // fork 是独立会话：它自己是根项，没有祖先链可展开。
+  assert.deepEqual(locateSessionInSidebarTree(tree, "c"), { projectRoot: "/repo", ancestors: [] });
+  assert.deepEqual(locateSessionInSidebarTree(tree, "og"), { projectRoot: "/other", ancestors: [] });
   assert.equal(locateSessionInSidebarTree(tree, "missing"), null);
 });
 
@@ -253,10 +256,7 @@ test("搜索与折叠偏好隔离：过滤不触碰折叠集合，搜索期强�
   assert.deepEqual([...collapsedProjects], ["/repo"]);
 });
 
-test("collectSubagentParentIdsFromSidebarTree：含子节点的父会话默认收起", async () => {
-  const {
-    collectSubagentParentIdsFromSidebarTree,
-  } = await jiti.import("./session-sidebar-model.ts");
+test("平铺后项目树里没有父子嵌套（subagent 仍隐藏）", async () => {
   const mainParent = session("mp", { cwd: "/repo" });
   const mainSub = session("ms", {
     cwd: "/repo",
@@ -266,24 +266,22 @@ test("collectSubagentParentIdsFromSidebarTree：含子节点的父会话默认�
   const forkOnly = session("fo", { cwd: "/other" });
   const forkChild = session("fc", { cwd: "/other", parentSessionId: "fo" });
   const tree = await treeOf([mainParent, mainSub, forkOnly, forkChild]);
-  // subagent 子会话不展示；含 fork 子节点的父会话（fo）默认收起。
-  assert.deepEqual(collectSubagentParentIdsFromSidebarTree(tree).sort(), ["fo"]);
+  const all = tree.flatMap((p) => p.tree);
+  assert.deepEqual(all.map((n) => n.session.id).sort(), ["fc", "fo", "mp"]);
+  assert.ok(all.every((n) => n.children.length === 0), "不该有嵌套子行");
+  assert.equal(all.some((n) => n.session.id === "ms"), false, "subagent 仍隐藏");
 });
 
-test("collectSubagentParentIdsFromSidebarTree：未分组区的父会话同样默认收起（#53）", async () => {
-  const {
-    collectSubagentParentIdsFromSidebarTree,
-    buildUngroupedTree,
-  } = await jiti.import("./session-sidebar-model.ts");
+test("平铺后未分组区同样没有父子嵌套（#53）", async () => {
+  const { buildUngroupedTree } = await jiti.import("./session-sidebar-model.ts");
   const projectParent = session("pp", { cwd: "/repo" });
   const projectChild = session("pc", { cwd: "/repo", parentSessionId: "pp" });
   const looseParent = session("lp", { cwd: "/loose" });
   const looseChild = session("lc", { cwd: "/loose", parentSessionId: "lp" });
-  const tree = await treeOf([projectParent, projectChild]);
-  // 只走项目树时未分组的父会话会被漏掉（/loose 不在 projectRoots 里）。
-  assert.deepEqual(collectSubagentParentIdsFromSidebarTree(tree).sort(), ["pp"]);
+  await treeOf([projectParent, projectChild]);
   const ungrouped = buildUngroupedTree([projectParent, projectChild, looseParent, looseChild], { projectRoots: ["/repo"] });
-  assert.deepEqual(collectSubagentParentIdsFromSidebarTree(tree, [ungrouped]).sort(), ["lp", "pp"]);
+  assert.deepEqual(ungrouped.map((n) => n.session.id).sort(), ["lc", "lp"]);
+  assert.ok(ungrouped.every((n) => n.children.length === 0));
 });
 
 test("全文模式：按 session id 集合保留祖先链，不按 name/alias 整树匹配", async () => {
@@ -292,13 +290,12 @@ test("全文模式：按 session id 集合保留祖先链，不按 name/alias �
   const child = session("c", { cwd: "/repo", parentSessionId: "p", firstMessage: "leaf body" });
   const other = session("o", { cwd: "/other", name: "repo alias bait" });
   const tree = await treeOf([parent, child, other]);
-  // 仅命中 child：保留 p → c 祖先链，不保留 other（即使 name 含 repo）。
+  // 仅命中 child：平铺语义下它就是一条根行（不再保留 p → c 祖先链）；other 不保留。
   const filtered = filterSidebarTree(tree, "", { "/other": "repo" }, new Set(["c"]));
   assert.equal(filtered.length, 1);
   assert.equal(filtered[0].root, "/repo");
-  assert.equal(filtered[0].tree.length, 1);
-  assert.equal(filtered[0].tree[0].session.id, "p");
-  assert.equal(filtered[0].tree[0].children[0].session.id, "c");
+  assert.deepEqual(filtered[0].tree.map((n) => n.session.id), ["c"]);
+  assert.equal(filtered[0].tree[0].children.length, 0);
   // 空集合：全文模式无命中 → 空树。
   assert.deepEqual(filterSidebarTree(tree, "", undefined, new Set()), []);
 });
@@ -403,9 +400,9 @@ test("#53 未分组树沿用 fork/subagent 语义与排序：子会话挂父下�
   });
   const other = session("uother", { cwd: "/tmp/two", modified: "2026-07-08T00:00:00.000Z" });
   const tree = m.buildUngroupedTree([parent, forkChild, sub, other], { projectRoots: [] });
-  assert.deepEqual(tree.map((n) => n.session.id), ["up", "uother"]);
-  assert.deepEqual(tree[0].children.map((n) => n.session.id), ["uc"]);
-  assert.equal(tree[0].children[0].relation, "fork");
+  // fork 平铺：父与 fork 各一条根行；subagent 仍不展示。
+  assert.deepEqual([...tree].map((n) => n.session.id).sort(), ["uc", "uother", "up"]);
+  assert.ok(tree.every((n) => n.children.length === 0));
   assert.equal(tree.some((n) => n.session.id === "usub"), false);
 });
 
@@ -415,6 +412,6 @@ test("#53 未分组定位：命中返回祖先链（含空链），未找到返�
   const child = session("uc", { cwd: "/tmp/scratch", parentSessionId: "up" });
   const tree = m.buildUngroupedTree([parent, child], { projectRoots: [] });
   assert.deepEqual(m.locateSessionInUngroupedTree(tree, "up"), []);
-  assert.deepEqual(m.locateSessionInUngroupedTree(tree, "uc"), ["up"]);
+  assert.deepEqual(m.locateSessionInUngroupedTree(tree, "uc"), [], "平铺后 fork 无祖先链");
   assert.equal(m.locateSessionInUngroupedTree(tree, "missing"), null);
 });

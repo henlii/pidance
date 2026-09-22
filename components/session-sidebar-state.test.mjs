@@ -369,10 +369,9 @@ test("置顶会话：空置顶列表与空会话列表安全空态", async () =>
   assert.deepEqual(dup.map((s) => s.id), ["a"]);
 });
 
-test("最近/置顶区：父也在同一列表时，fork 子会话不再单独出一行（同一会话不会显示多行）", async () => {
+test("最近/置顶区：fork 子会话是独立会话，各自成行（不折叠进父行）", async () => {
   const m = await jiti.import("./session-sidebar-state.ts");
-  // 真实场景：fork 会连标题一起复制，于是父子看起来是「同一个会话」；子会话更新更近，
-  // 在最近区里会排到父前面 —— 若不过滤，同一会话就会出现三行（子自己 + 父 + 父下嵌的子）。
+  // 真实场景：fork 会连标题一起复制，父子看起来像「同一个会话」；它们**各自一条行**。
   const parent = session("fork-parent", {
     firstMessage: "pi的扩展面板有几种",
     modified: "2026-07-02T00:00:00.000Z",
@@ -386,46 +385,27 @@ test("最近/置顶区：父也在同一列表时，fork 子会话不再单独�
   });
   const other = session("other", { modified: "2026-07-01T00:00:00.000Z" });
 
-  // 父在列表里 → 只保留父（子嵌在父行下）
+  // 平铺：父与 fork 各占一行（按活动排序，子的更近所以在前面）
   assert.deepEqual(
     m.deriveRecentSessions({ sessions: [child, parent, other] }).map((s) => s.id),
-    ["fork-parent", "other"],
-    "父在列表里时子会话不该再单独出一行",
+    ["fork-child", "fork-parent", "other"],
+    "fork 子会话必须自己占一行，不能因为父也在列表里就被折叠掉",
   );
-  // 父不在列表里（孤儿子会话）→ 必须仍然显示，不能被吞掉
   assert.deepEqual(
-    m.deriveRecentSessions({ sessions: [child, other] }).map((s) => s.id),
-    ["fork-child", "other"],
-    "父不在列表里时子会话仍要显示（否则会话会凭空消失）",
+    m.deriveRecentSessions({ sessions: [child, parent, other], limit: 2 }).map((s) => s.id),
+    ["fork-child", "fork-parent"],
+    "截断也不改变平铺语义",
   );
-  // 置顶同理
+  // 置顶同样平铺：父子都置顶 → 两条行；只钉子 → 子自己一条行
   assert.deepEqual(
-    m.derivePinnedSessions({ sessions: [parent, child, other], pinnedSessionIds: ["fork-child", "fork-parent", "other"] })
+    m.derivePinnedSessions({ sessions: [parent, child, other], pinnedSessionIds: ["fork-parent", "fork-child"] })
       .map((s) => s.id),
-    ["fork-parent", "other"],
-    "父子都被置顶时子不该重复一行",
+    ["fork-parent", "fork-child"],
+    "父子都置顶时各占一行",
   );
-  assert.deepEqual(
-    m.derivePinnedSessions({ sessions: [child, other], pinnedSessionIds: ["fork-child"] }).map((s) => s.id),
-    ["fork-child"],
-    "孤儿子会话被置顶时仍要显示",
-  );
-  // 折叠只在「父也在同一区里」时发生：只钉子会话时（父存在但没钉）必须保留它自己那行，
-  // 否则这次置顶就等于白钉了、会话在置顶区也不可见。
   assert.deepEqual(
     m.derivePinnedSessions({ sessions: [parent, child], pinnedSessionIds: ["fork-child"] }).map((s) => s.id),
     ["fork-child"],
-    "父没被置顶时，被置顶的子会话必须保留自己那一行",
-  );
-  // 最近区同理：只在「父也在最近这段列表里」时折叠；父排不进这段列表时子必须出列。
-  assert.deepEqual(
-    m.deriveRecentSessions({ sessions: [child, other], limit: 1 }).map((s) => s.id),
-    ["fork-child"],
-    "父不在最近区（超出条数上限）时，子会话必须自己出列",
-  );
-  assert.deepEqual(
-    m.deriveRecentSessions({ sessions: [parent, child, other], limit: 2 }).map((s) => s.id),
-    ["fork-parent"],
-    "父也在最近区时，子折叠在父行下（只留父那一行）",
+    "只钉子会话时它也照常一行",
   );
 });
