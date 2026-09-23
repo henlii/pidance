@@ -1310,6 +1310,12 @@ export function createBrowserSessionRuntimeRegistry(
         return { runId, stale: true, live: false, shouldFinish: false };
       }
       const live = data.live === true || (data.live === undefined && data.running === true);
+      // 别的标签/端把 host 唤醒后，本端可能一直没连事件流（打开空闲会话时 attach
+      // 不 wake 也不连流）—— 那样只能拿到状态、永远收不到消息。确认 host 已 live
+      // 且本端没有活动事件流时补一次连接。
+      if (live && !current.eventStream?.isCurrent(sessionId)) {
+        connectEvents(current);
+      }
       const state = data.state;
       const knownIdleWithoutLive = data.activeRun === false && data.lockedByOther !== true;
       return {

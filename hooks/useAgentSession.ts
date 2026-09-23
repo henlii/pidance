@@ -1734,8 +1734,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // through the same path as agent_end / prompt_done.
   const reconcileAgentState = useCallback(async (sid: string) => {
     const registry = getOrCreateBrowserSessionRuntimeRegistry();
-    const current = registry.getRunState(sid);
-    if (!current?.agentRunning) return;
+    // 这里**不能**用「本端 agentRunning」当门槛：本端打开的是空闲会话时它是 false，
+    // 而 host 可能刚被别的标签/端唤醒（本端既没连流、也没收到 agent_start）。
+    // 拦掉这次 reconcile，就等于永远发现不了 host 已经 live —— 用户看到的正是
+    // 「A 端发消息，B 端只显示运行中状态、看不到任何消息」。成本是 15s 一次
+    // light 状态读，值得。
     const contextGenerationAtRequest = contextUsageGenerationRef.current;
     try {
       const result = await registry.reconcile(sid);
@@ -1784,7 +1787,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // against the server periodically and whenever the tab returns to the
   // foreground or the network comes back.
   useEffect(() => {
-    if (!agentRunning) return;
+    // 定时 reconcile 的两个目的：
+    // 1) 本端在跑（agentRunning）—— 兜住漏掉的收尾事件；
+    // 2) **本端没连上事件流** —— 别的标签/端刚把 host 唤醒，本端打开的是空闲会话
+    //    （attach 不 wake、也不连流），只有靠轮询才能发现「它已经 live 了」并接上流。
+    //    没有这一条时表现就是：A 端发消息，B 端只看到运行中、看不到任何消息。
+    // 无条件轮询。原判据用 `getEventSource` 判断"已连流"，但它在流被 404 拒过或
+    // 停在 CLOSED 时仍会返回一个 source —— 正好漏掉需要轮询的情形。成本只是每
+    // 15s 一次 light 状态读，换掉一整类"状态判漏就再也接不上"的 bug。
+    // 注意：**不能**在这里用 sessionIdRef 决定要不要起定时器 —— effect 首次运行时它
+    // 往往还是 null，那样定时器根本不会启动（正是「B 端永远收不到消息」的原因）。
+    // 一律启动，每次 tick 再按 sessionIdRef/连流状态决定是否真的 reconcile。
     const reconcile = () => {
       // Read the ref on every tick: for brand-new sessions the id is
       // assigned only after ensure_session returns.
