@@ -344,6 +344,16 @@ const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
 const PROMPT_SETTLE_POLL_MS = 600;
 const PROMPT_SETTLE_MAX_MS = 20_000;
 const AGENT_STATE_RECONCILE_MS = 15_000;
+/**
+ * 空闲、且事件流仍然活着时的兜底间隔。
+ *
+ * 这是「收紧」的实际收益所在：打开会话时若 host 已 live 就会连上流（attach 的
+ * 连流分支），之后空闲期间**不需要**每 15s 去问一次 —— 流活着就有事件。
+ * 只留一个很长的兜底，防「流悄悄死了」这种极端情况。
+ * （未连流那种情况仍按 AGENT_STATE_RECONCILE_MS 轮询：那是等「host 被别的端
+ * 唤醒」，间隔太长用户就盯着旧内容等。）
+ */
+const RECONCILE_IDLE_MS = 120_000;
 const BASH_STATE_RECONCILE_MS = 1_000;
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1798,20 +1808,36 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 注意：**不能**在这里用 sessionIdRef 决定要不要起定时器 —— effect 首次运行时它
     // 往往还是 null，那样定时器根本不会启动（正是「B 端永远收不到消息」的原因）。
     // 一律启动，每次 tick 再按 sessionIdRef/连流状态决定是否真的 reconcile。
+    // 只在**需要**时轮询，间隔分两档：
+    // - 本端在跑：兜住漏掉的收尾事件，SSE 是主路径，30s 足够；
+    // - 本端没连上事件流：等的是「host 被别的端唤醒」这件事，间隔太长用户就会
+    //   盯着旧内容等（实测 15s 就已经能感到迟滞），所以放短到 4s；
+    // - 空闲且流是活的：不需要轮询，用一个很长的间隔兜「流悄悄死了」这种极端情况。
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = () => {
+      const sid = sessionIdRef.current;
+      let nextDelay = RECONCILE_IDLE_MS;
+      if (sid) {
+        const registry = getOrCreateBrowserSessionRuntimeRegistry();
+        if (registry.getRunState(sid)?.agentRunning) nextDelay = AGENT_STATE_RECONCILE_MS;
+        // 未连流：等「host 被别的端唤醒」，沿用原来的节奏
+        else if (!registry.hasActiveEventStream(sid)) nextDelay = AGENT_STATE_RECONCILE_MS;
+        if (nextDelay !== RECONCILE_IDLE_MS) void reconcileAgentState(sid);
+      }
+      timer = setTimeout(tick, nextDelay);
+    };
     const reconcile = () => {
-      // Read the ref on every tick: for brand-new sessions the id is
-      // assigned only after ensure_session returns.
       const sid = sessionIdRef.current;
       if (sid) void reconcileAgentState(sid);
     };
     const onVisible = () => {
       if (document.visibilityState === "visible") reconcile();
     };
-    const interval = setInterval(reconcile, AGENT_STATE_RECONCILE_MS);
+    timer = setTimeout(tick, AGENT_STATE_RECONCILE_MS);
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("online", reconcile);
     return () => {
-      clearInterval(interval);
+      if (timer !== null) clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("online", reconcile);
     };

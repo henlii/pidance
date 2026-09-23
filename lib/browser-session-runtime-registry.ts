@@ -339,6 +339,9 @@ export type BrowserSessionRuntimeRegistry = {
   dropLocal(sessionId: string, key: string): boolean;
   applyEvent(sessionId: string, event: AgentStreamEvent): void;
   ensureEventsConnected(sessionId: string): void;
+  /** 本端是否正有一条**有效**的事件流（CLOSED / 被 404 拒过的不算）。
+   *  判断「要不要轮询」必须用它：`getEventSource` 对已死的流也返回 source。 */
+  hasActiveEventStream(sessionId: string): boolean;
   getEventSource(sessionId: string): EventSourceLike | null;
   getSubmission(sessionId: string, submissionId: string): PromptSubmission | undefined;
   /** 冷挂载/刷新时把服务端已在跑的 run 导入 slot（防止 reconcile 误收尾、发送被拒）。 */
@@ -1404,6 +1407,10 @@ export function createBrowserSessionRuntimeRegistry(
     applyEvent(sessionId, event) {
       const slot = getSlot(sessionId, true)!;
       applyEventToSlot(slot, event);
+    },
+    hasActiveEventStream(sessionId) {
+      const slot = getSlot(sessionId, false);
+      return slot?.eventStream?.isCurrent(sessionId) === true;
     },
     ensureEventsConnected(sessionId) {
       // 重连也只尝试当前 live host；焦点/可见性恢复不得把冷历史会话唤醒。
