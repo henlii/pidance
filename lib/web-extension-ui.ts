@@ -79,6 +79,7 @@ export type PendingExtensionRequest = {
 
 type CustomUiSession = {
   handleInput: (data: string) => void;
+  handleMouse: (event: Record<string, unknown>) => void;
   done: (result?: unknown) => void;
 };
 
@@ -96,9 +97,16 @@ export type WebExtensionUIAdapter = {
    * 刷新/切回来时服务端仍在等输入，浏览器却拿不到内容与输入入口。
    * 这里保存最后可重放的投影，由 get_state 下发恢复。
    */
-  customSnapshot: { id: string; lines: string[]; layout?: ExtensionUiCustomLayout } | null;
+  customSnapshot: { id: string; lines: string[]; layout?: ExtensionUiCustomLayout; hidden?: boolean } | null;
   respond: (id: string, response: Record<string, unknown>) => boolean;
   inputCustom: (id: string, data: string) => boolean;
+  /** 面板内的鼠标事件（pi-subagents 的 widget 靠它点标题行折叠）。 */
+  inputCustomMouse: (id: string, event: Record<string, unknown>) => boolean;
+  /**
+   * 把前端的一个按键交给插件注册的全局监听器（对齐 pi-tui 的 addInputListener：
+   * 逐个调用，`consume` 结束传播，`data` 改写后续输入；改写成空串则丢弃）。
+   */
+  dispatchTerminalInput: (data: string) => { consumed: boolean; data?: string };
   dispose: () => void;
 };
 
@@ -176,7 +184,47 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
   const statuses = new Map<string, string>();
   const widgets = new Map<string, unknown>();
   const customSessions = new Map<string, CustomUiSession>();
-  let customSnapshot: { id: string; lines: string[]; layout?: ExtensionUiCustomLayout } | null = null;
+  let customSnapshot: { id: string; lines: string[]; layout?: ExtensionUiCustomLayout; hidden?: boolean } | null =
+    null;
+
+  /** 扩展请求的全局工具展开态（pi-subagents 跑子代理前会 setToolsExpanded(false)）。 */
+  let toolsExpanded = false;
+
+  /** 每个能力只提示一次：插件可能反复调用同一条不支持的 API。 */
+  const unsupportedNotified = new Set<string>();
+
+  /** 插件的全局按键监听（ctx.ui.onTerminalInput）。 */
+  type TerminalInputListener = (data: string) => { consume?: boolean; data?: string } | undefined;
+  const terminalInputListeners = new Set<TerminalInputListener>();
+
+  const emitTerminalInputListeners = () => {
+    emit({
+      type: "extension_ui_request",
+      id: randomUUID(),
+      method: "terminalInputListeners",
+      count: terminalInputListeners.size,
+    });
+  };
+
+  /**
+   * 插件调用了 Web 端没有等价语义的 UI 能力。
+   *
+   * 不能静默 no-op：插件作者会以为生效了（例如 setEditorComponent 之后
+   * getEditorComponent() 仍是 undefined，包裹链就断了）。也不能每次都提示，
+   * 所以每种能力只报一次。文案用英文：这是面向插件生态的诊断信息。
+   */
+  const notifyUnsupported = (feature: string) => {
+    if (unsupportedNotified.has(feature)) return;
+    unsupportedNotified.add(feature);
+    console.warn(`[pidance] extension UI capability not supported on web: ${feature}`);
+    emit({
+      type: "extension_ui_request",
+      id: randomUUID(),
+      method: "notify",
+      message: `Extension UI "${feature}" is not supported by the Pidance web client.`,
+      notifyType: "warning",
+    });
+  };
 
   /**
    * 工厂形式的 widget（如 pi-subagents 的 async widget）：工厂只调用一次、组件实例
@@ -331,8 +379,17 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
         notifyType: type,
       });
     },
-    onTerminalInput() {
-      return () => {};
+    onTerminalInput(handler) {
+      // pi-tui 的 addInputListener 是全局的，Web 没有等价的同步键盘通道：
+      // 前端只在「有 custom 面板且被插件收起」时把白名单按键拿过来问
+      // （见 hooks/useExtensionTerminalInput.ts）。注册数量会下发给前端，
+      // 没有监听器时前端完全不介入键盘。
+      terminalInputListeners.add(handler);
+      emitTerminalInputListeners();
+      return () => {
+        if (!terminalInputListeners.delete(handler)) return;
+        emitTerminalInputListeners();
+      };
     },
     setStatus(key, text) {
       if (text) statuses.set(key, text);
@@ -345,10 +402,24 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
         statusText: text,
       });
     },
-    setWorkingMessage() {},
-    setWorkingVisible() {},
-    setWorkingIndicator() {},
-    setHiddenThinkingLabel() {},
+    setWorkingMessage(message) {
+      // 无参 = 恢复默认，Web 端本来就是默认
+      if (message === undefined) return;
+      notifyUnsupported("setWorkingMessage");
+    },
+    setWorkingVisible(visible) {
+      // true = 显示运行行，Web 端本来就有
+      if (visible) return;
+      notifyUnsupported("setWorkingVisible");
+    },
+    setWorkingIndicator(options) {
+      if (options === undefined) return;
+      notifyUnsupported("setWorkingIndicator");
+    },
+    setHiddenThinkingLabel(label) {
+      if (label === undefined) return;
+      notifyUnsupported("setHiddenThinkingLabel");
+    },
     setWidget(key: string, content: unknown, options?: { placement?: string }) {
       // 组件工厂形式：实例常驻 + requestRender 热更新（见 mountWidgetFactory）。
       if (typeof content === "function") {
@@ -379,8 +450,15 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
         });
       }
     },
-    setFooter() {},
-    setHeader() {},
+    setFooter(factory) {
+      // undefined = 恢复默认；Web 端的 footer 是自有的，本就没有可恢复的替换
+      if (factory === undefined) return;
+      notifyUnsupported("setFooter");
+    },
+    setHeader(factory) {
+      if (factory === undefined) return;
+      notifyUnsupported("setHeader");
+    },
     setTitle(title) {
       emit({
         type: "extension_ui_request",
@@ -414,6 +492,27 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
           });
           resolve(result as never);
         };
+        // 最后一次渲染的行：hidden 切换时要把完整状态重发一遍（前端按事件整体替换）
+        let lastLines: string[] = [];
+        let hidden = false;
+        const emitCustom = () => {
+          emit({
+            type: "extension_ui_request",
+            id,
+            method: "custom",
+            lines: lastLines,
+            ...(hidden ? { hidden } : {}),
+            ...(layout ? { layout } : {}),
+          });
+          // 同时保存快照：刷新/切回后由 get_state 恢复面板内容与输入入口。
+          // 只保留最新一个（面板同时只应有一个活动 custom）。
+          customSnapshot = {
+            id,
+            lines: [...lastLines],
+            ...(hidden ? { hidden } : {}),
+            ...(layout ? { layout } : {}),
+          };
+        };
         const emitLines = () => {
           if (doneCalled) return;
           let lines: string[] = [];
@@ -425,16 +524,31 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
           } catch (error) {
             console.error("[pidance] custom UI render failed:", error);
           }
-          emit({
-            type: "extension_ui_request",
-            id,
-            method: "custom",
-            lines,
-            ...(layout ? { layout } : {}),
-          });
-          // 同时保存快照：刷新/切回后由 get_state 恢复面板内容与输入入口。
-          // 只保留最新一个（面板同时只应有一个活动 custom）。
-          customSnapshot = { id, lines: [...lines], ...(layout ? { layout } : {}) };
+          lastLines = lines;
+          emitCustom();
+        };
+        const setHidden = (value: boolean) => {
+          const next = Boolean(value);
+          if (hidden === next) return;
+          hidden = next;
+          if (doneCalled) return;
+          emitCustom();
+        };
+        /**
+         * 交给插件的 overlay 句柄。Web 端只有一层面板，focus/unfocus 没有
+         * 可切换的目标；setHidden 是真效果：前端隐藏面板，插件借此让用户看到
+         * 背后的会话内容（rpiv-ask-user 的折叠键就靠它，见它的 set_overlay_hidden）。
+         */
+        const overlayHandle = {
+          hide() {
+            setHidden(true);
+          },
+          setHidden,
+          isHidden: () => hidden,
+          focus() {},
+          unfocus() {},
+          isFocused: () => !hidden,
+          getBounds: () => undefined,
         };
         const handleInput = (data: string) => {
           if (data === "\x03") {
@@ -447,11 +561,20 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
             console.error("[pidance] custom UI input failed:", error);
           }
         };
-        customSessions.set(id, { handleInput, done });
+        const handleMouse = (event: Record<string, unknown>) => {
+          try {
+            (component as { handleMouse?: (e: unknown) => unknown } | undefined)?.handleMouse?.(event);
+          } catch (error) {
+            console.error("[pidance] custom UI mouse failed:", error);
+          }
+        };
+        customSessions.set(id, { handleInput, handleMouse, done });
         const tui = createHeadlessCustomUiTui(() => {
           emitLines();
         }, columns, rows);
         const theme = loadPiTheme() ?? uiContext.theme;
+        // onHandle 在组件建好之后调，对齐 pi-tui 的顺序（先 showOverlay，再给句柄）
+        options?.onHandle?.(overlayHandle as never);
         void Promise.resolve()
           .then(() => factory(tui as never, theme as never, extensionKeybindings as never, done))
           .then((created) => {
@@ -495,8 +618,14 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
               : undefined,
       );
     },
-    addAutocompleteProvider() {},
-    setEditorComponent() {},
+    addAutocompleteProvider() {
+      notifyUnsupported("addAutocompleteProvider");
+    },
+    setEditorComponent(factory) {
+      // undefined = 恢复默认
+      if (factory === undefined) return;
+      notifyUnsupported("setEditorComponent");
+    },
     getEditorComponent() {
       return undefined;
     },
@@ -527,9 +656,17 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       return { success: false, error: "Theme switching not supported in Web mode" };
     },
     getToolsExpanded() {
-      return false;
+      return toolsExpanded;
     },
-    setToolsExpanded() {},
+    setToolsExpanded(expanded) {
+      toolsExpanded = Boolean(expanded);
+      emit({
+        type: "extension_ui_request",
+        id: randomUUID(),
+        method: "setToolsExpanded",
+        toolsExpanded,
+      });
+    },
   };
 
   return {
@@ -553,6 +690,30 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       session.handleInput(data);
       return true;
     },
+    inputCustomMouse(id, event) {
+      const session = customSessions.get(id);
+      if (!session) return false;
+      session.handleMouse(event);
+      return true;
+    },
+    dispatchTerminalInput(data) {
+      let current = data;
+      for (const listener of terminalInputListeners) {
+        let result: { consume?: boolean; data?: string } | undefined;
+        try {
+          result = listener(current);
+        } catch (error) {
+          console.error("[pidance] extension terminal input listener failed:", error);
+          continue;
+        }
+        // 与 pi-tui 一致：先看 consume，再看 data 改写
+        if (result?.consume) return { consumed: true, data: current };
+        if (result?.data !== undefined) current = result.data;
+      }
+      // 改写成空串等价于丢弄这次输入
+      if (current.length === 0) return { consumed: true, data: current };
+      return { consumed: false, data: current };
+    },
     dispose() {
       for (const [id, entry] of pending) {
         pending.delete(id);
@@ -564,6 +725,7 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       }
       customSessions.clear();
       customSnapshot = null;
+      terminalInputListeners.clear();
       for (const key of [...widgetFactories.keys()]) unmountWidgetFactory(key);
       statuses.clear();
       widgets.clear();

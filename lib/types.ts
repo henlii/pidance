@@ -267,6 +267,19 @@ export type ExtensionUiRequest =
   | {
       type: "extension_ui_request";
       id: string;
+      method: "setToolsExpanded";
+      toolsExpanded: boolean;
+    }
+  | {
+      type: "extension_ui_request";
+      id: string;
+      method: "terminalInputListeners";
+      /** 当前注册了全局按键监听的监听器数量（0 = 前端无需询问）。 */
+      count: number;
+    }
+  | {
+      type: "extension_ui_request";
+      id: string;
       method: "setTitle";
       title: string;
     }
@@ -282,6 +295,8 @@ export type ExtensionUiRequest =
       method: "custom";
       lines: string[];
       closed?: boolean;
+      /** 插件把面板收起了（overlay 句柄的 setHidden）：前端让位给背后的会话内容。 */
+      hidden?: boolean;
       /** 插件声明了 overlay 时的定位/尺寸；缺省表示按全屏模态面板渲染。 */
       layout?: ExtensionUiCustomLayout;
     };

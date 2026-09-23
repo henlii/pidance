@@ -9,6 +9,50 @@ import { useI18n } from "@/lib/i18n";
 import type { ExtensionUiCustomRequest } from "@/lib/extension-ui-bridge";
 import { ExtensionPanelChrome } from "./ExtensionPanelChrome";
 
+/** 等宽字符宽度（px）：`ch` 就是等宽字体的字符宽，用探针量一次后缓存。 */
+let cachedCharWidth: number | null = null;
+function measureCharWidth(host: HTMLElement): number {
+  if (cachedCharWidth !== null) return cachedCharWidth;
+  const probe = document.createElement("span");
+  probe.textContent = "0".repeat(100);
+  probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
+  host.appendChild(probe);
+  cachedCharWidth = probe.getBoundingClientRect().width / 100 || 8;
+  probe.remove();
+  return cachedCharWidth;
+}
+
+/**
+ * DOM 点击坐标 → 面板内的字符行列（pi-tui 的 TuiMouseEvent 用字符坐标）。
+ * 行按实际行高算；列按等宽字符宽算。滚动位置一并计入。
+ */
+function toPanelMouseEvent(
+  event: React.MouseEvent<HTMLPreElement>,
+): Record<string, unknown> {
+  const el = event.currentTarget;
+  const rect = el.getBoundingClientRect();
+  const styles = window.getComputedStyle(el);
+  const fontSize = Number.parseFloat(styles.fontSize) || 12;
+  const lineHeight = Number.parseFloat(styles.lineHeight) || fontSize * 1.5;
+  const charWidth = measureCharWidth(el);
+  const x = Math.max(0, Math.floor((event.clientX - rect.left + el.scrollLeft) / charWidth));
+  const y = Math.max(0, Math.floor((event.clientY - rect.top + el.scrollTop) / lineHeight));
+  return {
+    type: "click",
+    button: event.button === 0 ? "left" : event.button === 1 ? "middle" : "right",
+    x,
+    y,
+    screenX: x,
+    screenY: y,
+    width: Math.max(1, Math.floor(rect.width / charWidth)),
+    height: Math.max(1, Math.floor(rect.height / lineHeight)),
+    shift: event.shiftKey,
+    alt: event.altKey,
+    ctrl: event.ctrlKey,
+    clickCount: event.detail,
+  };
+}
+
 function renderAnsiLine(line: string, keyPrefix: string) {
   return parseAnsiLine(line).map((segment, index) => (
     segment.style
@@ -20,9 +64,11 @@ function renderAnsiLine(line: string, keyPrefix: string) {
 export function ExtensionCustomPanel({
   request,
   onInput,
+  onMouse,
 }: {
   request: ExtensionUiCustomRequest;
   onInput: (request: ExtensionUiCustomRequest, data: string) => void;
+  onMouse?: (request: ExtensionUiCustomRequest, event: Record<string, unknown>) => void;
 }) {
   const { t } = useI18n();
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -50,6 +96,8 @@ export function ExtensionCustomPanel({
   };
 
   const selectedText = () => (typeof window === "undefined" ? "" : window.getSelection()?.toString() ?? "");
+
+  if (request.hidden) return null;
 
   return (
     <div className="extension-panel-overlay" style={overlayStyles?.containerStyle}>
@@ -123,7 +171,13 @@ export function ExtensionCustomPanel({
           }}
           className="extension-panel-keytrap"
         />
-        <pre className="extension-panel-ansi">
+        <pre
+          className="extension-panel-ansi"
+          onClick={(event) => {
+            // 组件树里的 MouseRegion / widget 折叠靠它；没有 onMouse 就不转发
+            onMouse?.(request, toPanelMouseEvent(event));
+          }}
+        >
           {(displayLines.length ? displayLines : [""]).map((line, index, allLines) => (
             <Fragment key={index}>
               {renderAnsiLine(line, `line-${index}`)}

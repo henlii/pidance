@@ -37,6 +37,7 @@ import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAg
 import { useAudio } from "@/hooks/useAudio";
 import { useI18n } from "@/lib/i18n";
 import { useDragDrop } from "@/hooks/useDragDrop";
+import { useExtensionTerminalInput } from "@/hooks/useExtensionTerminalInput";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { SessionActivity } from "@/lib/session-activity";
@@ -161,7 +162,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, defaultThinkingLevel,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput,
+    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse,
     todos,
     isAutoModelSelection,
     agentPhase, toolExecutionSnapshots,
@@ -184,6 +185,14 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     session, newSessionCwd: effectiveNewSessionCwd, newSessionIntentId, onAgentEnd: wrappedOnAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
     isMobile,
+  });
+
+  // 插件把 custom 面板收起后，白名单按键仍要能到达它的全局监听器
+  // （ctx.ui.onTerminalInput；如 rpiv-ask-user 的折叠键重新展开面板）。
+  // 面板可见时不介入：那时按键归面板自己的 keytrap。
+  useExtensionTerminalInput({
+    sessionId: sessionIdRef.current,
+    enabled: Boolean(extensionCustomUi?.hidden) && extensionTerminalInputListenerCount > 0,
   });
   /**
    * 会话全部用户消息大纲（左侧导航条「列出所有提问」）。
@@ -613,6 +622,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
         <ExtensionCustomPanel
           request={extensionCustomUi}
           onInput={sendExtensionCustomInput}
+          onMouse={sendExtensionCustomMouse}
         />
       )}
 

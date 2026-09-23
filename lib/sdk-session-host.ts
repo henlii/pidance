@@ -2724,6 +2724,23 @@ export class SdkSessionHost {
         return null;
       }
 
+      case "terminal_input": {
+        // 面板被插件收起时的白名单按键：交给插件注册的全局监听器
+        // （ctx.ui.onTerminalInput；如 rpiv-ask-user 的折叠键用来重新展开面板）。
+        const data = typeof command.data === "string" ? command.data : "";
+        return this.extensionUi?.dispatchTerminalInput(data) ?? { consumed: false };
+      }
+
+      case "extension_ui_mouse": {
+        // 面板内的鼠标事件（当前用于 pi-subagents 的 widget：点标题行折叠）
+        const id = asString(command.id);
+        const event = command.event;
+        if (id && event && typeof event === "object") {
+          this.extensionUi?.inputCustomMouse(id, event as Record<string, unknown>);
+        }
+        return null;
+      }
+
       case "append_activity":
         return this.appendActivity(command);
 

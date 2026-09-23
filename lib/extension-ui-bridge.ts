@@ -16,17 +16,20 @@ export interface ExtensionUiState {
   customUi: ExtensionUiCustomRequest | null;
   statuses: ExtensionStatusItem[];
   widgets: ExtensionWidgetItem[];
+  /** 注册了全局按键监听的插件监听器数量（>0 时前端才需要把按键拿去问）。 */
+  terminalInputListenerCount: number;
   /** 阻塞请求 FIFO 内部队列；dialog 始终由队首投影 */
   blockingQueue: ExtensionUiBlockingRequest[];
 }
 
-export function createEmptyExtensionUiState(  partial?: Partial<Pick<ExtensionUiState, "statuses" | "widgets" | "customUi">>,
+export function createEmptyExtensionUiState(  partial?: Partial<Pick<ExtensionUiState, "statuses" | "widgets" | "customUi" | "terminalInputListenerCount">>,
 ): ExtensionUiState {
   return {
     dialog: null,
     customUi: partial?.customUi ?? null,
     statuses: partial?.statuses ?? [],
     widgets: partial?.widgets ?? [],
+    terminalInputListenerCount: partial?.terminalInputListenerCount ?? 0,
     blockingQueue: [],
   };
 }
@@ -64,7 +67,7 @@ export function pickBlockingExtensionRequests(events: unknown): ExtensionUiBlock
  */
 export function restoreCustomUi(
   state: ExtensionUiState,
-  active: { id?: unknown; lines?: unknown; layout?: unknown } | null | undefined,
+  active: { id?: unknown; lines?: unknown; layout?: unknown; hidden?: unknown } | null | undefined,
 ): ExtensionUiState {
   const id = typeof active?.id === "string" && active.id ? active.id : null;
   if (!id) return state;
@@ -77,6 +80,8 @@ export function restoreCustomUi(
     active?.layout && typeof active.layout === "object"
       ? (active.layout as ExtensionUiCustomLayout)
       : undefined;
+  // 收起状态同理：刷新后不得把一个已被插件收起的面板重新弹出来
+  const hidden = active?.hidden === true;
   return {
     ...state,
     customUi: {
@@ -84,6 +89,7 @@ export function restoreCustomUi(
       id,
       method: "custom",
       lines,
+      ...(hidden ? { hidden } : {}),
       ...(layout ? { layout } : {}),
     } as ExtensionUiCustomRequest,
   };
@@ -203,6 +209,8 @@ export function applyExtensionUiRequest(
       return request.title
         ? { state, effects: [{ type: "setTitle", title: request.title }] }
         : { state, effects: [] };
+    case "terminalInputListeners":
+      return { state: { ...state, terminalInputListenerCount: request.count }, effects: [] };
     case "set_editor_text":
       return { state, effects: [{ type: "insertText", text: request.text }] };
     case "custom":

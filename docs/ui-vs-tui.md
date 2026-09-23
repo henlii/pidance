@@ -155,7 +155,12 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
    有意不搬的：终端键位提示（`↓/← to inspect`）——Web 里换成面板自身折叠，子会话导航在顶栏谱系下拉。
    解析失败时**不显示原始载荷**（宁可空着，也不把 JSON 糊到界面上）。
    子代理全部结束后 pi-subagents 会 `setWidget(key, undefined)`，面板消失。
-4. **仍存在的差异**：
+6. **`onTerminalInput`（插件全局按键）只覆盖一个缺口**：pi-tui 的 `addInputListener` 是全局同步的，Web 没有等价层。Pidance 现在只处理「插件把 custom 面板收起后仍要收到按键」：面板 `hidden` 且插件注册了监听器时，前端把白名单键（Escape / F1–F12 / Ctrl·Alt + 非保留字符，见 `lib/extension-panel-keys.ts` 的 `shouldRouteKeyToExtensionListener`）POST 给 `terminal_input`，服务端按 pi-tui 语义逐个调监听器（先 `consume` 再 `data` 改写，见 `dispatchTerminalInput`）。rpiv-ask-user 的折叠键靠它把面板重新展开。**没有面板时的全局键不路由**（pi-subagents 的 Esc 取消长任务、fleet 激活键因此不可用）—— 那会给普通打字加一次往返，拿不准就不碰。
+7. **面板内鼠标事件**：`ExtensionCustomPanel` 把点击换算成字符行列后发 `extension_ui_mouse`，服务端调组件的 `handleMouse`（pi-subagents 的 async widget 用 `y === 0` 判定「点标题行」折叠）。只转 click，不转 move / drag / wheel。
+8. **`getToolsExpanded` / `setToolsExpanded` 自洽**：服务端维护布尔并下发事件，插件 set 之后自己 get 得到的是一致的值；界面上的工具块仍按各自的折叠规则（`setToolsExpanded(true)` 不会展开所有块）。
+9. **没有等价语义的能力改成可见失败**：`setFooter` / `setHeader` / `setEditorComponent` / `addAutocompleteProvider` / `setWorkingMessage` / `setWorkingIndicator` / `setHiddenThinkingLabel` / `setWorkingVisible(false)` 会发一条 warning 通知（每种能力只发一次），不再静默 no-op —— 静默会让插件作者以为生效了（例如 `setEditorComponent` 之后 `getEditorComponent()` 仍是 undefined，包裹链就断了）。传 `undefined` / 无参的「恢复默认」不算降级，不提示。
+
+10. **仍存在的差异**：
    - `subagent-fleet-status`（placement `belowEditor`）是 TUI 组件，经渲染桥转成文本，里面的 `↓/← to inspect` 是终端键位。Web 侧现在改写这行：去掉键位提示段，保留 agent 数与 token 读数（`rewriteFleetStatusLines`）；整行只剩提示时不渲染该 widget。
    - **`tui.focusedComponent` 未注入**：pi-subagents 的 fleet 状态 widget 用它判断主编辑器有没有焦点（`fleet-status.ts`），Web 端恒为 undefined，所以方向键进不了滚动/选择（停在 summary 形态）。要开这个口子得把 Web 输入区的焦点状态注入适配器。
    - ~~新开页面拿不到已存在的 widget~~ **已核实不是问题**：widget 会随状态水合（`/api/sessions/<id>/state` 的 `state.extensionWidgets`）在打开会话时出现。此前判定「拿不到」是探针口径造成的误判。
@@ -165,8 +170,8 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
    - **子代理通知消息块**（`subagent-notify` / `subagent-incremental-child-notify` 这类扩展自定义消息）：标题显示为「子代理通知」而**不露出内部 customType**，折叠开关在卡片头部（默认收起），展开后才显示通知正文。
    - **会话内容区宽度可拖拽、按比例记忆**（2026-09-22 决定）：宽度 = 内容区**可用宽度** × 比例，再夹到 [1000, 1600]，可用宽度不够时由 `100%` 兜住 —— 于是宽屏到 1600 封顶后只长两侧空白，窄到下限后只缩空白，空白归零后内容才跟着缩。比例存 `localStorage`（本机 UI 状态，随 #65 口径），窗口/侧栏尺寸变化自动重算。把手贴在内容列左右缘（`role="separator"`，拖任一侧对称改宽、被拖那条边跟手；双击回默认）。宽度用 CSS 变量 `--pidance-chat-column-width` **一处设置**（AppShell），消息列/输入栏/扩展面板/widget/底栏共用同一变量，保证同宽同中心线。
    - **折叠总规则（2026-09-22 决定）**：会话时间线里**只有智能体直接输出的正文默认展开**；除此之外的块（thinking、工具调用、过程分组、压缩、分支摘要、扩展自定义消息、子代理通知）一律可折叠且**默认收起**。过程分组只包中间过程（thinking / 工具 / 子代理回复），每轮末尾的正式回答由 compositor 渲染在组外，所以收起不会藏掉智能体输出。
-4. **状态条与 widget 不区分“谁提供”**：Web 侧只按 key 渲染与折叠（折叠状态存 `localStorage` 的 `pidance.collapsedWidgetKeys.v1`）。
-5. **阻塞弹窗（`ExtensionDialog`）的按钮与可读性由 Web 侧定**：协议只传 `title` / `options` / `placeholder` 这类纯文本字段，插件无法定制样式与按钮。现状：
+11. **状态条与 widget 不区分“谁提供”**：Web 侧只按 key 渲染与折叠（折叠状态存 `localStorage` 的 `pidance.collapsedWidgetKeys.v1`）。
+12. **阻塞弹窗（`ExtensionDialog`）的按钮与可读性由 Web 侧定**：协议只传 `title` / `options` / `placeholder` 这类纯文本字段，插件无法定制样式与按钮。现状：
    - 按钮按 `method` 固定：`select` 只有底部「取消」；`input`/`editor` 是「取消 + 提交」；`confirm` 是「取消 + 确认」。**`select` 不再渲染右上「关闭」**——它与「取消」发的是同一个 `cancelled` 响应（并且会中止这次执行），并排两个等价按钮只会让人以为「关闭」是温和的那个。
    - 「取消」的语义不止关窗：`hooks/useAgentSession.ts` 在 cancelled 之后若 agent 仍在跑会补发 `abort`（对齐 OpenChamber）。
    - **长提问可滚**：扩展经常把 preview / 说明折进 `title`，所以标题本身就是内容区（`.extension-panel-title`，`max-height: min(30vh, 240px); overflow-y: auto`）；正文（选项等）在 `.extension-panel-body` 里滚动。

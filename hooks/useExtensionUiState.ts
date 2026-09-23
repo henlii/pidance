@@ -26,6 +26,7 @@ export function useExtensionUiState() {
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
+  const [extensionTerminalInputListenerCount, setExtensionTerminalInputListenerCount] = useState(0);
 
   const extensionUiStateRef = useRef<ExtensionUiState>(createEmptyExtensionUiState({
     customUi: extensionCustomUi,
@@ -39,6 +40,7 @@ export function useExtensionUiState() {
     setExtensionCustomUi(next.customUi);
     setExtensionStatuses(next.statuses);
     setExtensionWidgets(next.widgets);
+    setExtensionTerminalInputListenerCount(next.terminalInputListenerCount);
   }, []);
 
   const patchExtensionUiState = useCallback((patch: Partial<ExtensionUiState>) => {
@@ -58,6 +60,7 @@ export function useExtensionUiState() {
     extensionCustomUi,
     extensionStatuses,
     extensionWidgets,
+    extensionTerminalInputListenerCount,
     extensionUiStateRef,
     commitExtensionUiState,
     patchExtensionUiState,

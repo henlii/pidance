@@ -554,6 +554,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // extension UI 展示状态（#17 D5c）：5 state + ref + 3 更新回调已抽至 useExtensionUiState。
   const {
     extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets,
+    extensionTerminalInputListenerCount,
     extensionUiStateRef, commitExtensionUiState, patchExtensionUiState, dismissExtensionUiRequest,
   } = useExtensionUiState();
   /**
@@ -1519,6 +1520,31 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
     } catch (e) {
       console.error("Failed to send extension custom UI input:", e);
+    }
+  }, [capabilities.canSendSessionCommands, extensionUiStateRef]);
+
+  /**
+   * 面板内的鼠标事件：转成 pi-tui 的 TuiMouseEvent 交给面板组件。
+   * 目前唯一的消费者是 pi-subagents 的 async widget（点标题行折叠），
+   * 它只看 type / button / y 与修饰键。
+   */
+  const sendExtensionCustomMouse = useCallback(async (
+    request: ExtensionUiCustomRequest,
+    event: Record<string, unknown>,
+  ) => {
+    if (!capabilities.canSendSessionCommands) return;
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    // 关闭或切换到下一次 custom 请求后，旧鼠标事件不能再写入代理会话。
+    if (extensionUiStateRef.current.customUi?.id !== request.id) return;
+    try {
+      await sendAgentCommand(sid, {
+        type: "extension_ui_mouse",
+        id: request.id,
+        event,
+      });
+    } catch (e) {
+      console.error("Failed to send extension custom UI mouse event:", e);
     }
   }, [capabilities.canSendSessionCommands, extensionUiStateRef]);
 
@@ -3657,7 +3683,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     liveNoticeActivities,
     dismissNotice,
     toggleNoticePin,
-    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput,
+    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse,
     todos,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,
