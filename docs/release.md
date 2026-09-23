@@ -27,6 +27,9 @@
    仍指向上一版正式 tgz** —— 目标版本此刻还没发布，指向它会让桌面 workflow 的 `npm ci` 直接 404；
    而条目版本停在旧版则会在 lockfileVersion 3 下 ETARGET。发行完成、npm 传播结束后，再补一次
    `chore(desktop): lockfile 指向 <version> 的正式 tgz` 提交把条目对齐。桌面壳必须与主包一起提交。
+   改完后跑 `npm run release:desktop-check` 校验：它按「目标版本是否已在 npm 上」自动判断阶段，
+   不一致会带修复指引非零退出（离线用 `--stage=pre|post`）。v0.2.35 与 v0.2.37 两次桌面构建变红
+   就是这套口径被漏改/写错，别再靠人肉核对这几个字段。
 
 当前 release workflow 不运行 `npm run check`，因此不能跳过发布前本地质量门禁。
 

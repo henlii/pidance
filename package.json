@@ -55,6 +55,7 @@
     "check": "npm run typecheck && npm run lint && npm run test",
     "release:audit": "node scripts/audit-release-package.mjs --pre",
     "release:audit:tgz": "node scripts/audit-release-package.mjs --tgz",
+    "release:desktop-check": "node scripts/check-desktop-lockfile.mjs",
     "package:candidate": "node scripts/make-candidate-package.mjs",
     "release:check": "npm run check && npm run build && npm run release:audit",
     "test:browser:sse": "node --test scripts/sse-recording-replay.test.mjs"
