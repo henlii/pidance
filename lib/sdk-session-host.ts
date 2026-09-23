@@ -1161,7 +1161,12 @@ export class SdkSessionHost {
       ? [{ ids: waiting.map((item) => item.id) }]
       : waiting.map((item) => ({ ids: [item.id] }));
     this.followUpFlushCursor = 0;
-    void this.sendNextFollowUp();
+    const unit0 = this.followUpFlushUnits[0];
+    setTimeout(() => {
+      if (this.flushingFollowUp && this.followUpFlushUnits[this.followUpFlushCursor] === unit0) {
+        void this.sendNextFollowUp();
+      }
+    }, 0);
   }
 
   /** 队列权威快照下发给其它标签页/端点（跨 tab 同一会话）。 */
@@ -1322,6 +1327,7 @@ export class SdkSessionHost {
       if (released) this.emitQueueChanged();
       return;
     }
+    // 2) 已受理：删除本次单元（按 id）并落盘。
     // 2) 已受理：删除本次单元（按 id）并落盘。
     const delivered = new Set(ids);
     const deliveredMedia = followUpItemMedia(live);
@@ -1738,10 +1744,12 @@ export class SdkSessionHost {
         eventToEmit = { ...eventToEmit, turnMetrics: projected };
       }
     }
-    // 上下文占用随每条 assistant 消息（每个工具轮次）变化：message_end 时 SDK
-    // 权威 messages 已含刚结束的这条，getContextUsage() 即最新值；只在 agent_end
-    // 下发会让顶栏在整个 run 期间停在上一轮读数。agent_end 保留同字段，避免
-    // settled 后立即 dispose 使浏览器错过最后一次热 state。
+    // 上下文占用随每条 assistant 消息（每个工具轮次）变化：只在 agent_end 下发会让
+    // 顶栏在整个 run 期间停在上一轮读数，所以 message_end 也要给一次读数。
+    // 0.87.0 起 getContextUsage() 基于 SessionManager 投影（buildSessionProjection），
+    // 而 message_end 事件先于本轮 assistant 入库，此刻读数比 agent_end 少这一轮回复的
+    // 估算（约本轮输出 chars/4）；agent_end 的读数为权威值，顶栏在 run 结束时补上这部分。
+    // agent_end 保留同字段，避免 settled 后立即 dispose 使浏览器错过最后一次热 state。
     const isAssistantMessageEnd =
       event.type === "message_end"
       && (event as { message?: { role?: string } }).message?.role === "assistant";
