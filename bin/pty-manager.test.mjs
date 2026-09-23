@@ -1,9 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 const { startPtySession, tryLoadNodePty } = await import("./pty-manager.cjs");
+
+// 临时目录随进程回收：本文件每个用例建一个，漏了会按跑测试的次数累积在 /tmp。
+const tempDirs = [];
+process.on("exit", () => {
+  for (const dir of tempDirs) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* 尽力而为 */
+    }
+  }
+});
+function makeTempDir(prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
 
 test("node-pty 不可用时 startPtySession 抛错", () => {
   assert.throws(
@@ -31,7 +48,7 @@ test("mock pty 写入/缩放/dispose 会杀进程组语义", () => {
       };
     },
   };
-  const cwd = mkdtempSync(join(tmpdir(), "pidance-pty-"));
+  const cwd = makeTempDir("pidance-pty-");
   const session = startPtySession({
     cwd,
     cols: 40,
@@ -67,7 +84,7 @@ test("win32 无 SHELL 时使用 PowerShell/cmd（Windows 终端可交互）", as
       return { pid: 1, write() {}, resize() {}, kill() {}, onData() {}, onExit() {} };
     },
   };
-  const cwd = mkdtempSync(join(tmpdir(), "pidance-pty-win-"));
+  const cwd = makeTempDir("pidance-pty-win-");
   // 模拟 Windows：无 SHELL，有 COMSPEC
   const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
   const realShell = process.env.SHELL;
