@@ -159,6 +159,27 @@ export function clearAllExtensionUiBlocking(state: ExtensionUiState): ExtensionU
   };
 }
 
+/**
+ * 切会话 / 新建会话时清掉**上一个会话**的扩展 UI 投影。
+ *
+ * 内容类字段全清：面板（custom）、状态条、widget、运行提示、按键监听器计数。
+ * 新会话的投影随后由水合（/state 的 extensionStatuses / extensionWidgets /
+ * activeCustomUi）填回；没水合到就保持空 —— 宁可空着，也不要把上个会话的面板
+ * 留在新会话里（否则看起来像“面板跟着人跑”）。
+ */
+export function resetExtensionUiForSession(state: ExtensionUiState): ExtensionUiState {
+  return {
+    ...clearAllExtensionUiBlocking(state),
+    customUi: null,
+    statuses: [],
+    widgets: [],
+    terminalInputListenerCount: 0,
+    workingMessage: null,
+    workingVisible: true,
+    workingIndicator: null,
+  };
+}
+
 export type ExtensionUiEffect =
   | { type: "notice"; id: string; message: string; noticeType: ExtensionUiNoticeType; activityRecord: boolean }
   | { type: "setTitle"; title: string }

@@ -38,7 +38,7 @@ import { pendingSessionId } from "@/lib/new-session-intent";
 import type { ContextUsage, SessionStatsInfo } from "@/lib/pi-types";
 import {
   applyExtensionUiRequest,
-  clearAllExtensionUiBlocking,
+  resetExtensionUiForSession,
   clearExtensionUiRequest,
   pickBlockingExtensionRequests,
   projectBlockingHead,
@@ -3389,13 +3389,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (currentQueueSessionIdRef.current === sid) publishQueue();
   }, [adoptRemoteQueue, publishQueue, serverPrefs, session?.id]);
 
-  // 会话切换：清空阻塞队列与可见卡片；不发送 extension_ui_response。
+  // 会话切换：清空**上一个会话**的全部扩展 UI 投影（阻塞队列 / 面板 / 状态条 /
+  // widget / 运行提示 / 监听器计数）；不发送 extension_ui_response。
+  // 只清 blocking 是不够的：面板与运行提示会“跟着人跑”到新会话里。
   useEffect(() => {
-    const current = extensionUiStateRef.current;
-    commitExtensionUiState({
-      ...clearAllExtensionUiBlocking(current),
-      customUi: null,
-    });
+    commitExtensionUiState(resetExtensionUiForSession(extensionUiStateRef.current));
     clearLiveActivities();
   }, [session?.id, newSessionCwd, commitExtensionUiState, extensionUiStateRef, clearLiveActivities]);
 
