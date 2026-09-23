@@ -403,18 +403,33 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       });
     },
     setWorkingMessage(message) {
-      // 无参 = 恢复默认，Web 端本来就是默认
-      if (message === undefined) return;
-      notifyUnsupported("setWorkingMessage");
+      // 无参 = 恢复默认文案
+      emit({
+        type: "extension_ui_request",
+        id: randomUUID(),
+        method: "setWorkingMessage",
+        message: message ?? null,
+      });
     },
     setWorkingVisible(visible) {
-      // true = 显示运行行，Web 端本来就有
-      if (visible) return;
-      notifyUnsupported("setWorkingVisible");
+      emit({
+        type: "extension_ui_request",
+        id: randomUUID(),
+        method: "setWorkingVisible",
+        visible: Boolean(visible),
+      });
     },
     setWorkingIndicator(options) {
-      if (options === undefined) return;
-      notifyUnsupported("setWorkingIndicator");
+      // 无参 = 恢复默认；frames: [] = 隐藏指示器（pi 的语义）
+      emit({
+        type: "extension_ui_request",
+        id: randomUUID(),
+        method: "setWorkingIndicator",
+        frames: Array.isArray(options?.frames)
+          ? options.frames.filter((frame): frame is string => typeof frame === "string")
+          : null,
+        intervalMs: typeof options?.intervalMs === "number" ? options.intervalMs : null,
+      });
     },
     setHiddenThinkingLabel(label) {
       if (label === undefined) return;

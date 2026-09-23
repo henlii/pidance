@@ -280,6 +280,27 @@ export type ExtensionUiRequest =
   | {
       type: "extension_ui_request";
       id: string;
+      method: "setWorkingMessage";
+      /** null = 恢复默认文案。 */
+      message: string | null;
+    }
+  | {
+      type: "extension_ui_request";
+      id: string;
+      method: "setWorkingVisible";
+      visible: boolean;
+    }
+  | {
+      type: "extension_ui_request";
+      id: string;
+      method: "setWorkingIndicator";
+      /** null = 恢复默认 spinner；空数组 = 隐藏指示器。 */
+      frames: string[] | null;
+      intervalMs: number | null;
+    }
+  | {
+      type: "extension_ui_request";
+      id: string;
       method: "setTitle";
       title: string;
     }

@@ -162,7 +162,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, defaultThinkingLevel,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse,
+    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse,
     todos,
     isAutoModelSelection,
     agentPhase, toolExecutionSnapshots,
@@ -275,12 +275,27 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
    * - 真正需要一行文字的是「没有工具块可看」的阶段：等待模型（含请求重试）。
    */
   const runPhaseNotice = (() => {
+    // 扩展可以用 setWorkingVisible(false) 藏掉整行，用 setWorkingMessage 换文案
+    if (!extensionWorkingVisible) return null;
     if (bashRunning && !pendingBash) return `${t("chat_runningCommand")}...`;
     if (!agentRunning || streamState.streamingMessage) return null;
     const kind = agentPhase?.kind;
     if (kind === "running_tools" || kind === "running_command") return null;
-    return phaseLabel(agentPhase, t);
+    return extensionWorkingMessage ?? phaseLabel(agentPhase, t);
   })();
+
+  // 扩展自定义的运行指示帧（setWorkingIndicator）：按 intervalMs 轮播；
+  // frames 为 null = 用默认圆点，空数组 = 不要指示器（只留文案）。
+  const workingFrames = extensionWorkingIndicator?.frames ?? null;
+  const [workingFrameIndex, setWorkingFrameIndex] = useState(0);
+  useEffect(() => {
+    if (!workingFrames || workingFrames.length <= 1) return;
+    const intervalMs = Math.max(16, extensionWorkingIndicator?.intervalMs ?? 120);
+    const timer = window.setInterval(() => {
+      setWorkingFrameIndex((index) => (index + 1) % workingFrames.length);
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [workingFrames, extensionWorkingIndicator?.intervalMs]);
   const [todosCollapsed, setTodosCollapsed] = useState(true);
   const todoCollapseScope = session?.id ?? (effectiveNewSessionCwd ? `new:${effectiveNewSessionCwd}` : "new-session");
   // Todo 展开状态只属于当前聊天视图；切换会话后恢复默认折叠。
@@ -817,7 +832,13 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
 
             {runPhaseNotice && (
               <div className="flex items-center gap-2 py-2 text-[13px] text-text-muted">
-                <span className="size-1.5 rounded-full bg-status-running" aria-hidden="true" />
+                {workingFrames === null ? (
+                  <span className="size-1.5 rounded-full bg-status-running" aria-hidden="true" />
+                ) : workingFrames.length > 0 ? (
+                  <span aria-hidden="true">
+                    {renderAnsiLine(workingFrames[workingFrameIndex % workingFrames.length], "working-frame")}
+                  </span>
+                ) : null}
                 <span>{runPhaseNotice}</span>
               </div>
             )}

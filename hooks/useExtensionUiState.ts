@@ -27,6 +27,9 @@ export function useExtensionUiState() {
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
   const [extensionTerminalInputListenerCount, setExtensionTerminalInputListenerCount] = useState(0);
+  const [extensionWorkingMessage, setExtensionWorkingMessage] = useState<string | null>(null);
+  const [extensionWorkingVisible, setExtensionWorkingVisible] = useState(true);
+  const [extensionWorkingIndicator, setExtensionWorkingIndicator] = useState<{ frames: string[]; intervalMs: number } | null>(null);
 
   const extensionUiStateRef = useRef<ExtensionUiState>(createEmptyExtensionUiState({
     customUi: extensionCustomUi,
@@ -41,6 +44,9 @@ export function useExtensionUiState() {
     setExtensionStatuses(next.statuses);
     setExtensionWidgets(next.widgets);
     setExtensionTerminalInputListenerCount(next.terminalInputListenerCount);
+    setExtensionWorkingMessage(next.workingMessage);
+    setExtensionWorkingVisible(next.workingVisible);
+    setExtensionWorkingIndicator(next.workingIndicator);
   }, []);
 
   const patchExtensionUiState = useCallback((patch: Partial<ExtensionUiState>) => {
@@ -61,6 +67,9 @@ export function useExtensionUiState() {
     extensionStatuses,
     extensionWidgets,
     extensionTerminalInputListenerCount,
+    extensionWorkingMessage,
+    extensionWorkingVisible,
+    extensionWorkingIndicator,
     extensionUiStateRef,
     commitExtensionUiState,
     patchExtensionUiState,

@@ -18,6 +18,12 @@ export interface ExtensionUiState {
   widgets: ExtensionWidgetItem[];
   /** 注册了全局按键监听的插件监听器数量（>0 时前端才需要把按键拿去问）。 */
   terminalInputListenerCount: number;
+  /** 扩展定制的运行提示：文案（setWorkingMessage）。 */
+  workingMessage: string | null;
+  /** 扩展是否允许显示运行提示行（setWorkingVisible，默认 true）。 */
+  workingVisible: boolean;
+  /** 扩展自定义的运行指示动画帧（setWorkingIndicator）；frames 为空数组 = 隐藏指示器。 */
+  workingIndicator: { frames: string[]; intervalMs: number } | null;
   /** 阻塞请求 FIFO 内部队列；dialog 始终由队首投影 */
   blockingQueue: ExtensionUiBlockingRequest[];
 }
@@ -30,6 +36,9 @@ export function createEmptyExtensionUiState(  partial?: Partial<Pick<ExtensionUi
     statuses: partial?.statuses ?? [],
     widgets: partial?.widgets ?? [],
     terminalInputListenerCount: partial?.terminalInputListenerCount ?? 0,
+    workingMessage: null,
+    workingVisible: true,
+    workingIndicator: null,
     blockingQueue: [],
   };
 }
@@ -211,6 +220,27 @@ export function applyExtensionUiRequest(
         : { state, effects: [] };
     case "terminalInputListeners":
       return { state: { ...state, terminalInputListenerCount: request.count }, effects: [] };
+    case "setWorkingMessage":
+      return state.workingMessage === request.message
+        ? { state, effects: [] }
+        : { state: { ...state, workingMessage: request.message }, effects: [] };
+    case "setWorkingVisible":
+      return state.workingVisible === request.visible
+        ? { state, effects: [] }
+        : { state: { ...state, workingVisible: request.visible }, effects: [] };
+    case "setWorkingIndicator": {
+      // frames 为空数组是「隐藏指示器」的有效声明，不能当成「未提供」而回退默认
+      if (request.frames === null) {
+        return state.workingIndicator === null
+          ? { state, effects: [] }
+          : { state: { ...state, workingIndicator: null }, effects: [] };
+      }
+      const intervalMs = request.intervalMs ?? 120;
+      return {
+        state: { ...state, workingIndicator: { frames: request.frames, intervalMs } },
+        effects: [],
+      };
+    }
     case "set_editor_text":
       return { state, effects: [{ type: "insertText", text: request.text }] };
     case "custom":
