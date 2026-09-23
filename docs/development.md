@@ -4,7 +4,7 @@
 
 ## 环境与隔离
 
-- Node.js `>=22.19.0`；主 Pi SDK 精确版本由 [package.json](../package.json) 与 lockfile 锁定，当前为 `0.85.1`。
+- Node.js `>=22.19.0`；主 Pi SDK 精确版本由 [package.json](../package.json) 与 lockfile 锁定，当前为 `0.87.0`。
 - 主仓和 `desktop/` 是独立 npm 包，各自维护 lockfile。
 - 31415 保留给稳定安装版；工作区持续测试使用 31416。不操作上游 pi-web 的服务、目录或产物。
 - 工作区禁止正式 `next build`。正式构建在隔离发布根运行，不能污染开发输出。

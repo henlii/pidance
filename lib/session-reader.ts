@@ -548,7 +548,7 @@ export function buildSessionNavigationSnapshot(
     sm.getLeafId(),
   );
   const tree = projectTreeForResponse(
-    stripLabelMetadataNodes(sm.getTree() as Parameters<typeof stripLabelMetadataNodes>[0]),
+    stripMetadataNodes(sm.getTree() as Parameters<typeof stripMetadataNodes>[0]),
   );
   const context = buildSessionContext(entries, leafId, options);
   return {
@@ -569,6 +569,16 @@ const MAX_PROJECTED_TREE_DEPTH = 200;
  * 导航 API 将尾部连续 label 元数据上溯到第一个非 label 祖先，
  * 作为 BranchNavigator 的 active leaf（书签附着在 target 上，不是新分支）。
  */
+/**
+ * 不参与对话上下文、也不该成为导航落点的元数据 entry：
+ * - label：给消息打标签；
+ * - usage：缓存保活/压缩的用量记录（0.87.0 起 SDK 会写，idle 保活成功后可能停在链尾）；
+ * - context_edit：只追加的上下文编辑记录（0.87.0 起 SDK 会写，用于从模型上下文里省略条目）。
+ * 它们都可能成为 JSONL 链尾，导航时必须像 label 一样上溯到最近的真实消息，
+ * 否则分支导航会露出 "usage" 这类类型名。
+ */
+const METADATA_ENTRY_TYPES: ReadonlySet<string> = new Set(["label", "usage", "context_edit"]);
+
 export function resolveNavigationLeafId(
   entries: ReadonlyArray<{ id: string; type: string; parentId: string | null }>,
   leafId: string | null | undefined,
@@ -577,7 +587,7 @@ export function resolveNavigationLeafId(
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
   let current = byId.get(leafId);
   if (!current) return leafId;
-  while (current?.type === "label") {
+  while (current && METADATA_ENTRY_TYPES.has(current.type)) {
     if (!current.parentId) return null;
     current = byId.get(current.parentId);
   }
@@ -585,15 +595,15 @@ export function resolveNavigationLeafId(
 }
 
 /**
- * 从导航树中移除 type=label 元数据节点，将其子节点提升到父级。
+ * 从导航树中移除元数据节点（label / usage / context_edit），将其子节点提升到父级。
  * 目标 entry 上的 node.label（由 SessionManager.getTree 解析）保持不变；
  * JSONL 中的历史 label entry 不删除。
  */
-export function stripLabelMetadataNodes<T extends {
+export function stripMetadataNodes<T extends {
   entry: { id: string; type: string };
   children: T[];
 }>(nodes: T[]): T[] {
-  // 迭代版后序遍历（显式栈）：label 元数据节点提升其子节点，其余原样保留。
+  // 迭代版后序遍历（显式栈）：元数据节点提升其子节点，其余原样保留。
   // 递归版在超长线性链（数千层）下栈溢出（Maximum call stack size exceeded，
   // 大会话加载 500）。兄弟顺序保持正序（入栈倒序、pop 正序）。
   interface Frame { node: T; out: T[]; }
@@ -604,7 +614,7 @@ export function stripLabelMetadataNodes<T extends {
   }
   while (stack.length > 0) {
     const { node, out } = stack.pop()!;
-    if (node.entry.type === "label") {
+    if (METADATA_ENTRY_TYPES.has(node.entry.type)) {
       for (let i = node.children.length - 1; i >= 0; i--) {
         stack.push({ node: node.children[i], out });
       }
@@ -628,7 +638,7 @@ export function hasBookmarkLabel(node: { label?: string }): boolean {
  * 将会话树投影为发给客户端的浅导航树。
  * 保留根、分支点、叶子与带 label 的书签目标；压缩无 label 的单子链。
  * 被压缩的 entry id 挂到下一可见节点，便于 UI 识别链内活跃 leaf。
- * 调用方应先 stripLabelMetadataNodes，避免 label 元数据成为可点击假分支。
+ * 调用方应先 stripMetadataNodes，避免元数据成为可点击假分支。
  */
 export function projectTreeForResponse<T extends {
   entry: { id: string };

@@ -34,7 +34,7 @@ type SdkFileSurface = {
 };
 
 export const SDK_SESSION_FILE_SURFACE_MISSING =
-  "Pi SDK 未提供会话文件写入入口（_rewriteFile / flushed）。请检查 @earendil-works/pi-coding-agent 版本（当前基线 0.85.1）与 pi-session-io 适配层。";
+  "Pi SDK 未提供会话文件写入入口（_rewriteFile / flushed）。请检查 @earendil-works/pi-coding-agent 版本（当前基线 0.87.0）与 pi-session-io 适配层。";
 
 function readSdkFileSurface(manager: SessionManager): SdkFileSurface | null {
   const internal = manager as unknown as {

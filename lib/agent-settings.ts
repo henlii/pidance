@@ -19,6 +19,21 @@ export type AgentThinkingLevel = (typeof THINKING_LEVELS)[number];
 export const QUEUE_MODES = ["all", "one-at-a-time"] as const;
 export type QueueMode = (typeof QUEUE_MODES)[number];
 
+/**
+ * Prompt cache warming 模式，与 Pi SDK 0.87 的 CACHE_WARMING_MODES 保持一致。
+ * 长工具运行期间服务商会丢弃提示词缓存，下一轮请求就要按原价重算整个前缀。
+ * 保活即在缓存过期前把上一次请求以「最多输出 1 个 token」重发一次。
+ */
+export const CACHE_WARMING_MODES = ["off", "streaming", "idle"] as const;
+export type CacheWarmingMode = (typeof CACHE_WARMING_MODES)[number];
+
+/** SDK 未显式设置 cacheWarming 时的生效默认值（见 SDK settings-manager）。 */
+export const DEFAULT_CACHE_WARMING_MODE: CacheWarmingMode = "streaming";
+
+export function isCacheWarmingMode(value: unknown): value is CacheWarmingMode {
+  return typeof value === "string" && (CACHE_WARMING_MODES as readonly string[]).includes(value);
+}
+
 /** GET 响应：合并生效视图 + 只读嵌套数值 */
 export interface AgentSettingsView {
   defaultProvider: string | null;

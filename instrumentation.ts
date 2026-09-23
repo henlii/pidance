@@ -16,9 +16,9 @@ export async function register(): Promise<void> {
       "[pidance] 未解析到包内 Pi CLI（@earendil-works/pi-coding-agent package.json#bin.pi）。subagent 可能失败。",
     );
   }
-  // 版本号与 SDK 基线同步（AGENTS.md 锁定 0.85.1；升级 SDK 时同步此日志）。
+  // 版本号与 SDK 基线同步（AGENTS.md 锁定 0.87.0；升级 SDK 时同步此日志）。
   // 不用 require(package.json)：webpack 产物中无法解析包外模块路径。
-  console.log("[pidance] 主 Agent runtime: 同进程 Pi SDK 0.85.1");
+  console.log("[pidance] 主 Agent runtime: 同进程 Pi SDK 0.87.0");
 
   // 回收崩溃/被 SIGKILL 的进程留下的租约文件：release 只在优雅 dispose 时执行，
   // 否则租约目录会无界增长（实测本机 2550 文件 / 11MB）。只删持有者已死的。

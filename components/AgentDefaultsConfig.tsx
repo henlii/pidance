@@ -3,7 +3,14 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import type { TranslationKey } from "@/lib/locales/en";
-import { THINKING_LEVELS, type AgentThinkingLevel } from "@/lib/agent-settings";
+import {
+  CACHE_WARMING_MODES,
+  DEFAULT_CACHE_WARMING_MODE,
+  isCacheWarmingMode,
+  THINKING_LEVELS,
+  type AgentThinkingLevel,
+  type CacheWarmingMode,
+} from "@/lib/agent-settings";
 import { SettingsJsonEditor } from "./SettingsJsonEditor";
 import { SettingsPageFooter, settingsPrimaryButtonStyle, settingsSecondaryButtonStyle } from "./SettingsPageFooter";
 
@@ -136,6 +143,12 @@ const THINKING_LEVEL_LABEL_KEYS: Record<AgentThinkingLevel, TranslationKey> = {
   max: "input_thinkingMax",
 };
 
+const CACHE_WARMING_LABEL_KEYS: Record<CacheWarmingMode, TranslationKey> = {
+  off: "defaults_cacheWarmingOff",
+  streaming: "defaults_cacheWarmingStreaming",
+  idle: "defaults_cacheWarmingIdle",
+};
+
 type SettingsObject = Record<string, unknown>;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -159,6 +172,7 @@ type Draft = {
   defaultProvider: string;
   defaultModel: string;
   defaultThinkingLevel: AgentThinkingLevel | "";
+  cacheWarming: CacheWarmingMode;
   compactionEnabled: boolean;
   compactionReserve: string;
   compactionKeep: string;
@@ -185,6 +199,8 @@ function rawToDraft(raw: SettingsObject): Draft {
     defaultProvider: asStr(raw.defaultProvider),
     defaultModel: asStr(raw.defaultModel),
     defaultThinkingLevel: (raw.defaultThinkingLevel as AgentThinkingLevel | undefined) ?? "",
+    // 未设置或非法值都按 SDK 的生效默认值展示（默认 streaming），保存时才显式写入。
+    cacheWarming: isCacheWarmingMode(raw.cacheWarming) ? raw.cacheWarming : DEFAULT_CACHE_WARMING_MODE,
     compactionEnabled: asBool(compaction.enabled),
     compactionReserve: asNumStr(compaction.reserveTokens),
     compactionKeep: asNumStr(compaction.keepRecentTokens),
@@ -210,6 +226,7 @@ function draftDirty(draft: Draft, base: Draft): boolean {
     draft.defaultProvider !== base.defaultProvider ||
     draft.defaultModel !== base.defaultModel ||
     draft.defaultThinkingLevel !== base.defaultThinkingLevel ||
+    draft.cacheWarming !== base.cacheWarming ||
     draft.compactionEnabled !== base.compactionEnabled ||
     draft.compactionReserve !== base.compactionReserve ||
     draft.compactionKeep !== base.compactionKeep ||
@@ -323,6 +340,7 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
       next.hideThinkingBlock = draft.hideThinkingBlock || undefined;
       next.showCacheMissNotices = draft.showCacheMissNotices || undefined;
       next.quietStartup = draft.quietStartup || undefined;
+      next.cacheWarming = draft.cacheWarming;
 
       const compaction = { ...asRecord(next.compaction) };
       compaction.enabled = draft.compactionEnabled;
@@ -596,6 +614,28 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
                 min={0}
                 onChange={(v) => setDraft({ ...draft, retryBaseDelayMs: v })}
               />
+            </div>
+          </div>
+
+          {/* 提示词缓存保活 */}
+          <div style={blockStyle}>
+            <div style={sectionTitleStyle}>{t("defaults_cacheWarmingSection")}</div>
+            <div>
+              <div style={labelStyle}>{t("defaults_cacheWarming")}</div>
+              <select
+                value={draft.cacheWarming}
+                onChange={(e) =>
+                  setDraft({ ...draft, cacheWarming: e.target.value as CacheWarmingMode })
+                }
+                style={selectStyle}
+              >
+                {CACHE_WARMING_MODES.map((mode) => (
+                  <option key={mode} value={mode}>
+                    {mode} · {t(CACHE_WARMING_LABEL_KEYS[mode])}
+                  </option>
+                ))}
+              </select>
+              <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 4 }}>{t("defaults_cacheWarmingHint")}</div>
             </div>
           </div>
 

@@ -2,7 +2,7 @@
 
 [文档导航](README.md) · [开发验证](development.md) · [已知风险](architecture-review-2026-09-15.md)
 
-本文描述当前源码结构，不将目标约束等同于已经验证的不变量。主包当前精确依赖 Pi SDK `0.85.1`；更新依赖时以 [package.json](../package.json) 为准。
+本文描述当前源码结构，不将目标约束等同于已经验证的不变量。主包当前精确依赖 Pi SDK `0.87.0`；更新依赖时以 [package.json](../package.json) 为准。
 
 ## 1. 分层与所有权
 
