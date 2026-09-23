@@ -126,7 +126,6 @@ import {
   renderCustomMessageLines,
   renderToolCallLines,
   renderToolResultLines,
-  renderWidgetFactoryLines,
   type Theme,
 } from "./tui-render-bridge";
 

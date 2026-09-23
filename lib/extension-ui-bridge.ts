@@ -1,5 +1,6 @@
 import type {
   ExtensionStatusItem,
+  ExtensionUiCustomLayout,
   ExtensionUiRequest,
   ExtensionWidgetItem,
 } from "./types";
@@ -63,7 +64,7 @@ export function pickBlockingExtensionRequests(events: unknown): ExtensionUiBlock
  */
 export function restoreCustomUi(
   state: ExtensionUiState,
-  active: { id?: unknown; lines?: unknown } | null | undefined,
+  active: { id?: unknown; lines?: unknown; layout?: unknown } | null | undefined,
 ): ExtensionUiState {
   const id = typeof active?.id === "string" && active.id ? active.id : null;
   if (!id) return state;
@@ -71,9 +72,20 @@ export function restoreCustomUi(
   const lines = Array.isArray(active?.lines)
     ? (active!.lines as unknown[]).filter((line): line is string => typeof line === "string")
     : [];
+  // overlay 布局必须跟内容一起恢复，否则刷新后浮层变回全屏模态、盖住输入区
+  const layout =
+    active?.layout && typeof active.layout === "object"
+      ? (active.layout as ExtensionUiCustomLayout)
+      : undefined;
   return {
     ...state,
-    customUi: { type: "extension_ui_request", id, method: "custom", lines } as ExtensionUiCustomRequest,
+    customUi: {
+      type: "extension_ui_request",
+      id,
+      method: "custom",
+      lines,
+      ...(layout ? { layout } : {}),
+    } as ExtensionUiCustomRequest,
   };
 }
 

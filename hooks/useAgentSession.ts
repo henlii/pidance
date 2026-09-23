@@ -4,6 +4,7 @@ import { useState, useCallback, useRef, useEffect, useMemo, useReducer } from "r
 import type {
   AgentMessage,
   ExtensionStatusItem,
+  ExtensionUiCustomLayout,
   ExtensionUiRequest,
   ExtensionWidgetItem,
   SessionInfo,
@@ -225,7 +226,7 @@ type AgentStateResponse = {
    * 活动 custom 面板的快照（由 host 保存的最后一次渲染行）。
    * custom 只有 SSE 事件、没有重放，刷新/切回后靠它恢复面板内容与输入入口。
    */
-  activeCustomUi?: { id?: string; lines?: string[] } | null;
+  activeCustomUi?: { id?: string; lines?: string[]; layout?: ExtensionUiCustomLayout } | null;
   /** host 侧本 run 的吞吐读数（冷挂载/刷新时 seed；本地采样后失效）。 */
   turnMetrics?: { tokensPerSecond?: number; ttftMs?: number } | null;
 };

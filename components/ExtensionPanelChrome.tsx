@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 import { CHAT_COLUMN_MAX_WIDTH_CSS } from "@/lib/chat-column";
 import { useI18n } from "@/lib/i18n";
 
@@ -17,6 +17,7 @@ export function ExtensionPanelChrome({
   extraHeader,
   footer,
   children,
+  panelStyle,
 }: {
   title: ReactNode;
   accessibilityLabel?: string;
@@ -24,6 +25,8 @@ export function ExtensionPanelChrome({
   extraHeader?: ReactNode;
   footer?: ReactNode;
   children: ReactNode;
+  /** 覆盖面板本体尺寸；overlay 面板用它落实插件给的 width / minWidth / maxHeight。 */
+  panelStyle?: CSSProperties;
 }) {
   const { t } = useI18n();
   const titleText = accessibilityLabel ?? (typeof title === "string" ? title : undefined);
@@ -42,7 +45,7 @@ export function ExtensionPanelChrome({
       aria-modal="true"
       aria-label={titleText}
       className={className}
-      style={{ width: CHAT_COLUMN_MAX_WIDTH_CSS }}
+      style={{ width: CHAT_COLUMN_MAX_WIDTH_CSS, ...panelStyle }}
     >
       <header
         className="extension-panel-header"

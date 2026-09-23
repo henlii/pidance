@@ -282,7 +282,28 @@ export type ExtensionUiRequest =
       method: "custom";
       lines: string[];
       closed?: boolean;
+      /** 插件声明了 overlay 时的定位/尺寸；缺省表示按全屏模态面板渲染。 */
+      layout?: ExtensionUiCustomLayout;
     };
+
+/**
+ * 插件 overlay 面板的定位/尺寸（pi-tui `OverlayOptions` 在 Web 上的投影）。
+ *
+ * 只带插件真正用得到的那几个字段：真实插件只用到 anchor / width / minWidth /
+ * maxHeight / margin，row / col / offset / visible 回调等未出现。
+ */
+export interface ExtensionUiCustomLayout {
+  /** 九个锚点之一（center、top-left、bottom-center …），缺省 center。 */
+  anchor: string;
+  /** 数字 = 终端列数，字符串 = 百分比（如 "95%"）。 */
+  width?: number | string;
+  /** 终端列数。 */
+  minWidth?: number;
+  /** 数字 = 终端行数，字符串 = 百分比。 */
+  maxHeight?: number | string;
+  /** 数字 = 四周一致，对象按边给；单位为终端行/列。 */
+  margin?: number | { top?: number; right?: number; bottom?: number; left?: number };
+}
 
 export type ExtensionUiResponse =
   | { type: "extension_ui_response"; id: string; value: string }

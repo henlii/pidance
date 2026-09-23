@@ -388,6 +388,20 @@ export function renderWidgetFactoryLines(
 }
 
 /**
+ * 渲染一个**已挂载**的组件实例 → ANSI 行数组。
+ *
+ * 供工厂形式 setWidget 的热更新路径复用：工厂只调用一次、实例常驻，
+ * `requestRender()` 时对该实例重新渲染（见 lib/web-extension-ui.ts）。
+ * 失败 / 无 render 方法 / 输出非法或超限 → null（上层保留上一次的行，不推空帧）。
+ */
+export function renderWidgetComponentLines(
+  component: unknown,
+  width: number = RENDER_WIDTH,
+): string[] | null {
+  return renderToLines(component, width);
+}
+
+/**
  * 调用自定义消息渲染器（pi.registerMessageRenderer 注册，如 pi-subagents 的
  * SubagentControlNoticeComponent）→ headless render → ANSI 行数组。
  * 调用签名与 pi MessageRenderer 一致：`renderer(message, { expanded: true }, theme)`。

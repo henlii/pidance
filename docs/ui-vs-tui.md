@@ -145,8 +145,10 @@
 Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContext` 投影成 SSE 上的 `extension_ui_request`，再由 `lib/extension-ui-bridge.ts` 落到 UI。几个已知事实：
 
 1. **widget 的 placement**：缺省按 `aboveEditor` 处理（与 Pi 默认一致），所以扩展不写 placement 时，Web 就会把它渲染在**输入框上方**。
-2. **组件工厂形式**（`setWidget(key, (tui, theme) => Component)`）：Pidance 走 `lib/tui-render-bridge.ts` 无头渲染成 ANSI 行，再当文本渲染。这是**快照式**的：工厂自身的 state/invalidate 驱动的实时重绘不支持；渲染失败会静默跳过（不设置、不 emit）。
-3. **`mode === "rpc"` 快照已解码**：pi-subagents 在检测到宿主是 rpc 模式时，发的是同一份数据的一行快照
+2. **组件工厂形式**（`setWidget(key, (tui, theme) => Component)`）：工厂只调用一次，组件实例常驻在适配器里，`tui.requestRender()` 触发重新渲染并按 microtask 合并，产出走与字符串数组相同的 `setWidget` 通道（`lib/web-extension-ui.ts` 的 `mountWidgetFactory` + `lib/tui-render-bridge.ts` 的 `renderWidgetComponentLines`）。渲染失败保留上一次的行（不推空帧）；卸载、替换成字符串数组或适配器 dispose 时调组件的 `dispose?.()`。工厂收到的 `tui` 是有 `requestRender` + `terminal` 的真对象（此前传 `undefined`）。
+3. **`custom()` 的 overlay 与 keybindings**：`ctx.ui.custom(factory, options)` 接收第二参，把 `overlayOptions` 的 `anchor` / `width` / `minWidth` / `maxHeight` / `margin` 归一化成 `ExtensionUiCustomLayout` 随事件下发（`lib/web-extension-ui.ts` 的 `normalizeCustomOverlayLayout`），前端由 `lib/extension-overlay-layout.ts` 映射成浮层的对齐与尺寸。**没有 layout 的 custom 仍是全屏模态**——那对齐的是 `overlay: false` 的语义（替换 editor 区域，如 pi-subagents 的 SelectorComponent）。回调第 3 参注入真的 `KeybindingsManager`（键名定义取 pi-tui 的 `TUI_KEYBINDINGS`）；pi 的应用级键位（如 `app.editor.external`）不在这份定义里，对应的 `matches()` 恒为 false。`tui.stop()` / `tui.start()` 是 no-op 占位（Web 没有可让出的终端），插件的外部编辑器路径会因 spawn 不到 tty 自行失败。
+4. **`mode` 是 `"tui"`**（`lib/sdk-session-host.ts` 的 `bindExtensions`）：宿主声明能渲染扩展自绘组件，插件因此走富路径而不是降级——pi-subagents 的 async widget 走组件工厂、pi-mcp-adapter 启用 `/mcp` 的 overlay、pi-advisor-flow 才进 `custom()`。`lib/subagent-async-widget.ts` 仍保留 rpc 快照载荷的解析（`PI_SUBAGENT_ASYNC_JSON:`），作为旧会话与兼容路径。
+5. **`mode === "rpc"` 快照已解码**：pi-subagents 在检测到宿主是 rpc 模式时，发的是同一份数据的一行快照
    `PI_SUBAGENT_ASYNC_JSON:{"kind":"pi-subagents.async-status-snapshot",…}`（见其 `src/tui/render.ts` 与 `src/runs/background/async-status-snapshot.ts`）。
    Pidance 现在在 `lib/subagent-async-widget.ts` 里解析它，并**按 TUI 的行结构**渲染成 `components/SubagentAsyncWidget.tsx`：
    标题 `异步子代理 <agent> · 后台`（多个 run 时是 `异步子代理`），每行 = 状态字形（●/◦/✓/■/✗，颜色同 TUI 的 accent/success/warning/error）＋ label ＋ 状态 ＋ 已用时长 ＋ `⎿ 当前工具 工具时长 · N 轮 · N 次工具`；位置仍是输入框上方（TUI 的 aboveEditor 语义）。
@@ -155,6 +157,7 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
    子代理全部结束后 pi-subagents 会 `setWidget(key, undefined)`，面板消失。
 4. **仍存在的差异**：
    - `subagent-fleet-status`（placement `belowEditor`）是 TUI 组件，经渲染桥转成文本，里面的 `↓/← to inspect` 是终端键位。Web 侧现在改写这行：去掉键位提示段，保留 agent 数与 token 读数（`rewriteFleetStatusLines`）；整行只剩提示时不渲染该 widget。
+   - **`tui.focusedComponent` 未注入**：pi-subagents 的 fleet 状态 widget 用它判断主编辑器有没有焦点（`fleet-status.ts`），Web 端恒为 undefined，所以方向键进不了滚动/选择（停在 summary 形态）。要开这个口子得把 Web 输入区的焦点状态注入适配器。
    - ~~新开页面拿不到已存在的 widget~~ **已核实不是问题**：widget 会随状态水合（`/api/sessions/<id>/state` 的 `state.extensionWidgets`）在打开会话时出现。此前判定「拿不到」是探针口径造成的误判。
    - **左侧用户消息导航条铺满整列**（2026-09-22 决定）：短横线首尾贴住列内缩位置、中间按条数均分，**一条横线的纵向位置就对应它在会话里的先后** —— 贴底时「当前」那条落在轨道最下面（此前整条限高 320px、垂直居中，当前项落在屏幕中部，看不出与会话位置的关系）。条数多到每格矮于 8px（点不中）时退回旧的「限高 + 居中 + 内部滚动」，此时才显示上下小三角。
    - **侧栏里的 fork 子会话平铺显示**（2026-09-22 决定）：Pi 原生 fork 出来的会话是**独立会话**，与父平级各占一行，侧栏不再有「展开/折叠子会话」；父行下也不再嵌 fork 子行。此前把它嵌在父下，而 fork 会连标题一起复制，于是看起来像「同一个会话显示了好几行」。subagent 子会话仍然整体隐藏（只在顶栏「子会话谱系」里）。

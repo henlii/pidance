@@ -4,6 +4,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { normalizeCustomPanelLines, parseAnsiLine, stripAnsi } from "@/lib/ansi";
 import { shouldCaptureCustomPanelKey } from "@/lib/extension-panel-keys";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
+import { buildExtensionOverlayStyle } from "@/lib/extension-overlay-layout";
 import { useI18n } from "@/lib/i18n";
 import type { ExtensionUiCustomRequest } from "@/lib/extension-ui-bridge";
 import { ExtensionPanelChrome } from "./ExtensionPanelChrome";
@@ -30,6 +31,10 @@ export function ExtensionCustomPanel({
   const displayLines = normalizeCustomPanelLines(request.lines);
   const plainText = displayLines.map((line) => stripAnsi(line)).join("\n");
 
+  // overlay 插件给的定位/尺寸：容器按 anchor 对齐、按 margin 留边，面板本体按
+  // width/minWidth/maxHeight 定尺寸。没有 layout（非 overlay）时保持全屏模态。
+  const overlayStyles = buildExtensionOverlayStyle(request.layout);
+
   useEffect(() => {
     inputRef.current?.focus();
   }, [request.id]);
@@ -47,9 +52,10 @@ export function ExtensionCustomPanel({
   const selectedText = () => (typeof window === "undefined" ? "" : window.getSelection()?.toString() ?? "");
 
   return (
-    <div className="extension-panel-overlay">
+    <div className="extension-panel-overlay" style={overlayStyles?.containerStyle}>
       <ExtensionPanelChrome
         overlay
+        panelStyle={overlayStyles?.panelStyle}
         title={t("chat_extensionPanel")}
         // 中断入口放在底栏（与问答块的「取消」同一位置/同一语义）：标题行只有折叠，
         // 而这类面板是扩展自绘的 TUI 界面，没有底栏就等于没有鼠标退出口
@@ -129,4 +135,4 @@ export function ExtensionCustomPanel({
     </div>
   );
 }
-
+
