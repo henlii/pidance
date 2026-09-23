@@ -62,6 +62,7 @@ import {
   applyToolExecutionUpdate,
   applyToolExecutionEnd,
   applyToolExecutionResultRender,
+  applyToolExecutionRenderLines,
   clearToolExecutions,
   finalizeRunningToolExecutions,
   getToolExecutionSnapshots,
@@ -2046,6 +2047,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // 不改写既有终态。缺字段时仍由原 tool_execution_end / 消息结果负责。
         commitToolExecutions(applyToolExecutionResultRender(toolExecutionBufferRef.current, {
           toolCallId: event.toolCallId,
+          renderedResultLines: event.renderedResultLines,
+        }));
+        break;
+      }
+      case "rendered_lines_update": {
+        // 渲染宽度变了，服务端用新宽度重渲了这一块：按 toolCallId 覆盖已显示的行。
+        commitToolExecutions(applyToolExecutionRenderLines(toolExecutionBufferRef.current, {
+          toolCallId: event.toolCallId,
+          renderedCallLines: event.renderedCallLines,
           renderedResultLines: event.renderedResultLines,
         }));
         break;

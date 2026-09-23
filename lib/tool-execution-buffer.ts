@@ -290,6 +290,29 @@ export function applyToolExecutionResultRender(state: ToolExecutionBufferState, 
 }
 
 /**
+ * 渲染宽度变化后服务端重渲的行：按 toolCallId 覆盖已渲染的 call / result 行。
+ * 只改行字段，不动执行状态（与 applyToolExecutionResultRender 同一套字段）。
+ */
+export function applyToolExecutionRenderLines(
+  state: ToolExecutionBufferState,
+  event: { toolCallId?: unknown; renderedCallLines?: unknown; renderedResultLines?: unknown },
+): ToolExecutionBufferState {
+  if (typeof event !== "object" || event === null) return state;
+  const id = validToolCallId(event.toolCallId);
+  if (!id) return state;
+  const existing = state.get(id);
+  if (!existing) return state;
+  const renderedCallLines = optionalRenderedLines(event.renderedCallLines);
+  const renderedResultLines = optionalRenderedLines(event.renderedResultLines);
+  if (!renderedCallLines && !renderedResultLines) return state;
+  return new Map(state).set(id, {
+    ...existing,
+    ...(renderedCallLines ? { renderedCallLines } : {}),
+    ...(renderedResultLines ? { renderedResultLines } : {}),
+  });
+}
+
+/**
  * 清空缓冲（新 run 开始时由 hook 调用）。已空时返回原引用（调用方 setState 可
  * bail out）；否则返回新的空 Map，与原状态共享无关。
  */

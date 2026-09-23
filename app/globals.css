@@ -1406,8 +1406,10 @@ span.linenumber {
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.5;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  /* 插件组件按列排版，必须保结构：换行会把方框/选中条拆散。
+     超宽时横向滚动（外层已有 overflow: auto），宽度由服务端的列数决定。 */
+  white-space: pre;
+  overflow-x: auto;
   user-select: text;
   -webkit-user-select: text;
 }

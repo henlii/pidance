@@ -324,6 +324,7 @@ export function renderToolResultLines(
   options: { expanded: boolean; isPartial: boolean },
   context: Record<string, unknown>,
   onComponent?: (component: unknown) => void,
+  width: number = RENDER_WIDTH,
 ): string[] | null {
   const renderer = getToolRenderResultRenderer(def);
   if (!renderer) return null;
@@ -332,7 +333,7 @@ export function renderToolResultLines(
   try {
     const component = renderer(result, options, theme, context);
     if (component && typeof component === "object") onComponent?.(component);
-    return renderToLines(component);
+    return renderToLines(component, width);
   } catch {
     return null;
   }
@@ -347,6 +348,7 @@ export function renderToolCallLines(
   args: unknown,
   context: Record<string, unknown>,
   onComponent?: (component: unknown) => void,
+  width: number = RENDER_WIDTH,
 ): string[] | null {
   const renderer = getToolRenderCallRenderer(def);
   if (!renderer) return null;
@@ -355,7 +357,7 @@ export function renderToolCallLines(
   try {
     const component = renderer(args, theme, context);
     if (component && typeof component === "object") onComponent?.(component);
-    return renderToLines(component);
+    return renderToLines(component, width);
   } catch {
     return null;
   }

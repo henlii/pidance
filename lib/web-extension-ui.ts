@@ -7,7 +7,6 @@ import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import {
   createHeadlessCustomUiTui,
-  DEFAULT_CUSTOM_UI_COLUMNS,
   DEFAULT_CUSTOM_UI_ROWS,
 } from "./custom-ui-terminal";
 import {
@@ -102,6 +101,8 @@ export type WebExtensionUIAdapter = {
   inputCustom: (id: string, data: string) => boolean;
   /** 面板内的鼠标事件（pi-subagents 的 widget 靠它点标题行折叠）。 */
   inputCustomMouse: (id: string, event: Record<string, unknown>) => boolean;
+  /** 按新的可用列数重排已挂载的插件界面（custom 面板 + widget 工厂）。 */
+  setRenderWidth: (width: number) => boolean;
   /**
    * 把前端的一个按键交给插件注册的全局监听器（对齐 pi-tui 的 addInputListener：
    * 逐个调用，`consume` 结束传播，`data` 改写后续输入；改写成空串则丢弃）。
@@ -190,6 +191,12 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
   /** 扩展请求的全局工具展开态（pi-subagents 跑子代理前会 setToolsExpanded(false)）。 */
   let toolsExpanded = false;
 
+  /** 当前渲染列数：前端按可用宽度上报，插件组件按它排版（见 setRenderWidth）。 */
+  let renderWidth = RENDER_WIDTH;
+
+  /** custom 面板的重渲入口（setRenderWidth 用）：按当前宽度重渲并下发。 */
+  const customRenderers = new Set<() => void>();
+
   /** 每个能力只提示一次：插件可能反复调用同一条不支持的 API。 */
   const unsupportedNotified = new Set<string>();
 
@@ -232,7 +239,8 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
    * 相同的 setWidget 通道。渲染失败保留上一次的行（不推空帧）；替换或卸载时调
    * 组件的 `dispose?.()`。
    */
-  const widgetFactories = new Map<string, { dispose?: () => void }>();
+  /** 把 requestRender 存进 entry，供宽度变化时统一重推一帧。 */
+  const widgetFactories = new Map<string, { dispose?: () => void; requestRender: () => void }>();
 
   const unmountWidgetFactory = (key: string) => {
     const entry = widgetFactories.get(key);
@@ -276,7 +284,7 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       return;
     }
 
-    const entry: { dispose?: () => void } = {};
+    const entry: { dispose?: () => void; requestRender: () => void } = { requestRender: () => {} };
     let component: unknown;
     let scheduled = false;
 
@@ -284,7 +292,7 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       scheduled = false;
       // 已被替换或卸载：丢弃这帧，避免把旧 widget 写回去
       if (widgetFactories.get(key) !== entry) return;
-      const lines = renderWidgetComponentLines(component);
+      const lines = renderWidgetComponentLines(component, renderWidth);
       if (lines === null) return;
       widgets.set(key, { lines, placement });
       emit({
@@ -303,9 +311,10 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
         scheduled = true;
         queueMicrotask(publish);
       },
-      RENDER_WIDTH,
+      renderWidth,
       DEFAULT_CUSTOM_UI_ROWS,
     );
+    entry.requestRender = tui.requestRender;
 
     try {
       component = factory(tui, theme);
@@ -487,7 +496,6 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       // /btw 等 overlay 扩展依赖 theme.fg/bg 与 requestRender；缺 lines 会让 React 崩页面。
       // options 决定面板是浮层（按插件给的尺寸/锚点）还是全屏模态。
       const id = randomUUID();
-      const columns = DEFAULT_CUSTOM_UI_COLUMNS;
       const rows = DEFAULT_CUSTOM_UI_ROWS;
       const layout = normalizeCustomOverlayLayout(options);
       return new Promise((resolve) => {
@@ -496,6 +504,7 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
         const done = (result: unknown) => {
           if (doneCalled) return;
           doneCalled = true;
+          customRenderers.delete(emitLines);
           customSessions.delete(id);
           if (customSnapshot?.id === id) customSnapshot = null;
           emit({
@@ -532,7 +541,7 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
           if (doneCalled) return;
           let lines: string[] = [];
           try {
-            const rendered = component?.render?.(columns);
+            const rendered = component?.render?.(renderWidth);
             if (Array.isArray(rendered)) {
               lines = rendered.filter((line): line is string => typeof line === "string");
             }
@@ -586,7 +595,8 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
         customSessions.set(id, { handleInput, handleMouse, done });
         const tui = createHeadlessCustomUiTui(() => {
           emitLines();
-        }, columns, rows);
+        }, renderWidth, rows);
+        customRenderers.add(emitLines);
         const theme = loadPiTheme() ?? uiContext.theme;
         // onHandle 在组件建好之后调，对齐 pi-tui 的顺序（先 showOverlay，再给句柄）
         options?.onHandle?.(overlayHandle as never);
@@ -709,6 +719,15 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       const session = customSessions.get(id);
       if (!session) return false;
       session.handleMouse(event);
+      return true;
+    },
+    setRenderWidth(width) {
+      if (!Number.isFinite(width) || width <= 0) return false;
+      const next = Math.round(width);
+      if (next === renderWidth) return false;
+      renderWidth = next;
+      for (const render of [...customRenderers]) render();
+      for (const entry of [...widgetFactories.values()]) entry.requestRender();
       return true;
     },
     dispatchTerminalInput(data) {

@@ -39,6 +39,7 @@ import { useI18n } from "@/lib/i18n";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useExtensionTerminalInput } from "@/hooks/useExtensionTerminalInput";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useRenderWidth } from "@/hooks/useRenderWidth";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { SessionActivity } from "@/lib/session-activity";
 import { DEFAULT_SESSION_HISTORY_PAGE } from "@/lib/session-context-window";
@@ -193,6 +194,14 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   useExtensionTerminalInput({
     sessionId: sessionIdRef.current,
     enabled: Boolean(extensionCustomUi?.hidden) && extensionTerminalInputListenerCount > 0,
+  });
+
+  // 插件组件按可用列数排版：视口变窄时让服务端重新渲染，而不是交给 CSS 硬断行
+  // （硬断行会把方框/表格/选中条拆散，见 lib/render-width.ts）。
+  useRenderWidth({
+    sessionId: sessionIdRef.current,
+    containerRef: scrollContainerRef,
+    enabled: !isReadOnly,
   });
   /**
    * 会话全部用户消息大纲（左侧导航条「列出所有提问」）。
@@ -1200,7 +1209,7 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
               snapshot ? (
                 <SubagentAsyncWidget snapshot={snapshot} />
               ) : (
-                <pre style={{ margin: 0, padding: "8px 9px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--font-mono)", maxHeight: bodyMaxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y" }}>
+                <pre style={{ margin: 0, padding: "8px 9px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre", fontFamily: "var(--font-mono)", maxHeight: bodyMaxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y" }}>
                   {(Array.isArray(widget.lines) ? widget.lines : []).map((line, index, lines) => (
                     <Fragment key={index}>
                       {renderAnsiLine(line, `widget-${widget.key}-line-${index}`)}

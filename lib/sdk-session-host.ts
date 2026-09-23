@@ -123,9 +123,11 @@ import {
 import type { BinaryMessageData, BinaryMessageInput } from "./types";
 import {
   loadPiTheme,
+  RENDER_WIDTH,
   renderCustomMessageLines,
   renderToolCallLines,
   renderToolResultLines,
+  renderWidgetComponentLines,
   type Theme,
 } from "./tui-render-bridge";
 
@@ -326,10 +328,21 @@ export class SdkSessionHost {
   private activeToolNames: string[] | undefined;
   /** 渲染桥主题（模块级缓存）；加载失败为 null → 跳过渲染。 */
   private readonly renderBridgeTheme: Theme | null = loadPiTheme();
+
+  /**
+   * 当前渲染列数：由前端按可用宽度上报（默认 RENDER_WIDTH）。
+   * 插件的组件按这个宽度排版，所以窄视口不应该再按桌面宽度渲染 ——
+   * 否则方框/表格会被 CSS 硬断行打乱。
+   */
+  private renderWidth = RENDER_WIDTH;
   /** toolCallId → 渲染状态（跨 tool_call → update → result 共享）。 */
   private readonly toolRenderStates = new Map<string, ToolRenderStateEntry>();
   /** tool_execution_update 渲染最短间隔（ms），防高频 partial 阻塞事件循环。 */
   private static readonly PARTIAL_RENDER_MIN_INTERVAL_MS = 100;
+
+  /** 渲染列数边界：太窄会把插件界面压烂，太宽没有意义。 */
+  private static readonly RENDER_WIDTH_MIN = 40;
+  private static readonly RENDER_WIDTH_MAX = 240;
 
   constructor(private readonly options: SdkSessionHostOptions) {
     this.realSessionId = options.sessionId;
@@ -1812,6 +1825,7 @@ export class SdkSessionHost {
             { expanded: true, isPartial: true },
             context,
             (component) => this.updateToolRenderLastComponent(event.toolCallId, true, component),
+            this.renderWidth,
           );
           return lines ? { ...event, renderedLines: lines } : event;
         }
@@ -1829,6 +1843,7 @@ export class SdkSessionHost {
             event.input,
             context,
             (component) => this.updateToolRenderLastComponent(event.toolCallId, false, component),
+            this.renderWidth,
           );
           return lines ? { ...event, renderedCallLines: lines } : event;
         }
@@ -1853,6 +1868,7 @@ export class SdkSessionHost {
             { expanded: true, isPartial: false },
             context,
             (component) => this.updateToolRenderLastComponent(event.toolCallId, true, component),
+            this.renderWidth,
           );
           return lines ? { ...event, renderedResultLines: lines } : event;
         }
@@ -1871,7 +1887,12 @@ export class SdkSessionHost {
             typeof runner?.getMessageRenderer === "function"
               ? runner.getMessageRenderer(msg.customType)
               : undefined;
-          const lines = renderCustomMessageLines(renderer, event.message, this.renderBridgeTheme);
+          const lines = renderCustomMessageLines(
+            renderer,
+            event.message,
+            this.renderBridgeTheme,
+            this.renderWidth,
+          );
           return lines ? { ...event, renderedLines: lines } : event;
         }
         default:
@@ -1943,6 +1964,29 @@ export class SdkSessionHost {
     if (!entry) return;
     if (resultSlot) entry.lastResultComponent = component;
     else entry.lastCallComponent = component;
+  }
+
+  /**
+   * 宽度变化后重渲已经渲染过的工具块：组件实例还在 toolRenderStates 里，
+   * 直接用新宽度 render 一次，把新行推给前端按 toolCallId 替换。
+   * 没有组件的（渲染桥未命中）跳过，不推空帧。
+   */
+  private rerenderToolLines(): void {
+    for (const [toolCallId, entry] of this.toolRenderStates) {
+      const renderedCallLines = entry.lastCallComponent
+        ? renderWidgetComponentLines(entry.lastCallComponent, this.renderWidth)
+        : null;
+      const renderedResultLines = entry.lastResultComponent
+        ? renderWidgetComponentLines(entry.lastResultComponent, this.renderWidth)
+        : null;
+      if (!renderedCallLines && !renderedResultLines) continue;
+      this.emit({
+        type: "rendered_lines_update",
+        toolCallId,
+        ...(renderedCallLines ? { renderedCallLines } : {}),
+        ...(renderedResultLines ? { renderedResultLines } : {}),
+      } as SdkAgentEvent);
+    }
   }
 
   /** tool_execution_update 节流：同一 toolCallId 最短间隔内跳过渲染。 */
@@ -2738,6 +2782,22 @@ export class SdkSessionHost {
         if (id && event && typeof event === "object") {
           this.extensionUi?.inputCustomMouse(id, event as Record<string, unknown>);
         }
+        return null;
+      }
+
+      case "set_render_width": {
+        // 前端按可用宽度上报列数：插件组件按这个宽度排版，所以视口变窄时
+        // 不应该再按桌面宽度渲染（否则方框/表格会被 CSS 硬断行打乱）。
+        const raw = typeof command.width === "number" ? command.width : NaN;
+        if (!Number.isFinite(raw)) return null;
+        const width = Math.min(
+          SdkSessionHost.RENDER_WIDTH_MAX,
+          Math.max(SdkSessionHost.RENDER_WIDTH_MIN, Math.round(raw)),
+        );
+        if (width === this.renderWidth) return null;
+        this.renderWidth = width;
+        this.extensionUi?.setRenderWidth(width);
+        this.rerenderToolLines();
         return null;
       }
 

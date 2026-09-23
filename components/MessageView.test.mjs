@@ -169,7 +169,8 @@ test("custom 渲染桥：合法 ANSI 行优先，隐藏原始内容、详情与�
   assert.ok(!html.includes('aria-label="Copy message"'));
   assert.ok(!html.includes('aria-label="Show details"'));
   assert.match(html, /font-family:var\(--font-mono\)/);
-  assert.match(html, /white-space:pre-wrap/);
+  // 插件渲染行必须保结构（pre）：换行会把方框/表格拆散，超宽交给横向滚动
+  assert.match(html, /white-space:pre"/);
 });
 
 test("custom 渲染桥：空数组和非法载荷回退现有文本与详情逻辑", () => {

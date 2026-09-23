@@ -1366,7 +1366,7 @@ maxHeight: streamBlockMaxHeight,
               if (pinningOutputRef.current) return;
               followOutputRef.current = isNearStreamBlockBottom(event.currentTarget);
             }}
-            style={{ margin: 0, padding: "4px 10px 10px", maxHeight: streamBlockMaxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", color: renderedLiveLines || snapshot.output ? "var(--text-muted)" : "var(--text-dim)", background: "var(--tool-bg)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
+            style={{ margin: 0, padding: "4px 10px 10px", maxHeight: streamBlockMaxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", color: renderedLiveLines || snapshot.output ? "var(--text-muted)" : "var(--text-dim)", background: "var(--tool-bg)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre" }}
           >{renderedLiveLines ? renderAnsiLines(renderedLiveLines, "tool-live") : snapshot.output || t("message_toolWaitingOutput")}</pre>
         </div>
       )}
@@ -1430,7 +1430,7 @@ function AnsiToolLines({ lines, statusColor }: { lines: string[]; statusColor: s
   return (
     <pre
       tabIndex={0}
-      style={{ margin: 0, padding: "8px 10px", maxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--bg-subtle)", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
+      style={{ margin: 0, padding: "8px 10px", maxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--bg-subtle)", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, whiteSpace: "pre" }}
     >
       {renderAnsiLines(lines, "tool-rendered")}
     </pre>
@@ -2265,8 +2265,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
               fontFamily: "var(--font-mono)",
               fontSize: 12,
               lineHeight: 1.55,
-              whiteSpace: "pre-wrap",
-              overflowWrap: "anywhere",
+              whiteSpace: "pre",
             }}
           >
             {renderAnsiLines(renderedLines, "custom-rendered")}

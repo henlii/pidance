@@ -5,26 +5,14 @@ import { normalizeCustomPanelLines, parseAnsiLine, stripAnsi } from "@/lib/ansi"
 import { shouldCaptureCustomPanelKey } from "@/lib/extension-panel-keys";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { buildExtensionOverlayStyle } from "@/lib/extension-overlay-layout";
+import { measureCharWidth } from "@/lib/render-width";
 import { useI18n } from "@/lib/i18n";
 import type { ExtensionUiCustomRequest } from "@/lib/extension-ui-bridge";
 import { ExtensionPanelChrome } from "./ExtensionPanelChrome";
 
-/** 等宽字符宽度（px）：`ch` 就是等宽字体的字符宽，用探针量一次后缓存。 */
-let cachedCharWidth: number | null = null;
-function measureCharWidth(host: HTMLElement): number {
-  if (cachedCharWidth !== null) return cachedCharWidth;
-  const probe = document.createElement("span");
-  probe.textContent = "0".repeat(100);
-  probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
-  host.appendChild(probe);
-  cachedCharWidth = probe.getBoundingClientRect().width / 100 || 8;
-  probe.remove();
-  return cachedCharWidth;
-}
-
 /**
  * DOM 点击坐标 → 面板内的字符行列（pi-tui 的 TuiMouseEvent 用字符坐标）。
- * 行按实际行高算；列按等宽字符宽算。滚动位置一并计入。
+ * 行按实际行高算；列按等宽字符宽算（同 measureCharWidth）。滚动位置一并计入。
  */
 function toPanelMouseEvent(
   event: React.MouseEvent<HTMLPreElement>,
