@@ -1407,7 +1407,11 @@ export class SdkSessionHost {
 
     await session.bindExtensions({
       uiContext: this.extensionUi.uiContext,
-      mode: "rpc",
+      // "tui"：宿主能渲染扩展自绘的 TUI 组件（custom / overlay / widget 组件工厂）。
+      // 插件据此在富路径与降级之间选：pi-subagents 在 rpc 下只发一行 JSON 快照、
+      // pi-mcp-adapter 禁用 /mcp 的 overlay、pi-advisor-flow 不进 custom。
+      // Pidance 用 headless 渲染桥把组件 render 结果投影成 Web 面板，所以声明 tui。
+      mode: "tui",
       commandContextActions: {
         waitForIdle: () => session.waitForIdle(),
         newSession: async (opts) => {
