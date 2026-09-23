@@ -1096,6 +1096,20 @@ function ExtensionStatusBar({ statuses }: { statuses: Array<{ key: string; text:
   );
 }
 
+/**
+ * widget key（kebab/snake）→ 可读标题：`subagent-async` → `Subagent Async`。
+ *
+ * 通用规则：所有插件共用，**不为个别插件写特例**（产品原则见 AGENTS.md）。
+ * 已知机器载荷（能解析出结构化信息的）仍用它们自己的友好名，见下面的 heading。
+ */
+function widgetKeyTitle(key: string): string {
+  return key
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: string[] }> }) {
   // 扩展可能发「机器载荷」widget（pi-subagents 的 subagent-async 在 rpc 模式下就是一整行
   // PI_SUBAGENT_ASYNC_JSON:{…}）。这类载荷要按数据渲染，绝不能当文本显示原样 JSON。
@@ -1136,22 +1150,14 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
         // 也不把载荷当文本糊在界面上。
         if (machinePayload && !snapshot) return null;
         const collapsed = collapsedKeys.has(widget.key);
-        // **标题与副标题由槽位外壳决定**（折叠也是外壳的职责）：已认识的部件用友好名字，
-        // 其余扩展部件仍显示自己的 widget key。
+        // **标题与副标题由槽位外壳决定**（折叠也是外壳的职责）：已认识的机器载荷用友好名，
+        // 其余部件走通用的 key 美化（不为个别插件写特例）。
         const heading = snapshot ? subagentAsyncHeading(snapshot) : null;
-        // pi-subagents 在 mode=tui 下不再发 JSON 快照而改走组件工厂，此时上面的 heading
-        // 取不到，标题会退化成 key 名（"subagent-async"）。部件还是同一个，给同样的友好名。
-        const knownKeyTitle =
-          widget.key === "subagent-async"
-            ? t("subagent_widgetTitle")
-            : widget.key === "subagent-fleet-status"
-              ? t("subagent_widgetFleetTitle")
-              : null;
         const title = heading
           ? (heading.singleLabel
             ? t("subagent_widgetSingle", { name: heading.singleLabel })
             : t("subagent_widgetTitle"))
-          : (knownKeyTitle ?? widget.key);
+          : widgetKeyTitle(widget.key);
         const subtitle = heading
           ? [
             t("subagent_widgetBackground"),

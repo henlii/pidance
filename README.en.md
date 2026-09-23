@@ -12,6 +12,15 @@ Pidance is an open-source web client for the [Pi](https://github.com/badlogic/pi
 
 > Current version: `0.2.37` · npm package: `@henlii/pidance` · CLI: `pidance`
 
+## Design principles
+
+**Compatibility first, then general display improvements on top of it.**
+
+1. **Content completeness comes first.** Pidance aims to let you experience what a native TUI session shows — **including extension (plugin) custom UI** — in the browser. Anything the native TUI can display, Pidance should display too; prefer showing it as-is over hiding it because it “looks off on the web”.
+2. **Compatibility outranks looks.** Content a plugin expresses through the TUI extension API (self-drawn components, overlays, widgets, status lines, dialogs) must always have a landing spot. When a capability is missing, degrade **visibly** — notify or return an explicit value, never drop it silently (silence makes plugin authors think it worked).
+3. **Improvements must be general.** Display-layer work (layout, collapsing, card shells, titles, accessibility) goes through mechanisms shared by every plugin — no per-plugin special cases. Plugin-specific code is allowed only in the compatibility layer: parsing a plugin's private payloads, or bridging TUI semantics to the web.
+4. **Pi stays the source of truth.** Session files, tool execution, compaction and branch semantics are decided by the Pi SDK; Pidance only projects and presents them. See [`docs/ui-vs-tui.md`](./docs/ui-vs-tui.md) for the surface-by-surface mapping.
+
 ## Preview
 
 ![Pidance new-session workspace](./docs/screenshots/desktop.png)

@@ -157,7 +157,6 @@ export const en = {
   sidebar_projectDescription: 'Description',
   sidebar_running: 'Running',
   subagent_widgetTitle: 'Async agents',
-  subagent_widgetFleetTitle: 'Subagent fleet',
   subagent_widgetSingle: 'async subagent {name}',
   subagent_widgetBackground: 'background',
   subagent_widgetQueued: '{count} queued',
