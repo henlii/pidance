@@ -157,6 +157,7 @@ export const zhCN: Record<TranslationKey, string> = {
   sidebar_projectDescription: '描述',
   sidebar_running: '运行中',
   subagent_widgetTitle: '异步子代理',
+  subagent_widgetFleetTitle: '子代理舰队',
   subagent_widgetSingle: '异步子代理 {name}',
   subagent_widgetBackground: '后台',
   subagent_widgetQueued: '排队 {count}',

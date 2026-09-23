@@ -1136,14 +1136,22 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
         // 也不把载荷当文本糊在界面上。
         if (machinePayload && !snapshot) return null;
         const collapsed = collapsedKeys.has(widget.key);
-        // **标题与副标题由槽位外壳决定**（折叠也是外壳的职责）：已知的机器载荷用友好名字，
+        // **标题与副标题由槽位外壳决定**（折叠也是外壳的职责）：已认识的部件用友好名字，
         // 其余扩展部件仍显示自己的 widget key。
         const heading = snapshot ? subagentAsyncHeading(snapshot) : null;
+        // pi-subagents 在 mode=tui 下不再发 JSON 快照而改走组件工厂，此时上面的 heading
+        // 取不到，标题会退化成 key 名（"subagent-async"）。部件还是同一个，给同样的友好名。
+        const knownKeyTitle =
+          widget.key === "subagent-async"
+            ? t("subagent_widgetTitle")
+            : widget.key === "subagent-fleet-status"
+              ? t("subagent_widgetFleetTitle")
+              : null;
         const title = heading
           ? (heading.singleLabel
             ? t("subagent_widgetSingle", { name: heading.singleLabel })
             : t("subagent_widgetTitle"))
-          : widget.key;
+          : (knownKeyTitle ?? widget.key);
         const subtitle = heading
           ? [
             t("subagent_widgetBackground"),
