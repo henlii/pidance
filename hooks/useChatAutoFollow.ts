@@ -20,6 +20,16 @@ import {
 
 const RELEASE_KEYS = new Set(["ArrowUp", "PageUp", "Home"]);
 
+/**
+ * 指针「按住」最多挡住钉底这么久。
+ *
+ * selectingRef 由 pointerdown 置真、pointerup/pointercancel/blur 清；只要有一次
+ * pointerup 落不到本页（在滚动条上松开、触摸被打断、按住时元素被重渲染换掉），
+ * 它就会一直为真，而 pinToBottom 是唯一的 scrollTop 写入方 —— 表现出来就是
+ * 「自动跟随从此永久失效」。所以它只能挡住一次真实交互窗口，之后自愈。
+ */
+const SELECTING_HOLD_MAX_MS = 4000;
+
 function isInsideNestedUpScrollable(target: EventTarget | null, container: HTMLElement): boolean {
   if (!(target instanceof Element)) return false;
   let el: Element | null = target;
@@ -78,6 +88,8 @@ export function useChatAutoFollow({
   const selectingRef = useRef(false);
   /** 当前按下的指针 id：松开/取消必须来自同一次交互，避免杂散事件清掉进行中的交互态。 */
   const activePointerIdRef = useRef<number | null>(null);
+  /** selectingRef 置真的时刻：超时自愈用（见 SELECTING_HOLD_MAX_MS）。 */
+  const selectingSinceRef = useRef(0);
   /** 左键按下起点（鼠标/笔）：拖选判定用，单击不释放跟随。 */
   const selectOriginRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const [scrollContainerEl, setScrollContainerEl] = useState<HTMLDivElement | null>(null);
@@ -98,12 +110,26 @@ export function useChatAutoFollow({
     setJumpButtonVisible((prev) => (prev === show ? prev : show));
   }, []);
 
+  /**
+   * 阅读态把视口锚定交还浏览器（上方插入更旧历史时，它自己保持视口内容不动）；
+   * 跟随态才交给我方独占 scrollTop。
+   *
+   * 直接写 DOM、不走 React state：mode 也会在 pointermove（拖选）里变，
+   * 那里 setState 会重渲染并把还没成形的选区拖断。
+   */
+  const syncOverflowAnchor = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    container.style.overflowAnchor = autoFollowModeRef.current === "released" ? "auto" : "none";
+  }, []);
+
   const applyAutoFollowMode = useCallback((mode: AutoFollowMode) => {
     if (autoFollowModeRef.current === mode) return;
     autoFollowModeRef.current = mode;
     if (mode === "released") pendingEndPinRef.current = false;
+    syncOverflowAnchor();
     updateJumpButtonVisibility();
-  }, [updateJumpButtonVisibility]);
+  }, [syncOverflowAnchor, updateJumpButtonVisibility]);
 
   const pinToBottom = useCallback((behavior: ScrollBehavior = "instant") => {
     const container = scrollContainerRef.current;
@@ -115,7 +141,21 @@ export function useChatAutoFollow({
     // 写入方 —— 表现出来就是「多输出了几条工具块之后，自动跟随就此一直失效」，
     // 连「回到底部」点了也没反应（用户实测）。阅读意图由跟随状态兜：拖选在
     // pointerup 时会把状态置为 released，released 时的调用点本身就不会 pin。
-    if (selectingRef.current) return;
+    if (selectingRef.current) {
+      // 「还按着」不能自愈：触摸长按选字、慢速拖选都可能超过窗口期，一自愈就会把
+      // 选区钉到底。判据用 :active（按住时浏览器把它挂在被按元素链上），按住就顺延。
+      const stillPressed = typeof container.matches === "function"
+        && (container.matches(":active") || container.querySelector(":active") !== null);
+      if (stillPressed) {
+        selectingSinceRef.current = Date.now();
+        return;
+      }
+      if (Date.now() - selectingSinceRef.current < SELECTING_HOLD_MAX_MS) return;
+      // 确实没有按住的指针（松开事件丢了）：自愈，否则自动跟随再也不工作。
+      selectingRef.current = false;
+      activePointerIdRef.current = null;
+      selectOriginRef.current = null;
+    }
     const top = Math.max(0, container.scrollHeight - container.clientHeight);
     if (behavior === "smooth") {
       programmaticSmoothUntilRef.current = Date.now() + PROGRAMMATIC_SMOOTH_IGNORE_MS;
@@ -179,6 +219,11 @@ export function useChatAutoFollow({
     setScrollContainerEl((prev) => (prev === el ? prev : el));
   }, [loading, messages.length, isNew]);
 
+  // 容器就绪后先按当前模式把锚定写好（否则首帧是浏览器默认的 auto）。
+  useEffect(() => {
+    if (scrollContainerEl) syncOverflowAnchor();
+  }, [scrollContainerEl, syncOverflowAnchor]);
+
   useEffect(() => {
     const container = scrollContainerEl;
     if (!container) return;
@@ -221,6 +266,7 @@ export function useChatAutoFollow({
     // 就是「切一下窗口自动滚动就停了」。判据放在松开那一刻：这次按下真的选出了一段
     // 文本才算阅读意图；拖选位移 ≥ 阈值作为表格等不发 selectstart 场景的兜底。
     const onPointerDown = (event: PointerEvent) => {
+      selectingSinceRef.current = Date.now();
       if (event.pointerType === "touch") {
         // 触摸只登记「正在交互」（pin 别抢滚动/选区）；方向与阈值由 touchstart/touchmove 把关
         selectingRef.current = true;
@@ -242,6 +288,7 @@ export function useChatAutoFollow({
       // 只改 ref（不用 releaseOnUpIntent）：pointermove 里 setState 会重渲染，
       // 把还没成形的选区拖断；按钮状态由随后的 pointerup / scroll 事件对齐。
       autoFollowModeRef.current = reduceAutoFollow(autoFollowModeRef.current, { kind: "up-intent" });
+      syncOverflowAnchor();
     };
     const onPointerUp = (event: PointerEvent) => {
       if (activePointerIdRef.current !== event.pointerId) {
@@ -256,6 +303,7 @@ export function useChatAutoFollow({
       if (pressedContent && window.getSelection()?.type === "Range") {
         // 双击选词/长按选中/拖选都会在松开时留下 Range；仅是单击留下的 Caret 不算
         autoFollowModeRef.current = reduceAutoFollow(autoFollowModeRef.current, { kind: "up-intent" });
+        syncOverflowAnchor();
       } else if (autoFollowModeRef.current === "following") {
         // 按住期间内容增长被 pinToBottom 的交互态挡掉了；仍跟随就补一次守卫钉底，
         // 否则内容会停在半途（下一次增长才被拉回）。只补钉底，不改成 released/following。
@@ -293,7 +341,7 @@ export function useChatAutoFollow({
       container.removeEventListener("touchmove", onTouchMove);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [scrollContainerEl, applyAutoFollowMode, updateJumpButtonVisibility, pinToBottom]);
+  }, [scrollContainerEl, applyAutoFollowMode, updateJumpButtonVisibility, pinToBottom, syncOverflowAnchor]);
 
   useEffect(() => {
     const container = scrollContainerEl;
@@ -417,9 +465,6 @@ export function useChatAutoFollow({
     notifyAutoFollowSend,
     notifyAutoFollowBranchReset,
     notifyAutoFollowEnd,
-    markExternalScrollWrite,
-    notifyProgrammaticSmooth,
     notifyBrowsingHistory,
-    isAutoFollowing,
   };
 }

@@ -1365,13 +1365,21 @@ export function createBrowserSessionRuntimeRegistry(
     appendLocal(sessionId, message) {
       const slot = getSlot(sessionId, true)!;
       const key = nextLocalKey(slot);
-      // 本步还在流式时发出的本地记录（引导）：Pi 把引导投递到下一个 step 边界，
-      // 磁盘上它排在被打断那一步的内容之后；而这里只能先追加在末尾，所以打上标记，
-      // 等这一步的 assistant 记录到达时插到它前面（见 insertRecordBeforePendingSteers）。
-      const duringStreamingStep = slot.snapshot.streamState.isStreaming === true;
+      // 「本步还在跑」而不是「此刻有流式帧」：Pi 把引导投递到**下一个 turn 边界**，
+      // 上一步刚结束、下一步还没出首帧的空窗里发出的引导同样排在「本步之后」。
+      // 用流式帧判断会在空窗漏掉标记 —— 那条引导先按 live 之后渲染，本步记录落盘时
+      // 又被追加到它后面，位置就从「思考下面」跳到「思考前面」。
+      //
+      // 标记同时写到 record（insertRecordBeforePendingSteers 用）和 message
+      // （compositor 的 trailingLiveUserStart 用）：两处判据必须是同一个，否则渲染
+      // 顺序与落位顺序会互相打架。
+      const duringRunningStep = slot.snapshot.agentRunning === true;
+      const markedMessage = duringRunningStep
+        ? ({ ...(message as unknown as Record<string, unknown>), _duringStreamingStep: true } as unknown as AgentMessage)
+        : message;
       slot.timeline = appendRecord(slot.timeline, {
-        ...optimisticRecord(key, message),
-        ...(duringStreamingStep ? { duringStreamingStep: true } : {}),
+        ...optimisticRecord(key, markedMessage),
+        ...(duringRunningStep ? { duringStreamingStep: true } : {}),
       });
       bumpTimeline(slot);
       publish(slot);

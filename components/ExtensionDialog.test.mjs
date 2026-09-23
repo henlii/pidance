@@ -140,21 +140,15 @@ test("SSR/source：面板与输入框同宽同中线，内容区可滚动", () =
 
 // ── 提问区可读性：右上「关闭」只留给非 select；面板可展开/收回 ────────────────
 
-test("SSR select：不再渲染右上「关闭」（它与取消等价，且取消会中止执行）", () => {
-  const select = renderCard({
-    request: request("select", { options: ["一"] }),
-    onRespond: () => {},
-  });
-  assert.ok(!/>关闭</.test(select) && !/>Close</.test(select), "select 仍渲染「关闭」按钮");
-  assert.ok(!/aria-label="关闭"/.test(select), "select 的「关闭」按钮仍在 DOM 里");
-  assert.ok(/aria-label="取消"|aria-label="Cancel"/.test(select), "select 丢了「取消」按钮");
-
-  // 非 select（input/editor/confirm）保留「关闭」：那是它们唯一的取消入口之外的习惯动作
-  const input = renderCard({
-    request: request("input", { placeholder: "写点什么" }),
-    onRespond: () => {},
-  });
-  assert.ok(/aria-label="关闭"|aria-label="Close"/.test(input), "非 select 弹窗应保留「关闭」");
+test("SSR：标题行不再有任何「关闭/收起」按钮，取消留在底栏", () => {
+  for (const req of [request("select", { options: ["一"] }), request("input", { placeholder: "写点什么" })]) {
+    const html = renderCard({ request: req, onRespond: () => {} });
+    assert.ok(!/>关闭</.test(html) && !/>Close</.test(html), `${req.method} 仍渲染「关闭」按钮`);
+    assert.ok(!/aria-label="关闭"/.test(html), `${req.method} 的「关闭」按钮仍在 DOM 里`);
+    // 「收起/展开」也不再是按钮：整行标题就是开关
+    assert.ok(!/>收回</.test(html) && !/>Collapse</.test(html), `${req.method} 仍渲染「收回」按钮`);
+    assert.ok(/aria-label="取消"|aria-label="Cancel"/.test(html), `${req.method} 丢了底栏「取消」`);
+  }
 });
 
 test("SSR：面板带展开/收回开关，默认展开（可收回）", () => {
@@ -163,9 +157,11 @@ test("SSR：面板带展开/收回开关，默认展开（可收回）", () => {
     onRespond: () => {},
   });
   assert.match(html, /aria-expanded="true"/, "缺展开开关的初始态");
-  assert.ok(/aria-label="收回"|aria-label="Collapse"/.test(html), "默认展开时应显示「收回」");
+  assert.ok(/aria-label="收回"|aria-label="Collapse"/.test(html), "默认展开时标题行应标为可收回");
   assert.ok(html.includes("extension-panel-shell--expanded"), "默认应为展开态（长提问默认能看全）");
   assert.ok(!/aria-label="展开"/.test(html), "展开文案只在收回后出现");
+  // 整行标题就是开关：header 上带 role=button + aria-expanded（不再靠独立按钮）
+  assert.match(html, /class="extension-panel-header"[^>]*role="button"/, "标题行不是折叠开关");
 });
 
 test("CSS 契约：提问区可滚、展开态提高高度上限（含窄屏规则）", () => {

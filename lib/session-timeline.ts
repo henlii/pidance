@@ -298,13 +298,26 @@ export type UserConfirmationOutcome = "key" | "text" | "reconciled" | "appended"
  * user 消息确认（SSE `message_end`）。
  *
  * 生产 SSE 的 `message_end` 既不带 entryId 也不带 submissionId，因此：
- * 1. 有 submission key 且记录还在 → 原位确认（正文可能被插件变换）；
+ * 1. 有 submission key、记录仍待确认，且时间线上没有另一条同文本待确认记录
+ *    → 原位确认（正文可能被插件变换）；
  * 2. 有 submission key 但记录已被磁盘归并对账掉 → `reconciled`，**不追加**。
- *    此时磁盘已有该消息，按事件再追加一条只会产生重复；
+ *    此时磁盘已有该消息，按事件再追加一条只会产生重复；但同文本的待确认记录
+ *    仍要就地确认，否则它会一直是「乐观引导」被排到 live 之后（顺序错位）；
  * 3. 无 key：按正文绑定最靠后且仍 pending 的同文 user 记录（引导投递）；
  * 4. 该 entryId 已存在 → 重复；
  * 5. 其余追加。宁可多一条可见消息，也不静默丢弃服务端已观察到的消息。
  */
+/** 末尾最近的、仍待确认的同文本 user 记录下标；没有则 -1。 */
+function lastPendingUserIndexByText(timeline: Timeline, text: string): number {
+  if (text.length === 0) return -1;
+  for (let index = timeline.length - 1; index >= 0; index--) {
+    const record = timeline[index];
+    if (!record.pending || record.message.role !== "user") continue;
+    if (messageContentText((record.message as { content?: unknown }).content) !== text) continue;
+    return index;
+  }
+  return -1;
+}
 export function confirmUserMessage(
   timeline: Timeline,
   args: { key: string | null; message: AgentMessage; entryId: string; fallbackKey: string },
@@ -312,9 +325,20 @@ export function confirmUserMessage(
   const { key, message, entryId, fallbackKey } = args;
   const stamped = stampEntryId(message, entryId);
   const text = messageContentText((stamped as { content?: unknown }).content);
+  // 这条 message_end 真正的主人：末尾仍待确认的同文本 user 记录（引导只靠它认领）。
+  const pendingTwinIdx = lastPendingUserIndexByText(timeline, text);
   if (key) {
-    const replaced = replaceRecord(timeline, key, stamped, entryId);
-    if (replaced) return { timeline: replaced, outcome: "key" };
+    // 先判主人再看 key：生产 SSE 不带 submissionId，提交匹配是 FIFO 的，引导
+    // （无 submission）的 message_end 会把别人的 key 领走。若时间线上另有一条
+    // 同文本待确认记录，这条事件属于它——按 key 替换只会覆盖别人的消息，而那条
+    // 引导则永远得不到确认，被 compositor 一直排到 live 之后。
+    const keyed = pendingTwinIdx < 0 || timeline[pendingTwinIdx]?.key === key
+      ? findRecord(timeline, key)
+      : undefined;
+    if (keyed?.pending) {
+      const replaced = replaceRecord(timeline, key, stamped, entryId);
+      if (replaced) return { timeline: replaced, outcome: "key" };
+    }
     // 乐观记录已不在时间线里。只有**确实找到了它**才算交付证据：
     // 有 entryId 时按 id 命中，否则按同文本且已带 entryId 的磁盘记录命中。
     // 否则那只是一份尚未包含该提交的快照替换掉了它——不是交付证据，
@@ -324,16 +348,19 @@ export function confirmUserMessage(
       : text.length > 0
         && timeline.some((record) => record.entryId
           && messageContentText((record.message as { content?: unknown }).content) === text);
-    if (deliveredByDisk) return { timeline: [...timeline], outcome: "reconciled" };
-  }
-  if (text.length > 0) {
-    for (let index = timeline.length - 1; index >= 0; index--) {
-      const record = timeline[index];
-      if (!record.pending || record.message.role !== "user") continue;
-      if (messageContentText((record.message as { content?: unknown }).content) !== text) continue;
-      const replaced = replaceRecord(timeline, record.key, stamped, entryId);
-      if (replaced) return { timeline: replaced, outcome: "text" };
+    if (deliveredByDisk) {
+      // 磁盘已有这条消息 ≠ 那条待确认记录已经确认。留着它会让引导气泡继续被
+      // 后置到 live 之后（顺序错位到下一次 hydrate 为止），必须就地确认。
+      if (pendingTwinIdx >= 0) {
+        const replaced = replaceRecord(timeline, timeline[pendingTwinIdx].key, stamped, entryId);
+        if (replaced) return { timeline: replaced, outcome: "text" };
+      }
+      return { timeline: [...timeline], outcome: "reconciled" };
     }
+  }
+  if (pendingTwinIdx >= 0) {
+    const replaced = replaceRecord(timeline, timeline[pendingTwinIdx].key, stamped, entryId);
+    if (replaced) return { timeline: replaced, outcome: "text" };
   }
   if (entryId && timeline.some((record) => record.entryId === entryId)) {
     return { timeline: [...timeline], outcome: "duplicate" };

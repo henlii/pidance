@@ -90,6 +90,9 @@ export function ChatMinimap({ messages, plan, scrollContainer, messageRefs }: Pr
   }, [plan, messages]);
   const allMessagesRef = useRef(allMessages);
   allMessagesRef.current = allMessages;
+  /** measureNodes 里要判断 live 槽（不占 ref 下标），又不想把 plan 放进它的依赖数组。 */
+  const planRef = useRef(plan);
+  planRef.current = plan;
 
   // --- 仅更新视口比例，不读取 DOM ---
   const updateScroll = useCallback(() => {
@@ -124,9 +127,13 @@ export function ChatMinimap({ messages, plan, scrollContainer, messageRefs }: Pr
       const newNodes: NodeInfo[] = [];
       let refIndex = 0;
       const allMessages = allMessagesRef.current;
+      // live 槽在 ChatWindow 里不挂 ref（attachRef=false），这里也不能占下标，
+      // 否则 live 之后的气泡在 minimap 上整体错一格。
+      const liveProjection = getChatPlanLiveMessage(planRef.current ?? []);
 
       for (let i = 0; i < allMessages.length; i++) {
         const msg = allMessages[i];
+        if (liveProjection && msg === liveProjection) continue;
         if (msg.role !== "user" && msg.role !== "assistant") continue;
         const el = refs?.[refIndex];
         refIndex++;

@@ -51,7 +51,20 @@ export function ExtensionCustomPanel({
       <ExtensionPanelChrome
         overlay
         title={t("chat_extensionPanel")}
-        onClose={() => onInput(request, "\x03")}
+        // 中断入口放在底栏（与问答块的「取消」同一位置/同一语义）：标题行只有折叠，
+        // 而这类面板是扩展自绘的 TUI 界面，没有底栏就等于没有鼠标退出口
+        // （键盘 Esc/Ctrl+C 由 keytrap 转发，手机上没有键盘）。
+        footer={(
+          <button
+            type="button"
+            className="extension-card-btn"
+            title={t("extension_cancel")}
+            aria-label={t("extension_cancel")}
+            onClick={() => onInput(request, "\x03")}
+          >
+            {t("extension_cancel")}
+          </button>
+        )}
         extraHeader={(
           <button
             type="button"

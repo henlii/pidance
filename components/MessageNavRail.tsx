@@ -38,7 +38,6 @@ interface Props {
   /** entryId → 已渲染的消息元素（由 ChatWindow 提供；槽位映射归渲染层所有） */
   resolveMessageElementRef: RefObject<((entryId: string) => HTMLElement | null) | null>;
   /** 把渲染窗口扩到包含该 entry（只渲染末 N 条，目标可能已加载但未渲染） */
-  expandRenderWindowToEntryRef: RefObject<((entryId: string) => boolean) | null>;
   /**
    * 按 entryId 跳到历史某条：服务端返回该条附近窗口并整体替换时间线（一次到位）。
    * 返回是否成功；成功后调用方再滚到目标。
@@ -73,7 +72,6 @@ export function MessageNavRail({
   outline,
   entryIds,
   resolveMessageElementRef,
-  expandRenderWindowToEntryRef,
   jumpToEntry,
   isAtLiveTail,
 }: Props) {
@@ -481,9 +479,9 @@ export function MessageNavRail({
       /**
        * 换窗填充期持续把锚点钉回原位（无锚点时无事发生）。
        *
-       * 为什么不能只还原一次：新窗口是**分批挂载**的（实测一帧内 47 → 74 条），
-       * 锚点上方内容变高就会把它整体推走 —— 一次性还原只挡住第一帧，之后仍漂
-       * 1695px。所以填充期间每帧重钉，直到平滑滚动开始（动画一开始就不该再抢滚动）。
+       * 为什么不能只还原一次：定位后新加载的一页是分批挂载的，锚点上方内容变高
+       * 就会把它整体推走 —— 一次性还原只挡住第一帧，之后仍漂 1695px。所以填充期间
+       * 每帧重钉，直到平滑滚动开始（动画一开始就不该再抢滚动）。
        */
       const holdAnchor = () => {
         if (options?.anchor) applyAnchorOffset(options.anchor);
@@ -492,10 +490,9 @@ export function MessageNavRail({
       /**
        * 落地后有界收敛：目标不再偏离视口顶就停，最多 12 次 × 100ms。
        *
-       * 为什么不能只校正一次：滚动容器是 overflow-anchor:none（钉底自动跟随需要，
-       * 见 ChatWindow），浏览器不会替我们补偿上方内容的晚挂载。跳转后视口附近的过程块
-       * 仍会陆续挂载/卸载，上方高度一变，目标就被整体推走 —— 实测最后一次校正后又被
-       * 推偏 613px（中间位置则稳定在 0）。
+       * 为什么不能只校正一次：跳转期间视口附近仍会有内容晚挂载（更旧的一页、
+       * 代码高亮、图片），上方高度一变，目标就被整体推走 —— 实测最后一次校正后
+       * 又被推偏 613px（中间位置则稳定在 0）。
        */
       const converge = (stableCount: number, attempt: number) => {
         if (interrupted || !isCurrent() || !el.isConnected) { stopWatching(); syncActiveRef.current(); return; }
@@ -560,7 +557,7 @@ export function MessageNavRail({
     const waitForTarget = async (): Promise<HTMLElement | null> => {
       for (let i = 0; i < 10; i += 1) {
         if (!isCurrent()) return null;
-        const target = findTarget() ?? (expandRenderWindowToEntryRef.current?.(entryId) ? findTarget() : null);
+        const target = findTarget();
         if (target) return target;
         await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
       }
@@ -597,7 +594,7 @@ export function MessageNavRail({
       // 漏这一步的后果不是“高亮不准”，而是导航条**永久停止跟随**。
       if (!handedOff && jumpPinRef.current === entryId) jumpPinRef.current = null;
     }
-  }, [expandRenderWindowToEntryRef, jumpToEntry, resolveMessageElementRef, scrollContainer, syncActiveRef]);
+  }, [jumpToEntry, resolveMessageElementRef, scrollContainer, syncActiveRef]);
 
   const onKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;

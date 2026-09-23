@@ -349,8 +349,8 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** steer 乐观消息本地标记（仅前端内存，不写盘；投递时由 registry 按稳定 key 对账）。 */
-type SteerOptimisticMessage = AgentMessage & { _steerOptimistic?: boolean };
+/** 引导乐观消息：落位标记由 registry.appendLocal 按运行时状态统一打（见 appendLocal）。 */
+type SteerOptimisticMessage = AgentMessage;
 
 /**
  * 请求被取消（切换会话 / 新的加载取代了本次）—— 不是失败，不得写 error。
@@ -733,10 +733,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     notifyAutoFollowSend,
     notifyAutoFollowBranchReset,
     notifyAutoFollowEnd,
-    markExternalScrollWrite,
-    notifyProgrammaticSmooth,
     notifyBrowsingHistory,
-    isAutoFollowing,
   } = useChatAutoFollow({
     isMobile: opts.isMobile ?? false,
     loading,
@@ -1231,9 +1228,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         around: entryId,
         deferThinking: "1",
         deferMedia: "1",
-        // 默认取到最新（toEnd=1）：跳转历史后，时间线必须仍然包含「目标 → 最新」整段，
-        // 否则运行中会话的尾部（流式输出）会脱离时间线。性能靠渲染窗口控制，不靠截断数据。
-        toEnd: options?.toEnd === false ? "0" : "1",
+        // 只有运行中的会话才取到最新：那时「目标 → 最新」整段必须留在时间线里，
+        // 否则尾部流式输出会脱离时间线。空闲会话只取锚点附近一页 —— 以前靠客户端
+        // 渲染窗口压 DOM，窗口已删除，取到最新会把几千条消息一次性塞进 DOM。
+        // 向下补由 hasMoreAfter + loadNewerHistory 负责。
+        toEnd: options?.toEnd === false || !agentRunning ? "0" : "1",
       });
       if (options?.limit) params.set("limit", String(options.limit));
       if (leafAtStart) params.set("leafId", leafAtStart);
@@ -1274,7 +1273,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!isAbortError(e)) console.error("Failed to jump to entry:", e);
       return false;
     }
-  }, [beginLoadRequest, notifyBrowsingHistory]);
+  }, [agentRunning, beginLoadRequest, notifyBrowsingHistory]);
 
   /**
    * 定位到历史窗口后继续向下加载「更新」的历史（与 loadOlderHistory 对称）。
@@ -2862,7 +2861,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       role: "user",
       content: images?.length ? message : message,
       timestamp: Date.now(),
-      _steerOptimistic: true,
     };
     const registry = getOrCreateBrowserSessionRuntimeRegistry();
     // 本地 key 由 registry 生成：同文两条引导必须能各自回滚，
@@ -3191,7 +3189,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         role: "user",
         content: merged,
         timestamp: Date.now(),
-        _steerOptimistic: true,
+
       } as SteerOptimisticMessage)
       : null;
     // 本轮把「队列 + 输入框 extra」合并成一条 steer：队列内容的归属由服务端
@@ -3629,7 +3627,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Refs
     sessionIdRef, eventSourceRef, scrollContainerRef,
     // 自动跟随
-    jumpButtonVisible, jumpToBottom, markExternalScrollWrite, notifyProgrammaticSmooth, isAutoFollowing,
+    jumpButtonVisible, jumpToBottom,
     // Actions
     loadOlderHistory,
     loadNewerHistory,

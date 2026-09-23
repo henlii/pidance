@@ -154,7 +154,8 @@ html[data-theme-style="fusion"] {
   --assistant-bg: #fbfcfd;
   --tool-bg: #f0f5f4;
   --code-bg: #172126;
-  --status-running: #27836e;
+  /* 运行中用橙：与成功绿、失败红一眼可分（原来是青绿，和成功绿太近） */
+  --status-running: #b35017;
   --status-waiting: #cf9f1d;
   --status-unread: #286e98;
   --status-success: #49805d;
@@ -202,7 +203,8 @@ html.dark[data-theme-style="fusion"] {
   --assistant-bg: #101719;
   --tool-bg: #121d1f;
   --code-bg: #0b1113;
-  --status-running: #5eb39b;
+  /* 运行中用橙（暗色主题版本），理由同上 */
+  --status-running: #da7c47;
   --status-waiting: #ecc94b;
   --status-unread: #69a7ca;
   --status-success: #79ad78;
@@ -1317,6 +1319,33 @@ span.linenumber {
   flex-shrink: 0;
   align-items: center;
   gap: 8px;
+}
+/* 标题行整行就是折叠开关（与工具块一致）：箭头朝右=收起，朝下=展开 */
+.extension-panel-header {
+  cursor: pointer;
+  user-select: none;
+}
+.extension-panel-header:hover {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.extension-panel-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.extension-panel-chevron {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  color: var(--text-dim);
+  transition: transform 0.15s;
+}
+.extension-panel-chevron.is-expanded {
+  transform: rotate(90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .extension-panel-chevron {
+    transition: none;
+  }
 }
 .extension-panel-body {
   flex: 1 1 auto;
@@ -2497,4 +2526,44 @@ span.linenumber {
 
 .pidance-terminal-xterm .xterm-screen {
   background: transparent;
+}
+
+/* 工具块运行中：整行扫光（折叠态这一行就是整块，展开态它是标题行）。
+   这是「非颜色信号」—— 浅色主题里运行色与成功色曾经非常接近（青绿 vs 绿），
+   光靠色相认不出来；扫光在任何主题、任何色觉条件下都能看出"还在跑"。 */
+.tool-row-running {
+  position: relative;
+  overflow: hidden;
+}
+
+.tool-row-running::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--status-running) 18%, transparent) 42%,
+    color-mix(in srgb, var(--status-running) 32%, transparent) 50%,
+    color-mix(in srgb, var(--status-running) 18%, transparent) 58%,
+    transparent 100%
+  );
+  transform: translateX(-100%);
+  animation: tool-row-sweep 1.6s linear infinite;
+}
+
+@keyframes tool-row-sweep {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* 动效关闭时留一层淡淡的静态底：信号还在，但不流动 */
+  .tool-row-running::after {
+    animation: none;
+    transform: none;
+    opacity: 0.4;
+  }
 }

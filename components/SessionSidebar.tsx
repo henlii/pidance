@@ -1151,25 +1151,45 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [selectedSessionId, sidebarTree, ungroupedTree, updatePrefs]);
 
   // 仅首次 URL 恢复或目标确实超出可视区时滚动，不打断用户正常浏览位置。
+  //
+  // 依赖里**不放折叠状态**：展开/折叠「未分组会话」这类分组会改列表高度，但选中项
+  // 没变，滚它只会把用户正看的位置拽走（实测：点分组标题，滚动条跳到最近会话区）。
+  // 「选中是否变化」也在取行元素**之前**判定 —— 否则行暂时取不到（分组折叠、列表
+  // 尚未挂载）时 ref 不更新，下一次折叠就会被误判成"刚切换了会话"而滚动。
   useLayoutEffect(() => {
     if (!selectedSessionId) return;
+    const selectionChanged = prevSelectedScrollIdRef.current !== selectedSessionId;
+    prevSelectedScrollIdRef.current = selectedSessionId;
     const list = sessionListRef.current;
     if (!list) return;
-    const row = Array.from(list.querySelectorAll<HTMLElement>("[data-session-id]"))
-      .find((element) => element.dataset.sessionId === selectedSessionId);
-    if (!row) return;
+    // 同一会话可能同时挂在「最近会话」和「未分组会话」两个区 —— 必须看**全部副本**。
+    // 只取第一个匹配（DOM 里通常是最新区那条）会犯这个错：点未分组区的那条，
+    // 却把最近会话区的那条滚进视口，滚动条于是跳到最近会话处（用户实测）。
+    const matches = Array.from(list.querySelectorAll<HTMLElement>("[data-session-id]"))
+      .filter((element) => element.dataset.sessionId === selectedSessionId);
+    if (matches.length === 0) return;
 
     const isInitialRestore = !initialSelectionScrollDoneRef.current
       && initialSessionId === selectedSessionId;
-    const selectionChanged = prevSelectedScrollIdRef.current !== selectedSessionId;
-    prevSelectedScrollIdRef.current = selectedSessionId;
     const listRect = list.getBoundingClientRect();
-    const rowRect = row.getBoundingClientRect();
-    const outsideViewport = rowRect.top < listRect.top || rowRect.bottom > listRect.bottom;
-    // 展开/折叠会改列表高度，不因此 scrollIntoView，否则滚动条乱跳。
-    if (isInitialRestore || (selectionChanged && outsideViewport)) row.scrollIntoView({ block: "nearest" });
+    const isVisible = (el: HTMLElement) => {
+      const r = el.getBoundingClientRect();
+      return r.bottom > listRect.top && r.top < listRect.bottom;
+    };
+    const visibleRow = matches.find(isVisible);
+    if (!isInitialRestore) {
+      // 任一副本已经看得见 → 不动滚动；选中没变 → 也不动。
+      if (visibleRow || !selectionChanged) return;
+    }
+    const target = visibleRow ?? matches
+      .map((el) => {
+        const r = el.getBoundingClientRect();
+        return { el, distance: Math.min(Math.abs(r.top - listRect.top), Math.abs(r.bottom - listRect.bottom)) };
+      })
+      .sort((a, b) => a.distance - b.distance)[0].el;
+    target.scrollIntoView({ block: "nearest" });
     if (isInitialRestore) initialSelectionScrollDoneRef.current = true;
-  }, [selectedSessionId, initialSessionId, visibleTree, collapsedProjectRoots, collapsedSessionIds]);
+  }, [selectedSessionId, initialSessionId, visibleTree]);
 
   const toggleSessionCollapse = useCallback((sessionId: string) => {
     userTouchedSessionCollapseRef.current.add(sessionId);

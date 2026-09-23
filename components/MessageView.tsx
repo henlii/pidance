@@ -984,7 +984,7 @@ const COLLAPSED_LINE_STYLE = {
  * 结构上左侧是撑满剩余宽度的按钮（标签 + 摘要），右侧耗时是独立元素 ——
  * 这样整行（除耗时外）都可点，光标停在行内任意处都是手型。
  */
-function BlockHeaderRow({ label, expanded, onToggle, summary, meta, showCommandLabel }: {
+function BlockHeaderRow({ label, expanded, onToggle, summary, meta, showCommandLabel, running = false }: {
   label: string;
   expanded: boolean;
   onToggle: () => void;
@@ -994,6 +994,8 @@ function BlockHeaderRow({ label, expanded, onToggle, summary, meta, showCommandL
   meta?: string | null;
   /** 渲染「命令」小字：只有工具块的命令分区需要，思考块不要 */
   showCommandLabel?: boolean;
+  /** 仍在执行：整行扫光（折叠态这一行就是整块，展开态它是标题行） */
+  running?: boolean;
 }) {
   const { t } = useI18n();
   return (
@@ -1001,6 +1003,7 @@ function BlockHeaderRow({ label, expanded, onToggle, summary, meta, showCommandL
       type="button"
       onClick={onToggle}
       aria-expanded={expanded}
+      className={running ? "tool-row-running" : undefined}
       title={expanded ? t("chat_hideProcess") : t("chat_showProcess")}
       data-block-header="true"
       style={{
@@ -1298,6 +1301,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
           onToggle={() => setExpanded(!expanded)}
           summary={!expanded ? (isRunning && liveLastLine.trim() ? liveLastLine : command) : null}
           meta={elapsedMs === undefined ? null : formatElapsedDuration(elapsedMs)}
+          running={isRunning}
         />
       )}
 
@@ -1311,6 +1315,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
             summary={null}
             meta={elapsedMs === undefined ? null : formatElapsedDuration(elapsedMs)}
             showCommandLabel
+            running={isRunning}
           />
           <code style={{ display: "block", padding: "0 10px 8px", maxHeight: streamBlockMaxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{command}</code>
         </div>

@@ -1,9 +1,36 @@
 import type { AgentMessage, SessionContext } from "./types";
 
-/** 首屏尾页条数（OpenChamber 风格 tail-first；偏大一点覆盖 tool 长尾）。 */
-export const DEFAULT_SESSION_TAIL_LIMIT = 80;
+/** 首屏尾页条数（tail-first）。 */
+export const DEFAULT_SESSION_TAIL_LIMIT = 100;
 /** 向上滚动时每页更旧消息条数。 */
-export const DEFAULT_SESSION_HISTORY_PAGE = 80;
+export const DEFAULT_SESSION_HISTORY_PAGE = 100;
+
+/**
+ * 分页边界对齐到「轮」时允许额外向前多取的条数上限（= limit）。
+ *
+ * 一轮（一条 user 消息到下一个 user 之前）实测 p50 18–98 条、p90 137–542、最大 836：
+ * 单纯按「组」分页会让 100 组等于整个会话（实测 5482/7708/5016 条）。所以单位仍是
+ * 条数，只把起点对齐到最近的提问 —— 阅读上"每页从提问开始"，成本仍有硬顶。
+ */
+export const DEFAULT_TURN_ALIGN_MAX_EXTEND = DEFAULT_SESSION_HISTORY_PAGE;
+
+/**
+ * 把窗口起点向前对齐到最近的 user 消息（轮开头）。
+ * 找不到（或在 maxExtend 内找不到）就返回原下标：宁可切开一轮，也不让单页无限膨胀。
+ */
+function alignToTurnStart(
+  messages: readonly { role?: string }[],
+  index: number,
+  maxExtend: number,
+): number {
+  if (index <= 0) return index;
+  if (messages[index]?.role === "user") return index;
+  const floor = Math.max(0, index - Math.max(0, maxExtend));
+  for (let i = index - 1; i >= floor; i--) {
+    if (messages[i]?.role === "user") return i;
+  }
+  return index;
+}
 
 export type SessionContextWindow = SessionContext & {
   /** 当前窗口之前是否还有更旧消息（leaf 路径上）。 */
@@ -73,7 +100,7 @@ export function sliceContextTail(
       totalMessageCount,
     };
   }
-  const start = totalMessageCount - n;
+  const start = alignToTurnStart(context.messages as { role?: string }[], totalMessageCount - n, n);
   return {
     messages: context.messages.slice(start),
     entryIds: context.entryIds.slice(start),
@@ -107,7 +134,7 @@ export function sliceContextAround(
   if (idx < 0) return null;
   const n = clampLimit(limit, DEFAULT_SESSION_HISTORY_PAGE);
   const half = Math.max(1, Math.floor(n / 2));
-  const start = Math.max(0, idx - half);
+  const start = alignToTurnStart(context.messages as { role?: string }[], Math.max(0, idx - half), half);
   // toEnd：窗口从 anchor 前一小段一直取到最新（跳转历史时把「之后」整段一并带上，
   // 运行中会话的尾部流式输出才不会被切掉）。
   const end = options.toEnd ? totalMessageCount : Math.min(totalMessageCount, start + n);
@@ -180,7 +207,7 @@ export function sliceContextBefore(
     };
   }
   const n = clampLimit(limit, DEFAULT_SESSION_HISTORY_PAGE);
-  const start = Math.max(0, idx - n);
+  const start = alignToTurnStart(context.messages as { role?: string }[], Math.max(0, idx - n), n);
   return {
     messages: context.messages.slice(start, idx),
     entryIds: context.entryIds.slice(start, idx),
