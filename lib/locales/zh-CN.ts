@@ -123,6 +123,8 @@ export const zhCN: Record<TranslationKey, string> = {
   sidebar_searchPlaceholderFulltext: '搜索消息正文…',
   sidebar_clearSearch: '清除搜索',
   sidebar_loading: '加载中…',
+  sidebar_loadFailedRetry: '重试',
+  sidebar_loadFailed: '会话列表加载失败',
   sidebar_searchEmpty: "没有匹配 “{query}” 的会话",
   sidebar_searchModeMeta: '名称',
   sidebar_searchModeFulltext: '全文',
@@ -246,6 +248,8 @@ export const zhCN: Record<TranslationKey, string> = {
   chat_showProcess: '展开过程',
   chat_hideProcess: '折叠过程',
   chat_loadingSession: '正在加载会话…',
+  chat_loadFailedHint: '服务端可能有响应，但本次连接没能拿到内容；点重试即可重新加载。',
+  chat_loadFailed: '会话内容加载失败（已自动重试 {attempts} 次）',
   chat_loadEarlier: '加载较早的 {count} 条消息',
 
 

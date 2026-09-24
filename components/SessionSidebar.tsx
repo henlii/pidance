@@ -39,6 +39,7 @@ import {
   type SidebarDisplayMode,
   type SidebarPreferences,
 } from "@/lib/ui-preferences";
+import { subscribeAppEvents } from "@/lib/app-events-stream";
 import { loadCachedSessionList, saveCachedSessionList } from "@/lib/session-list-cache";
 import { shouldNotifyRunCompletion } from "@/lib/desktop-bridge";
 import { isPlaceholderSessionId } from "@/lib/session-id";
@@ -193,6 +194,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const serverListLoaded = catalogSnapshot.serverListLoaded;
   const loading = catalogSnapshot.loading;
   const error = catalogSnapshot.error;
+  // 列表加载失败后的手动重试：本地点一下的状态（#91，避免点了没反应）
+  const [listRetrying, setListRetrying] = useState(false);
   const archivedSessions = catalogSnapshot.archivedSessions;
   const runningSessionIds = catalogSnapshot.runningIds;
   const serverSessionsRef = useRef<SessionInfo[]>(serverSessions);
@@ -611,35 +614,30 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [allSessions, catalogTick, catalogStore]);
 
   useEffect(() => {
-    // Live running status via SSE — no polling. The server pushes the current
-    // set of running session ids whenever any session starts/stops working.
-    const source = new EventSource("/api/agent/running/events");
-
-    source.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data) as {
-          type?: string;
-          runningSessionIds?: string[];
-          runningStartedAt?: Record<string, number>;
-          pendingExtensionUi?: unknown;
-        };
-        if (data.type === "running") {
-          runningSnapshotAuthoritativeRef.current = true;
-          commitRunningSnapshot(
-            (data.runningSessionIds ?? []).filter((id): id is string => typeof id === "string"),
-            data.runningStartedAt && typeof data.runningStartedAt === "object"
-              ? data.runningStartedAt
-              : undefined,
-          );
-          setWaitingUserIds(extractWaitingSessionIds(data.pendingExtensionUi));
-        }
-      } catch {
-        // ignore malformed frames
-      }
-    };
-
-    // On error EventSource auto-reconnects; keep the last known state meanwhile.
-    return () => source.close();
+    // 运行集走**共用的应用级流**（lib/app-events-stream）：一个页面只开一条
+    // /api/agent/running/events。此前这里自己又开了一条同 URL 的连接，既与
+    // app-events-stream 顶部的「一个页面只有一条应用级流」相矛盾，又白占一条同源连接
+    // ——同源（HTTP/1.1）只有 6 条，连接紧张时普通请求会被饿住（#91 的现场证据）。
+    // 断线重连由 EventSource 自己负责（共用模块不主动重建，避免叠加多条流）。
+    return subscribeAppEvents((payload) => {
+      const data = payload as {
+        type?: string;
+        runningSessionIds?: unknown;
+        runningStartedAt?: unknown;
+        pendingExtensionUi?: unknown;
+      } | null;
+      if (!data || data.type !== "running") return;
+      runningSnapshotAuthoritativeRef.current = true;
+      commitRunningSnapshot(
+        Array.isArray(data.runningSessionIds)
+          ? data.runningSessionIds.filter((id): id is string => typeof id === "string")
+          : [],
+        data.runningStartedAt && typeof data.runningStartedAt === "object"
+          ? (data.runningStartedAt as Record<string, number>)
+          : undefined,
+      );
+      setWaitingUserIds(extractWaitingSessionIds(data.pendingExtensionUi));
+    });
   }, [commitRunningSnapshot]);
 
   // 后台标签页会漏 SSE：聚焦时用 GET 对齐运行集（同机多浏览器可见）。
@@ -1620,8 +1618,34 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           </div>
         )}
         {error && (
-          <div style={{ padding: "12px 14px", color: "var(--status-danger)", fontSize: 12 }}>
-            {error}
+          <div
+            style={{
+              padding: "12px 14px",
+              color: "var(--status-danger)",
+              fontSize: 12,
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+            }}
+          >
+            <div>{t("sidebar_loadFailed")}</div>
+            {/* 原始错误串（TimeoutError 之类）留在 title 里便于诊断，正文不再裸铺给用户（#91）。 */}
+            <div title={error} style={{ color: "var(--text-muted)", fontSize: 11, overflowWrap: "anywhere" }}>
+              {error.length > 90 ? `${error.slice(0, 90)}…` : error}
+            </div>
+            <button
+              type="button"
+              disabled={listRetrying}
+              onClick={() => {
+                // 重置重试计数：让这一轮又拿到完整的重试预算；成功后 error 会自动清除。
+                sessionListRetryRef.current = 0;
+                setListRetrying(true);
+                void loadSessionsRef.current(true).finally(() => setListRetrying(false));
+              }}
+              style={{ alignSelf: "flex-start" }}
+            >
+              {listRetrying ? t("common_loading") : t("sidebar_loadFailedRetry")}
+            </button>
           </div>
         )}
         {!loading && !error && visibleTree.length === 0 && visibleUngroupedTree.length === 0 && (

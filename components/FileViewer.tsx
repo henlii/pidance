@@ -26,6 +26,8 @@ import { parseUnifiedPatch } from "@/lib/patch";
 import type { GitFileDiffResponse } from "@/lib/git-types";
 import { affectedPathsMatchFile } from "@/lib/git-refresh";
 import { canRedo, canUndo, type FileBuffer, type FileEditorAction } from "@/lib/file-editor-state";
+import { closeTrackedEventSource, trackLiveEventSource } from "@/lib/live-event-sources";
+import { useLiveStreamRestoreNonce } from "@/hooks/useLiveStreamRestoreNonce";
 import { useI18n } from "@/lib/i18n";
 
 interface Props {
@@ -348,6 +350,8 @@ function ImageViewer({ filePath, cwd, sourceSessionId }: Props) {
   const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
+  // bfcache 恢复：文档回来时 +1，让下面的 watch effect 重建连接（#91）。
+  const restoreNonce = useLiveStreamRestoreNonce();
 
   const ext = getFileName(filePath).toLowerCase().split(".").pop() ?? "";
 
@@ -359,12 +363,14 @@ function ImageViewer({ filePath, cwd, sourceSessionId }: Props) {
     setWatching(false);
 
     if (esRef.current) {
-      esRef.current.close();
+      closeTrackedEventSource(esRef.current);
       esRef.current = null;
     }
 
     const es = new EventSource(getFileApiUrl(filePath, "watch", sourceSessionId));
     esRef.current = es;
+    // 登记到 live-event-sources：pagehide 时集中让出同源连接（#91）。
+    trackLiveEventSource(es);
 
     es.addEventListener("connected", () => setWatching(true));
     es.addEventListener("change", (e) => {
@@ -378,10 +384,10 @@ function ImageViewer({ filePath, cwd, sourceSessionId }: Props) {
     es.onerror = () => setWatching(false);
 
     return () => {
-      es.close();
+      closeTrackedEventSource(es);
       esRef.current = null;
     };
-  }, [filePath, sourceSessionId]);
+  }, [filePath, sourceSessionId, restoreNonce]);
 
   const src = getFileApiUrl(filePath, "read", sourceSessionId, bust ? { v: bust } : undefined);
 
@@ -482,6 +488,8 @@ function VideoViewer({ filePath, cwd, sourceSessionId }: Props) {
   const [duration, setDuration] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
+  // bfcache 恢复：文档回来时 +1，让下面的 watch effect 重建连接（#91）。
+  const restoreNonce = useLiveStreamRestoreNonce();
 
   const ext = getFileName(filePath).toLowerCase().split(".").pop() ?? "";
 
@@ -493,12 +501,14 @@ function VideoViewer({ filePath, cwd, sourceSessionId }: Props) {
     setWatching(false);
 
     if (esRef.current) {
-      esRef.current.close();
+      closeTrackedEventSource(esRef.current);
       esRef.current = null;
     }
 
     const es = new EventSource(getFileApiUrl(filePath, "watch", sourceSessionId));
     esRef.current = es;
+    // 登记到 live-event-sources：pagehide 时集中让出同源连接（#91）。
+    trackLiveEventSource(es);
 
     es.addEventListener("connected", () => setWatching(true));
     es.addEventListener("change", (e) => {
@@ -514,10 +524,10 @@ function VideoViewer({ filePath, cwd, sourceSessionId }: Props) {
     es.onerror = () => setWatching(false);
 
     return () => {
-      es.close();
+      closeTrackedEventSource(es);
       esRef.current = null;
     };
-  }, [filePath, sourceSessionId]);
+  }, [filePath, sourceSessionId, restoreNonce]);
 
   const src = getFileApiUrl(filePath, "read", sourceSessionId, bust ? { v: bust } : undefined);
 
@@ -600,6 +610,8 @@ function AudioViewer({ filePath, cwd, sourceSessionId }: Props) {
   const [duration, setDuration] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
+  // bfcache 恢复：文档回来时 +1，让下面的 watch effect 重建连接（#91）。
+  const restoreNonce = useLiveStreamRestoreNonce();
 
   const ext = getFileName(filePath).toLowerCase().split(".").pop() ?? "";
 
@@ -611,12 +623,14 @@ function AudioViewer({ filePath, cwd, sourceSessionId }: Props) {
     setWatching(false);
 
     if (esRef.current) {
-      esRef.current.close();
+      closeTrackedEventSource(esRef.current);
       esRef.current = null;
     }
 
     const es = new EventSource(getFileApiUrl(filePath, "watch", sourceSessionId));
     esRef.current = es;
+    // 登记到 live-event-sources：pagehide 时集中让出同源连接（#91）。
+    trackLiveEventSource(es);
 
     es.addEventListener("connected", () => setWatching(true));
     es.addEventListener("change", (e) => {
@@ -632,10 +646,10 @@ function AudioViewer({ filePath, cwd, sourceSessionId }: Props) {
     es.onerror = () => setWatching(false);
 
     return () => {
-      es.close();
+      closeTrackedEventSource(es);
       esRef.current = null;
     };
-  }, [filePath, sourceSessionId]);
+  }, [filePath, sourceSessionId, restoreNonce]);
 
   const src = getFileApiUrl(filePath, "read", sourceSessionId, bust ? { v: bust } : undefined);
 
@@ -716,6 +730,8 @@ function DocumentViewer({ filePath, cwd, sourceSessionId }: Props) {
   const [size, setSize] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
+  // bfcache 恢复：文档回来时 +1，让下面的 watch effect 重建连接（#91）。
+  const restoreNonce = useLiveStreamRestoreNonce();
 
   const ext = getFileExt(filePath);
   const isPdf = ext === "pdf";
@@ -730,7 +746,7 @@ function DocumentViewer({ filePath, cwd, sourceSessionId }: Props) {
     setWatching(false);
 
     if (esRef.current) {
-      esRef.current.close();
+      closeTrackedEventSource(esRef.current);
       esRef.current = null;
     }
 
@@ -749,6 +765,8 @@ function DocumentViewer({ filePath, cwd, sourceSessionId }: Props) {
 
     const es = new EventSource(getFileApiUrl(filePath, "watch", sourceSessionId));
     esRef.current = es;
+    // 登记到 live-event-sources：pagehide 时集中让出同源连接（#91）。
+    trackLiveEventSource(es);
 
     es.addEventListener("connected", () => setWatching(true));
     es.addEventListener("change", (e) => {
@@ -769,10 +787,10 @@ function DocumentViewer({ filePath, cwd, sourceSessionId }: Props) {
     es.onerror = () => setWatching(false);
 
     return () => {
-      es.close();
+      closeTrackedEventSource(es);
       esRef.current = null;
     };
-  }, [filePath, isPdf, sourceSessionId, t]);
+  }, [filePath, isPdf, sourceSessionId, t, restoreNonce]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -859,6 +877,8 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, writable = false, buff
   const [wrapLines, setWrapLines] = useState(false);
   const [watching, setWatching] = useState(false);
   const esRef = useRef<EventSource | null>(null);
+  // bfcache 恢复：文档回来时 +1，让下面的 watch effect 重建连接（#91）。
+  const restoreNonce = useLiveStreamRestoreNonce();
   // 切文件/切 diff 目标时旧响应可能后到：只有最新一次请求可以写 gitDiff。
   const gitDiffGuardRef = useRef<LatestRequestGuard | null>(null);
   if (!gitDiffGuardRef.current) gitDiffGuardRef.current = createLatestRequestGuard();
@@ -934,7 +954,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, writable = false, buff
     setWatching(false);
 
     if (esRef.current) {
-      esRef.current.close();
+      closeTrackedEventSource(esRef.current);
       esRef.current = null;
     }
 
@@ -950,6 +970,8 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, writable = false, buff
     // Set up SSE watch
     const es = new EventSource(getFileApiUrl(filePath, "watch", sourceSessionId));
     esRef.current = es;
+    // 登记到 live-event-sources：pagehide 时集中让出同源连接（#91）。
+    trackLiveEventSource(es);
 
     es.addEventListener("connected", () => {
       setWatching(true);
@@ -969,10 +991,10 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, writable = false, buff
     };
 
     return () => {
-      es.close();
+      closeTrackedEventSource(es);
       esRef.current = null;
     };
-  }, [filePath, fetchContent, fetchGitDiff, sourceSessionId]);
+  }, [filePath, fetchContent, fetchGitDiff, sourceSessionId, restoreNonce]);
 
   // 受影响路径集合命中当前文件时定向重抓该文件 diff（SSE watch 的兜底：
   // 覆盖 watcher 未建立/事件丢失场景）。null 或未命中不重抓——agent 结束
