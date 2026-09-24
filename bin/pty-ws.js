@@ -69,6 +69,10 @@ function isLoopbackHost(hostHeader) {
 const UI_SESSION_COOKIE_NAME = "pidance_ui_session";
 
 function resolvePassword(env) {
+  // 启动时密码已搬进同进程 globalThis 缓存（bin/pidance-auth-gate.js 的
+  // primeAndScrubPassword），env 里不再有明文；两条来源同形，缺一不可。
+  const cached = globalThis.__piAuthPassword;
+  if (cached) return cached.value;
   const p =
     env && env.PIDANCE_PASSWORD && env.PIDANCE_PASSWORD.length > 0
       ? env.PIDANCE_PASSWORD

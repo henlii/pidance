@@ -12,7 +12,7 @@ const { parseLaunchOptions } = require("./pidance-options");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { loadServerConfig } = require("./pidance-server-config");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { shouldRequireAuth, resolvePassword, describeHost } = require("./pidance-auth-gate");
+const { shouldRequireAuth, resolvePassword, primeAndScrubPassword, describeHost } = require("./pidance-auth-gate");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { startPidanceHttpServer } = require("./pidance-http-server");
 
@@ -39,6 +39,10 @@ if (!nodeMeetsMin(process.versions.node)) {
 
 const { port: explicitPort, hostname: explicitHostname, openBrowser } = parseLaunchOptions();
 const serverConfig = loadServerConfig();
+// 密码只活在进程内缓存里：把 env 里的密码搬进缓存、再删掉两个变量名。
+// 必须在启动 Next 之前做——middleware / route / SDK bash 都在同一进程，读的是 globalThis
+// 缓存；env 里留着的密码会被 agent 的 bash 一条 `env` 打进会话并永久落盘。
+primeAndScrubPassword(process.env);
 // 默认绑定：设置 → 通用 开启远程服务 → 0.0.0.0；否则仅本机 127.0.0.1（免密码）。
 // 显式 --hostname / -H / HOSTNAME env 优先；显式 0.0.0.0 仍走密码门禁。
 const hostname = explicitHostname ?? (serverConfig.remoteEnabled ? "0.0.0.0" : "127.0.0.1");

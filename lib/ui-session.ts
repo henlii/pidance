@@ -17,10 +17,6 @@ export const UI_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 /** 信任设备长期有效（10 年）：有效性由登录管理删除控制，不因时间过期。 */
 export const UI_TRUSTED_DEVICE_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1000;
 
-export const UI_LOGIN_RATE_WINDOW_MS = 5 * 60 * 1000;
-export const UI_LOGIN_RATE_MAX = 10;
-export const UI_LOGIN_RATE_LOCKOUT_MS = 15 * 60 * 1000;
-
 const SECRET_FILE_NAME = "pidance-ui-jwt-secret";
 
 export type UiSessionTtlKind = "default" | "trusted";
@@ -215,72 +211,6 @@ export function verifyPassword(candidate: string, expected: string): boolean {
 /** 可选：scrypt 绑盐校验（登录 API 内对 env 明文密码仍用 verifyPassword）。 */
 export function hashPasswordScrypt(password: string, salt: Buffer): Buffer {
   return scryptSync(password.normalize().trim(), salt, 64);
-}
-
-// —— 登录限流（进程内；对齐 OC 量级）——
-
-type RateEntry = { fails: number; windowStart: number; lockedUntil: number };
-
-const loginRateMap = new Map<string, RateEntry>();
-
-export function resetLoginRateLimitForTests(): void {
-  loginRateMap.clear();
-}
-
-export function checkLoginRateLimit(key: string, nowMs = Date.now()): {
-  allowed: boolean;
-  remaining: number;
-  retryAfterSeconds: number;
-  limit: number;
-} {
-  const limit = UI_LOGIN_RATE_MAX;
-  const entry = loginRateMap.get(key);
-  if (!entry) {
-    return { allowed: true, remaining: limit, retryAfterSeconds: 0, limit };
-  }
-  if (entry.lockedUntil > nowMs) {
-    return {
-      allowed: false,
-      remaining: 0,
-      retryAfterSeconds: Math.ceil((entry.lockedUntil - nowMs) / 1000),
-      limit,
-    };
-  }
-  if (nowMs - entry.windowStart > UI_LOGIN_RATE_WINDOW_MS) {
-    loginRateMap.delete(key);
-    return { allowed: true, remaining: limit, retryAfterSeconds: 0, limit };
-  }
-  const remaining = Math.max(0, limit - entry.fails);
-  return { allowed: remaining > 0, remaining, retryAfterSeconds: 0, limit };
-}
-
-export function recordLoginFailure(key: string, nowMs = Date.now()): void {
-  let entry = loginRateMap.get(key);
-  if (!entry || nowMs - entry.windowStart > UI_LOGIN_RATE_WINDOW_MS) {
-    entry = { fails: 0, windowStart: nowMs, lockedUntil: 0 };
-  }
-  entry.fails += 1;
-  if (entry.fails >= UI_LOGIN_RATE_MAX) {
-    entry.lockedUntil = nowMs + UI_LOGIN_RATE_LOCKOUT_MS;
-  }
-  loginRateMap.set(key, entry);
-}
-
-export function clearLoginFailures(key: string): void {
-  loginRateMap.delete(key);
-}
-
-export function clientIpFromHeaders(headers: {
-  "x-forwarded-for"?: string | null;
-  "x-real-ip"?: string | null;
-}): string {
-  const fwd = headers["x-forwarded-for"];
-  if (typeof fwd === "string" && fwd.trim()) {
-    return fwd.split(",")[0]!.trim().replace(/^::ffff:/, "");
-  }
-  const real = headers["x-real-ip"];
-  if (typeof real === "string" && real.trim()) return real.trim().replace(/^::ffff:/, "");
-  return "unknown";
 }
 
 // —— UI 会话设备（设置 → 通用 → 登录管理）——

@@ -22,6 +22,10 @@ import {
   UI_SESSION_COOKIE_NAME,
 } from "./ui-session";
 import {
+  getAuthRetryAfterMs,
+  recordAuthFailure,
+} from "./auth-throttle";
+import {
   passwordHashConfigured,
   verifyConfigPassword,
   type ServerConfig,
@@ -40,6 +44,9 @@ export type RequestGuardHeaders = {
   secFetchUser: string | null;
   authorization: string | null;
   cookie: string | null;
+  /** 自管 HTTP server 注入的对端地址（客户端自带的同名头已被覆盖）。 */
+  peerAddress: string | null;
+  xForwardedFor: string | null;
   method: string;
   url: string;
   pathname: string;
@@ -122,15 +129,52 @@ export function isLoopbackHost(hostHeader: string | null): boolean {
 }
 
 /**
- * 解析认证密码：PIDANCE_PASSWORD 优先（产品名，空/缺失时回退），兼容旧变量 PI_WEB_PASSWORD；
- * 最终值为空串或缺失视为未设置。
+ * 进程内密码缓存。
+ *
+ * 为什么需要：SDK 的 bash 工具用 `{ ...process.env }` 构造命令环境
+ * （pi-coding-agent dist/utils/shell.js 的 getShellEnv），env 里的登录密码会被 agent
+ * 一条 `env` 打进对话并永久落盘。启动时把密码从环境变量搬进缓存、再从 process.env
+ * 删掉两个变量名后，命令环境自然拿不到；`resolvePassword` 改读缓存，认证不受影响
+ * （不能只删环境变量：resolvePassword 是每次现读，删了就 fail-open）。
+ *
+ * 放 globalThis 而不是模块作用域：middleware / route / instrumentation 各自是独立的
+ * bundle，各有自己的模块实例；Next 的 Node middleware 是 require 进同进程的
+ * （next-server.js 的 loadNodeMiddleware），所以 globalThis 在同进程内可靠共享。
+ * 缓存不写盘、不出进程。
  */
-export function resolvePassword(env: Record<string, string | undefined>): string | null {
+declare global {
+  var __piAuthPassword: { value: string | null } | undefined;
+}
+
+/** 把 env 里的密码写进缓存（不删环境变量；删除由启动方负责）。 */
+export function primeAuthPassword(env: Record<string, string | undefined>): string | null {
+  const value = readPasswordFromEnv(env);
+  globalThis.__piAuthPassword = { value };
+  return value;
+}
+
+/** 清掉缓存（测试与诊断用）。清掉后 resolvePassword 回退读 env。 */
+export function clearAuthPasswordCache(): void {
+  globalThis.__piAuthPassword = undefined;
+}
+
+function readPasswordFromEnv(env: Record<string, string | undefined>): string | null {
   const p =
     env.PIDANCE_PASSWORD && env.PIDANCE_PASSWORD.length > 0
       ? env.PIDANCE_PASSWORD
       : env.PI_WEB_PASSWORD;
   return typeof p === "string" && p.length > 0 ? p : null;
+}
+
+/**
+ * 解析认证密码：启动缓存优先（进程内已搬走的密码）；未搬过则读
+ * PIDANCE_PASSWORD（优先，产品名）→ PI_WEB_PASSWORD（兼容旧变量）。
+ * 空串与缺失一律视为未设置。
+ */
+export function resolvePassword(env: Record<string, string | undefined>): string | null {
+  const cached = globalThis.__piAuthPassword;
+  if (cached) return cached.value;
+  return readPasswordFromEnv(env);
 }
 
 export function passwordEnabled(
@@ -220,18 +264,86 @@ export function isPublicAuthApi(pathname: string): boolean {
   return PUBLIC_AUTH_API_RE.test(pathname);
 }
 
-export type GuardVerdict = "ok" | "untrusted-host" | "csrf" | "auth-required";
+/**
+ * 限流分桶的桶名：显式开启 `PIDANCE_TRUST_PROXY` 时用 `x-forwarded-for` 首段，
+ * 否则用自管 server 注入的对端地址；两者都没有就退回固定全局桶（宁可误伤也不放行）。
+ */
+/** authIdentity 只看这两个头；RequestGuardHeaders 结构上兼容。 */
+export type AuthIdentityHeaders = {
+  peerAddress: string | null;
+  xForwardedFor: string | null;
+};
+
+export function authIdentity(
+  req: AuthIdentityHeaders,
+  env: Record<string, string | undefined>,
+): string {
+  const trustProxy = env.PIDANCE_TRUST_PROXY === "1" || env.PIDANCE_TRUST_PROXY === "true";
+  if (trustProxy) {
+    const first = req.xForwardedFor?.split(",")[0]?.trim();
+    if (first) return first.replace(/^::ffff:/, "");
+  }
+  const peer = req.peerAddress?.trim();
+  if (peer) return peer.replace(/^::ffff:/, "");
+  return "unknown";
+}
+
+function isBasicAuthorizationHeader(authorization: string | null): boolean {
+  return typeof authorization === "string" && /^Basic\s/i.test(authorization);
+}
+
+/**
+ * 把带 Basic 头的请求算作一次密码尝试，与登录表单共用同一个桶：
+ * - 正在封锁：即便密码是对的也返回 throttled（否则响应就是密码预言机），由
+ *   middleware 回 429 + Retry-After。
+ * - 密码错：记一次失败并返回 auth-required。
+ * - 密码对：放行，**不复位**计数（Basic 客户端每个请求都带凭据，复位会把
+ *   穿插猜测者拉回基准延迟）。
+ */
+function assessBasicAttempt(
+  req: RequestGuardHeaders,
+  env: Record<string, string | undefined>,
+  options?: { config?: ServerConfig | null; now?: number },
+): GuardVerdict | null {
+  if (!isBasicAuthorizationHeader(req.authorization)) return null;
+  const now = options?.now ?? Date.now();
+  const key = authIdentity(req, env);
+  if (getAuthRetryAfterMs(key, now) > 0) return "throttled";
+  if (checkBasicAuth(req, env, options?.config)) return null;
+  recordAuthFailure(key, now);
+  return "auth-required";
+}
+
+export type GuardVerdict = "ok" | "untrusted-host" | "csrf" | "auth-required" | "throttled";
 
 /** 完整判定（middleware 用；isApi 区分错误形态）。 */
 export function guardRequest(
   req: RequestGuardHeaders,
   env: Record<string, string | undefined>,
-  options?: { jwtSecret?: string; config?: ServerConfig | null; deviceStore?: UiSessionDeviceStore | null },
+  options?: {
+    jwtSecret?: string;
+    config?: ServerConfig | null;
+    deviceStore?: UiSessionDeviceStore | null;
+    /** 判定时的时间戳；与 middleware 读 Retry-After 共用同一个值，避免两次数值不一致。 */
+    now?: number;
+  },
 ): GuardVerdict {
   if (!isTrustedHost(req.host, env)) return "untrusted-host";
   const isApi = req.pathname === "/api" || req.pathname.startsWith("/api/");
   if (isApi && !isPublicAuthApi(req.pathname)) {
     if (!checkCsrf(req)) return "csrf";
+  }
+  // 限流判定必须在公开认证 API 豁免**之前**：否则登录/状态端点就是一条不限速的
+  // 密码猜测通道。只在带 Basic 头时才算尝试；带合法会话 Cookie 的请求不受封锁影响
+  // （只在这一分支里验 Cookie，普通请求不多付一次验签/读盘）。
+  if (passwordEnabled(env, options?.config) && isBasicAuthorizationHeader(req.authorization)) {
+    const authenticatedByCookie = checkUiSessionCookie(
+      req, env, options?.jwtSecret, options?.config, options?.deviceStore,
+    );
+    if (!authenticatedByCookie) {
+      const throttled = assessBasicAttempt(req, env, options);
+      if (throttled) return throttled;
+    }
   }
   // 登录/会话状态 API 在已设密码时也放行（由路由自身校验密码）。
   if (isPublicAuthApi(req.pathname)) {
