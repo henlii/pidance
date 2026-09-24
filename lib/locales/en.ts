@@ -961,6 +961,21 @@ export const en = {
   general_saved: "Saved.",
   general_serverRestartHint: "Binding and port changes take effect after restarting Pidance.",
   general_interactionSection: 'Interaction preferences',
+  models_availableTab: "Available models",
+  models_availableTitle: "Model availability",
+  models_availableHint: "Turn individual models on or off to control what the model picker offers. Saving only edits enabledModels in settings.json.",
+  models_availableCount: "{enabled} of {total} enabled",
+  models_availableEmpty: "No models found yet. Configure a provider first.",
+  models_availableReadOnlyProject: "This project defines enabledModels in .pi/settings.json, so the global list is read-only here.",
+  models_availableReadOnlyUnreadable: "settings.json cannot be parsed, so editing is disabled to avoid overwriting it.",
+  models_toggleModelAria: "Enable {name}",
+  models_refreshCatalog: "Refresh catalog",
+  models_refreshing: "Refreshing…",
+  models_refreshDone: "Catalog refreshed.",
+  models_refreshFailed: "Refresh failed: {error}",
+  models_lastModelHint: "At least one model must stay enabled.",
+  models_loading: "Loading…",
+
 } as const;
 
 export type TranslationKey = keyof typeof en;

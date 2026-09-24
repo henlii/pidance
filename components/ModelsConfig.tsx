@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Check as CheckIcon, Eraser, LoaderCircle, Plus, Zap } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/lib/i18n";
+import { EnabledModelsPanel } from "./EnabledModelsPanel";
 import type { TranslationKey } from "@/lib/locales/en";
 import { SettingsPageFooter, settingsPrimaryButtonStyle } from "./SettingsPageFooter";
 import { SettingsJsonEditor } from "./SettingsJsonEditor";
@@ -1674,7 +1675,7 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
 
   const isMobile = useIsMobile();
   /** 基础表单 / 原始 JSON（与会话设置二级页一致） */
-  const [activeTab, setActiveTab] = useState<"basic" | "json">("basic");
+  const [activeTab, setActiveTab] = useState<"basic" | "json" | "available">("basic");
   const [config, setConfig] = useState<ModelsJson>({ providers: {} });
   // GET 附带的文件基线：PUT 带回做冲突检测（多标签页/多端互覆盖防护）
   const [baseline, setBaseline] = useState<ModelsConfigBaseline | null>(null);
@@ -1938,7 +1939,7 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
         )}
 
         {/* 二级页：基础 / 原始 JSON */}
-        <div style={{ flexShrink: 0, padding: "12px 16px 0", display: "flex", gap: 8, flexWrap: "wrap", borderBottom: activeTab === "json" ? "none" : undefined }}>
+        <div style={{ flexShrink: 0, padding: "12px 16px 0", display: "flex", gap: 8, flexWrap: "wrap", borderBottom: activeTab === "basic" ? undefined : "none" }}>
           <button
             type="button"
             onClick={() => setActiveTab("basic")}
@@ -1965,6 +1966,19 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
           >
             {t("defaults_jsonTab")}
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("available")}
+            style={{
+              minHeight: 28, padding: "0 12px", borderRadius: 6, border: "1px solid var(--border)",
+              background: activeTab === "available" ? "var(--bg-selected)" : "var(--bg-panel)",
+              color: activeTab === "available" ? "var(--text)" : "var(--text-muted)",
+              cursor: "pointer", fontSize: 12, fontWeight: activeTab === "available" ? 600 : 400,
+            }}
+            aria-current={activeTab === "available" ? "page" : undefined}
+          >
+            {t("models_availableTab")}
+          </button>
         </div>
 
         {activeTab === "json" ? (
@@ -1977,6 +1991,10 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
               titleLabel={t("defaults_jsonTab")}
               fileLabel="models.json"
             />
+          </div>
+        ) : activeTab === "available" ? (
+          <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+            <EnabledModelsPanel onModelsChanged={onAuthStateChange} />
           </div>
         ) : (
         <>
