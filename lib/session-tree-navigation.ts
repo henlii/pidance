@@ -75,7 +75,15 @@ export function planBranchFromAssistant(
   };
 }
 
-/** 落地：改内存 leaf + 写/清 sidecar。`noop` 不产生任何写入。 */
+/**
+ * 落地：先写/清 sidecar（磁盘提交点），再改内存 leaf。`noop` 不产生任何写入。
+ *
+ * 顺序理由：`branch()` 只改内存，sidecar 是这两个命令**唯一**的磁盘效果。先写 sidecar、
+ * 写成功再改内存，则 sidecar 写失败时内存 leaf 原样不动 —— 调用方看到失败就等于
+ * 「什么都没发生」，不会留下「内存已经换了分支、磁盘指针还是旧的」的分裂（反过来的顺序
+ * 就会出现这种状态：调用方收到失败、但同一个 manager 已经被改过）。
+ * `branch()` 在计划阶段已校验过目标 entry 存在，因此它失败只可能是真正的程序错误。
+ */
 export function applyTreeNavigation(options: {
   sessionManager: TreeNavigationSessionManager;
   sessionFile: string;
@@ -83,7 +91,10 @@ export function applyTreeNavigation(options: {
 }): void {
   const { sessionManager, sessionFile, plan } = options;
   if (plan.kind === "noop") return;
+  // 没有会话文件就没有 sidecar 可写：空串不能当路径用（leafSidecarPath("") 会落到 cwd）。
+  if (sessionFile) {
+    if (plan.clearSidecar) clearLeafSidecar(sessionFile);
+    else writeLeafSidecar(sessionFile, plan.leafId);
+  }
   sessionManager.branch(plan.leafId);
-  if (plan.clearSidecar) clearLeafSidecar(sessionFile);
-  else writeLeafSidecar(sessionFile, plan.leafId);
 }

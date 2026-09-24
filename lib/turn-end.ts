@@ -7,8 +7,11 @@
  *   若无后继，turnEnd = selectedAssistant。
  *
  * turnEnd 必然为非 user entry（toolResult / assistant / custom_message /
- * compaction / model_change 等），因此 `navigate_tree(turnEnd)` 在 Pi 中
- * 走「精确设 leaf」语义（user 目标才会退到 parent）。
+ * compaction / model_change 等）。注意 Pi 的 `navigateTree` 对
+ * `type === "custom_message"` 的目标**也会退到 parent**（agent-session.js 里 user 与
+ * custom_message 是两条并列分支），所以轮到 custom_message 收尾时，
+ * `navigate_tree(turnEnd)` 与 Pidance 的精确 leaf（select_leaf_exact / branch_from_assistant）
+ * 落在**不同**的位置——这是我们有意保留的分叉，不是等价关系。
  */
 /** 最小 entry 形状（不依赖 pi npm） */
 export type TurnEndEntry = {
