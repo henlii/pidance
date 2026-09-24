@@ -431,3 +431,37 @@ export function renderCustomMessageLines(
     return null;
   }
 }
+
+/**
+ * 调用自定义 entry 渲染器（`pi.registerEntryRenderer` 注册，如 pi-subagents 的
+ * supervisor reply / watchdog warning）→ headless render → ANSI 行数组。
+ *
+ * 调用签名与 pi `EntryRenderer` 一致：`renderer(entry, { expanded: true }, theme)`。
+ * `expanded: true` 是有意的：entries 没有 Web 侧的展开设置，取内容最多的形态，
+ * 折叠由前端的卡片承担（与自定义消息同一取舍）。
+ *
+ * 失败语义与 `renderCustomMessageLines` 一致：无渲染器 / 非函数 / theme 为 null /
+ * 渲染抛错 / 返回 undefined 或非组件 / 输出非法 → null。与 TUI 的差别：TUI 在
+ * 渲染器抛错时会画一个错误框，Web 这里只隐藏（见 issue #71 的取舍）。
+ */
+export function renderCustomEntryLines(
+  renderer: unknown,
+  entry: unknown,
+  theme: Theme | null,
+  width: number = RENDER_WIDTH,
+): string[] | null {
+  if (typeof renderer !== "function") return null;
+  if (!theme) return null;
+  try {
+    const component = (
+      renderer as (
+        e: unknown,
+        options: { expanded: boolean },
+        th: Theme,
+      ) => unknown
+    )(entry, { expanded: true }, theme);
+    return renderToLines(component, width);
+  } catch {
+    return null;
+  }
+}

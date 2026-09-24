@@ -22,6 +22,7 @@ import { parseContextLimitParam, sliceContextBefore, sliceContextTail, DEFAULT_S
 import { getThinkingText, isThinkingLikeType } from "./thinking-content";
 import { clearLeafSidecar, writeLeafSidecar } from "./session-leaf-sidecar";
 import { invalidateSessionReadCache } from "./session-read-manager-cache";
+import { resolveEntryLinesProvider } from "./extension-entry-renderers";
 import {
   getRpcSession,
   waitForSessionStart,
@@ -36,6 +37,8 @@ import {
 } from "./rpc-manager";
 import {
   buildSessionContext,
+  type EntryLinesResolver,
+  isPidanceOwnCustomType,
   buildSessionPathLocal,
   resolveNavigationLeafId,
   buildSessionNavigationSnapshot,
@@ -231,6 +234,14 @@ export type SessionServiceDeps = {
   archiveFs?: SessionArchiveFs;
   /** 归档 sidecar 根目录（测试注入 tmpdir；缺省 ~/.pi/agent） */
   archiveAgentDir?: () => string;
+  /**
+   * 插件自定义 entry 的渲染器解析（issue #71）。
+   * 缺省走扩展加载（可缓存）；测试注入以避免加载真实扩展。
+   */
+  resolveEntryLinesProvider?: (options: {
+    cwd: string;
+    agentDir?: string;
+  }) => Promise<EntryLinesResolver | null>;
 };
 
 const defaultDeps: SessionServiceDeps = {
@@ -425,6 +436,43 @@ export type SessionService = {
  * 省略即表示本次不更新，不会把已有值清掉。
  */
 const LIGHT_STATE_OMIT = ["systemPrompt"] as const;
+
+/** 会话里是否存在需要插件渲染器的自定义 entry（未知 customType）。 */
+function needsForeignEntryRenderers(
+  entries: Parameters<typeof buildSessionContext>[0],
+): boolean {
+  return entries.some((entry) => {
+    const e = entry as { type?: unknown; customType?: unknown };
+    return e.type === "custom"
+      && typeof e.customType === "string"
+      && e.customType !== ""
+      && !isPidanceOwnCustomType(e.customType);
+  });
+}
+
+/**
+ * 解析插件自定义 entry 的渲染行（issue #71）。
+ *
+ * cwd 取会话头（插件按项目加载），agentDir 与归档/插件面板同一口径。
+ * 任何失败返回 null：调用方按「没有渲染器」处理，这些 entry 不投影。
+ */
+async function resolveForeignEntryLines(
+  entries: Parameters<typeof buildSessionContext>[0],
+  filePath: string,
+  deps: Pick<SessionServiceDeps, "archiveAgentDir" | "resolveEntryLinesProvider">,
+): Promise<EntryLinesResolver | null> {
+  const cwd = readSessionHeader(filePath)?.cwd;
+  if (!cwd) return null;
+  const resolveProvider = deps.resolveEntryLinesProvider ?? resolveEntryLinesProvider;
+  try {
+    return await resolveProvider({
+      cwd,
+      agentDir: deps.archiveAgentDir?.() ?? getAgentDir(),
+    });
+  } catch {
+    return null;
+  }
+}
 
 export function projectAgentState(
   state: unknown,
@@ -934,7 +982,16 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       const view = await service.getReadView(sessionId);
       if (!view) return null;
       const { filePath, manager: sm } = view;
-      const { leafId, tree, context, header, sessionName } = buildSessionNavigationSnapshot(sm, options);
+      // 插件自定义 entry（issue #71）与 getContextPage 同一口径：有这类记录才解析渲染器。
+      const navManagerRead = sm as { getEntries?: () => Parameters<typeof buildSessionContext>[0] };
+      const navEntries = (navManagerRead.getEntries?.() ?? []) as Parameters<typeof buildSessionContext>[0];
+      const navEntryLines = needsForeignEntryRenderers(navEntries)
+        ? await resolveForeignEntryLines(navEntries, filePath, deps)
+        : null;
+      const { leafId, tree, context, header, sessionName } = buildSessionNavigationSnapshot(sm, {
+        ...options,
+        ...(navEntryLines ? { entryLines: navEntryLines } : {}),
+      });
       const parentSessionId = header?.parentSession
         ? await resolveSessionIdByPath(header.parentSession)
         : undefined;
@@ -983,9 +1040,17 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       if (!view) return { context: null };
       const sm = view.manager as { getEntries?: () => Parameters<typeof buildSessionContext>[0] };
       const entries = (sm.getEntries?.() ?? []) as Parameters<typeof buildSessionContext>[0];
+      // 插件自定义 entry（issue #71）：只有拿到插件的 entry 渲染器才有内容。
+      // 仅当 entries 里真有这类记录时才去解析（扩展加载有固定开销，已按 cwd 缓存）；
+      // 解析失败一律当作没有渲染器——这些 entry 不投影，与历史行为一致，
+      // 绝不让整个会话读取失败。
+      const entryLines = needsForeignEntryRenderers(entries)
+        ? await resolveForeignEntryLines(entries, view.filePath, deps)
+        : null;
       const full = buildSessionContext(entries, options.leafId, {
         deferThinking: options.deferThinking,
         deferToolResultImages: options.deferToolResultImages,
+        ...(entryLines ? { entryLines } : {}),
       });
       const limit = options.limit;
       let context;
