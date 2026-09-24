@@ -77,6 +77,11 @@ interface Props {
   /** 最近一轮 run 的延迟/吞吐，供顶栏显示。 */
   onTurnMetricsChange?: (metrics: TurnMetrics) => void;
   onOpenFile?: (filePath: string) => void;
+  /**
+   * 把文件路径引用到输入框（@ 引用）；与 `onOpenFile`（打开文件）是两条不同的路。
+   * 消息卡上的引用按钮走它；插入入口只有一个（上层接到输入框）。
+   */
+  onReferenceFile?: (filePath: string) => void;
   /** 会话外发起的「定位到某条历史」请求（全文搜索命中）：切会话后由 ChatWindow 消费 */
   entryJumpRequest?: { sessionId: string; entryId: string; nonce: number } | null;
   /** 定位请求已消费（成功或重试超限）：AppShell 据此清掉，避免运行态变化反复重跳 */
@@ -113,7 +118,7 @@ function planItemStableKey(
   return messageKeys[idx] ?? `idx:${idx}`;
 }
 
-export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, projectRoots, onGuideTargetChange, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onTurnMetricsChange, onOpenFile, entryJumpRequest, onEntryJumpHandled, footerCollapsed, onFooterToggle }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, projectRoots, onGuideTargetChange, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onTurnMetricsChange, onOpenFile, onReferenceFile, entryJumpRequest, onEntryJumpHandled, footerCollapsed, onFooterToggle }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -327,6 +332,12 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   );
 
   const writesDisabled = isReadOnly || lockedByOther;
+  /**
+   * 输入框有没有真的挂载。「引用到输入框」的按钮活在消息卡里，而输入框在三种状态下会被
+   * 换掉（扩展弹窗独占输入区 / 只读会话 / 被别的 writer 占用）—— 那时回调拿到的是空 ref，
+   * 点下去没有任何反应。这种情况不下发回调，卡片里的引用按钮随之消失，不留死按钮。
+   */
+  const canReferenceIntoComposer = !extensionDialog && !(isReadOnly && session) && !lockedByOther;
   const sessionBusy = agentRunning || bashRunning || isCompacting;
   const liveSlot = streamState.isStreaming && streamState.streamingMessage
     ? { message: streamState.streamingMessage, isActive: true }
@@ -891,6 +902,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
                     modelNames={modelNames}
                     cwd={messageCwd}
                     onOpenFile={onOpenFile}
+                    onReferenceFile={canReferenceIntoComposer ? onReferenceFile : undefined}
                     writtenFiles={writtenFiles}
                     isStreaming={isLive}
                     toolsActive={sessionBusy}

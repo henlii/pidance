@@ -117,3 +117,39 @@ test("本轮写入的文件：只在收尾 assistant 消息下汇总一次，并
   assert.match(renderer, /NO_WRITTEN_FILES/, "没有写入时未复用稳定空数组（会打破 memo）");
   assert.match(source, /writtenFiles=\{writtenFiles\}/, "没有把聚合结果透给 MessageView");
 });
+
+test("引用到输入框的接线：AppShell 处理器 → ChatWindow → MessageView（漏一环整条链静默失效）", () => {
+  const chat = readFileSync(fileURLToPath(new URL("./ChatWindow.tsx", import.meta.url)), "utf8");
+  assert.match(chat, /onReferenceFile\?: \(filePath: string\) => void;/, "ChatWindow 没有声明 onReferenceFile");
+  assert.match(chat, /onOpenFile, onReferenceFile, entryJumpRequest/, "ChatWindow 没有解构 onReferenceFile");
+  assert.match(chat, /onReferenceFile=\{canReferenceIntoComposer \? onReferenceFile : undefined\}/, "ChatWindow 没把 onReferenceFile 传给 MessageView（或没经过挂载门禁）");
+  // 输入框会被三种状态换掉（扩展弹窗 / 只读会话 / 被别的 writer 占用）。那时回调拿到的是空
+  // ref，点下去没任何反应——所以门禁必须与输入框的渲染分支同步，不留死按钮。
+  assert.match(
+    chat,
+    /const canReferenceIntoComposer = !extensionDialog && !\(isReadOnly && session\) && !lockedByOther;/,
+    "引用回调缺少「输入框已挂载」门禁",
+  );
+  assert.ok(
+    chat.indexOf("const canReferenceIntoComposer") < chat.indexOf("const chatInputElement"),
+    "门禁必须在渲染前算好",
+  );
+  const inputBranch = chat.slice(chat.indexOf("const chatInputElement"), chat.indexOf("const aboveEditorWidgets"));
+  for (const condition of ["extensionDialog ?", "isReadOnly && session ?", "lockedByOther ?"]) {
+    assert.ok(inputBranch.includes(condition), `输入框渲染分支与门禁不同步：分支里没有 ${condition}`);
+  }
+
+  const shell = readFileSync(fileURLToPath(new URL("./AppShell.tsx", import.meta.url)), "utf8");
+  const at = shell.indexOf("const handleReferenceFile = useCallback(");
+  assert.ok(at > 0, "AppShell 没有 handleReferenceFile");
+  const handler = shell.slice(at, at + 400);
+  assert.match(handler, /chatInputRef\.current\?\.insertText\(/, "引用没有走输入框唯一的插入入口");
+  assert.match(handler, /buildFileReferenceText\(filePath, activeCwd/, "引用没有按当前 cwd 转相对路径");
+  assert.match(handler, /\}, \[activeCwd\]\)/, "处理器没有跟随 cwd 更新");
+  // activeCwd 必须在处理器之前声明：反了会在渲染期 TDZ 报错（实际踩过一次）
+  assert.ok(
+    shell.indexOf("const activeCwd = identity.cwd;") < at,
+    "handleReferenceFile 声明在 activeCwd 之前（渲染期 TDZ）",
+  );
+  assert.match(shell, /onReferenceFile=\{handleReferenceFile\}/, "AppShell 没把处理器交给 ChatWindow");
+});

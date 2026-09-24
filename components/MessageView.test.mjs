@@ -617,6 +617,23 @@ test("源码契约：思考块展开正文不再限高/内部滚动，工具块�
   assert.ok(tool.includes("streamBlockMaxHeight"), "工具块仍须限高");
 });
 
+test("源码契约：本轮写入文件卡的引用按钮不会被长文件名挤出可视区", () => {
+  // 为何是源码契约：卡片是 overflow:hidden，而「打开」芯片与「引用」按钮是同一行里的 flex
+  // 兄弟；不给收缩下限（minWidth:0）时长文件名会让芯片占满整条，右侧的引用按钮被裁掉、
+  // 窄屏点不到。真实观感由父会话的无头验收覆盖（390 宽 + 长文件名）。
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  const card = source.slice(source.indexOf("function TurnWrittenFilesCard("), source.indexOf("function FileContextList("));
+  assert.match(card, /gap: 2, maxWidth: "100%", minWidth: 0 \}/, "外层行缺少 minWidth:0，芯片不会收缩");
+  assert.match(card, /flex: "1 1 auto"/, "打开芯片没有可收缩的 flex 基线");
+  assert.match(card, /style=\{\{ minWidth: 0, overflow: "hidden"/, "文件名 span 缺少 minWidth:0");
+  assert.match(card, /message-file-open-btn/, "打开芯片没有触屏热区类");
+  const ref = source.slice(source.indexOf("function ReferenceFileButton("), source.indexOf("function TurnWrittenFilesCard("));
+  assert.match(ref, /file-row-action-btn message-file-action-btn/, "引用按钮没有触屏热区类");
+  // 热区按**指针类型**放大：平板是宽视口 + 触摸，只按 (max-width:640px) 放大会在那儿留下 24px 热区
+  const css = readFileSync(fileURLToPath(new URL("../app/globals.css", import.meta.url)), "utf8");
+  assert.match(css, /@media \(pointer: coarse\) \{[\s\S]*?\.message-file-action-btn \{[\s\S]*?min-width: 40px;/, "触屏下引用按钮热区没有放大");
+});
+
 function assistantOnlyMessage(content) {
   return { role: "assistant", model: "m", provider: "p", content };
 }
@@ -673,5 +690,35 @@ test("本轮写入的文件：走通用表头与统一折叠口径，条目可�
     assert.match(dict, /message_openWrittenFile:/, `${locale} 缺少 message_openWrittenFile`);
     assert.match(dict, /message_writtenFilesExpand:/, `${locale} 缺少 message_writtenFilesExpand`);
     assert.match(dict, /message_writtenFilesCollapse:/, `${locale} 缺少 message_writtenFilesCollapse`);
+  }
+});
+
+test("文件条目：引用到输入框与打开文件是两个动作，引用走唯一的插入入口", () => {
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  // 引用按钮只负责发起，不自己拼文本（插入入口只有一条，见 AppShell.handleReferenceFile）
+  const button = source.slice(source.indexOf("function ReferenceFileButton("), source.indexOf("function TurnWrittenFilesCard("));
+  assert.ok(button.length > 0, "没有找到引用按钮组件");
+  assert.match(button, /onReferenceFile\(filePath\)/, "引用按钮没有把路径交给上层");
+  assert.match(button, /aria-label=\{label\}/, "引用按钮缺少无障碍名");
+  assert.match(button, /files_insertIntoChat/, "引用按钮没有复用既有的「插入聊天」文案键");
+  assert.match(button, /getFileName\(filePath\)/, "无障碍名里没有文件名");
+
+  // 两个调用点都要有：本轮写入的文件卡 + apply_patch 的已修改文件列表
+  const card = source.slice(source.indexOf("function TurnWrittenFilesCard("), source.indexOf("function FileContextList("));
+  assert.ok(card.includes("<ReferenceFileButton"), "本轮写入的文件卡没有引用入口");
+  assert.ok(card.includes("onOpenFile?.(filePath)"), "文件卡的打开入口被顶掉了");
+  assert.ok(card.includes("onReferenceFile?.") === false, "文件卡不该自己拼文本");
+  const appliedAt = source.indexOf('t("message_modifiedFiles")');
+  assert.ok(appliedAt > 0, "没有找到已修改文件列表");
+  assert.ok(source.slice(appliedAt, appliedAt + 1200).includes("<ReferenceFileButton"), "已修改文件列表没有引用入口");
+
+  // 接线：props 声明 + memo 比较（漏进 memo 比较会让入口在流式期间静默消失）
+  assert.match(source, /onReferenceFile\?: \(filePath: string\) => void;/, "Props 没有声明 onReferenceFile");
+  assert.match(source, /prev\.onReferenceFile === next\.onReferenceFile/, "memo 比较漏了 onReferenceFile");
+  assert.match(source, /<TurnWrittenFilesCard [^>]*onReferenceFile=\{onReferenceFile\}/, "文件卡没接到 onReferenceFile");
+
+  for (const locale of ["en", "zh-CN"]) {
+    const dict = readFileSync(fileURLToPath(new URL(`../lib/locales/${locale}.ts`, import.meta.url)), "utf8");
+    assert.match(dict, /files_insertIntoChat:/, `${locale} 缺少 files_insertIntoChat`);
   }
 });

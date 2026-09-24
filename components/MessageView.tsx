@@ -2,7 +2,7 @@
 
 import { memo, useState, useRef, useEffect, useMemo, type ReactNode } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { AlertTriangle, Check, CheckCircle2, ChevronDown, ChevronUp, Copy, FilePlus, GitBranch, Terminal, XCircle } from "lucide-react";
+import { AlertTriangle, AtSign, Check, CheckCircle2, ChevronDown, ChevronUp, Copy, FilePlus, GitBranch, Terminal, XCircle } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
 import { BinaryMessageGallery, BinaryMessageView } from "./BinaryMessageView";
 import { MessageImage, resolveImageContent } from "./MessageImage";
@@ -239,6 +239,11 @@ interface Props {
   modelNames?: Record<string, string>;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
+  /**
+   * 把文件路径引用到输入框（@ 引用）。与 `onOpenFile`（打开文件）是两条不同的路：
+   * 用户想接着对某个文件说点什么时用这条。由上层接到输入框的插入入口。
+   */
+  onReferenceFile?: (filePath: string) => void;
   /** 本轮写入的文件（绝对路径，写入类工具的**成功**结果）；由调用方按轮聚合。 */
   writtenFiles?: string[];
   entryId?: string;
@@ -294,12 +299,12 @@ function sameWrittenFiles(prev?: string[], next?: string[]): boolean {
   return prev.length === next.length && prev.every((value, index) => value === next[index]);
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, toolExecutionSnapshots, modelNames, cwd, onOpenFile, writtenFiles, entryId, onBranchHere, onNewSessionFromHere, onBranchFromAssistant, onNewSessionFromAnswer, forking, showTimestamp, prevTimestamp, sessionId, toolsActive, contextUsage, onCompactContext }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, toolExecutionSnapshots, modelNames, cwd, onOpenFile, onReferenceFile, writtenFiles, entryId, onBranchHere, onNewSessionFromHere, onBranchFromAssistant, onNewSessionFromAnswer, forking, showTimestamp, prevTimestamp, sessionId, toolsActive, contextUsage, onCompactContext }: Props) {
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onBranchHere={onBranchHere} onNewSessionFromHere={onNewSessionFromHere} forking={forking} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} toolExecutionSnapshots={toolExecutionSnapshots} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} writtenFiles={writtenFiles} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} onBranchFromAssistant={onBranchFromAssistant} onNewSessionFromAnswer={onNewSessionFromAnswer} toolsActive={toolsActive} contextUsage={contextUsage} onCompactContext={onCompactContext} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} toolExecutionSnapshots={toolExecutionSnapshots} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onReferenceFile={onReferenceFile} writtenFiles={writtenFiles} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} onBranchFromAssistant={onBranchFromAssistant} onNewSessionFromAnswer={onNewSessionFromAnswer} toolsActive={toolsActive} contextUsage={contextUsage} onCompactContext={onCompactContext} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -341,6 +346,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.modelNames === next.modelNames
     && prev.cwd === next.cwd
     && prev.onOpenFile === next.onOpenFile
+    && prev.onReferenceFile === next.onReferenceFile
     && sameWrittenFiles(prev.writtenFiles, next.writtenFiles)
     && prev.entryId === next.entryId
     && prev.onBranchHere === next.onBranchHere
@@ -525,6 +531,7 @@ function AssistantMessageView({
   modelNames,
   cwd,
   onOpenFile,
+  onReferenceFile,
   writtenFiles,
   showTimestamp,
   prevTimestamp,
@@ -545,6 +552,7 @@ function AssistantMessageView({
   modelNames?: Record<string, string>;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
+  onReferenceFile?: (filePath: string) => void;
   writtenFiles?: string[];
   showTimestamp?: boolean;
   prevTimestamp?: number;
@@ -736,7 +744,7 @@ function AssistantMessageView({
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {blockItems.map(({ block, originalIndex }, blockOffset) => (
-          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block as AssistantContentBlock} toolResults={toolResults} toolExecutionMap={toolExecutionMap} isStreaming={isStreaming} activeStreamBlock={isActiveStreamBlock(isStreaming, blockOffset, blockItems.length)} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} toolsActive={toolsActive} startedAt={message.timestamp} />
+          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block as AssistantContentBlock} toolResults={toolResults} toolExecutionMap={toolExecutionMap} isStreaming={isStreaming} activeStreamBlock={isActiveStreamBlock(isStreaming, blockOffset, blockItems.length)} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} onReferenceFile={onReferenceFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} toolsActive={toolsActive} startedAt={message.timestamp} />
         ))}
       </div>
 
@@ -826,7 +834,7 @@ function AssistantMessageView({
       )}
 
       {/* 本轮写入的文件：只取写入类工具**成功**的结果，不扫回复正文 */}
-      <TurnWrittenFilesCard files={writtenFiles} isStreaming={isStreaming} onOpenFile={onOpenFile} />
+      <TurnWrittenFilesCard files={writtenFiles} isStreaming={isStreaming} onOpenFile={onOpenFile} onReferenceFile={onReferenceFile} />
 
       <div style={{
         display: "flex", alignItems: "center", gap: 8, marginTop: 4,
@@ -913,7 +921,7 @@ function AssistantMessageView({
   );
 }
 
-function BlockView({ block, toolResults, toolExecutionMap, isStreaming, activeStreamBlock, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex, toolsActive, startedAt }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; toolExecutionMap?: Map<string, ToolExecutionSnapshot>; isStreaming?: boolean; activeStreamBlock?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; toolsActive?: boolean; startedAt?: number }) {
+function BlockView({ block, toolResults, toolExecutionMap, isStreaming, activeStreamBlock, streamingDuration, toolCallDurations, cwd, onOpenFile, onReferenceFile, sessionId, entryId, blockIndex, toolsActive, startedAt }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; toolExecutionMap?: Map<string, ToolExecutionSnapshot>; isStreaming?: boolean; activeStreamBlock?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; onReferenceFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; toolsActive?: boolean; startedAt?: number }) {
   if (block.type === "text") {
     return <TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} />;
   }
@@ -944,6 +952,7 @@ function BlockView({ block, toolResults, toolExecutionMap, isStreaming, activeSt
         snapshot={toolExecutionMap?.get(tc.toolCallId)}
         duration={duration}
         sessionId={sessionId}
+        onReferenceFile={onReferenceFile}
         // agent 运行中且该工具无 result（刷新后快照丢失）：推断执行中（运行色 + 实时时长）。
         // startedAt = assistant 消息时间戳（工具开始近似）；快照仍是内存态权威。
         pending={!result && toolsActive === true}
@@ -1203,12 +1212,13 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
 }
 
 
-function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, startedAt, defaultExpanded }: {
+function ToolCallBlock({ block, result, snapshot, duration, sessionId, onReferenceFile, pending, startedAt, defaultExpanded }: {
   block: ToolCallContent;
   result?: ToolResultMessage;
   snapshot?: ToolExecutionSnapshot;
   duration?: number;
   sessionId?: string;
+  onReferenceFile?: (filePath: string) => void;
   /** 已知执行中但无快照（如刷新后恢复的 bash 气泡）；无快照时以此推导运行色。 */
   pending?: boolean;
   /** 无快照时的执行开始时间（如 pendingBash 服务端快照）；pending 时实时计时。 */
@@ -1489,13 +1499,18 @@ maxHeight: streamBlockMaxHeight,
             >
               <span>{t("message_modifiedFiles")}</span>
               {applyPatchApplied.map((filePath) => (
-                <code
+                <span
                   key={filePath}
-                  title={filePath}
-                  style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text)", overflowWrap: "anywhere" }}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 2, minWidth: 0 }}
                 >
-                  {filePath}
-                </code>
+                  <code
+                    title={filePath}
+                    style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text)", overflowWrap: "anywhere" }}
+                  >
+                    {filePath}
+                  </code>
+                  {onReferenceFile ? <ReferenceFileButton filePath={filePath} onReferenceFile={onReferenceFile} /> : null}
+                </span>
               ))}
             </div>
           )}
@@ -2146,10 +2161,37 @@ function FileContextMetadata({ readFiles, modifiedFiles }: { readFiles: string[]
  * 所以列表还在增长时它显示最新写入的那个文件，停止后固定显示第一个。标题行与折叠
  * 按钮复用通用表头 `BlockHeaderRow`，不为这个块另写一套交互。
  */
-function TurnWrittenFilesCard({ files, isStreaming, onOpenFile }: {
+/**
+ * 「引用到输入框」按钮：把路径以 @ 引用插进输入框。
+ *
+ * 与「打开文件」是两个不同的动作（想接着对某个文件说点什么 vs 想看它），所以各占一个按钮。
+ * 入口只有一条（上层接到输入框的 insertText），这里只负责发起，不自己拼文本。
+ *
+ * 样式复用文件浏览器里那个同动作按钮（`.file-row-action-btn`）：24×24、透明的 hover 底、
+ * 可见的 focus-visible 焦点环——同一个动作不该在两处长成两样，也不该再手写一套内联样式。
+ */
+function ReferenceFileButton({ filePath, onReferenceFile }: { filePath: string; onReferenceFile: (filePath: string) => void }) {
+  const { t } = useI18n();
+  const label = t("files_insertIntoChat", { name: getFileName(filePath) });
+  return (
+    <button
+      type="button"
+      className="file-row-action-btn message-file-action-btn"
+      title={label}
+      aria-label={label}
+      onClick={() => onReferenceFile(filePath)}
+      style={{ color: "var(--accent)", flexShrink: 0 }}
+    >
+      <AtSign size={12} strokeWidth={2} aria-hidden="true" />
+    </button>
+  );
+}
+
+function TurnWrittenFilesCard({ files, isStreaming, onOpenFile, onReferenceFile }: {
   files?: string[];
   isStreaming?: boolean;
   onOpenFile?: (filePath: string) => void;
+  onReferenceFile?: (filePath: string) => void;
 }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
@@ -2187,31 +2229,38 @@ function TurnWrittenFilesCard({ files, isStreaming, onOpenFile }: {
           {files.map((filePath) => {
             const name = getFileName(filePath);
             return (
-              /* 长路径保留完整文件名（title 给全路径），截断只发生在视觉层 */
-              <button
-                key={filePath}
-                type="button"
-                title={filePath}
-                aria-label={t("message_openWrittenFile", { name })}
-                onClick={() => onOpenFile?.(filePath)}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 4,
-                  maxWidth: "100%",
-                  padding: "2px 8px",
-                  borderRadius: 6,
-                  border: "1px solid var(--border)",
-                  background: "var(--bg)",
-                  color: "var(--text)",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 11.5,
-                  cursor: onOpenFile ? "pointer" : "default",
-                }}
-              >
-                <FilePlus size={12} strokeWidth={1.8} />
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
-              </button>
+              /* 长路径保留完整文件名（title 给全路径），截断只发生在视觉层。
+                 minWidth:0 让「打开」芯片可以真的收缩：卡片是 overflow:hidden，
+                 不给收缩下限时长文件名会把右侧的「引用」按钮挤出可视区（窄屏点不到）。 */
+              <span key={filePath} style={{ display: "inline-flex", alignItems: "center", gap: 2, maxWidth: "100%", minWidth: 0 }}>
+                <button
+                  type="button"
+                  className="message-file-open-btn"
+                  title={filePath}
+                  aria-label={t("message_openWrittenFile", { name })}
+                  onClick={() => onOpenFile?.(filePath)}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
+                    flex: "1 1 auto",
+                    minWidth: 0,
+                    maxWidth: "100%",
+                    padding: "2px 8px",
+                    borderRadius: 6,
+                    border: "1px solid var(--border)",
+                    background: "var(--bg)",
+                    color: "var(--text)",
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 11.5,
+                    cursor: onOpenFile ? "pointer" : "default",
+                  }}
+                >
+                  <FilePlus size={12} strokeWidth={1.8} />
+                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
+                </button>
+                {onReferenceFile ? <ReferenceFileButton filePath={filePath} onReferenceFile={onReferenceFile} /> : null}
+              </span>
             );
           })}
         </div>
