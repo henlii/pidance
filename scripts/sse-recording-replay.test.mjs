@@ -156,8 +156,14 @@ function buildInitScript(sessionId) {
   const normalize = (value) => value.replace(/\s+/g, "");
   const FINAL = normalize(FINAL_MARKER);
   const STREAM = normalize(STREAM_MARKER);
-  const chatText = () => normalize(document.querySelector('[data-pidance-chat="true"]')?.innerText ?? "");
   const scroller = () => document.querySelector('[data-pidance-chat="true"]')?.querySelector('[data-chat-scroller="true"]') ?? null;
+  // D2 比的是**消息时间线**投影，必须把底栏排除掉：底栏里的扩展状态（mcp / pi-cache-stats 之类）
+  // 是服务端实时状态，本用例又把 EventSource 换成了回放，页面只能靠打开时水合拿到它 ——
+  // 于是「桌面页开得早、水合时状态还没注册」会表现成一个与时间线无关的假阳性差异。
+  const chatText = () => {
+    const el = scroller() ?? document.querySelector('[data-pidance-chat="true"]');
+    return normalize(el?.innerText ?? "");
+  };
   const tick = () => {
     const text = chatText();
     if (probe.streamSeen === null && STREAM && text.includes(STREAM)) probe.streamSeen = performance.now();
@@ -240,7 +246,11 @@ function chatSnapshotScript() {
       messageCount: Number(chat?.getAttribute('data-chat-message-count') ?? -1),
       entryCount: Number(chat?.getAttribute('data-chat-entry-count') ?? -1),
       entryIds: chat?.getAttribute('data-chat-entry-ids') ?? null,
-      text: (chat?.innerText ?? '').replace(/\\s+/g, ' ').trim(),
+      // D2 比的是**消息时间线**投影：取滚动容器而不是整个聊天列，把底栏排除掉。
+      // 底栏里的扩展状态（mcp / pi-cache-stats 之类）是服务端实时状态，而本用例把
+      // EventSource 换成了回放，页面只能靠打开时水合拿到它 —— 桌面页开得早、水合时
+      // 状态还没注册，就会表现成一个与时间线无关的假阳性差异。
+      text: ((chat?.querySelector('[data-chat-scroller="true"]') ?? chat)?.innerText ?? '').replace(/\\s+/g, ' ').trim(),
       probe: (() => {
         const dispatched = window.__sseReplay?.dispatched ?? [];
         const updates = dispatched.filter((item) => item.type === 'message_update');
