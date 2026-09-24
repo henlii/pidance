@@ -2842,6 +2842,14 @@ export class SdkSessionHost {
         return this.extensionUi?.dispatchTerminalInput(data) ?? { consumed: false };
       }
 
+      case "editor_focus": {
+        // 客户端输入框的焦点状态。插件读 `tui.focusedComponent` 判断「主编辑器有没有
+        // 焦点」（pi-subagents 的 fleet widget 靠它决定方向键能不能进选择态），
+        // 这个探针只有真的有焦点时才给。
+        const focused = command.focused === true;
+        return { focused, changed: this.extensionUi?.setEditorFocus(focused) ?? false };
+      }
+
       case "extension_ui_mouse": {
         // 面板内的鼠标事件（当前用于 pi-subagents 的 widget：点标题行折叠）
         const id = asString(command.id);

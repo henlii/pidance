@@ -593,6 +593,16 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? (effectiveNewSessionCwd ? `new:${effectiveNewSessionCwd}` : undefined)}
       cwd={session?.cwd ?? effectiveNewSessionCwd}
+      sessionId={sessionIdRef.current}
+      // 插件 widget 的按键窄口子：没有 custom 面板（有面板时按键归面板的 keytrap，
+      // 收起那条路径由 useExtensionTerminalInput 负责）、该会话存在 widget、
+      // 且有插件注册了全局按键监听。只读会话不参与。
+      extensionWidgetKeysEnabled={
+        !isReadOnly
+        && !extensionCustomUi
+        && extensionWidgets.length > 0
+        && extensionTerminalInputListenerCount > 0
+      }
       blocked={Boolean(extensionDialog)}
     />
       )}

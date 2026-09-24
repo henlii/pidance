@@ -108,6 +108,13 @@ export type WebExtensionUIAdapter = {
    * 逐个调用，`consume` 结束传播，`data` 改写后续输入；改写成空串则丢弃）。
    */
   dispatchTerminalInput: (data: string) => { consumed: boolean; data?: string };
+  /**
+   * 客户端上报主编辑器（Web 输入框）的焦点。返回是否发生了变化。
+   *
+   * 注入后插件读到的 `tui.focusedComponent` 才有值（鸭子类型探针）；
+   * 不注入就永远 undefined，插件的「编辑器有焦点」分支永远不成立。
+   */
+  setEditorFocus: (focused: boolean) => boolean;
   dispose: () => void;
 };
 
@@ -214,6 +221,27 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
   };
 
   /**
+   * 主编辑器焦点状态（客户端在聚焦/失焦/切后台时上报）。
+   *
+   * TTL 是为了「标签页被直接关掉」：没有心跳时焦点必须自己过期，否则插件会
+   * 永远以为编辑器有焦点。客户端在路由按键之前会重新上报一次，所以正常使用
+   * 中不会出现「一直聚焦却过期」。
+   */
+  const EDITOR_FOCUS_TTL_MS = 60_000;
+  let editorFocusedUntil = 0;
+  const isEditorFocused = () => Date.now() < editorFocusedUntil;
+
+  const setEditorFocus = (focused: boolean): boolean => {
+    const wasFocused = isEditorFocused();
+    editorFocusedUntil = focused ? Date.now() + EDITOR_FOCUS_TTL_MS : 0;
+    if (wasFocused === focused) return false;
+    // 焦点会改变插件组件的形态：让挂了工厂的 widget 与 custom 面板重渲一帧。
+    for (const entry of [...widgetFactories.values()]) entry.requestRender();
+    for (const render of [...customRenderers]) render();
+    return true;
+  };
+
+  /**
    * 插件调用了 Web 端没有等价语义的 UI 能力。
    *
    * 不能静默 no-op：插件作者会以为生效了（例如 setEditorComponent 之后
@@ -313,6 +341,7 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       },
       () => renderWidth,
       DEFAULT_CUSTOM_UI_ROWS,
+      { isEditorFocused },
     );
     entry.requestRender = tui.requestRender;
 
@@ -595,7 +624,7 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
         customSessions.set(id, { handleInput, handleMouse, done });
         const tui = createHeadlessCustomUiTui(() => {
           emitLines();
-        }, () => renderWidth, rows);
+        }, () => renderWidth, rows, { isEditorFocused });
         customRenderers.add(emitLines);
         const theme = loadPiTheme() ?? uiContext.theme;
         // onHandle 在组件建好之后调，对齐 pi-tui 的顺序（先 showOverlay，再给句柄）
@@ -774,7 +803,9 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       if (current.length === 0) return { consumed: true, data: current };
       return { consumed: false, data: current };
     },
+    setEditorFocus,
     dispose() {
+      editorFocusedUntil = 0;
       for (const [id, entry] of pending) {
         pending.delete(id);
         pendingSnapshot.delete(id);
