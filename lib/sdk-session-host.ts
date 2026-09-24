@@ -179,6 +179,31 @@ function asToolCallId(value: unknown): string | null {
 }
 
 /**
+ * 斜杠命令参数候选的规范化（issue #75）。
+ *
+ * 插件（AutocompleteItem[]）的形状是 `{ value, label, description? }`，但插件写壤时不能
+ * 把非法值传给前端：没有可用 value 的条目一律丢弃（value 是要替进输入框的文本）。
+ */
+function normalizeArgumentCompletions(value: unknown): Array<{ value: string; label: string; description?: string }> {
+  if (!Array.isArray(value)) return [];
+  const items: Array<{ value: string; label: string; description?: string }> = [];
+  for (const raw of value) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const record = raw as { value?: unknown; label?: unknown; description?: unknown };
+    if (typeof record.value !== "string" || record.value === "") continue;
+    const label = typeof record.label === "string" && record.label !== "" ? record.label : record.value;
+    items.push({
+      value: record.value,
+      label,
+      ...(typeof record.description === "string" && record.description !== ""
+        ? { description: record.description }
+        : {}),
+    });
+  }
+  return items;
+}
+
+/**
  * 命令仍在进行、无法安全交出 writer 时的失败消息。
  * SessionService 把它映射为 409：宁可让离线写 fail closed，也不并发写同一个 JSONL。
  */
@@ -1885,7 +1910,39 @@ export class SdkSessionHost {
       // （同一帧既要带上下文占用、也要带吞吐读数）。
       if (usage) eventToEmit = { ...eventToEmit, contextUsage: usage };
     }
+    // 工具定义的显示元数据（label / renderShell，issue #75）：不依赖主题，
+    // 因此放在渲染桥之前 —— 主题加载失败时仍然应该带上人类可读名与外壳声明。
+    eventToEmit = this.withToolDisplayMeta(eventToEmit);
     this.emit(this.withRenderedToolLines(eventToEmit));
+  }
+
+  /**
+   * 给 `tool_execution_start` 附上工具定义的显示元数据（issue #75）。
+   *
+   * 只读投影：读不到定义 / 没有展示字段就原样返回，客户端回退到工具名格式化。
+   * 只在 start 上附：一个工具调用的 label 与壳声明在一次调用内不会变。
+   */
+  private withToolDisplayMeta(event: SdkAgentEvent): SdkAgentEvent {
+    if (event.type !== "tool_execution_start") return event;
+    try {
+      const definition = this.getToolRenderDefinition(event.toolName) as
+        | { label?: unknown; renderShell?: unknown }
+        | undefined;
+      if (!definition) return event;
+      const label = typeof definition.label === "string" && definition.label.trim() !== ""
+        ? definition.label.trim()
+        : undefined;
+      const shell = definition.renderShell === "self" ? ("self" as const) : undefined;
+      if (label === undefined && shell === undefined) return event;
+      return {
+        ...event,
+        ...(label !== undefined ? { toolLabel: label } : {}),
+        ...(shell !== undefined ? { toolShell: shell } : {}),
+      };
+    } catch {
+      // 显示元数据缺失不能影响事件流
+      return event;
+    }
   }
 
   /**
@@ -2926,6 +2983,25 @@ export class SdkSessionHost {
         return null;
       }
 
+      case "get_command_argument_completions": {
+        // 斜杠命令的参数补全（issue #75）：与 TUI 同一语义 ——
+        // prefix 是**命令名之后的整段文本**（含空串），插件返回的 value 是要替换进去的完整参数文本。
+        const name = typeof command.name === "string" ? command.name : "";
+        const prefix = typeof command.prefix === "string" ? command.prefix : "";
+        if (!name) return { items: [] };
+        const registered = session.extensionRunner.getRegisteredCommands()
+          .find((cmd) => cmd.invocationName === name) as { getArgumentCompletions?: unknown } | undefined;
+        const resolve = registered?.getArgumentCompletions;
+        if (typeof resolve !== "function") return { items: [] };
+        try {
+          const result = await (resolve as (p: string) => unknown).call(registered, prefix);
+          return { items: normalizeArgumentCompletions(result) };
+        } catch {
+          // 插件补全抛错不能影响输入：当作没有候选
+          return { items: [] };
+        }
+      }
+
       case "get_commands": {
         const commands: Array<Record<string, unknown>> = [];
         for (const cmd of session.extensionRunner.getRegisteredCommands()) {
@@ -2934,6 +3010,11 @@ export class SdkSessionHost {
             description: cmd.description,
             source: "extension",
             sourceInfo: cmd.sourceInfo,
+            // 参数补全（`/cmd <prefix>`）：客户端据此决定要不要问下一级补全（issue #75）。
+            // 只标能力，不在这一帧里跑插件代码——补全按输入前缀单独请求。
+            ...(typeof (cmd as { getArgumentCompletions?: unknown }).getArgumentCompletions === "function"
+              ? { hasArgumentCompletions: true }
+              : {}),
           });
         }
         for (const template of session.promptTemplates) {

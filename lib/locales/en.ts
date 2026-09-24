@@ -309,6 +309,8 @@ export const en = {
   input_slashCommands: 'Slash commands',
   input_loadingCommands: 'Loading commands…',
   input_tabEnter: 'Tab / Enter',
+  input_commandArgs: 'Command arguments · {name}',
+  input_commandArgsLoading: 'Loading command arguments…',
   input_noCommands: 'No commands found',
   // message
   message_copy: 'Copy message',

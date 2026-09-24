@@ -8,7 +8,7 @@ import {
   resolve as resolvePath,
   sep,
 } from "path";
-import type { AgentMessage, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
+import type { AgentMessage, SessionEntry, SessionHeader, SessionInfo, SessionContext, ToolDisplayMeta } from "./types";
 import { PIDANCE_COMMAND_CUSTOM_TYPE, parseCommandEntryData } from "./session-command-entry";
 import {
   scanSessionFiles,
@@ -989,6 +989,15 @@ function getSessionContextSettingsLocal(path: SessionEntry[]): {
  */
 export type EntryLinesResolver = (entry: unknown) => string[] | null;
 
+/**
+ * 工具定义的显示元数据解析器（由调用方注入，issue #75）。
+ *
+ * 拿到工具名 → `{ label?, renderShell? }`；null 表示没有元数据（客户端走既有回退）。
+ * 与 entryLines 同理：注入而不是在 reader 里加载扩展，reader 保持纯同步、可单测，
+ * 扩展加载与缓存由服务层负责（见 lib/tool-display-meta.ts）。
+ */
+export type ToolMetaResolver = (toolName: string) => ToolDisplayMeta | null;
+
 /** 会话投影选项（纯同步：不加载扩展、不做 IO）。 */
 export interface SessionReaderProjectionOptions {
   deferThinking?: boolean;
@@ -998,6 +1007,11 @@ export interface SessionReaderProjectionOptions {
    * 缺省时未知 customType 的 entry 不投影（与历史行为一致）。
    */
   entryLines?: EntryLinesResolver;
+  /**
+   * 工具定义的显示元数据（`label` / `renderShell`）。
+   * 缺省时不附字段，客户端按工具名回退。
+   */
+  toolMeta?: ToolMetaResolver;
 }
 
 /** Pidance 自有 customType：有本地投影，不交给插件渲染器。 */
@@ -1142,6 +1156,50 @@ export function buildSessionContext(
   };
 }
 
+/**
+ * 给投影出来的工具调用块附上工具定义的显示元数据（issue #75）。
+ *
+ * 只读投影：解析器拿不到元数据（没有插件 / 加载失败 / 该工具没声明）时原样返回，
+ * 客户端回退到工具名格式化——绝不因为缺元数据而丢块。
+ * 注入方式与 entryLines 一致（reader 不加载扩展）。
+ */
+function withToolDisplayMeta(message: AgentMessage, options: SessionReaderProjectionOptions): AgentMessage {
+  const resolve = options.toolMeta;
+  if (!resolve || message.role !== "assistant") return message;
+  const content = (message as { content?: unknown }).content;
+  if (!Array.isArray(content)) return message;
+  let changed = false;
+  const next = content.map((block) => {
+    if (!isRecord(block) || block.type !== "toolCall") return block;
+    const toolName = typeof block.toolName === "string"
+      ? block.toolName
+      : (typeof block.name === "string" ? block.name : "");
+    if (!toolName) return block;
+    let meta: ToolDisplayMeta | null = null;
+    try {
+      meta = resolve(toolName);
+    } catch {
+      meta = null;
+    }
+    if (!meta) return block;
+    // 只接受声明的形状：label 是非空字符串，renderShell 仅认 "self"。
+    // 注入方写壤了也不能往投影里写非法值（客户端只认 "self"，其它值一旦漏进去就是无声撒谎）。
+    const label = typeof meta.label === "string" && meta.label.trim() !== "" ? meta.label : undefined;
+    const shell = meta.renderShell === "self" ? ("self" as const) : undefined;
+    if (label === undefined && shell === undefined) return block;
+    if ((label === undefined || label === block.toolLabel) && (shell === undefined || shell === block.toolShell)) {
+      return block;
+    }
+    changed = true;
+    return {
+      ...block,
+      ...(label !== undefined ? { toolLabel: label } : {}),
+      ...(shell !== undefined ? { toolShell: shell } : {}),
+    };
+  });
+  return changed ? ({ ...message, content: next } as AgentMessage) : message;
+}
+
 function parseEntryTimestamp(timestamp: string): number | undefined {
   const parsed = Date.parse(timestamp);
   return Number.isNaN(parsed) ? undefined : parsed;
@@ -1263,6 +1321,8 @@ function entryToUiMessage(
         message = omitToolResultBase64Images(message);
         message = omitHeavyToolResultDetails(message);
       }
+      // 工具定义的显示元数据（label / renderShell）：只影响展示，不参与执行语义。
+      message = withToolDisplayMeta(message, options);
       if (!options.deferThinking || message.role !== "assistant") return message;
       return {
         ...message,

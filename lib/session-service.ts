@@ -23,6 +23,7 @@ import { getThinkingText, isThinkingLikeType } from "./thinking-content";
 import { clearLeafSidecar, writeLeafSidecar } from "./session-leaf-sidecar";
 import { invalidateSessionReadCache } from "./session-read-manager-cache";
 import { resolveEntryLinesProvider } from "./extension-entry-renderers";
+import { resolveToolMetaProvider } from "./tool-display-meta";
 import {
   getRpcSession,
   waitForSessionStart,
@@ -38,6 +39,7 @@ import {
 import {
   buildSessionContext,
   type EntryLinesResolver,
+  type ToolMetaResolver,
   isPidanceOwnCustomType,
   buildSessionPathLocal,
   resolveNavigationLeafId,
@@ -243,6 +245,14 @@ export type SessionServiceDeps = {
     cwd: string;
     agentDir?: string;
   }) => Promise<EntryLinesResolver | null>;
+  /**
+   * 工具定义显示元数据的解析（issue #75）。
+   * 缺省走扩展加载（可缓存）；测试注入以避免加载真实扩展。
+   */
+  resolveToolMetaProvider?: (options: {
+    cwd: string;
+    agentDir?: string;
+  }) => Promise<ToolMetaResolver | null>;
 };
 
 const defaultDeps: SessionServiceDeps = {
@@ -450,6 +460,44 @@ function needsForeignEntryRenderers(
       && typeof e.customType === "string"
       && e.customType !== ""
       && !isPidanceOwnCustomType(e.customType);
+  });
+}
+
+/**
+ * 解析工具定义的显示元数据（issue #75）。
+ *
+ * cwd 取会话头（插件按项目加载），agentDir 与归档/插件面板同一口径。
+ * 任何失败返回 null：调用方按「没有元数据」处理，客户端回退到工具名格式化。
+ */
+async function resolveToolMeta(
+  filePath: string,
+  deps: Pick<SessionServiceDeps, "archiveAgentDir" | "resolveToolMetaProvider">,
+): Promise<ToolMetaResolver | null> {
+  const cwd = readSessionHeader(filePath)?.cwd;
+  if (!cwd) return null;
+  const resolveProvider = deps.resolveToolMetaProvider ?? resolveToolMetaProvider;
+  try {
+    return await resolveProvider({
+      cwd,
+      agentDir: deps.archiveAgentDir?.() ?? getAgentDir(),
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** 会话里是否存在工具调用（有才去加载扩展解析 label/renderShell）。 */
+function needsToolDisplayMeta(
+  entries: Parameters<typeof buildSessionContext>[0],
+): boolean {
+  return entries.some((entry) => {
+    const e = entry as { type?: unknown; message?: { role?: unknown; content?: unknown } };
+    if (e.type !== "message" || e.message?.role !== "assistant") return false;
+    const content = e.message.content;
+    return Array.isArray(content) && content.some((block) => {
+      const b = block as { type?: unknown };
+      return typeof b === "object" && b !== null && b.type === "toolCall";
+    });
   });
 }
 
@@ -1004,9 +1052,14 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       const navEntryLines = needsForeignEntryRenderers(navEntries)
         ? await resolveForeignEntryLines(navEntries, filePath, deps)
         : null;
+      // 工具显示元数据与 getContextPage 同一口径（首屏也走这条路径）。
+      const navToolMeta = needsToolDisplayMeta(navEntries)
+        ? await resolveToolMeta(filePath, deps)
+        : null;
       const { leafId, tree, context, header, sessionName } = buildSessionNavigationSnapshot(sm, {
         ...options,
         ...(navEntryLines ? { entryLines: navEntryLines } : {}),
+        ...(navToolMeta ? { toolMeta: navToolMeta } : {}),
       });
       const parentSessionId = header?.parentSession
         ? await resolveSessionIdByPath(header.parentSession)
@@ -1066,6 +1119,11 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       const entryLines = needsForeignEntryRenderers(entries)
         ? await resolveForeignEntryLines(entries, view.filePath, deps)
         : null;
+      // 工具定义的显示元数据（issue #75）：只影响展示（标题与外壳），不参与执行语义。
+      // 与 entry 渲染器同一口径：仅当 entries 里真有工具调用、且该会话有插件时才有元数据。
+      const toolMeta = needsToolDisplayMeta(entries)
+        ? await resolveToolMeta(view.filePath, deps)
+        : null;
       // 客户端把首屏拿到的**导航 leaf**（可能已从 label/usage/context_edit 尾上溯）回传分页；
       // 投影要按原始 leaf 走，否则停在链尾的 context_edit 不在路径上，「省略 / 替换」在分页里失效。
       const projectionLeafId = resolveContextProjectionLeafId(
@@ -1077,6 +1135,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         deferThinking: options.deferThinking,
         deferToolResultImages: options.deferToolResultImages,
         ...(entryLines ? { entryLines } : {}),
+        ...(toolMeta ? { toolMeta } : {}),
       });
       const limit = options.limit;
       let context;

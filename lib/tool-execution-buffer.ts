@@ -37,6 +37,10 @@ export interface ToolExecutionSnapshot {
   command?: string;
   /** 插件 renderCall 的 ANSI 行；仅在工具块展开时展示。 */
   renderedCallLines?: string[];
+  /** 工具定义的显示名（`ToolDefinition.label`，issue #75）；缺省时客户端按工具名回退。 */
+  toolLabel?: string;
+  /** 工具定义声明自带外壳（`renderShell: "self"`）：卡片不套边框/底色。 */
+  toolShell?: "self";
   /** 插件运行中 renderResult 的 ANSI 行；存在时优先于 output。 */
   renderedLines?: string[];
   /** 插件最终 renderResult 的 ANSI 行；存在时优先于结构化/文本结果。 */
@@ -62,6 +66,8 @@ export interface ToolExecutionStartInput {
   toolName?: unknown;
   args?: unknown;
   renderedCallLines?: unknown;
+  toolLabel?: unknown;
+  toolShell?: unknown;
 }
 
 /** update 事件宽松输入。 */
@@ -107,6 +113,11 @@ function optionalRenderedLines(value: unknown): string[] | undefined {
     return undefined;
   }
   return [...value];
+}
+
+/** `toolShell` 只认 "self"（工具自带外壳）；其它值一律当没声明。 */
+function optionalToolShell(value: unknown): "self" | undefined {
+  return value === "self" ? "self" : undefined;
 }
 
 /**
@@ -193,16 +204,25 @@ export function applyToolExecutionStart(state: ToolExecutionBufferState, event: 
   const toolName = optionalString(event.toolName) ?? existing?.toolName ?? "";
   const command = extractToolCommand(event.args) ?? existing?.command;
   const renderedCallLines = optionalRenderedLines(event.renderedCallLines) ?? existing?.renderedCallLines;
+  // 显示元数据只在 start 携带（服务端只在 start 投影）：重复 start 时用新值补上。
+  const toolLabel = optionalString(event.toolLabel) ?? existing?.toolLabel;
+  const toolShell = optionalToolShell(event.toolShell) ?? existing?.toolShell;
   if (existing?.status === "running") {
     // 重复 start 且仍运行中：不动 output/startedAt，只补齐缺失的展示字段。
-    if (toolName === existing.toolName && command === existing.command && renderedCallLines === existing.renderedCallLines) return state;
-    return new Map(state).set(id, { ...existing, toolName, command, renderedCallLines });
+    if (toolName === existing.toolName
+      && command === existing.command
+      && renderedCallLines === existing.renderedCallLines
+      && toolLabel === existing.toolLabel
+      && toolShell === existing.toolShell) return state;
+    return new Map(state).set(id, { ...existing, toolName, command, renderedCallLines, toolLabel, toolShell });
   }
   const snapshot: ToolExecutionSnapshot = {
     toolCallId: id,
     toolName,
     command,
     renderedCallLines,
+    toolLabel,
+    toolShell,
     output: "",
     startedAt: Date.now(),
     status: "running",

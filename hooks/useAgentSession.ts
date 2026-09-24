@@ -317,6 +317,9 @@ export interface SlashCommandInfo {
     origin: "package" | "top-level";
     baseDir?: string;
   };
+  /** 该命令是否提供参数补全（`/cmd <prefix>`，issue #75）：服务端只在插件注册了
+   *  `getArgumentCompletions` 时才置 true。 */
+  hasArgumentCompletions?: boolean;
 }
 
 export type BuiltinSlashCommandResult =
@@ -411,6 +414,13 @@ type ModelsResponse = {
 
 type SlashCommandsResponse = {
   commands?: SlashCommandInfo[];
+};
+
+/** 斜杠命令的参数候选（与 pi-tui 的 AutocompleteItem 同形）。 */
+export type CommandArgumentCompletion = {
+  value: string;
+  label: string;
+  description?: string;
 };
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
@@ -1494,6 +1504,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return [] as SlashCommandInfo[];
     } finally {
       setSlashCommandsLoading(false);
+    }
+  }, [isReadOnly, session?.id, sendAgentCommand]);
+
+  /**
+   * 斜杠命令的参数补全（issue #75）。
+   *
+   * 与 TUI 同一语义：`prefix` 是命令名之后的整段文本（含空串），插件返回的 `value`
+   * 是要替进输入框的完整参数文本。只读会话／没有会话时不请求（与服务端语义一致）。
+   * 任何失败都当作「没有候选」：补全不可用不能影响输入。
+   */
+  const loadCommandArgumentCompletions = useCallback(async (name: string, prefix: string) => {
+    const sid = sessionIdRef.current ?? session?.id ?? null;
+    if (!sid || isReadOnly || !name) return [] as CommandArgumentCompletion[];
+    try {
+      const data = await sendAgentCommand<{ items?: CommandArgumentCompletion[] }>(sid, {
+        type: "get_command_argument_completions",
+        name,
+        prefix,
+      });
+      return data?.items ?? [];
+    } catch {
+      return [] as CommandArgumentCompletion[];
     }
   }, [isReadOnly, session?.id, sendAgentCommand]);
 
@@ -3778,7 +3810,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleRecallQueue, handleSendQueueAsSteer,
     handleBuiltinSlashCommand,
     // REFACTOR-DEAD: handleToolPresetChange 已注释（P0c 工具不收窄）。
-    handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,
+    handleThinkingLevelChange, loadTools, loadSlashCommands, loadCommandArgumentCompletions, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
     // Workspace History（仅 type:prompt 派发到扩展）

@@ -1276,6 +1276,16 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, onReferen
   const renderedCallLines = getRenderableAnsiLines(snapshot?.renderedCallLines ?? block.renderedCallLines);
   const renderedLiveLines = getRenderableAnsiLines(snapshot?.renderedLines);
   const renderedResultLines = getRenderableAnsiLines(snapshot?.renderedResultLines ?? effectiveResult?.renderedResultLines);
+  /**
+   * 工具定义的显示元数据（issue #75）：`label` 是人类可读名，`renderShell` 决定要不要套壳。
+   * 活路径由 `tool_execution_start` 投影带来（快照优先），历史路径由会话读取投影写在块上。
+   * 都没有时回退到工具名格式化——不因为缺元数据而少显示任何东西。
+   */
+  const toolLabel = snapshot?.toolLabel ?? block.toolLabel;
+  const bareShell = (snapshot?.toolShell ?? block.toolShell) === "self";
+  const headerLabel = toolLabel && toolLabel.trim() !== ""
+    ? formatBlockLabel(toolLabel.trim())
+    : formatToolBlockLabel(block.toolName);
   const elapsedMs = snapshot
     ? Math.max(0, (snapshot.status === "running" ? now : (snapshot.endedAt ?? snapshot.startedAt)) - snapshot.startedAt)
     : startedAt !== undefined
@@ -1343,20 +1353,26 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, onReferen
 
   return (
     <div
-      style={{
-        borderRadius: "var(--radius-md)",
-        overflow: "hidden",
-        fontSize: 12,
-        border: "1px solid var(--border)",
-        borderLeft: `3px solid ${statusColor}`,
-        background: "var(--tool-bg)",
-      }}
+      style={bareShell
+        // 自带外壳（renderShell: "self"）：插件自己画框（例如 ask_advisor 的 ANSI 框线），
+        // 再套一层我们的边框与底色就会出现「框里套框」。TUI 的做法同类：这类工具不进
+        // 默认 Box，因此不继承宿主的底色与内边距。表头行保留 —— 折叠入口与耗时是我们
+        // 自己的交互面，去掉它会让自带外壳的工具无法折叠。
+        ? { fontSize: 12 }
+        : {
+            borderRadius: "var(--radius-md)",
+            overflow: "hidden",
+            fontSize: 12,
+            border: "1px solid var(--border)",
+            borderLeft: `3px solid ${statusColor}`,
+            background: "var(--tool-bg)",
+          }}
     >
       {/* 标签与内容同一行：折叠/运行中整块只有一行（不再有标题栏 + 预览行两层）。
           展开且存在命令分区时，标签并进该分区表头（展开后同样不出现标题行）。 */}
       {(!expanded || !command) && (
         <BlockHeaderRow
-          label={formatToolBlockLabel(block.toolName)}
+          label={headerLabel}
           expanded={expanded}
           onToggle={() => setExpanded(!expanded)}
           summary={!expanded ? collapsedSummary : null}
@@ -1369,7 +1385,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, onReferen
       {expanded && command && (
         <div style={{ background: "var(--bg-subtle)" }}>
           <BlockHeaderRow
-            label={formatToolBlockLabel(block.toolName)}
+            label={headerLabel}
             expanded={expanded}
             onToggle={() => setExpanded(!expanded)}
             summary={null}
@@ -1382,7 +1398,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, onReferen
       )}
 
       {expanded && renderedCallLines && (
-        <AnsiToolLines lines={renderedCallLines} statusColor={statusColor} />
+        <AnsiToolLines lines={renderedCallLines} statusColor={statusColor} bare={bareShell} />
       )}
 
       {expanded && !isEditTool && !isApplyPatchTool && (
@@ -1440,7 +1456,7 @@ maxHeight: streamBlockMaxHeight,
             </div>
           )}
           {renderedResultLines ? (
-            <AnsiToolLines lines={renderedResultLines} statusColor={statusColor} />
+            <AnsiToolLines lines={renderedResultLines} statusColor={statusColor} bare={bareShell} />
           ) : detailsLoading && isDeferredHeavyToolDetails(result?.details) && !resultDiff && !applyPatchFiles ? (
             <div style={{ padding: "8px 10px", borderTop: "1px solid var(--border)", color: "var(--text-dim)", fontSize: 11 }}>
               {t("message_thinkingLoading")}
@@ -1543,12 +1559,16 @@ function renderAnsiLines(lines: string[], keyPrefix: string): ReactNode[] {
 }
 
 /** 插件 TUI 行沿用工具卡片的边框、底色和等宽排版，不引入新视觉语义。 */
-function AnsiToolLines({ lines, statusColor }: { lines: string[]; statusColor: string }) {
+function AnsiToolLines({ lines, statusColor, bare = false }: { lines: string[]; statusColor: string; bare?: boolean }) {
   const maxHeight = useStreamBlockMaxHeight();
   return (
     <pre
       tabIndex={0}
-      style={{ margin: 0, padding: "8px 10px", maxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--bg-subtle)", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, whiteSpace: "pre" }}
+      style={bare
+        // 自带外壳的工具（`renderShell: "self"`）：TUI 里这类工具不进默认 Box，
+        // 也就不继承宿主的底色与边框（插件的行自己画框）。
+        ? { margin: 0, padding: "8px 10px", maxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, whiteSpace: "pre" }
+        : { margin: 0, padding: "8px 10px", maxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--bg-subtle)", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, whiteSpace: "pre" }}
     >
       {renderAnsiLines(lines, "tool-rendered")}
     </pre>

@@ -722,3 +722,43 @@ test("文件条目：引用到输入框与打开文件是两个动作，引用�
     assert.match(dict, /files_insertIntoChat:/, `${locale} 缺少 files_insertIntoChat`);
   }
 });
+
+test("工具定义 label 优先做标题，缺省时回退工具名格式化（issue #75）", () => {
+  const message = toolMessage("status");
+  message.content[0].toolName = "mcp";
+  message.content[0].toolLabel = "MCP";
+
+  const withLabel = renderMessage(message);
+  assert.ok(withLabel.includes("MCP·"), "有 label 时标题用 label");
+  assert.ok(!withLabel.includes("Mcp·"), "有 label 时不再显示工具名格式化结果");
+
+  const withoutLabel = renderMessage(toolMessage("status"));
+  assert.ok(withoutLabel.includes("Bash·"), "没有 label 时回退到工具名格式化");
+});
+
+test("renderShell: \"self\" 的工具不套卡片外壳，但仍保留标题与折叠入口（issue #75）", () => {
+  const message = toolMessage("status");
+  message.content[0].toolName = "ask_advisor";
+  message.content[0].toolLabel = "Ask Advisor";
+  message.content[0].toolShell = "self";
+  const html = renderMessage(message);
+  assert.ok(html.includes("Ask Advisor·"), "自带外壳的工具仍要有标题（折叠入口与耗时不能丢）");
+  assert.ok(!html.includes("border-radius:var(--radius-md)"), "自带外壳的工具不再套我们的圆角卡片");
+  assert.ok(!html.includes("1px solid var(--border)"), "自带外壳的工具不再套我们的边框");
+  assert.ok(!html.includes("background:var(--tool-bg)"), "自带外壳的工具不再套我们的底色");
+
+  // 对照：默认外壳的工具仍有卡片样式
+  const normal = renderMessage(toolMessage("status"));
+  assert.ok(normal.includes("border-radius:var(--radius-md)"), "默认工具仍套卡片外壳");
+});
+
+test("源码契约：自带外壳时调用/结果 ANSI 槽一并去掉宿主底色与分隔线（issue #75）", () => {
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  const barePropUses = source.match(/bare=\{bareShell\}/g) ?? [];
+  assert.equal(barePropUses.length, 2, "调用槽与结果槽都要跟随外壳声明");
+  // 源码是 CRLF，断言按单行片段写，避免行尾差异把契约测试变成环境测试
+  assert.ok(source.includes("style={bareShell"), "外层样式必须由外壳声明驱动");
+  assert.ok(source.includes('renderShell: \"self\"'), "注释里要写明这与 TUI 的 renderShell: self 同源");
+  // 表头标题统一走 headerLabel（label 优先、回退工具名）
+  assert.equal(source.includes("label={formatToolBlockLabel(block.toolName)}"), false, "工具卡标题不能再直接用工具名");
+});
