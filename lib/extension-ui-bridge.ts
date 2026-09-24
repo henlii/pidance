@@ -79,6 +79,36 @@ export function pickBlockingExtensionRequests(events: unknown): ExtensionUiBlock
 }
 
 /**
+ * 从 host 状态里挑出**宿主自己的能力提示**（"Web 端不支持/只部分支持某能力"）。
+ *
+ * 与 pickBlockingExtensionRequests 同一个理由：这些提示走一次性 SSE 事件，而 host
+ * 启动、扩展加载、注册监听器都发生在浏览器订阅之前 —— 那一刻没有订阅者，事件直接
+ * 丢掉，这条"可见降级"提示在实践中用户永远看不到（实测：服务端日志 5 次、页面 DOM 0 次）。
+ * 所以状态快照里带上它，凡是拿到状态的路径（热状态、切会话、reconcile、切回前台）
+ * 都补一遍；按 id 去重由通知队列负责（同 id 到两次只显示一条）。
+ *
+ * 只挑宿主的能力提示：插件自己调的 `notify` 不在这个数组里（它是一次性通知，
+ * 重放会让插件每次开页面都重弹）。
+ */
+export function pickCapabilityNotices(
+  notices: unknown,
+): { id: string; message: string; notifyType: "warning" }[] {
+  if (!Array.isArray(notices)) return [];
+  const out: { id: string; message: string; notifyType: "warning" }[] = [];
+  for (const item of notices) {
+    const candidate = item as { id?: unknown; message?: unknown; notifyType?: unknown } | null;
+    if (!candidate || typeof candidate !== "object") continue;
+    if (typeof candidate.id !== "string" || !candidate.id) continue;
+    if (typeof candidate.message !== "string" || !candidate.message.trim()) continue;
+    // 适配器目前只发 warning 一种能力提示；不认识的级别一律丢掉（宁可少显示，
+    // 也不要把插件私有 payload 当成宿主提示重放出去）。
+    if (candidate.notifyType !== "warning") continue;
+    out.push({ id: candidate.id, message: candidate.message, notifyType: "warning" });
+  }
+  return out;
+}
+
+/**
  * 从 host 状态恢复活动 custom 面板（Issue #34）。
  *
  * custom 面板只有 SSE 事件、没有重放，刷新或切回后服务端仍在等输入但浏览器端

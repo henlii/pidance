@@ -41,6 +41,7 @@ import {
   resetExtensionUiForSession,
   clearExtensionUiRequest,
   pickBlockingExtensionRequests,
+  pickCapabilityNotices,
   projectBlockingHead,
   restoreCustomUi,
 } from "@/lib/extension-ui-bridge";
@@ -201,6 +202,8 @@ interface LastAssistantTextResponse {
 }
 
 type AgentStateResponse = {
+  /** host 热投影自带的会话 id：水合时把按会话归属的东西（通知）放进正确的队列。 */
+  sessionId?: string;
   contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null;
   systemPrompt?: string;
   thinkingLevel?: string;
@@ -236,6 +239,13 @@ type AgentStateResponse = {
    * custom 只有 SSE 事件、没有重放，刷新/切回后靠它恢复面板内容与输入入口。
    */
   activeCustomUi?: { id?: string; lines?: string[]; layout?: ExtensionUiCustomLayout } | null;
+  /**
+   * 宿主自己发出的能力提示快照（"Web 端不支持/只部分支持某能力"）。
+   * 它们只有一次性 SSE 事件，而 host 启动、扩展加载都发生在浏览器订阅之前，
+   * 那一刻没有订阅者就永久丢掉 —— 刷新/冷挂载靠这份快照把它补回来。
+   * 只含宿主的能力提示，不含插件自己调的 notify。
+   */
+  extensionCapabilityNotices?: { id?: string; message?: string; notifyType?: string }[];
   /** host 侧本 run 的吞吐读数（冷挂载/刷新时 seed；本地采样后失效）。 */
   turnMetrics?: { tokensPerSecond?: number; ttftMs?: number } | null;
 };
@@ -636,6 +646,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * 所以凡是从服务端拿到状态的地方（热状态、切会话、reconcile、切回前台）
    * 都用这一份投影补齐；空闲（队列为空）时不清本地队列，避免竞态抹掉刚到的请求。
    */
+  /**
+   * 应用状态里的能力提示（"Web 端不支持/只部分支持某能力"）。
+   *
+   * host 启动、扩展加载、注册监听器都发生在浏览器订阅之前，那条一次性 SSE 提示
+   * 直接丢掉，后加载/刷新的页面永远看不到（实测：服务端日志 5 次、页面 DOM 0 次）。
+   * 与 statuses/widgets/阻塞队列同一条路子：拿到状态就补一遍，按 id 去重由
+   * 通知队列负责（同一条在订阅前后各到一次时只显示一条）。
+   */
+  const applyCapabilityNotices = useCallback((state?: AgentStateResponse | null) => {
+    if (!state) return;
+    for (const notice of pickCapabilityNotices(state.extensionCapabilityNotices)) {
+      // 显式带上状态自己的会话 id：水合期间"当前会话"可能还滞后一个渲染，
+      // 省略就会把通知放进上一个会话的队列（那条提示于是永远不显示）。
+      addNotice({
+        id: notice.id,
+        message: notice.message,
+        type: notice.notifyType,
+        sessionId: state.sessionId ?? null,
+      });
+    }
+  }, [addNotice]);
+
   const applyExtensionUiProjection = useCallback((state?: AgentStateResponse | null) => {
     if (!state) return;
     if (state.extensionStatuses !== undefined) {
@@ -645,6 +677,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
     }
     applyExtensionListenerCount(state);
+    applyCapabilityNotices(state);
     const queue = pickBlockingExtensionRequests(state.pendingExtensionRequests);
     const current = extensionUiStateRef.current.blockingQueue ?? [];
     // 队列相同（同 id 同顺序）就不重写：状态会反复回到，没必要逐 tick 重渲染。
@@ -661,7 +694,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       patchExtensionUiState({ blockingQueue: [], dialog: null });
     }
     applyActiveCustomUi(state.activeCustomUi);
-  }, [applyActiveCustomUi, applyExtensionListenerCount, extensionUiStateRef, patchExtensionUiState]);
+  }, [applyActiveCustomUi, applyCapabilityNotices, applyExtensionListenerCount, extensionUiStateRef, patchExtensionUiState]);
 
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [], followUpRows: [], followUpRevision: null });
   // 每会话本地 follow-up 队列：Host 是唯一 owner，浏览器只持「权威条目 + 一个
@@ -1780,6 +1813,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (state.extensionStatuses !== undefined) patchExtensionUiState({ statuses: state.extensionStatuses ?? [] });
     if (state.extensionWidgets !== undefined) patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
     applyExtensionListenerCount(state);
+    // 能力提示：宿主在浏览器订阅之前发出的那条（host 启动时的扩展加载）靠快照补回来。
+    applyCapabilityNotices(state);
     if (state.queuedMessages !== undefined) {
       applyProjectedQueues(sid, state.queuedMessages);
     }
