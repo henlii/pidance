@@ -17,6 +17,24 @@ import {
 import type { ExtensionUiCustomLayout } from "./types";
 
 /**
+ * 能力提示快照的上限。
+ *
+ * 取舍：宿主能力提示的种类是**枚举**（现在公开面一共 8 种：setHiddenThinkingLabel、
+ * setFooter、setHeader、addAutocompleteProvider、setEditorComponent、getAllThemes、
+ * getTheme、onTerminalInput），远小于这个 16 条上限，所以正常永远截不到。
+ * 保留上限只是防止将来有人拿新 feature 名反复调用（把 API 当循环用）让状态快照无界增长。
+ * 截断保留**最新**的：最旧的、可能还没被用户看见的那条会先丢——在 8 种枚举的现实下
+ * 不会发生；真发生了也只丢"旧提示"，不会让状态无界。改成无上限是错的（状态会被插件撑着）。
+ */
+export const MAX_CAPABILITY_NOTICES = 16;
+
+/** 追加一条能力提示并按上限截断（保留最新）。导出只为单测覆盖上限行为。 */
+export function appendCapabilityNotice<T>(list: T[], item: T, max = MAX_CAPABILITY_NOTICES): void {
+  list.push(item);
+  if (list.length > max) list.splice(0, list.length - max);
+}
+
+/**
  * `ctx.ui.custom(factory, options)` 的 overlay 选项 → Web 面板布局。
  *
  * 非 overlay（未声明或 `overlay: false`）返回 null，面板走既有的全屏模态渲染 ——
@@ -115,6 +133,13 @@ export type WebExtensionUIAdapter = {
    * 监听器只该由 `dispatchTerminalInput` 逐个调用。
    */
   readonly terminalInputListenerCount: number;
+  /**
+   * 宿主自己发出的能力提示快照（只读）。
+   *
+   * 宿主的状态投影用它重放给后加载的页面；只重放宿主的能力提示，
+   * **不含**插件自己调的 `notify`（那是一次性通知，重放会每次开页面都重弹）。
+   */
+  readonly capabilityNoticeSnapshot: { id: string; message: string; notifyType: "warning" }[];
   /**
    * 客户端上报主编辑器（Web 输入框）的焦点。返回是否发生了变化。
    *
@@ -274,6 +299,22 @@ export function createWebExtensionUIAdapter(
   /** 每个能力只提示一次：插件可能反复调用同一条 API（注册监听器、重复设组件）。 */
   const capabilityNoticesSent = new Set<string>();
 
+  /**
+   * 已发出的**能力提示**（宿主自己发的降级提示，不是插件调的 notify）。
+   *
+   * 为什么必须留下来：它们走一次性 SSE 事件，而 host 启动、扩展加载、注册监听器
+   * 都发生在浏览器订阅之前 —— 那一刻没有订阅者，事件直接丢掉，这条"可见降级"
+   * 提示在实践中用户永远看不到（实测：服务端日志 5 次、页面 DOM 0 次）。
+   * 宿主的状态投影把它当作可重放快照下发，后加载的页面才看得到（与
+   * pendingExtensionRequests / activeCustomUi 同一手法）。
+   *
+   * 只重放能力提示：插件自己调的 notify 是一次性通知，重放会让它每次开页面都重弹。
+   */
+  const capabilityNotices: { id: string; message: string; notifyType: "warning" }[] = [];
+  const recordCapabilityNotice = (id: string, message: string) => {
+    appendCapabilityNotice(capabilityNotices, { id, message, notifyType: "warning" as const });
+  };
+
   /** 插件的全局按键监听（ctx.ui.onTerminalInput）。 */
   type TerminalInputListener = (data: string) => { consume?: boolean; data?: string } | undefined;
   const terminalInputListeners = new Set<TerminalInputListener>();
@@ -329,11 +370,14 @@ export function createWebExtensionUIAdapter(
     if (capabilityNoticesSent.has(feature)) return;
     capabilityNoticesSent.add(feature);
     console.warn(`[pidance] extension UI capability not supported on web: ${feature}`);
+    const id = randomUUID();
+    const message = `Extension UI "${feature}" is not supported by the Pidance web client.`;
+    recordCapabilityNotice(id, message);
     emit({
       type: "extension_ui_request",
-      id: randomUUID(),
+      id,
       method: "notify",
-      message: `Extension UI "${feature}" is not supported by the Pidance web client.`,
+      message,
       notifyType: "warning",
     });
   };
@@ -358,9 +402,11 @@ export function createWebExtensionUIAdapter(
     capabilityNoticesSent.add(feature);
     const message = `Extension UI "${feature}" is limited by the Pidance web client: ${detail}`;
     console.warn(`[pidance] ${message}`);
+    const id = randomUUID();
+    recordCapabilityNotice(id, message);
     emit({
       type: "extension_ui_request",
-      id: randomUUID(),
+      id,
       method: "notify",
       message,
       notifyType: "warning",
@@ -880,6 +926,15 @@ export function createWebExtensionUIAdapter(
      */
     get terminalInputListenerCount() {
       return terminalInputListeners.size;
+    },
+    /**
+     * 已发出的能力提示快照（只读，拷贝）。
+     *
+     * 宿主的状态投影用它把"宿主自己不具备的能力"重放给后加载的页面。
+     * 返回拷贝：调用方只该读，改动内部数组会让快照与已下发的事件不一致。
+     */
+    get capabilityNoticeSnapshot() {
+      return capabilityNotices.map((item) => ({ ...item }));
     },
     respond(id, response) {
       const entry = pending.get(id);

@@ -48,11 +48,19 @@ export function useNoticeState(sessionId?: string | null) {
     store.activate(activeSessionId);
   }, [store, activeSessionId]);
 
-  const addNotice = useCallback((notice: { id?: string; message: string; type?: NoticeType; activityRecord?: boolean }) => {
+  /**
+   * 入队一条通知。
+   *
+   * `sessionId` 可选：默认进**当前激活**的会话（事件路径就是这样，事件本来就属于
+   * 正在看的会话）。水合路径要显式传——状态属于哪个会话是已知的，而"此刻激活的是
+   * 哪个会话"可能还滞后一个渲染（会话切换与首次 loadSession 同 tick 时），
+   * 传错会被放进上一个会话的队列，通知就永远不显示了。
+   */
+  const addNotice = useCallback((notice: { id?: string; message: string; type?: NoticeType; activityRecord?: boolean; sessionId?: string | null }) => {
     const message = notice.message.trim();
     if (!message) return;
     store.enqueue({
-      sessionId: activeSessionId,
+      sessionId: notice.sessionId ?? activeSessionId,
       id: notice.id ?? createNoticeId(),
       message,
       type: notice.type ?? "info",

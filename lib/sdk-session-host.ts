@@ -2520,6 +2520,12 @@ export class SdkSessionHost {
       // 活动 custom 面板快照：普通阻塞请求走 pendingExtensionRequests，
       // 但 custom 没有快照的话，刷新/切回后面板内容与输入入口都会丢。
       activeCustomUi: this.extensionUi?.customSnapshot ?? null,
+      // 宿主自己发出的能力提示（"Web 端不支持/只部分支持某能力"）同样是一次性 SSE
+      // 事件：host 启动、扩展加载、注册监听器都发生在浏览器订阅之前，那一刻没有
+      // 订阅者就永久丢掉，后加载的页面于是永远看不到这条降级提示（实测：服务端日志
+      // 5 次、页面 DOM 0 次）。与 pendingExtensionRequests / activeCustomUi 同一条路子，
+      // 用快照重放。插件自己调的 notify 不在其中——那是一次性通知，不该重放。
+      extensionCapabilityNotices: this.extensionUi?.capabilityNoticeSnapshot ?? [],
     };
     projected.queuedMessages = {
       steering: this.hasQueueSnapshot ? [...this.localQueue.steering] : [],

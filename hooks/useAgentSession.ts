@@ -41,6 +41,7 @@ import {
   resetExtensionUiForSession,
   clearExtensionUiRequest,
   pickBlockingExtensionRequests,
+  pickCapabilityNotices,
   projectBlockingHead,
   restoreCustomUi,
 } from "@/lib/extension-ui-bridge";
@@ -201,6 +202,8 @@ interface LastAssistantTextResponse {
 }
 
 type AgentStateResponse = {
+  /** host 热投影自带的会话 id：水合时把按会话归属的东西（通知）放进正确的队列。 */
+  sessionId?: string;
   contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null;
   systemPrompt?: string;
   thinkingLevel?: string;
@@ -236,6 +239,13 @@ type AgentStateResponse = {
    * custom 只有 SSE 事件、没有重放，刷新/切回后靠它恢复面板内容与输入入口。
    */
   activeCustomUi?: { id?: string; lines?: string[]; layout?: ExtensionUiCustomLayout } | null;
+  /**
+   * 宿主自己发出的能力提示快照（"Web 端不支持/只部分支持某能力"）。
+   * 它们只有一次性 SSE 事件，而 host 启动、扩展加载都发生在浏览器订阅之前，
+   * 那一刻没有订阅者就永久丢掉 —— 刷新/冷挂载靠这份快照把它补回来。
+   * 只含宿主的能力提示，不含插件自己调的 notify。
+   */
+  extensionCapabilityNotices?: { id?: string; message?: string; notifyType?: string }[];
   /** host 侧本 run 的吞吐读数（冷挂载/刷新时 seed；本地采样后失效）。 */
   turnMetrics?: { tokensPerSecond?: number; ttftMs?: number } | null;
 };
@@ -628,6 +638,56 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [patchExtensionUiState]);
 
   /**
+   * 本次页面加载里**已经交给通知队列**的通知 id（水合与 SSE 两条路都记）。
+   *
+   * 为什么必须记：能力提示在 host 存活期间一直留在状态快照里（"这个宿主不具备某
+   * 能力"是持续事实），而水合会反复发生（reconcile、prompt 收尾、切回前台、run 结束）。
+   * 用户点掉提示后条目就从队列里删了，下一次水合会当成"还没显示过"再弹回来——等于
+   * 关不掉。按 id 记住"本页已经交过"，之后的水合一律跳过；整页刷新时 ref 随组件重建
+   * 清空，提示重新出现一次（这才是"提示"的本意）。
+   *
+   * 为什么不按会话分键：id 由宿主/插件用 uuid 生成，跨会话不会撞；而水合路径与 SSE
+   * 路径对"当前是哪个会话"的判断可能差一拍（切换的同 tick），分键反而会让同一条 id
+   * 记到不同键上、又被弹回来。ref 挂在 useAgentSession 上（ChatWindow 只在插件重载时
+   * 重挂载），所以切走再切回同一会话不会重弹。
+   */
+  const handedNoticeIdsRef = useRef<Set<string>>(new Set());
+  /**
+   * 认领一次"交给队列"：true = 本页第一次交（调用方应真的入队）；false = 本页已经交过
+   * （水合路径据此跳过，否则用户关掉之后下一次水合又会把它加回来）。
+   */
+  const claimNoticeHandoff = useCallback((id: string): boolean => {
+    if (handedNoticeIdsRef.current.has(id)) return false;
+    handedNoticeIdsRef.current.add(id);
+    return true;
+  }, []);
+
+  /**
+   * 应用状态里的能力提示（"Web 端不支持/只部分支持某能力"）。
+   *
+   * host 启动、扩展加载、注册监听器都发生在浏览器订阅之前，那条一次性 SSE 提示
+   * 直接丢掉，后加载/刷新的页面永远看不到（实测：服务端日志 5 次、页面 DOM 0 次）。
+   * 与 statuses/widgets/阻塞队列同一条路子：拿到状态就补一遍。
+   *
+   * 补之前先认领（claimNoticeHandoff）：快照会反复回来，不认领的话用户点掉之后下一次
+   * 水合又会把它加回来（关不掉）。
+   */
+  const applyCapabilityNotices = useCallback((state?: AgentStateResponse | null) => {
+    if (!state) return;
+    for (const notice of pickCapabilityNotices(state.extensionCapabilityNotices)) {
+      if (!claimNoticeHandoff(notice.id)) continue;
+      // 显式带上状态自己的会话 id：水合期间"当前会话"可能还滞后一个渲染，
+      // 省略就会把通知放进上一个会话的队列（那条提示于是永远不显示）。
+      addNotice({
+        id: notice.id,
+        message: notice.message,
+        type: notice.notifyType,
+        sessionId: state.sessionId ?? null,
+      });
+    }
+  }, [addNotice, claimNoticeHandoff]);
+
+  /**
    * 应用 host 状态里的扩展 UI 投影：status / widget / 待答阻塞请求 / 活动 custom 面板。
    *
    * 这几项在浏览器侧**只有 SSE 事件，没有重放**。页面在后台（浏览器冻结/断流，
@@ -645,6 +705,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
     }
     applyExtensionListenerCount(state);
+    applyCapabilityNotices(state);
     const queue = pickBlockingExtensionRequests(state.pendingExtensionRequests);
     const current = extensionUiStateRef.current.blockingQueue ?? [];
     // 队列相同（同 id 同顺序）就不重写：状态会反复回到，没必要逐 tick 重渲染。
@@ -661,7 +722,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       patchExtensionUiState({ blockingQueue: [], dialog: null });
     }
     applyActiveCustomUi(state.activeCustomUi);
-  }, [applyActiveCustomUi, applyExtensionListenerCount, extensionUiStateRef, patchExtensionUiState]);
+  }, [applyActiveCustomUi, applyCapabilityNotices, applyExtensionListenerCount, extensionUiStateRef, patchExtensionUiState]);
 
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [], followUpRows: [], followUpRevision: null });
   // 每会话本地 follow-up 队列：Host 是唯一 owner，浏览器只持「权威条目 + 一个
@@ -1709,6 +1770,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     commitExtensionUiState(result.state);
     for (const effect of result.effects) {
       if (effect.type === "notice") {
+        // SSE 路径同样要认领：页面**已经订阅**时宿主才加载扩展（新建会话、换 cwd）的话，
+        // 提示是走这条事件到达的；不认领的话用户点掉后仍会被下一次水合弹回来。
+        // 插件自己的 notify 也走这条分支——它的 id 每次都是新 uuid
+        // （web-extension-ui 的 notify 用 randomUUID），所以记下来只会让"同一条 id 再
+        // 出现"被跳过，不影响正常通知。
+        claimNoticeHandoff(effect.id);
         addNotice({ id: effect.id, message: effect.message, type: effect.noticeType, activityRecord: effect.activityRecord });
         if (effect.activityRecord) {
           // 服务端已确认写盘，直接并入独立活动投影供 M4 历史面板读取。这里不能调用
@@ -1733,7 +1800,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         opts.chatInputRef?.current?.insertText(effect.text);
       }
     }
-  }, [addNotice, addLiveActivity, commitExtensionUiState, opts.chatInputRef, extensionUiStateRef]);
+  }, [addNotice, addLiveActivity, claimNoticeHandoff, commitExtensionUiState, opts.chatInputRef, extensionUiStateRef]);
 
   /**
    * 用 host 下发的本 run 吞吐读数兜底（冷挂载/刷新看不到 step 开始）。
@@ -1780,6 +1847,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (state.extensionStatuses !== undefined) patchExtensionUiState({ statuses: state.extensionStatuses ?? [] });
     if (state.extensionWidgets !== undefined) patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
     applyExtensionListenerCount(state);
+    // 能力提示：宿主在浏览器订阅之前发出的那条（host 启动时的扩展加载）靠快照补回来。
+    applyCapabilityNotices(state);
     if (state.queuedMessages !== undefined) {
       applyProjectedQueues(sid, state.queuedMessages);
     }
