@@ -25,17 +25,25 @@ export interface HeadlessCustomUiTui {
 
 export function createHeadlessCustomUiTui(
   requestRender: (force?: boolean) => void,
-  columns = DEFAULT_CUSTOM_UI_COLUMNS,
+  columns: number | (() => number) = DEFAULT_CUSTOM_UI_COLUMNS,
   rows = DEFAULT_CUSTOM_UI_ROWS,
 ): HeadlessCustomUiTui {
-  const terminal = Object.freeze({
-    columns,
-    rows,
+  const readColumns = typeof columns === "function" ? columns : () => columns;
+  // 尺寸用 getter：插件是在 render() 里读 tui.terminal.columns 做布局判断的
+  // （如 rpiv-ask-user 的 dialog-builder），视口变化后它必须与下一次 render(width)
+  // 的参数一致。此前是冻结的常量，宽度变了这边还是旧值。
+  const terminal = {
+    get columns() {
+      return readColumns();
+    },
+    get rows() {
+      return rows;
+    },
     kittyProtocolActive: false as const,
-  });
+  };
 
   return Object.freeze({
-    terminal,
+    terminal: Object.freeze(terminal),
     requestRender,
     stop() {},
     start() {},

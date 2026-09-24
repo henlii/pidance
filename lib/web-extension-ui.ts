@@ -311,7 +311,7 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
         scheduled = true;
         queueMicrotask(publish);
       },
-      renderWidth,
+      () => renderWidth,
       DEFAULT_CUSTOM_UI_ROWS,
     );
     entry.requestRender = tui.requestRender;
@@ -595,7 +595,7 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
         customSessions.set(id, { handleInput, handleMouse, done });
         const tui = createHeadlessCustomUiTui(() => {
           emitLines();
-        }, renderWidth, rows);
+        }, () => renderWidth, rows);
         customRenderers.add(emitLines);
         const theme = loadPiTheme() ?? uiContext.theme;
         // onHandle 在组件建好之后调，对齐 pi-tui 的顺序（先 showOverlay，再给句柄）
@@ -655,26 +655,37 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       return undefined;
     },
     get theme() {
-      // SDK Theme 签名：fg(name, text) / bold(text) 等。Web 无 TUI 上色，
-      // 但必须返回 text 本身，否则扩展把颜色名当内容（mcp status 曾变成 "accent"）
-      const passthrough = (text: string) => String(text ?? "");
-      const color = (name: unknown, text?: unknown) =>
-        text === undefined ? "" : String(text);
-      return new Proxy(
-        { fg: color, bg: color, bold: passthrough, dim: passthrough, italic: passthrough },
-        {
-          get(target, prop) {
-            if (prop in target) return (target as Record<string | symbol, unknown>)[prop];
-            if (prop === "then") return undefined;
-            return passthrough;
-          },
-        },
-      ) as never;
+      // 扩展拿到的 theme。Web 端不做终端上色（文本原样返回），但**接口形状必须与真
+      // Theme 一致**：之前用 Proxy 对未知属性一律返回透传函数，于是 theme.name 变成
+      // 函数、theme.getThinkingBorderColor("high") 返回字符串 "high"、
+      // theme.getColorMode() 返回 "" —— 插件一调用就 TypeError，还会被渲染桥的
+      // try/catch 吞成「回退原文」。
+      const passthrough = (text: unknown) => String(text ?? "");
+      const color = (_name: unknown, text?: unknown) => (text === undefined ? "" : String(text));
+      return {
+        name: "pidance",
+        fg: color,
+        bg: color,
+        bold: passthrough,
+        dim: passthrough,
+        italic: passthrough,
+        underline: passthrough,
+        inverse: passthrough,
+        strikethrough: passthrough,
+        getFgAnsi: () => "",
+        getBgAnsi: () => "",
+        getColorMode: () => "truecolor" as const,
+        getThinkingBorderColor: () => passthrough,
+        getBashModeBorderColor: () => passthrough,
+      } as never;
     },
     getAllThemes() {
+      // 与 setTheme 的明确错误保持一致：不用空数组假装「没有主题可选」
+      notifyUnsupported("getAllThemes");
       return [];
     },
     getTheme() {
+      notifyUnsupported("getTheme");
       return undefined;
     },
     setTheme() {

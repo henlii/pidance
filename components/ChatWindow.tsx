@@ -1109,8 +1109,9 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
   const parsed = widgets.map((widget) => {
     const machinePayload = widget.lines.some((line) => typeof line === "string" && line.startsWith(ASYNC_STATUS_SNAPSHOT_PREFIX));
     // 子代理的 fleet 状态行由 TUI 组件渲染而来，尾部带终端键位提示（↓/← to inspect）：
-    // 去掉提示段保留信息；若整行只剩提示（改写为 []）则这个 widget 不渲染。
-    const rewritten = widget.key === "subagent-fleet-status" ? rewriteFleetStatusLines(widget.lines) : null;
+    // 去掉提示段保留信息。**通用规则**：不按 widget key 闸门，函数自己按形状自检
+    // （认不出键位提示就返回 null），任何插件产出的同类文本一视同仁。
+    const rewritten = rewriteFleetStatusLines(widget.lines);
     return {
       widget: rewritten ? { ...widget, lines: rewritten } : widget,
       snapshot: machinePayload ? parseSubagentAsyncSnapshot(widget.lines) : null,

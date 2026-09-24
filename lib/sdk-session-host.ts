@@ -1916,7 +1916,7 @@ export class SdkSessionHost {
 
   /**
    * 构造 ToolRenderContext 兼容对象（对齐 pi tool-renderer）：state/lastComponent
-   * 取自 toolCallId 的稳定入口，跨事件共享；invalidate no-op（web 端无需重渲染）。
+   * 取自 toolCallId 的稳定入口，跨事件共享；invalidate 重渲这一块并推给前端。
    */
   private buildToolRenderContext(
     toolCallId: unknown,
@@ -1928,7 +1928,11 @@ export class SdkSessionHost {
     return {
       args,
       toolCallId,
-      invalidate: () => {},
+      // 渲染器靠它做异步刷新（SDK 内置 edit 预览、pi-subagents 的 widget 都调）：
+      // 重渲这一块并推 rendered_lines_update，与宽度变化同一条通路。
+      invalidate: () => {
+        this.rerenderToolLine(toolCallId);
+      },
       lastComponent: opts.resultSlot ? entry.lastResultComponent : entry.lastCallComponent,
       state: entry.state,
       cwd: this.realCwd,
@@ -1936,6 +1940,8 @@ export class SdkSessionHost {
       argsComplete: true,
       isPartial: opts.isPartial,
       expanded: opts.expanded,
+      // 如实声明宿主能力：headless 终端不支持 Kitty/iTerm2 图片协议，
+      // 插件据此走文字降级（不是缺口）。
       showImages: false,
       isError: opts.isError,
     };
@@ -1972,21 +1978,27 @@ export class SdkSessionHost {
    * 没有组件的（渲染桥未命中）跳过，不推空帧。
    */
   private rerenderToolLines(): void {
-    for (const [toolCallId, entry] of this.toolRenderStates) {
-      const renderedCallLines = entry.lastCallComponent
-        ? renderWidgetComponentLines(entry.lastCallComponent, this.renderWidth)
-        : null;
-      const renderedResultLines = entry.lastResultComponent
-        ? renderWidgetComponentLines(entry.lastResultComponent, this.renderWidth)
-        : null;
-      if (!renderedCallLines && !renderedResultLines) continue;
-      this.emit({
-        type: "rendered_lines_update",
-        toolCallId,
-        ...(renderedCallLines ? { renderedCallLines } : {}),
-        ...(renderedResultLines ? { renderedResultLines } : {}),
-      } as SdkAgentEvent);
-    }
+    for (const toolCallId of this.toolRenderStates.keys()) this.rerenderToolLine(toolCallId);
+  }
+
+  /** 重渲单个工具块：宽度变化与渲染器的 `invalidate()` 共用这一条通路。 */
+  private rerenderToolLine(toolCallId: unknown): void {
+    if (typeof toolCallId !== "string" || toolCallId === "") return;
+    const entry = this.toolRenderStates.get(toolCallId);
+    if (!entry) return;
+    const renderedCallLines = entry.lastCallComponent
+      ? renderWidgetComponentLines(entry.lastCallComponent, this.renderWidth)
+      : null;
+    const renderedResultLines = entry.lastResultComponent
+      ? renderWidgetComponentLines(entry.lastResultComponent, this.renderWidth)
+      : null;
+    if (!renderedCallLines && !renderedResultLines) return;
+    this.emit({
+      type: "rendered_lines_update",
+      toolCallId,
+      ...(renderedCallLines ? { renderedCallLines } : {}),
+      ...(renderedResultLines ? { renderedResultLines } : {}),
+    } as SdkAgentEvent);
   }
 
   /** tool_execution_update 节流：同一 toolCallId 最短间隔内跳过渲染。 */
