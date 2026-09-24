@@ -8,6 +8,7 @@ import { humanizeExtensionIdentifier } from "@/lib/extension-labels";
 import { composeChatPlan, type ChatRenderItem } from "@/lib/chat-compositor";
 import type { TurnMetrics } from "@/lib/browser-session-runtime-registry";
 import { MessageView } from "./MessageView";
+import { collectTurnWrittenFiles, shouldRenderTurnWrittenFiles } from "@/lib/turn-written-files";
 import { ImagePreviewOverlay } from "./MessageImage";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
@@ -28,6 +29,8 @@ import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE, CHAT_COLUMN_MAX_WI
  */
 const CHAT_INPUT_SIDE_PADDING = CHAT_GUTTER;
 const CHAT_INPUT_SIDE_PADDING_MOBILE = 16;
+/** 本轮没有写入文件时的稳定空数组：保持引用不变，MessageView 的 memo 才不会被打破。 */
+const NO_WRITTEN_FILES: string[] = [];
 import { ExtensionDialog } from "./ExtensionDialog";
 import { ExtensionCustomPanel } from "./ExtensionCustomPanel";
 import { SubagentAsyncWidget } from "./SubagentAsyncWidget";
@@ -333,6 +336,11 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     isStreaming: streamState.isStreaming,
     liveSlot,
   });
+  /** 计划里是否有流式中的助手消息：多步轮次的「本轮写入的文件」卡片归它，
+   *  磁盘上那条暂时收尾的助手消息不再重复出卡（见 shouldRenderTurnWrittenFiles）。 */
+  const liveAssistantActive = chatPlan.some(
+    (item) => item.source === "live" && item.messageOverride?.role === "assistant",
+  );
 
   /**
    * 运行阶段提示：**最多一行，且不与工具块重复**。
@@ -852,6 +860,23 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
                 const isLive = item.source === "live";
                 const idx = isLive ? -1 : (item.messageIndex as number);
                 const msg = item.messageOverride ?? messages[idx];
+                // 本轮写入的文件只在收尾的 assistant 消息下汇总一次：中间的 assistant
+                // step 也会写文件，但它们列一遍会让同一轮重复出现多张同样的卡片。
+                // 同段还有流式助手消息时归流式那项（判据见 shouldRenderTurnWrittenFiles）。
+                const writtenFiles = msg.role === "assistant"
+                  && shouldRenderTurnWrittenFiles({
+                    messages,
+                    index: isLive ? null : idx,
+                    liveAssistantActive,
+                  })
+                  ? collectTurnWrittenFiles({
+                      messages,
+                      index: isLive ? null : idx,
+                      liveMessage: isLive ? msg : null,
+                      toolResults: toolResultsMap,
+                      cwd: messageCwd,
+                    }).map((file) => file.filePath)
+                  : NO_WRITTEN_FILES;
                 const isVisible = msg.role === "user" || msg.role === "assistant";
                 const currentRefIdx = isLive ? undefined : visibleRefIndexByMessage.get(idx);
                 // 稳定身份：prepend 更旧历史后下标会整体平移，用记录 key 才能让
@@ -866,6 +891,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
                     modelNames={modelNames}
                     cwd={messageCwd}
                     onOpenFile={onOpenFile}
+                    writtenFiles={writtenFiles}
                     isStreaming={isLive}
                     toolsActive={sessionBusy}
                     entryId={isLive ? undefined : entryIds[idx]}

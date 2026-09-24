@@ -36,7 +36,8 @@ import {
 } from "@/lib/apply-patch";
 import { useI18n } from "@/lib/i18n";
 import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE, THINKING_BODY_STYLE } from "@/lib/chat-column";
-import { encodeFilePathForApi } from "@/lib/file-paths";
+import { encodeFilePathForApi, getFileName } from "@/lib/file-paths";
+import { isApplyPatchToolName, isEditToolName } from "@/lib/tool-names";
 import { extractMediaPathsFromText } from "@/lib/file-types";
 import type { ContextUsage } from "@/lib/pi-types";
 import type {
@@ -238,6 +239,8 @@ interface Props {
   modelNames?: Record<string, string>;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
+  /** 本轮写入的文件（绝对路径，写入类工具的**成功**结果）；由调用方按轮聚合。 */
+  writtenFiles?: string[];
   entryId?: string;
   /** 用户「从此处分支」：回到该消息之前（发送后形成新分支）。 */
   onBranchHere?: (entryId: string, text: string) => void;
@@ -284,12 +287,19 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, toolExecutionSnapshots, modelNames, cwd, onOpenFile, entryId, onBranchHere, onNewSessionFromHere, onBranchFromAssistant, onNewSessionFromAnswer, forking, showTimestamp, prevTimestamp, sessionId, toolsActive, contextUsage, onCompactContext }: Props) {
+/** writtenFiles 每次渲染都会新建数组：按内容比较，否则 memo 恒失效。 */
+function sameWrittenFiles(prev?: string[], next?: string[]): boolean {
+  if (prev === next) return true;
+  if (!prev || !next) return (prev?.length ?? 0) === (next?.length ?? 0);
+  return prev.length === next.length && prev.every((value, index) => value === next[index]);
+}
+
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, toolExecutionSnapshots, modelNames, cwd, onOpenFile, writtenFiles, entryId, onBranchHere, onNewSessionFromHere, onBranchFromAssistant, onNewSessionFromAnswer, forking, showTimestamp, prevTimestamp, sessionId, toolsActive, contextUsage, onCompactContext }: Props) {
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onBranchHere={onBranchHere} onNewSessionFromHere={onNewSessionFromHere} forking={forking} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} toolExecutionSnapshots={toolExecutionSnapshots} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} onBranchFromAssistant={onBranchFromAssistant} onNewSessionFromAnswer={onNewSessionFromAnswer} toolsActive={toolsActive} contextUsage={contextUsage} onCompactContext={onCompactContext} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} toolExecutionSnapshots={toolExecutionSnapshots} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} writtenFiles={writtenFiles} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} onBranchFromAssistant={onBranchFromAssistant} onNewSessionFromAnswer={onNewSessionFromAnswer} toolsActive={toolsActive} contextUsage={contextUsage} onCompactContext={onCompactContext} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -331,6 +341,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.modelNames === next.modelNames
     && prev.cwd === next.cwd
     && prev.onOpenFile === next.onOpenFile
+    && sameWrittenFiles(prev.writtenFiles, next.writtenFiles)
     && prev.entryId === next.entryId
     && prev.onBranchHere === next.onBranchHere
     && prev.onNewSessionFromHere === next.onNewSessionFromHere
@@ -514,6 +525,7 @@ function AssistantMessageView({
   modelNames,
   cwd,
   onOpenFile,
+  writtenFiles,
   showTimestamp,
   prevTimestamp,
   sessionId,
@@ -533,6 +545,7 @@ function AssistantMessageView({
   modelNames?: Record<string, string>;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
+  writtenFiles?: string[];
   showTimestamp?: boolean;
   prevTimestamp?: number;
   sessionId?: string;
@@ -812,6 +825,9 @@ function AssistantMessageView({
         </div>
       )}
 
+      {/* 本轮写入的文件：只取写入类工具**成功**的结果，不扫回复正文 */}
+      <TurnWrittenFilesCard files={writtenFiles} isStreaming={isStreaming} onOpenFile={onOpenFile} />
+
       <div style={{
         display: "flex", alignItems: "center", gap: 8, marginTop: 4,
       }}>
@@ -1018,7 +1034,7 @@ const COLLAPSED_LINE_STYLE = {
  * 结构上左侧是撑满剩余宽度的按钮（标签 + 摘要），右侧耗时是独立元素 ——
  * 这样整行（除耗时外）都可点，光标停在行内任意处都是手型。
  */
-function BlockHeaderRow({ label, expanded, onToggle, summary, meta, showCommandLabel, running = false }: {
+function BlockHeaderRow({ label, expanded, onToggle, summary, meta, showCommandLabel, running = false, toggleTitle }: {
   label: string;
   expanded: boolean;
   onToggle: () => void;
@@ -1030,6 +1046,9 @@ function BlockHeaderRow({ label, expanded, onToggle, summary, meta, showCommandL
   showCommandLabel?: boolean;
   /** 仍在执行：整行扫光（折叠态这一行就是整块，展开态它是标题行） */
   running?: boolean;
+  /** 折叠/展开的悬停文案覆盖；默认是过程块那套（「展开过程/折叠过程」）。
+   *  非过程块（如「本轮写入的文件」）用自己的文案，否则提示与实际内容对不上。 */
+  toggleTitle?: { expand: string; collapse: string };
 }) {
   const { t } = useI18n();
   return (
@@ -1038,7 +1057,9 @@ function BlockHeaderRow({ label, expanded, onToggle, summary, meta, showCommandL
       onClick={onToggle}
       aria-expanded={expanded}
       className={running ? "tool-row-running" : undefined}
-      title={expanded ? t("chat_hideProcess") : t("chat_showProcess")}
+      title={expanded
+        ? (toggleTitle?.collapse ?? t("chat_hideProcess"))
+        : (toggleTitle?.expand ?? t("chat_showProcess"))}
       data-block-header="true"
       style={{
         display: "flex",
@@ -1794,10 +1815,6 @@ function getResultDiff(result: ToolResultMessage): ResultDiff | null {
   return null;
 }
 
-function isApplyPatchToolName(toolName: string): boolean {
-  return toolName.toLowerCase().includes("apply_patch");
-}
-
 /**
  * apply_patch 的对照行：优先解调用参数里的 V4A 文档。
  *
@@ -1824,16 +1841,6 @@ function summarizeApplyPatchInput(block: ToolCallContent): string | null {
   const paths = extractApplyPatchPaths(getApplyPatchInputText(block.input));
   if (paths.length === 0) return null;
   return paths.join(", ").slice(0, 120);
-}
-
-function isEditToolName(toolName: string): boolean {
-  const name = toolName.toLowerCase();
-  return name === "edit" ||
-    name.startsWith("edit_") ||
-    name.endsWith(".edit") ||
-    name.endsWith("_edit") ||
-    name.includes("str_replace") ||
-    name.includes("replace_editor");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -2129,6 +2136,87 @@ function FileContextMetadata({ readFiles, modifiedFiles }: { readFiles: string[]
       {modifiedFiles.length > 0 && <FileContextList title={t("message_modifiedFiles")} files={modifiedFiles} />}
       {readFiles.length > 0 && <FileContextList title={t("message_readFiles")} files={readFiles} />}
     </details>
+  );
+}
+
+/**
+ * 本轮写入的文件卡片。
+ *
+ * 折叠行沿用聊天块的统一口径（`collapsedSummaryLine`：流式中末行、结束后首行），
+ * 所以列表还在增长时它显示最新写入的那个文件，停止后固定显示第一个。标题行与折叠
+ * 按钮复用通用表头 `BlockHeaderRow`，不为这个块另写一套交互。
+ */
+function TurnWrittenFilesCard({ files, isStreaming, onOpenFile }: {
+  files?: string[];
+  isStreaming?: boolean;
+  onOpenFile?: (filePath: string) => void;
+}) {
+  const { t } = useI18n();
+  const [expanded, setExpanded] = useState(false);
+  if (!files || files.length === 0) return null;
+
+  return (
+    <div
+      style={{
+        marginTop: 10,
+        border: "1px solid var(--border)",
+        borderRadius: 8,
+        background: "var(--bg-panel)",
+        overflow: "hidden",
+      }}
+    >
+      <BlockHeaderRow
+        label={t("message_writtenThisTurn")}
+        expanded={expanded}
+        onToggle={() => setExpanded(!expanded)}
+        summary={expanded ? null : collapsedSummaryLine(files.map((filePath) => getFileName(filePath)).join("\n"), { streaming: isStreaming })}
+        meta={String(files.length)}
+        toggleTitle={{ expand: t("message_writtenFilesExpand"), collapse: t("message_writtenFilesCollapse") }}
+      />
+      {expanded && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 6,
+            padding: "8px 10px",
+            borderTop: "1px solid var(--border)",
+            background: "var(--bg-subtle)",
+          }}
+        >
+          {files.map((filePath) => {
+            const name = getFileName(filePath);
+            return (
+              /* 长路径保留完整文件名（title 给全路径），截断只发生在视觉层 */
+              <button
+                key={filePath}
+                type="button"
+                title={filePath}
+                aria-label={t("message_openWrittenFile", { name })}
+                onClick={() => onOpenFile?.(filePath)}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                  maxWidth: "100%",
+                  padding: "2px 8px",
+                  borderRadius: 6,
+                  border: "1px solid var(--border)",
+                  background: "var(--bg)",
+                  color: "var(--text)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 11.5,
+                  cursor: onOpenFile ? "pointer" : "default",
+                }}
+              >
+                <FilePlus size={12} strokeWidth={1.8} />
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 
