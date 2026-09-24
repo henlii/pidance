@@ -355,6 +355,8 @@ export const en = {
   message_modifiedFiles: 'Modified files',
   message_writtenThisTurn: 'Files written this turn',
   message_openWrittenFile: 'Open {name}',
+  message_writtenFilesExpand: 'Show all files written this turn',
+  message_writtenFilesCollapse: 'Collapse the file list',
   message_applyPatchFailed: 'Not applied',
   message_readFiles: 'Read files',
   message_hiddenExtensionMessage: 'Extension message hidden',

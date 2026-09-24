@@ -14,7 +14,6 @@ import {
   applyPatchResultHasFailures,
   getApplyPatchAppliedFiles,
   getApplyPatchInputText,
-  parseApplyPatchInput,
 } from "./apply-patch";
 import { isApplyPatchToolName, isFileWritingToolName } from "./tool-names";
 import { joinFilePath, normalizeFilePathSlashes } from "./file-paths";
@@ -65,8 +64,12 @@ function collectApplyPatchDeleteTargets(input: Record<string, unknown> | undefin
 /**
  * 一次 apply_patch 真正写入的路径。
  *
- * 优先 `details.result.appliedFiles`（落盘事实，含重命名目标）；有失败且没有 appliedFiles
- * 说明这次什么都没写成；再退到已应用 preview，最后才是补丁文档本身。
+ * 写入事实只有两处，且都在**工具结果**侧：`details.result.appliedFiles`（落盘事实，
+ * 含重命名目标）与 `details.preview`（扩展产出的逐文件已应用 diff）。
+ * 有失败且没有 appliedFiles 说明这次什么都没写成。
+ *
+ * **不回退到补丁文档**：`input` 里的 V4A 补丁只说明请求过哪些路径（可能整体失败、
+ * 可能只成功一部分），把它当已写入就是谎报。宁可不显示，也不显示错的。
  */
 function readApplyPatchPaths(input: Record<string, unknown> | undefined, details: unknown): string[] {
   const deleted = collectApplyPatchDeleteTargets(input, details);
@@ -74,11 +77,8 @@ function readApplyPatchPaths(input: Record<string, unknown> | undefined, details
   if (applied.length > 0) return applied.filter((filePath) => !deleted.has(filePath));
   if (applyPatchResultHasFailures(details)) return [];
 
-  if (isRecord(details)) {
-    const fromPreview = writtenPathsFromFiles(applyPatchPreviewToFiles(details.preview));
-    if (fromPreview.length > 0) return fromPreview;
-  }
-  return writtenPathsFromFiles(parseApplyPatchInput(getApplyPatchInputText(input)));
+  if (isRecord(details)) return writtenPathsFromFiles(applyPatchPreviewToFiles(details.preview));
+  return [];
 }
 
 /**
@@ -123,6 +123,43 @@ export function isTurnFinalAssistantMessage(messages: readonly AgentMessage[], i
     if (role === "assistant") return false;
   }
   return true;
+}
+
+/** 该下标之后还有没有 user 消息（即这一轮是否已经翻页）。 */
+function hasUserMessageAfter(messages: readonly AgentMessage[], index: number): boolean {
+  for (let i = index + 1; i < messages.length; i += 1) {
+    if (messages[i]?.role === "user") return true;
+  }
+  return false;
+}
+
+/**
+ * 这条消息要不要渲染「本轮写入的文件」卡片。
+ *
+ * 同一轮只出一张卡：
+ * - 流式项（`index === null`）：它就是正在跑的那一步，出卡并随内容增长。
+ * - 磁盘项：必须是本轮收尾助手消息（`isTurnFinalAssistantMessage`），**且同一段
+ *   没有流式助手消息在跑**。
+ *
+ * 为什么需要后半个条件：多步轮次里，上一步的助手消息在 `message_end` 就已入库、
+ * 下一步仍在 live 槽（`lib/browser-session-runtime-registry.ts` 的 `emptyStream()`）。
+ * 此时磁盘上那条「暂时最后一条」既是收尾又是同段，两处各自出卡 → 同一轮两张卡，
+ * 而 live 那张还会把上一步的文件一起列出来。所以同段有流式助手时，让流式那项出卡。
+ */
+export function shouldRenderTurnWrittenFiles(input: {
+  messages: readonly AgentMessage[];
+  /** 磁盘下标；流式（未落盘）传 null。 */
+  index: number | null;
+  /** 渲染计划里是否存在流式中的助手消息（同一会话同一时刻至多一条）。 */
+  liveAssistantActive: boolean;
+}): boolean {
+  const { messages, index, liveAssistantActive } = input;
+  if (index === null) return true;
+  if (!isTurnFinalAssistantMessage(messages, index)) return false;
+  if (!liveAssistantActive) return true;
+  // 同段还有流式助手：这一轮的卡归它。已经翻页（后面有 user）的磁盘消息不受影响，
+  // 那段自有它的收尾消息。
+  return hasUserMessageAfter(messages, index);
 }
 
 /**

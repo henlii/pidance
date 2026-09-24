@@ -630,6 +630,9 @@ test("本轮写入的文件：卡片在回复下方，折叠态显示第一个�
   assert.ok(html.includes("a.ts"), "折叠行显示第一个文件名");
   assert.ok(!html.includes("b.ts"), "折叠态不铺开整份列表");
   assert.match(html, /aria-expanded="false"/, "默认收起（只有智能体正文默认展开）");
+  // 非过程块的提示文案不能沿用「展开/折叠过程」——那是工具块与思考块的语义。
+  assert.ok(html.includes('title="Show all files written this turn"'), "折叠提示仍是「展开过程」，与文件卡内容对不上");
+  assert.ok(!html.includes('title="Show process"'), "文件卡不该用过程块的提示文案");
 });
 
 test("本轮写入的文件：流式中折叠行取末行（最近写入的那个）", () => {
@@ -659,9 +662,16 @@ test("本轮写入的文件：走通用表头与统一折叠口径，条目可�
   assert.match(card, /onOpenFile\?\.\(filePath\)/, "条目没有打开文件的入口");
   assert.match(card, /title=\{filePath\}/, "长路径没有保留全路径");
   assert.match(card, /aria-label=\{t\("message_openWrittenFile"/, "条目缺少无障碍名");
+  assert.match(
+    card,
+    /toggleTitle=\{\{ expand: t\("message_writtenFilesExpand"\), collapse: t\("message_writtenFilesCollapse"\) \}\}/,
+    "文件卡未传自己的折叠提示文案",
+  );
   for (const locale of ["en", "zh-CN"]) {
     const dict = readFileSync(fileURLToPath(new URL(`../lib/locales/${locale}.ts`, import.meta.url)), "utf8");
     assert.match(dict, /message_writtenThisTurn:/, `${locale} 缺少 message_writtenThisTurn`);
     assert.match(dict, /message_openWrittenFile:/, `${locale} 缺少 message_openWrittenFile`);
+    assert.match(dict, /message_writtenFilesExpand:/, `${locale} 缺少 message_writtenFilesExpand`);
+    assert.match(dict, /message_writtenFilesCollapse:/, `${locale} 缺少 message_writtenFilesCollapse`);
   }
 });

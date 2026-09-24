@@ -8,7 +8,7 @@ import { humanizeExtensionIdentifier } from "@/lib/extension-labels";
 import { composeChatPlan, type ChatRenderItem } from "@/lib/chat-compositor";
 import type { TurnMetrics } from "@/lib/browser-session-runtime-registry";
 import { MessageView } from "./MessageView";
-import { collectTurnWrittenFiles, isTurnFinalAssistantMessage } from "@/lib/turn-written-files";
+import { collectTurnWrittenFiles, shouldRenderTurnWrittenFiles } from "@/lib/turn-written-files";
 import { ImagePreviewOverlay } from "./MessageImage";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
@@ -336,6 +336,11 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     isStreaming: streamState.isStreaming,
     liveSlot,
   });
+  /** 计划里是否有流式中的助手消息：多步轮次的「本轮写入的文件」卡片归它，
+   *  磁盘上那条暂时收尾的助手消息不再重复出卡（见 shouldRenderTurnWrittenFiles）。 */
+  const liveAssistantActive = chatPlan.some(
+    (item) => item.source === "live" && item.messageOverride?.role === "assistant",
+  );
 
   /**
    * 运行阶段提示：**最多一行，且不与工具块重复**。
@@ -857,7 +862,13 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
                 const msg = item.messageOverride ?? messages[idx];
                 // 本轮写入的文件只在收尾的 assistant 消息下汇总一次：中间的 assistant
                 // step 也会写文件，但它们列一遍会让同一轮重复出现多张同样的卡片。
-                const writtenFiles = msg.role === "assistant" && (isLive || isTurnFinalAssistantMessage(messages, idx))
+                // 同段还有流式助手消息时归流式那项（判据见 shouldRenderTurnWrittenFiles）。
+                const writtenFiles = msg.role === "assistant"
+                  && shouldRenderTurnWrittenFiles({
+                    messages,
+                    index: isLive ? null : idx,
+                    liveAssistantActive,
+                  })
                   ? collectTurnWrittenFiles({
                       messages,
                       index: isLive ? null : idx,

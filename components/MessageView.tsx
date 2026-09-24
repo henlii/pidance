@@ -1034,7 +1034,7 @@ const COLLAPSED_LINE_STYLE = {
  * 结构上左侧是撑满剩余宽度的按钮（标签 + 摘要），右侧耗时是独立元素 ——
  * 这样整行（除耗时外）都可点，光标停在行内任意处都是手型。
  */
-function BlockHeaderRow({ label, expanded, onToggle, summary, meta, showCommandLabel, running = false }: {
+function BlockHeaderRow({ label, expanded, onToggle, summary, meta, showCommandLabel, running = false, toggleTitle }: {
   label: string;
   expanded: boolean;
   onToggle: () => void;
@@ -1046,6 +1046,9 @@ function BlockHeaderRow({ label, expanded, onToggle, summary, meta, showCommandL
   showCommandLabel?: boolean;
   /** 仍在执行：整行扫光（折叠态这一行就是整块，展开态它是标题行） */
   running?: boolean;
+  /** 折叠/展开的悬停文案覆盖；默认是过程块那套（「展开过程/折叠过程」）。
+   *  非过程块（如「本轮写入的文件」）用自己的文案，否则提示与实际内容对不上。 */
+  toggleTitle?: { expand: string; collapse: string };
 }) {
   const { t } = useI18n();
   return (
@@ -1054,7 +1057,9 @@ function BlockHeaderRow({ label, expanded, onToggle, summary, meta, showCommandL
       onClick={onToggle}
       aria-expanded={expanded}
       className={running ? "tool-row-running" : undefined}
-      title={expanded ? t("chat_hideProcess") : t("chat_showProcess")}
+      title={expanded
+        ? (toggleTitle?.collapse ?? t("chat_hideProcess"))
+        : (toggleTitle?.expand ?? t("chat_showProcess"))}
       data-block-header="true"
       style={{
         display: "flex",
@@ -2166,6 +2171,7 @@ function TurnWrittenFilesCard({ files, isStreaming, onOpenFile }: {
         onToggle={() => setExpanded(!expanded)}
         summary={expanded ? null : collapsedSummaryLine(files.map((filePath) => getFileName(filePath)).join("\n"), { streaming: isStreaming })}
         meta={String(files.length)}
+        toggleTitle={{ expand: t("message_writtenFilesExpand"), collapse: t("message_writtenFilesCollapse") }}
       />
       {expanded && (
         <div
