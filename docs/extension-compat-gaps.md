@@ -36,6 +36,7 @@
 | 16 | `tui.focusedComponent`/`handleMouse`：widget 组件的鼠标事件永不调用（`inputCustomMouse` 只查 custom 面板）、move/drag/wheel 不转发 | `lib/web-extension-ui.ts:718-722` | pi-subagents（widget 点标题行折叠） | Web 侧已用共用卡片头做同义交互 → 体验不丢；组件级鼠标仍是缺口 | 待修（低） |
 | 17 | `setTitle` 30s 后静默回落项目名 | `lib/window-title.ts:15` | 无插件用 | 注记为刻意分叉（避免插件名永久占标题） | 刻意分叉 |
 | 18 | `registerShortcut` 无落点 | — | pi-subagents（仅当用户配置了 `foregroundDetachShortcut`） | 待评估（Web 键位体系是自有的） | 待修（低） |
+| 21 | `registerCommand` 的 `getArgumentCompletions` **零消费方**：插件的命令参数补全（TUI 里 `/mcp <Tab>` 会列参数）在 Web 里没有 | 全仓库无命中（slash 菜单只列命令名） | 任何带参数的命令（pi-mcp-adapter 的 `/mcp setup` 等） | 命令列表里带上参数补全，或至少在命令需要参数时给可见提示 | 待修 |
 | 19 | `registerMarkdownTransformer` 无消费方 | — | 已装插件 0 注册 | 待评估 | 待修（低） |
 | 20 | `Image` 组件 / 终端图片协议无落点（headless 终端恒 `kittyProtocolActive: false`） | `lib/custom-ui-terminal.ts:7,34` | 已装插件 0 使用 | 待评估 | 待修（低） |
 

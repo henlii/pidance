@@ -1981,24 +1981,35 @@ export class SdkSessionHost {
     for (const toolCallId of this.toolRenderStates.keys()) this.rerenderToolLine(toolCallId);
   }
 
+  /** 重渲中的 toolCallId：插件可能在 render() 里同步调 invalidate()，不防会递归。 */
+  private readonly toolRerendering = new Set<string>();
+
   /** 重渲单个工具块：宽度变化与渲染器的 `invalidate()` 共用这一条通路。 */
   private rerenderToolLine(toolCallId: unknown): void {
     if (typeof toolCallId !== "string" || toolCallId === "") return;
+    // 重入：渲染过程中又调了一次 invalidate（插件把重渲写进 render 里），忽略这一次，
+    // 否则「渲染→invalidate→重渲→渲染」会变成无限递归。
+    if (this.toolRerendering.has(toolCallId)) return;
     const entry = this.toolRenderStates.get(toolCallId);
     if (!entry) return;
-    const renderedCallLines = entry.lastCallComponent
-      ? renderWidgetComponentLines(entry.lastCallComponent, this.renderWidth)
-      : null;
-    const renderedResultLines = entry.lastResultComponent
-      ? renderWidgetComponentLines(entry.lastResultComponent, this.renderWidth)
-      : null;
-    if (!renderedCallLines && !renderedResultLines) return;
-    this.emit({
-      type: "rendered_lines_update",
-      toolCallId,
-      ...(renderedCallLines ? { renderedCallLines } : {}),
-      ...(renderedResultLines ? { renderedResultLines } : {}),
-    } as SdkAgentEvent);
+    this.toolRerendering.add(toolCallId);
+    try {
+      const renderedCallLines = entry.lastCallComponent
+        ? renderWidgetComponentLines(entry.lastCallComponent, this.renderWidth)
+        : null;
+      const renderedResultLines = entry.lastResultComponent
+        ? renderWidgetComponentLines(entry.lastResultComponent, this.renderWidth)
+        : null;
+      if (!renderedCallLines && !renderedResultLines) return;
+      this.emit({
+        type: "rendered_lines_update",
+        toolCallId,
+        ...(renderedCallLines ? { renderedCallLines } : {}),
+        ...(renderedResultLines ? { renderedResultLines } : {}),
+      } as SdkAgentEvent);
+    } finally {
+      this.toolRerendering.delete(toolCallId);
+    }
   }
 
   /** tool_execution_update 节流：同一 toolCallId 最短间隔内跳过渲染。 */

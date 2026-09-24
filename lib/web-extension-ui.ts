@@ -655,14 +655,22 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       return undefined;
     },
     get theme() {
-      // 扩展拿到的 theme。Web 端不做终端上色（文本原样返回），但**接口形状必须与真
-      // Theme 一致**：之前用 Proxy 对未知属性一律返回透传函数，于是 theme.name 变成
-      // 函数、theme.getThinkingBorderColor("high") 返回字符串 "high"、
-      // theme.getColorMode() 返回 "" —— 插件一调用就 TypeError，还会被渲染桥的
-      // try/catch 吞成「回退原文」。
+      // 扩展拿到的 theme。Web 端不做终端上色（文本原样返回）。
+      //
+      // 两层：
+      // 1. 真 Theme 的成员按**正确类型**给出：name 是字符串、getColorMode() 返回
+      //    "truecolor"、getThinkingBorderColor() 返回函数。此前用 Proxy 对**所有**
+      //    属性一律返回透传函数，于是 theme.name 是函数、getThinkingBorderColor("high")
+      //    返回字符串 "high"，插件一调用就 TypeError（再被渲染桥的 try/catch 吞成
+      //    「回退原文」）。
+      // 2. 未知成员回落到可调用的透传函数，而不是 undefined：「兼容优先」比严格更
+      //    重要 —— 插件会把主题对象透传给它自己的渲染辅助，返回 undefined 会让它们
+      //    从「没颜色但文本还在」退化成直接抛错。
+      //    （插件源码里常见的 theme.description / theme.selectedText / theme.border
+      //    多是 pi-tui 各组件自己的主题对象（SelectListTheme 等），与本对象无关。）
       const passthrough = (text: unknown) => String(text ?? "");
       const color = (_name: unknown, text?: unknown) => (text === undefined ? "" : String(text));
-      return {
+      const known = {
         name: "pidance",
         fg: color,
         bg: color,
@@ -677,7 +685,14 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
         getColorMode: () => "truecolor" as const,
         getThinkingBorderColor: () => passthrough,
         getBashModeBorderColor: () => passthrough,
-      } as never;
+      };
+      return new Proxy(known, {
+        get(target, prop) {
+          if (prop in target) return (target as Record<string | symbol, unknown>)[prop];
+          if (prop === "then") return undefined;
+          return passthrough;
+        },
+      }) as never;
     },
     getAllThemes() {
       // 与 setTheme 的明确错误保持一致：不用空数组假装「没有主题可选」
