@@ -224,10 +224,23 @@ function createDialogPromise<T>(
   });
 }
 
+export interface WebExtensionUiOptions {
+  /**
+   * 读当前输入框（草稿）的文本，供 `ctx.ui.getEditorText()` 回传。
+   *
+   * 由宿主注入而不是在这里直接读偏好文件：适配器不该知道宿主的存储形状，
+   * 测试也能给一个假读取器。省略即恒返回空串（与注入前一致）。
+   */
+  readComposerText?: () => string;
+}
+
 /**
  * 创建 Web Extension UI 适配器。emit 将事件推给浏览器 SSE。
  */
-export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtensionUIAdapter {
+export function createWebExtensionUIAdapter(
+  emit: ExtensionUiEmit,
+  options: WebExtensionUiOptions = {},
+): WebExtensionUIAdapter {
   const pending = new Map<string, PendingExtensionRequest>();
   const pendingSnapshot = new Map<string, Record<string, unknown>>();
   const statuses = new Map<string, string>();
@@ -240,6 +253,14 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
   let toolsExpanded = false;
 
   /**
+   * 插件注册的自定义编辑器工厂（`ctx.ui.setEditorComponent`）。
+   *
+   * 只存不用：Web 输入区是自己的 React 组件，插件工厂在这里没有渲染入口（已提示降级）。
+   * 但它必须能被 `getEditorComponent()` 读回去，否则「包裹上一个编辑器」的插件写法断链。
+   */
+  let editorComponentFactory: unknown;
+
+  /**
    * 当前渲染尺寸：前端按可用宽高上报，插件组件按它排版与裁切（见 setRenderSize）。
    * 两个维度必须同源 —— columns 是真值而 rows 是常量时，按行数裁切的插件会把
    * 本可以显示的行真丢掉（裁掉的行不在输出里）。
@@ -250,8 +271,8 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
   /** custom 面板的重渲入口（setRenderSize 用）：按当前尺寸重渲并下发。 */
   const customRenderers = new Set<() => void>();
 
-  /** 每个能力只提示一次：插件可能反复调用同一条不支持的 API。 */
-  const unsupportedNotified = new Set<string>();
+  /** 每个能力只提示一次：插件可能反复调用同一条 API（注册监听器、重复设组件）。 */
+  const capabilityNoticesSent = new Set<string>();
 
   /** 插件的全局按键监听（ctx.ui.onTerminalInput）。 */
   type TerminalInputListener = (data: string) => { consume?: boolean; data?: string } | undefined;
@@ -305,14 +326,43 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
    * 所以每种能力只报一次。文案用英文：这是面向插件生态的诊断信息。
    */
   const notifyUnsupported = (feature: string) => {
-    if (unsupportedNotified.has(feature)) return;
-    unsupportedNotified.add(feature);
+    if (capabilityNoticesSent.has(feature)) return;
+    capabilityNoticesSent.add(feature);
     console.warn(`[pidance] extension UI capability not supported on web: ${feature}`);
     emit({
       type: "extension_ui_request",
       id: randomUUID(),
       method: "notify",
       message: `Extension UI "${feature}" is not supported by the Pidance web client.`,
+      notifyType: "warning",
+    });
+  };
+
+  /**
+   * 插件用了一个 Web 端**只部分支持**的能力。
+   *
+   * 与 `notifyUnsupported` 的区别：能力本身在（按键确实会送达），只是覆盖面比 TUI 窄。
+   * 不说清楚的话，插件作者会把「没收到按键」当成「用户没按」，于是这块交互静默消失
+   * ——所以注册时给一次可见提示。同样只报一次，且去重范围就是**这个适配器（这个会话）**：
+   * 插件会反复注册监听器，而通知是发往该会话的 SSE —— 放到进程级去重，会让「在没人开着的
+   * 会话里注册」那一次丢掉之后永远不再出现。
+   *
+   * 文案用英文：与 `notifyUnsupported` 同属面向插件生态的诊断信息（客户端也把这类
+   * 通知固定成 `Extension warning` / `Extension error` 英文标题，见
+   * `hooks/useAgentSession.ts`），不为它单独开一条服务端 → 客户端的文案键协议。
+   * **但文案必须与 `lib/extension-panel-keys.ts` 的实际窗口逐字一致** —— 说错窗口
+   * 比不说更糟：插件作者会照着一份不存在的契约去设计交互。
+   */
+  const notifyLimitedSupport = (feature: string, detail: string) => {
+    if (capabilityNoticesSent.has(feature)) return;
+    capabilityNoticesSent.add(feature);
+    const message = `Extension UI "${feature}" is limited by the Pidance web client: ${detail}`;
+    console.warn(`[pidance] ${message}`);
+    emit({
+      type: "extension_ui_request",
+      id: randomUUID(),
+      method: "notify",
+      message,
       notifyType: "warning",
     });
   };
@@ -475,9 +525,23 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
     },
     onTerminalInput(handler) {
       // pi-tui 的 addInputListener 是全局的，Web 没有等价的同步键盘通道：
-      // 前端只在「有 custom 面板且被插件收起」时把白名单按键拿过来问
-      // （见 hooks/useExtensionTerminalInput.ts）。注册数量会下发给前端，
+      // 前端只在两个窄窗口里把按键拿过来问（见 hooks/useExtensionTerminalInput.ts
+      // 与 hooks/useExtensionWidgetKeys.ts）。注册数量会下发给前端，
       // 没有监听器时前端完全不介入键盘。
+      //
+      // 覆盖范围必须**告知**（issue #74）：插件注册后可能一个键都收不到，
+      // 无从知道是「用户没按」还是「Web 端收不到」，这块交互就静默消失了。
+      notifyLimitedSupport(
+        "onTerminalInput",
+        "handlers only receive keys in two narrow windows: " +
+          // 窗口 1：widget 选择态（lib/extension-panel-keys.ts 的 resolveExtensionWidgetKeyAction）
+          "(1) with a widget present and the composer focused and empty, Down/Left start a selection, " +
+          "after which arrows, j, k, Enter and Escape are routed while the selection lasts; " +
+          // 窗口 2：收起的面板（同文件 shouldRouteKeyToExtensionListener）
+          "(2) while a collapsed extension panel exists, Escape, F1-F12, Alt+<char> and Ctrl+<char> " +
+          "(browser-reserved chords and Ctrl+Space excluded) are routed. " +
+          "Ordinary typing never reaches them.",
+      );
       terminalInputListeners.add(handler);
       emitTerminalInputListeners();
       return () => {
@@ -709,7 +773,18 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       });
     },
     getEditorText() {
-      return "";
+      // SDK 契约（core/extensions/types.d.ts:134）："Get the current text from the
+      // core input editor." Web 的「core input editor」是浏览器里的 React 输入框，
+      // 宿主进程没有它的同步视图 —— 客户端会把草稿镜像到服务端偏好（400ms 防抖），
+      // 宿主注入的读取器读的就是那份镜像：**不新增任何客户端往返**，代价是一次
+      // 小文件读（实测 ~0.6ms）。读不到（没有草稿 / 宿主没注入 / 读失败）即空串，
+      // 与注入前一致。多标签下草稿按会话键共享（最后写入者胜出），不是「本标签」。
+      try {
+        return options.readComposerText?.() ?? "";
+      } catch (error) {
+        console.error("[pidance] readComposerText failed:", error);
+        return "";
+      }
     },
     async editor(title, prefill) {
       return createDialogPromise(
@@ -731,12 +806,18 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       notifyUnsupported("addAutocompleteProvider");
     },
     setEditorComponent(factory) {
-      // undefined = 恢复默认
+      // undefined = 恢复默认（SDK 类型：EditorFactory | undefined）
+      editorComponentFactory = factory;
       if (factory === undefined) return;
+      // Web 端不会用这个工厂去渲染输入区，所以仍然要提示一次降级；但**值要存下来**：
+      // 插件「包裹上一个编辑器」的写法（先 get 再 set 一个包住它的工厂）依赖它。
       notifyUnsupported("setEditorComponent");
     },
     getEditorComponent() {
-      return undefined;
+      // SDK 契约（core/extensions/types.d.ts:174）：返回**当前配置的**自定义编辑器工厂，
+      // 用默认编辑器时是 undefined。之前恒返回 undefined：即使刚 set 成功也读不回来，
+      // 包裹链在第一步就断了。
+      return editorComponentFactory as never;
     },
     get theme() {
       // 扩展拿到的 theme：直接给**真 Theme**，与 widget / custom / entry 的渲染路径
@@ -852,6 +933,7 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
     setEditorFocus,
     dispose() {
       editorFocusClients.clear();
+      editorComponentFactory = undefined;
       for (const [id, entry] of pending) {
         pending.delete(id);
         pendingSnapshot.delete(id);
