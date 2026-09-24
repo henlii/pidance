@@ -17,6 +17,9 @@
  *   未见 start 的 update，所以回放顺序必须是 start → update）；update 另外记一份
  *   「最近一条带渲染行」的（服务端按 toolCallId 节流渲染，被节流的那帧没有
  *   `renderedLines`），回放时补上，否则重连页面从 ANSI 渲染降级成原始文本；
+ *   `rendered_lines_update`（插件 `invalidate()` 与宽度变化的重渲，issue #69）也折进
+ *   该工具：调用槽覆盖 start 的 `renderedCallLines`，结果槽另发一帧同形事件 ——
+ *   否则后连接的页面看不到这次刷新（内置 edit 的 diff 只走调用槽）。
  *   end 后条目移除，终态结果由消息历史负责，不在这里回放。
  * - 工具在跑但本轮没有流式消息（纯 bash 轮次）也算 isStreaming：连接方据此对齐
  *   运行态，否则回放的工具事件会被当过期帧丢掉。
@@ -52,17 +55,30 @@ function messageIdOf(event: SnapshotEvent): string | null {
   return typeof value === "string" && value !== "" ? value : null;
 }
 
+/** 取事件里可用的渲染行（非空字符串数组）；不可用返回 null。 */
+function linesOf(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  return value.every((line) => typeof line === "string") ? (value as string[]) : null;
+}
+
 /** 该事件是否带可用的插件渲染行（ANSI）。被节流的那帧不带。 */
 function hasRenderedLines(event: SnapshotEvent): boolean {
-  const lines = event.renderedLines;
-  return Array.isArray(lines) && lines.length > 0;
+  return linesOf(event.renderedLines) !== null;
 }
 
 export function createStreamSnapshotCache(): StreamSnapshotCache {
   let streamingEvent: SnapshotEvent | null = null;
   const activeTools = new Map<
     string,
-    { start: SnapshotEvent; update: SnapshotEvent | null; renderedUpdate: SnapshotEvent | null }
+    {
+      start: SnapshotEvent;
+      update: SnapshotEvent | null;
+      renderedUpdate: SnapshotEvent | null;
+      /** 插件重渲（`rendered_lines_update`）刷过的调用槽；覆盖 start 自带的那份。 */
+      callLines: string[] | null;
+      /** 同上，结果槽：回放时另发一帧 `rendered_lines_update`。 */
+      resultLines: string[] | null;
+    }
   >();
 
   return {
@@ -91,7 +107,7 @@ export function createStreamSnapshotCache(): StreamSnapshotCache {
         case "tool_execution_start": {
           const toolCallId = toolCallIdOf(event);
           if (!toolCallId) return;
-          activeTools.set(toolCallId, { start: event, update: null, renderedUpdate: null });
+          activeTools.set(toolCallId, { start: event, update: null, renderedUpdate: null, callLines: null, resultLines: null });
           return;
         }
         case "tool_execution_update": {
@@ -101,6 +117,18 @@ export function createStreamSnapshotCache(): StreamSnapshotCache {
           if (!entry) return;
           entry.update = event;
           if (hasRenderedLines(event)) entry.renderedUpdate = event;
+          return;
+        }
+        case "rendered_lines_update": {
+          // 插件的 invalidate() / 宽度变化重渲：实时路径直接下发，后连接的页面只能靠快照。
+          const toolCallId = toolCallIdOf(event);
+          if (!toolCallId) return;
+          const entry = activeTools.get(toolCallId);
+          if (!entry) return;
+          const callLines = linesOf(event.renderedCallLines);
+          if (callLines) entry.callLines = callLines;
+          const resultLines = linesOf(event.renderedResultLines);
+          if (resultLines) entry.resultLines = resultLines;
           return;
         }
         case "tool_execution_end": {
@@ -117,17 +145,28 @@ export function createStreamSnapshotCache(): StreamSnapshotCache {
       const events: SnapshotEvent[] = [];
       if (streamingEvent) events.push(streamingEvent);
       for (const entry of activeTools.values()) {
-        events.push(entry.start);
+        // 调用槽：插件重渲过的行优先于 start 自带的那份（start 只带首次 renderCall 的结果）。
+        events.push(entry.callLines ? { ...entry.start, renderedCallLines: entry.callLines } : entry.start);
         const update = entry.update ?? entry.renderedUpdate;
-        if (!update) continue;
-        // 最新一帧被节流（**没有** `renderedLines` 字段）时，带上最近一次渲染过的行：
-        // 否则重连页面只能看到原始文本，要等下一个渲染帧才恢复 ANSI。
-        // 显式给了字段（含空数组）就按它来，不能用旧行盖掉插件的「这一帧没渲染」。
-        const carriesRenderedLines = Object.prototype.hasOwnProperty.call(update, "renderedLines");
-        if (!carriesRenderedLines && entry.renderedUpdate) {
-          events.push({ ...update, renderedLines: entry.renderedUpdate.renderedLines });
-        } else {
-          events.push(update);
+        if (update) {
+          // 最新一帧被节流（**没有** `renderedLines` 字段）时，带上最近一次渲染过的行：
+          // 否则重连页面只能看到原始文本，要等下一个渲染帧才恢复 ANSI。
+          // 显式给了字段（含空数组）就按它来，不能用旧行盖掉插件的「这一帧没渲染」。
+          const carriesRenderedLines = Object.prototype.hasOwnProperty.call(update, "renderedLines");
+          if (!carriesRenderedLines && entry.renderedUpdate) {
+            events.push({ ...update, renderedLines: entry.renderedUpdate.renderedLines });
+          } else {
+            events.push(update);
+          }
+        }
+        // 结果槽的插件重渲也要回放：实时路径走 rendered_lines_update，
+        // 这里发同形的一帧，两端共用同一套解释（浏览器按 toolCallId 覆盖该槽）。
+        if (entry.resultLines) {
+          events.push({
+            type: "rendered_lines_update",
+            toolCallId: toolCallIdOf(entry.start),
+            renderedResultLines: entry.resultLines,
+          });
         }
       }
       return { isStreaming: streamingEvent !== null || activeTools.size > 0, events };
@@ -150,6 +189,8 @@ export function createStreamSnapshotCache(): StreamSnapshotCache {
  *   取代，按 messageId 丢弃。
  * - `message_update`：只认**同一个事件对象**。同 id 的 update 内容可能更新，按 id
  *   一律丢弃会让用户停在旧 partial 上，而重复下发只是整条替换（幂等）。
+ * - `rendered_lines_update`：这是**整体替换**语义（浏览器按 toolCallId 覆盖该槽），
+ *   所以缓冲里那份可能比快照还旧 —— 重放会把新行盖回旧行，按 toolCallId 丢弃。
  */
 export function isEventIncludedInSnapshot(event: SnapshotEvent, snapshot: StreamSnapshot): boolean {
   if (event.type === "message_start") {
@@ -168,6 +209,13 @@ export function isEventIncludedInSnapshot(event: SnapshotEvent, snapshot: Stream
     if (!toolCallId) return false;
     return snapshot.events.some(
       (candidate) => candidate.type === event.type && toolCallIdOf(candidate) === toolCallId,
+    );
+  }
+  if (event.type === "rendered_lines_update") {
+    const toolCallId = toolCallIdOf(event);
+    if (!toolCallId) return false;
+    return snapshot.events.some(
+      (candidate) => candidate.type === "rendered_lines_update" && toolCallIdOf(candidate) === toolCallId,
     );
   }
   return false;

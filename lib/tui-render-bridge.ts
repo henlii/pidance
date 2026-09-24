@@ -390,6 +390,23 @@ export function renderWidgetFactoryLines(
 }
 
 /**
+ * 渲染一个**已存在**的组件实例 → ANSI 行数组。
+ *
+ * 工具槽复读用（issue #69 修复）：SDK 内置 edit 的 `renderResult` 会**就地把 diff/预览
+ * 写回 renderCall 建出来的那个组件**（`setEditPreview` 改的就是 `context.state.callComponent`，
+ * 与我们记的 `lastCallComponent` 是同一个实例），而那之后它可能返回空容器（
+ * `formatEditResult` 在 resultDiff 与预览相同时返回 undefined）—— diff 只存在于调用槽里。
+ * 所以重算路径要在 result 之后再读一次调用组件，否则推出去的是旧预览。
+ * 失败 / 无 render 方法 / 输出非法或超限 → null（调用方保留上一次的行）。
+ */
+export function renderComponentLines(
+  component: unknown,
+  width: number = RENDER_WIDTH,
+): string[] | null {
+  return renderToLines(component, width);
+}
+
+/**
  * 渲染一个**已挂载**的组件实例 → ANSI 行数组。
  *
  * 供工厂形式 setWidget 的热更新路径复用：工厂只调用一次、实例常驻，
@@ -400,7 +417,7 @@ export function renderWidgetComponentLines(
   component: unknown,
   width: number = RENDER_WIDTH,
 ): string[] | null {
-  return renderToLines(component, width);
+  return renderComponentLines(component, width);
 }
 
 /**

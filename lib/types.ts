@@ -357,11 +357,19 @@ export interface ExtensionWidgetItem {
   placement: "aboveEditor" | "belowEditor";
 }
 
-/** SSE 工具事件的插件 TUI 渲染扩展字段；服务端缺省时客户端维持原展示。 */
+/**
+ * SSE 工具事件的插件 TUI 渲染扩展字段；服务端缺省时客户端维持原展示。
+ *
+ * 事件名必须与 SDK 实际发的会话事件一致（tool_execution_start/update/end）——
+ * tool_call / tool_result 是**扩展钩子**事件，不会到达会话订阅者，
+ * 之前按它们接线等于全链路静默失效（issue #69）。
+ * rendered_lines_update 是宿主自己的重渲事件（插件 invalidate / 宽度变化）。
+ */
 export type ToolRenderedAgentEvent =
+  | { type: "tool_execution_start"; renderedCallLines?: string[] }
   | { type: "tool_execution_update"; renderedLines?: string[] }
-  | { type: "tool_call"; renderedCallLines?: string[] }
-  | { type: "tool_result"; renderedResultLines?: string[] };
+  | { type: "tool_execution_end"; renderedResultLines?: string[] }
+  | { type: "rendered_lines_update"; renderedCallLines?: string[]; renderedResultLines?: string[] };
 
 export interface SessionMessageEntry extends SessionEntryBase {
   type: "message";

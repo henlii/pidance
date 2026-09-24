@@ -126,12 +126,13 @@ import type { BinaryMessageData, BinaryMessageInput } from "./types";
 import {
   loadPiTheme,
   RENDER_WIDTH,
+  renderComponentLines,
   renderCustomMessageLines,
   renderToolCallLines,
   renderToolResultLines,
-  renderWidgetComponentLines,
   type Theme,
 } from "./tui-render-bridge";
+import { createToolRenderScheduler, pickChangedSlots } from "./tool-render-scheduler";
 
 export type SdkAgentEvent = {
   type: string;
@@ -140,7 +141,12 @@ export type SdkAgentEvent = {
 
 export type SdkEventListener = (event: SdkAgentEvent) => void;
 
-/** 单个 toolCallId 的渲染上下文状态（跨事件保持：call → update → result）。 */
+/** 渲染器调用凭据：SDK 的 invalidate 语义是「重新调用渲染器」，所以必须留住入参。 */
+type ToolRendererInvocation =
+  | { slot: "call"; def: unknown }
+  | { slot: "result"; def: unknown; result: unknown; isPartial: boolean; isError: boolean };
+
+/** 单个 toolCallId 的渲染上下文状态（跨事件保持：start → update → end）。 */
 type ToolRenderStateEntry = {
   /** 渲染器共享状态对象（插件读写 subagentResultAnimationTimer 等）。 */
   state: Record<string, unknown>;
@@ -150,7 +156,21 @@ type ToolRenderStateEntry = {
   lastResultComponent: unknown;
   /** tool_execution_update 上次渲染时间戳（节流用）。 */
   lastPartialRenderAt: number | undefined;
+  /** 最近的工具参数：end 事件不带 args，而 renderResult 的 context.args 要用它。 */
+  args: unknown;
+  /** renderCall 调用凭据（invalidate / 宽度变化时按 SDK 语义重新调用）。 */
+  callRenderer: ToolRendererInvocation | undefined;
+  /** renderResult 调用凭据（保留最后到的那次 partial / 最终结果）。 */
+  resultRenderer: ToolRendererInvocation | undefined;
+  /** 最近一次真正推给前端的行（行内容未变时不重复推事件）。 */
+  emittedCallLines: string[] | undefined;
+  emittedResultLines: string[] | undefined;
 };
+
+/** toolCallId 收窄成渲染状态键（非空字符串）。 */
+function asToolCallId(value: unknown): string | null {
+  return typeof value === "string" && value !== "" ? value : null;
+}
 
 /**
  * 命令仍在进行、无法安全交出 writer 时的失败消息。
@@ -337,8 +357,17 @@ export class SdkSessionHost {
    * 否则方框/表格会被 CSS 硬断行打乱。
    */
   private renderWidth = RENDER_WIDTH;
-  /** toolCallId → 渲染状态（跨 tool_call → update → result 共享）。 */
+  /** toolCallId → 渲染状态（跨 start → update → end 共享）。 */
   private readonly toolRenderStates = new Map<string, ToolRenderStateEntry>();
+  /**
+   * 重渲调度（限频 / 同栈重入补跑）：插件的 invalidate() 走它。
+   * 渲染与去重在 recompute/emit 里做，调度只保证「不并发、不丢、不过密」。
+   */
+  private readonly toolRenderScheduler = createToolRenderScheduler<{ callLines?: string[]; resultLines?: string[] }>({
+    minIntervalMs: SdkSessionHost.RERENDER_MIN_INTERVAL_MS,
+    recompute: (key) => this.recomputeToolSlots(key),
+    emit: (key, change) => this.emitRenderedLinesUpdate(key, change),
+  });
   /**
    * 连接快照：最近一条流式 message 事件 + 活跃工具的最新 start/update。
    * 中途接入的页面（新标签/重连/冷挂载）靠它立刻看到已生成的内容，
@@ -347,6 +376,13 @@ export class SdkSessionHost {
   private readonly streamSnapshot = createStreamSnapshotCache();
   /** tool_execution_update 渲染最短间隔（ms），防高频 partial 阻塞事件循环。 */
   private static readonly PARTIAL_RENDER_MIN_INTERVAL_MS = 100;
+  /**
+   * 渲染器 invalidate() 触发重渲的最短间隔（ms）。
+   *
+   * 插件会按自己的节奏刷新（pi-advisor-flow 的 spinner 80ms 一次 ≈ 12.5 次/秒），
+   * 不限频就是拿重复帧打爆事件流；限频后由尾随定时器兜最后一次，内容没变也不推事件。
+   */
+  private static readonly RERENDER_MIN_INTERVAL_MS = 100;
 
   /** 渲染列数边界：太窄会把插件界面压烂，太宽没有意义。 */
   private static readonly RENDER_WIDTH_MIN = 40;
@@ -1852,69 +1888,85 @@ export class SdkSessionHost {
     try {
       if (!this.renderBridgeTheme) return event;
       switch (event.type) {
+        case "tool_execution_start": {
+          // 真实事件名：SDK 只发 tool_execution_start/update/end（tool_call/tool_result 是
+          // 扩展钩子事件，不会到达会话订阅者）。renderCall 就在这里调用一次并留住入参，
+          // 插件稍后 invalidate() 时按 SDK 语义重新调用它（见 scheduleToolRerender）。
+          const def = this.getToolRenderDefinition(event.toolName);
+          if (!def) return event;
+          const toolCallId = asToolCallId(event.toolCallId);
+          // 调用凭据要在**调用渲染器之前**记下：插件可能在 renderCall 里同步 invalidate()
+          // （异步预览的常见写法是 then 里 invalidate，但同步路径也存在），而调度器对首次请求
+          // 是立即重算的 —— 那时 callRenderer 还没写就会白跑一次。
+          const entry = toolCallId ? this.getOrCreateToolRenderState(toolCallId) : null;
+          if (entry) {
+            entry.args = event.args;
+            entry.callRenderer = { slot: "call", def };
+          }
+          const context = this.buildToolRenderContext(event.toolCallId, event.args, {
+            isPartial: false, expanded: true, isError: false, resultSlot: false,
+          });
+          if (!context) return event;
+          const initialLines = renderToolCallLines(
+            def,
+            event.args,
+            context,
+            (component) => this.updateToolRenderLastComponent(event.toolCallId, false, component),
+            this.renderWidth,
+          );
+          // 插件可能在 renderCall 里**同步** invalidate()（异步预览的常见写法是 then 里调，
+          // 但同步路径也存在）：调度器对首次请求是立即重算的，那次重算已经把最新行记成基线。
+          // 这里以基线为准，否则 start 事件事后又把旧行盖上去（客户端按事件顺序应用）。
+          const lines = entry?.emittedCallLines ?? initialLines;
+          if (entry && lines) entry.emittedCallLines = lines;
+          return lines ? { ...event, renderedCallLines: lines } : event;
+        }
         case "tool_execution_update": {
           // 高频 partial：按 toolCallId 节流，防事件循环阻塞。
           if (!this.shouldRenderPartialUpdate(event.toolCallId)) return event;
           const def = this.getToolRenderDefinition(event.toolName);
           if (!def) return event;
-          const context = this.buildToolRenderContext(
-            event.toolCallId,
-            event.args ?? event.input,
-            { isPartial: true, expanded: true, isError: event.isError === true, resultSlot: true },
-          );
-          if (!context) return event;
-          const lines = renderToolResultLines(
+          const toolCallId = asToolCallId(event.toolCallId);
+          if (!toolCallId) return event;
+          const entry = this.getOrCreateToolRenderState(toolCallId);
+          if (!entry) return event;
+          if (event.args !== undefined) entry.args = event.args;
+          entry.resultRenderer = {
+            slot: "result",
             def,
-            event.partialResult,
-            { expanded: true, isPartial: true },
-            context,
-            (component) => this.updateToolRenderLastComponent(event.toolCallId, true, component),
-            this.renderWidth,
-          );
-          return lines ? { ...event, renderedLines: lines } : event;
+            result: event.partialResult,
+            isPartial: true,
+            isError: event.isError === true,
+          };
+          const changed = this.renderToolSlotsNow(toolCallId, entry);
+          if (!changed) return event;
+          // 调用槽的变化只能走 rendered_lines_update（本事件的 renderedLines 是结果槽），
+          // 丢掉它等于把 renderResult 就地在调用组件上写回的内容（内置 edit 的 diff）丢掉。
+          if (changed.callLines) this.emitRenderedLinesUpdate(toolCallId, { callLines: changed.callLines });
+          if (!changed.resultLines) return event;
+          this.recordEmittedToolLines(toolCallId, { resultLines: changed.resultLines });
+          return { ...event, renderedLines: changed.resultLines };
         }
-        case "tool_call": {
+        case "tool_execution_end": {
           const def = this.getToolRenderDefinition(event.toolName);
           if (!def) return event;
-          const context = this.buildToolRenderContext(
-            event.toolCallId,
-            event.input,
-            { isPartial: false, expanded: true, isError: false, resultSlot: false },
-          );
-          if (!context) return event;
-          const lines = renderToolCallLines(
-            def,
-            event.input,
-            context,
-            (component) => this.updateToolRenderLastComponent(event.toolCallId, false, component),
-            this.renderWidth,
-          );
-          return lines ? { ...event, renderedCallLines: lines } : event;
-        }
-        case "tool_result": {
-          const def = this.getToolRenderDefinition(event.toolName);
-          if (!def) return event;
-          const context = this.buildToolRenderContext(
-            event.toolCallId,
-            event.args ?? event.input,
-            { isPartial: false, expanded: true, isError: event.isError === true, resultSlot: true },
-          );
-          if (!context) return event;
-          // 结果对象补 isError（AgentToolResult 契约）。
-          const lines = renderToolResultLines(
-            def,
-            {
-              content: event.content,
-              details: event.details,
-              isError: event.isError === true,
-              ...(event.usage !== undefined ? { usage: event.usage } : {}),
-            },
-            { expanded: true, isPartial: false },
-            context,
-            (component) => this.updateToolRenderLastComponent(event.toolCallId, true, component),
-            this.renderWidth,
-          );
-          return lines ? { ...event, renderedResultLines: lines } : event;
+          const toolCallId = asToolCallId(event.toolCallId);
+          if (!toolCallId) return event;
+          const entry = this.getOrCreateToolRenderState(toolCallId);
+          if (!entry) return event;
+          const result = {
+            ...(typeof event.result === "object" && event.result !== null ? event.result : { content: [] }),
+            isError: event.isError === true,
+          };
+          entry.resultRenderer = { slot: "result", def, result, isPartial: false, isError: event.isError === true };
+          const changed = this.renderToolSlotsNow(toolCallId, entry);
+          if (!changed) return event;
+          // 调用槽在这些事件里也可能变（renderResult 会就地把预览写回 call 组件）：用
+          // rendered_lines_update 补一次，前端按 toolCallId 覆盖该槽。
+          if (changed.callLines) this.emitRenderedLinesUpdate(toolCallId, { callLines: changed.callLines });
+          if (!changed.resultLines) return event;
+          this.recordEmittedToolLines(toolCallId, { resultLines: changed.resultLines });
+          return { ...event, renderedResultLines: changed.resultLines };
         }
         case "message_start":
         case "message_end": {
@@ -1972,14 +2024,20 @@ export class SdkSessionHost {
     return {
       args,
       toolCallId,
-      // 渲染器靠它做异步刷新（SDK 内置 edit 预览、pi-subagents 的 widget 都调）：
-      // 重渲这一块并推 rendered_lines_update，与宽度变化同一条通路。
+      // 渲染器靠它做异步刷新（SDK 内置 edit 的 diff 预览、pi-advisor-flow 的 spinner 都调）。
+      // SDK 语义是**重新调用 renderCall/renderResult**（TUI 的 invalidate → updateDisplay 就是
+      // 重跑渲染器），只对缓存组件再 render 一次会一直画旧内容；这里按语义重调，并限频去重。
       invalidate: () => {
-        this.rerenderToolLine(toolCallId);
+        this.scheduleToolRerender(toolCallId);
       },
       lastComponent: opts.resultSlot ? entry.lastResultComponent : entry.lastCallComponent,
       state: entry.state,
       cwd: this.realCwd,
+      // 我们只在这三个事件上渲染：start / update / end —— 它们都发生在
+      // 「助手消息已结束（参数完整）」且「工具已开始执行」之后，所以这两个门闩恒为 true
+      // 是语义正确的（TUI 在 assistant message_end 时 setArgsComplete、在 start 时
+      // markExecutionStarted，时间点与我们相同）。expanded 是投影选择：Web 卡片自己管折叠，
+      // 服务端一律按展开形态渲染，与 TUI 的「全局展开开关」不同源。
       executionStarted: true,
       argsComplete: true,
       isPartial: opts.isPartial,
@@ -2001,6 +2059,11 @@ export class SdkSessionHost {
         lastCallComponent: undefined,
         lastResultComponent: undefined,
         lastPartialRenderAt: undefined,
+        args: undefined,
+        callRenderer: undefined,
+        resultRenderer: undefined,
+        emittedCallLines: undefined,
+        emittedResultLines: undefined,
       };
       this.toolRenderStates.set(toolCallId, entry);
     }
@@ -2017,43 +2080,133 @@ export class SdkSessionHost {
   }
 
   /**
-   * 宽度变化后重渲已经渲染过的工具块：组件实例还在 toolRenderStates 里，
-   * 直接用新宽度 render 一次，把新行推给前端按 toolCallId 替换。
-   * 没有组件的（渲染桥未命中）跳过，不推空帧。
+   * 宽度变化后重渲已经渲染过的工具块：按 SDK 语义重新调用渲染器（组件按新宽度排版），
+   * 只把**内容真的变了**的槽推给前端。宽度变化低频，不额外限频。
    */
   private rerenderToolLines(): void {
-    for (const toolCallId of this.toolRenderStates.keys()) this.rerenderToolLine(toolCallId);
+    this.toolRenderScheduler.flushAll([...this.toolRenderStates.keys()]);
   }
 
-  /** 重渲中的 toolCallId：插件可能在 render() 里同步调 invalidate()，不防会递归。 */
-  private readonly toolRerendering = new Set<string>();
+  /**
+   * 插件的 `invalidate()`：按 SDK 语义重新调用渲染器并推更新。
+   *
+   * 限频、同栈重入补跑、待执行定时器都在 lib/tool-render-scheduler.ts 里（纯逻辑、可单测）；
+   * 这里只做键的收窄与存在性检查。
+   */
+  private scheduleToolRerender(toolCallId: unknown): void {
+    const key = asToolCallId(toolCallId);
+    if (!key || !this.toolRenderStates.has(key)) return;
+    this.toolRenderScheduler.request(key);
+  }
 
-  /** 重渲单个工具块：宽度变化与渲染器的 `invalidate()` 共用这一条通路。 */
-  private rerenderToolLine(toolCallId: unknown): void {
-    if (typeof toolCallId !== "string" || toolCallId === "") return;
-    // 重入：渲染过程中又调了一次 invalidate（插件把重渲写进 render 里），忽略这一次，
-    // 否则「渲染→invalidate→重渲→渲染」会变成无限递归。
-    if (this.toolRerendering.has(toolCallId)) return;
+  /** 重算入口（调度器回调）：返回发生变化的槽，没变化返回 null。 */
+  private recomputeToolSlots(toolCallId: string): { callLines?: string[]; resultLines?: string[] } | null {
+    const entry = this.toolRenderStates.get(toolCallId);
+    if (!entry) return null;
+    return this.renderToolSlotsNow(toolCallId, entry);
+  }
+
+  /**
+   * 现在重算该工具的两个槽：按 SDK 语义重新调用渲染器，返回相对「最近推给前端的行」
+   * 发生变化的槽；都没变返回 null。
+   *
+   * 顺序必须是**先 call 后 result**（对齐 TUI 的 updateDisplay），并且 result 之后还要
+   * **再读一次调用组件**：renderResult 会就地把 diff / 预览写回 renderCall 建出来的组件
+   * （内置 edit 的 `setEditPreview` 改的就是 `context.state.callComponent`，与我们记的
+   * `lastCallComponent` 是同一个实例），而相同时它返回空容器（diff 与异步预览相同 →
+   * `formatEditResult` 返回 undefined，结果槽什么都没有）—— diff 只在调用槽里。
+   * 不重读的话：先取的 call 快照是写回之前的，结果槽又是空，diff 就彻底丢掉了，
+   * 且插件不会再 invalidate（它已经画完了）。
+   */
+  private renderToolSlotsNow(
+    toolCallId: string,
+    entry: ToolRenderStateEntry,
+  ): { callLines?: string[]; resultLines?: string[] } | null {
+    let callLines: string[] | null = null;
+    let resultLines: string[] | null = null;
+
+    // 调用槽也要如实看到「当前已知的结果状态」：TUI 的 getRenderContext 就是用
+    // `this.result?.isError ?? false` 与 `this.isPartial`，插件据此把调用卡画成失败/进行中。
+    const knownResult = entry.resultRenderer && entry.resultRenderer.slot === "result" ? entry.resultRenderer : undefined;
+    if (entry.callRenderer) {
+      const context = this.buildToolRenderContext(toolCallId, entry.args, {
+        isPartial: knownResult?.isPartial === true,
+        expanded: true,
+        isError: knownResult?.isError === true,
+        resultSlot: false,
+      });
+      if (context) {
+        callLines = renderToolCallLines(
+          entry.callRenderer.def,
+          entry.args,
+          context,
+          (component) => this.updateToolRenderLastComponent(toolCallId, false, component),
+          this.renderWidth,
+        );
+      }
+    }
+    const invocation = entry.resultRenderer;
+    if (invocation && invocation.slot === "result") {
+      const context = this.buildToolRenderContext(toolCallId, entry.args, {
+        isPartial: invocation.isPartial,
+        expanded: true,
+        isError: invocation.isError,
+        resultSlot: true,
+      });
+      if (context) {
+        resultLines = renderToolResultLines(
+          invocation.def,
+          invocation.result,
+          { expanded: true, isPartial: invocation.isPartial },
+          context,
+          (component) => this.updateToolRenderLastComponent(toolCallId, true, component),
+          this.renderWidth,
+        );
+      }
+      // result 之后重读调用组件：把渲染器就地写回的内容（edit 的 diff、settledError
+      // 造成的底色变化）收进调用槽。读不出（无组件/渲染失败）时保留上面那次的行。
+      if (entry.lastCallComponent) {
+        const reread = renderComponentLines(entry.lastCallComponent, this.renderWidth);
+        if (reread) callLines = reread;
+      }
+    }
+
+    // 去重在这里（不在调度器）：要跟「事件里已经推过的行」一起比，而不是只看最近一次重算。
+    return pickChangedSlots(
+      { callLines, resultLines },
+      { callLines: entry.emittedCallLines, resultLines: entry.emittedResultLines },
+    );
+  }
+
+  /**
+   * 记账：这些行**已经推给前端了**（下一次去重的基准）。
+   *
+   * 行不总是走 `rendered_lines_update`：调用槽的首次行随 `tool_execution_start` 的
+   * `renderedCallLines` 走，结果行随 update 的 `renderedLines` / end 的 `renderedResultLines`
+   * 走。凡是送出就必须记在这里，否则下一轮重算会把这些没变的行再推一次。
+   */
+  private recordEmittedToolLines(
+    toolCallId: string,
+    lines: { callLines?: string[]; resultLines?: string[] },
+  ): void {
     const entry = this.toolRenderStates.get(toolCallId);
     if (!entry) return;
-    this.toolRerendering.add(toolCallId);
-    try {
-      const renderedCallLines = entry.lastCallComponent
-        ? renderWidgetComponentLines(entry.lastCallComponent, this.renderWidth)
-        : null;
-      const renderedResultLines = entry.lastResultComponent
-        ? renderWidgetComponentLines(entry.lastResultComponent, this.renderWidth)
-        : null;
-      if (!renderedCallLines && !renderedResultLines) return;
-      this.emit({
-        type: "rendered_lines_update",
-        toolCallId,
-        ...(renderedCallLines ? { renderedCallLines } : {}),
-        ...(renderedResultLines ? { renderedResultLines } : {}),
-      } as SdkAgentEvent);
-    } finally {
-      this.toolRerendering.delete(toolCallId);
-    }
+    if (lines.callLines) entry.emittedCallLines = lines.callLines;
+    if (lines.resultLines) entry.emittedResultLines = lines.resultLines;
+  }
+
+  /** 推一次 `rendered_lines_update`（只带变化的槽），并更新去重基准。 */
+  private emitRenderedLinesUpdate(
+    toolCallId: string,
+    changed: { callLines?: string[]; resultLines?: string[] },
+  ): void {
+    this.emit({
+      type: "rendered_lines_update",
+      toolCallId,
+      ...(changed.callLines ? { renderedCallLines: changed.callLines } : {}),
+      ...(changed.resultLines ? { renderedResultLines: changed.resultLines } : {}),
+    } as SdkAgentEvent);
+    this.recordEmittedToolLines(toolCallId, changed);
   }
 
   /** tool_execution_update 节流：同一 toolCallId 最短间隔内跳过渲染。 */
@@ -3077,6 +3230,9 @@ export class SdkSessionHost {
   private beginDispose(): Promise<void> {
     if (this.destroyPromise) return this.destroyPromise;
     this._alive = false;
+    // 调度器的待执行定时器必须在这里清掉：销毁后再推 rendered_lines_update 会把
+    // 已经不在的会话写进事件流（前端按 toolCallId 找不到宿主，只会白收事件）。
+    this.toolRenderScheduler.dispose();
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
     if (this.startupHoldTimer) clearTimeout(this.startupHoldTimer);
