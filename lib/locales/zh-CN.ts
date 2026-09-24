@@ -353,6 +353,8 @@ export const zhCN: Record<TranslationKey, string> = {
   message_read: '读取',
   message_modified: '已修改',
   message_modifiedFiles: '已修改文件',
+  message_writtenThisTurn: '本轮写入的文件',
+  message_openWrittenFile: '打开 {name}',
   message_applyPatchFailed: '未应用的文件',
   message_readFiles: '已读取文件',
   message_hiddenExtensionMessage: '扩展消息已隐藏',

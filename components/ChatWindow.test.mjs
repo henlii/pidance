@@ -97,3 +97,14 @@ test("#83 修复轮：按键路由的四处收口（clientId / 同命令刷新�
     "顺序反了：必须先把焦点交给适配器，再把按键交给插件",
   );
 });
+
+test("本轮写入的文件：只在收尾 assistant 消息下汇总一次，并透传给 MessageView", () => {
+  const source = readFileSync(fileURLToPath(new URL("./ChatWindow.tsx", import.meta.url)), "utf8");
+  const renderer = source.slice(source.indexOf("const renderMessage = (item: ChatRenderItem)"), source.indexOf("const view = ("));
+  assert.match(renderer, /isTurnFinalAssistantMessage\(messages, idx\)/, "未按「本轮收尾消息」聚合，中间的 step 也会各渲染一张卡");
+  assert.match(renderer, /collectTurnWrittenFiles\(/, "没有聚合本轮写入的文件");
+  assert.match(renderer, /toolResults: toolResultsMap/, "聚合没带工具结果（写没写成无从判断）");
+  assert.match(renderer, /cwd: messageCwd/, "相对路径没有按会话 cwd 解析");
+  assert.match(renderer, /NO_WRITTEN_FILES/, "没有写入时未复用稳定空数组（会打破 memo）");
+  assert.match(source, /writtenFiles=\{writtenFiles\}/, "没有把聚合结果透给 MessageView");
+});

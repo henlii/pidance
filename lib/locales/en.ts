@@ -353,6 +353,8 @@ export const en = {
   message_read: 'Read',
   message_modified: 'Modified',
   message_modifiedFiles: 'Modified files',
+  message_writtenThisTurn: 'Files written this turn',
+  message_openWrittenFile: 'Open {name}',
   message_applyPatchFailed: 'Not applied',
   message_readFiles: 'Read files',
   message_hiddenExtensionMessage: 'Extension message hidden',

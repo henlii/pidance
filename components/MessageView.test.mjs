@@ -616,3 +616,52 @@ test("源码契约：思考块展开正文不再限高/内部滚动，工具块�
   const tool = source.slice(source.indexOf("function ToolCallBlock("), source.indexOf("function PairedResult("));
   assert.ok(tool.includes("streamBlockMaxHeight"), "工具块仍须限高");
 });
+
+function assistantOnlyMessage(content) {
+  return { role: "assistant", model: "m", provider: "p", content };
+}
+
+test("本轮写入的文件：卡片在回复下方，折叠态显示第一个文件名", () => {
+  const html = renderMessage(
+    assistantOnlyMessage([{ type: "text", text: "改完了" }]),
+    { writtenFiles: ["/repo/src/a.ts", "/repo/src/other/b.ts"] },
+  );
+  assert.ok(html.includes("Files written this turn"), "卡片标题走 i18n");
+  assert.ok(html.includes("a.ts"), "折叠行显示第一个文件名");
+  assert.ok(!html.includes("b.ts"), "折叠态不铺开整份列表");
+  assert.match(html, /aria-expanded="false"/, "默认收起（只有智能体正文默认展开）");
+});
+
+test("本轮写入的文件：流式中折叠行取末行（最近写入的那个）", () => {
+  const html = renderMessage(
+    assistantOnlyMessage([{ type: "text", text: "写文件中" }]),
+    { writtenFiles: ["/repo/src/a.ts", "/repo/src/other/b.ts"], isStreaming: true },
+  );
+  assert.ok(html.includes("b.ts"), "流式中显示最新写入的文件");
+  assert.ok(!html.includes("a.ts"), "流式中不显示更早写入的文件");
+});
+
+test("本轮写入的文件：没有写入时不渲染卡片，用户消息也不挂", () => {
+  for (const props of [{}, { writtenFiles: [] }]) {
+    const html = renderMessage(assistantOnlyMessage([{ type: "text", text: "只回答，没动文件" }]), props);
+    assert.ok(!html.includes("Files written this turn"), "无写入时不渲染卡片");
+  }
+  const userHtml = renderMessage({ role: "user", content: "hi" }, { writtenFiles: ["/repo/a.ts"] });
+  assert.ok(!userHtml.includes("Files written this turn"), "用户消息不挂这张卡片");
+});
+
+test("本轮写入的文件：走通用表头与统一折叠口径，条目可打开且保留全路径", () => {
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  const card = source.slice(source.indexOf("function TurnWrittenFilesCard("), source.indexOf("function FileContextList("));
+  assert.ok(card.length > 0, "没有找到卡片组件");
+  assert.match(card, /<BlockHeaderRow/, "未复用通用表头（每块自己实现折叠会漂移）");
+  assert.match(card, /collapsedSummaryLine\(/, "折叠行没有走统一口径");
+  assert.match(card, /onOpenFile\?\.\(filePath\)/, "条目没有打开文件的入口");
+  assert.match(card, /title=\{filePath\}/, "长路径没有保留全路径");
+  assert.match(card, /aria-label=\{t\("message_openWrittenFile"/, "条目缺少无障碍名");
+  for (const locale of ["en", "zh-CN"]) {
+    const dict = readFileSync(fileURLToPath(new URL(`../lib/locales/${locale}.ts`, import.meta.url)), "utf8");
+    assert.match(dict, /message_writtenThisTurn:/, `${locale} 缺少 message_writtenThisTurn`);
+    assert.match(dict, /message_openWrittenFile:/, `${locale} 缺少 message_openWrittenFile`);
+  }
+});

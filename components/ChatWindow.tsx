@@ -8,6 +8,7 @@ import { humanizeExtensionIdentifier } from "@/lib/extension-labels";
 import { composeChatPlan, type ChatRenderItem } from "@/lib/chat-compositor";
 import type { TurnMetrics } from "@/lib/browser-session-runtime-registry";
 import { MessageView } from "./MessageView";
+import { collectTurnWrittenFiles, isTurnFinalAssistantMessage } from "@/lib/turn-written-files";
 import { ImagePreviewOverlay } from "./MessageImage";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
@@ -28,6 +29,8 @@ import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE, CHAT_COLUMN_MAX_WI
  */
 const CHAT_INPUT_SIDE_PADDING = CHAT_GUTTER;
 const CHAT_INPUT_SIDE_PADDING_MOBILE = 16;
+/** 本轮没有写入文件时的稳定空数组：保持引用不变，MessageView 的 memo 才不会被打破。 */
+const NO_WRITTEN_FILES: string[] = [];
 import { ExtensionDialog } from "./ExtensionDialog";
 import { ExtensionCustomPanel } from "./ExtensionCustomPanel";
 import { SubagentAsyncWidget } from "./SubagentAsyncWidget";
@@ -852,6 +855,17 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
                 const isLive = item.source === "live";
                 const idx = isLive ? -1 : (item.messageIndex as number);
                 const msg = item.messageOverride ?? messages[idx];
+                // 本轮写入的文件只在收尾的 assistant 消息下汇总一次：中间的 assistant
+                // step 也会写文件，但它们列一遍会让同一轮重复出现多张同样的卡片。
+                const writtenFiles = msg.role === "assistant" && (isLive || isTurnFinalAssistantMessage(messages, idx))
+                  ? collectTurnWrittenFiles({
+                      messages,
+                      index: isLive ? null : idx,
+                      liveMessage: isLive ? msg : null,
+                      toolResults: toolResultsMap,
+                      cwd: messageCwd,
+                    }).map((file) => file.filePath)
+                  : NO_WRITTEN_FILES;
                 const isVisible = msg.role === "user" || msg.role === "assistant";
                 const currentRefIdx = isLive ? undefined : visibleRefIndexByMessage.get(idx);
                 // 稳定身份：prepend 更旧历史后下标会整体平移，用记录 key 才能让
@@ -866,6 +880,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
                     modelNames={modelNames}
                     cwd={messageCwd}
                     onOpenFile={onOpenFile}
+                    writtenFiles={writtenFiles}
                     isStreaming={isLive}
                     toolsActive={sessionBusy}
                     entryId={isLive ? undefined : entryIds[idx]}
