@@ -25,6 +25,38 @@ export type CatalogModel = {
   maxTokens?: number;
 };
 
+/**
+ * pi 目录条目（内置 provider 的 `getModels()` 与 models-store.json 的持久化形式是同一个
+ * `Model<Api>` 形状）→ CatalogModel。形状不认识就返回 null（不抛错）。
+ *
+ * 抽出这一处是为了让「内置目录」与「远端刷新目录」用同一份投影规则，避免两处各自解析、
+ * 字段口径慢慢跑偏。
+ */
+export function projectCatalogModel(raw: unknown, fallbackProvider = ""): CatalogModel | null {
+  if (!isPlainObject(raw)) return null;
+  const id = typeof raw.id === "string" ? raw.id : "";
+  if (!id) return null;
+  const provider = typeof raw.provider === "string" && raw.provider ? raw.provider : fallbackProvider;
+  if (!provider) return null;
+  const name = typeof raw.name === "string" && raw.name ? raw.name : id;
+  const thinkingLevelMap = isPlainObject(raw.thinkingLevelMap)
+    ? (raw.thinkingLevelMap as Record<string, string | null>)
+    : undefined;
+  return {
+    id,
+    name,
+    provider,
+    reasoning: raw.reasoning === true,
+    ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+    ...(typeof raw.contextWindow === "number" && Number.isFinite(raw.contextWindow)
+      ? { contextWindow: raw.contextWindow }
+      : {}),
+    ...(typeof raw.maxTokens === "number" && Number.isFinite(raw.maxTokens)
+      ? { maxTokens: raw.maxTokens }
+      : {}),
+  };
+}
+
 function loadModelsJson(modelsPath: string): Record<string, unknown> {
   if (!existsSync(modelsPath)) return { providers: {} };
   try {

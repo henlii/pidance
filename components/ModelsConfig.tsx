@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Check as CheckIcon, Eraser, LoaderCircle, Plus, Zap } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/lib/i18n";
+import { EnabledModelsPanel } from "./EnabledModelsPanel";
 import type { TranslationKey } from "@/lib/locales/en";
 import { SettingsPageFooter, settingsPrimaryButtonStyle } from "./SettingsPageFooter";
 import { SettingsJsonEditor } from "./SettingsJsonEditor";
@@ -1505,13 +1506,16 @@ interface AddProviderPickerProps {
   onClose: () => void;
   /** 认证状态加载中：只显示加载占位，不渲染列表（避免「没有匹配的提供商」错误推断）。 */
   loading?: boolean;
+  /** 扩展 provider 加载失败的原因（服务端降级提示，不能静默丢掉）。 */
+  extensionProvidersError?: string | null;
   /** 嵌入模式：浮层收敛到宿主容器内（absolute），不再叠加一层全屏 backdrop。 */
   embedded?: boolean;
 }
 
 function AddProviderPicker({
   oauthProviders, apiKeyProviders,
-  onSelectOAuth, onSelectApiKey, onAddCustom, onClose, loading = false, embedded = false,
+  onSelectOAuth, onSelectApiKey, onAddCustom, onClose, loading = false,
+  extensionProvidersError = null, embedded = false,
 }: AddProviderPickerProps) {
   const { t } = useI18n();
   const [search, setSearch] = useState("");
@@ -1590,6 +1594,23 @@ function AddProviderPicker({
 
         {/* Card grid */}
         <div style={{ flex: 1, overflowY: "auto", padding: 14 }}>
+          {extensionProvidersError && (
+            <div
+              role="status"
+              style={{
+                marginBottom: 10,
+                padding: "8px 10px",
+                borderRadius: "var(--radius-md)",
+                border: "1px solid var(--border)",
+                background: "var(--bg-subtle)",
+                color: "var(--text-muted)",
+                fontSize: 11,
+                lineHeight: 1.5,
+              }}
+            >
+              {t("models_extensionProvidersFailed", { error: extensionProvidersError })}
+            </div>
+          )}
           {loading ? (
             <div style={{ padding: "20px 0", fontSize: 12, color: "var(--text-muted)", textAlign: "center" }}>{t("common_loading")}</div>
           ) : totalCount === 0 ? (
@@ -1663,18 +1684,23 @@ function AddProviderPicker({
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
+export function ModelsConfig({ onClose, embedded = false, onAuthStateChange, cwd }: {
   onClose: () => void;
   /** 嵌入模式：去掉自身的全屏遮罩/外壳，由宿主（SettingsView）提供 chrome。 */
   embedded?: boolean;
   /** 认证状态（OAuth 登录/登出、API Key 保存/移除）变化后触发，宿主据此刷新模型列表。 */
   onAuthStateChange?: () => void;
+  /**
+   * 当前会话的项目目录。服务端据此解析项目级配置（只读判定）与项目扩展：
+   * 不带就是服务器的 process.cwd()，Electron/多项目下会错位。
+   */
+  cwd?: string;
 }) {
   const { t } = useI18n();
 
   const isMobile = useIsMobile();
   /** 基础表单 / 原始 JSON（与会话设置二级页一致） */
-  const [activeTab, setActiveTab] = useState<"basic" | "json">("basic");
+  const [activeTab, setActiveTab] = useState<"basic" | "json" | "available">("basic");
   const [config, setConfig] = useState<ModelsJson>({ providers: {} });
   // GET 附带的文件基线：PUT 带回做冲突检测（多标签页/多端互覆盖防护）
   const [baseline, setBaseline] = useState<ModelsConfigBaseline | null>(null);
@@ -1687,6 +1713,8 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
   const [selection, setSelection] = useState<Selection | null>(null);
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
   const [apiKeyProviders, setApiKeyProviders] = useState<ApiKeyProvider[]>([]);
+  // 扩展 provider 加载失败时的原因（服务端把降级原因放在响应里，不能静默丢掉）
+  const [extensionProvidersError, setExtensionProvidersError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   // 认证状态加载态分离：拉取完成前不渲染 provider 列表/不闪错误推断
   //（认证方式未确认时不得提前断定其为 API Key provider）。
@@ -1704,12 +1732,20 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
 
   const loadApiKeyProviders = useCallback(() => {
     setApiKeyLoading(true);
-    fetch("/api/auth/all-providers")
+    const query = cwd && cwd.trim() !== "" ? `?cwd=${encodeURIComponent(cwd)}` : "";
+    fetch(`/api/auth/all-providers${query}`)
       .then((r) => r.json())
-      .then((d: { providers: ApiKeyProvider[] }) => setApiKeyProviders(d.providers))
+      .then((d: { providers: ApiKeyProvider[]; extensionProvidersError?: string }) => {
+        setApiKeyProviders(d.providers);
+        setExtensionProvidersError(
+          typeof d.extensionProvidersError === "string" && d.extensionProvidersError
+            ? d.extensionProvidersError
+            : null,
+        );
+      })
       .catch(() => {})
       .finally(() => setApiKeyLoading(false));
-  }, []);
+  }, [cwd]);
 
   useEffect(() => {
     fetch("/api/models-config")
@@ -1938,7 +1974,7 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
         )}
 
         {/* 二级页：基础 / 原始 JSON */}
-        <div style={{ flexShrink: 0, padding: "12px 16px 0", display: "flex", gap: 8, flexWrap: "wrap", borderBottom: activeTab === "json" ? "none" : undefined }}>
+        <div style={{ flexShrink: 0, padding: "12px 16px 0", display: "flex", gap: 8, flexWrap: "wrap", borderBottom: activeTab === "basic" ? undefined : "none" }}>
           <button
             type="button"
             onClick={() => setActiveTab("basic")}
@@ -1965,6 +2001,19 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
           >
             {t("defaults_jsonTab")}
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("available")}
+            style={{
+              minHeight: 28, padding: "0 12px", borderRadius: 6, border: "1px solid var(--border)",
+              background: activeTab === "available" ? "var(--bg-selected)" : "var(--bg-panel)",
+              color: activeTab === "available" ? "var(--text)" : "var(--text-muted)",
+              cursor: "pointer", fontSize: 12, fontWeight: activeTab === "available" ? 600 : 400,
+            }}
+            aria-current={activeTab === "available" ? "page" : undefined}
+          >
+            {t("models_availableTab")}
+          </button>
         </div>
 
         {activeTab === "json" ? (
@@ -1977,6 +2026,10 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
               titleLabel={t("defaults_jsonTab")}
               fileLabel="models.json"
             />
+          </div>
+        ) : activeTab === "available" ? (
+          <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+            <EnabledModelsPanel onModelsChanged={onAuthStateChange} cwd={cwd} />
           </div>
         ) : (
         <>
@@ -2186,6 +2239,7 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
           onAddCustom={addCustomProvider}
           onClose={() => setPickerOpen(false)}
           loading={oauthLoading || apiKeyLoading}
+          extensionProvidersError={extensionProvidersError}
           embedded={embedded}
         />
       )}
