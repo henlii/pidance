@@ -113,4 +113,7 @@ export const THINKING_BODY_STYLE: CSSProperties = {
   fontSize: 12,
   lineHeight: 1.6,
   whiteSpace: "pre-wrap",
+  // 卡片外壳是 overflow:hidden，解除内滚后超长无空格行（长 token / 粘贴的 URL）
+  // 会被裁切且无法横滑，必须在正文上折行。
+  overflowWrap: "anywhere",
 };

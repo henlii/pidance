@@ -1258,7 +1258,9 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
    */
   const collapsedSummary = isRunning
     ? (collapsedSummaryLine(snapshot?.output, { streaming: true }) || command)
-    : (applyPatchSummary ?? command ?? collapsedSummaryLine(snapshot?.output, { streaming: false }));
+    // 必须用 `||` 而不是 `??`：getToolCommand 恒返回 string，无参数工具给的是空串，
+    // `??` 只在 null/undefined 时回退，于是空串会挡住后面的输出首行（折叠行为空）。
+    : (applyPatchSummary || command || collapsedSummaryLine(snapshot?.output, { streaming: false }));
   /**
    * 实时输出段：仅在运行中渲染；已结束但配对结果缺失时保留（见 shouldRenderLiveToolOutput）。
    * 否则终态快照会和「配对结果」段一起上屏，同一份输出展示两遍。

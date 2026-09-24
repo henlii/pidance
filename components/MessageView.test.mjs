@@ -563,7 +563,41 @@ test("工具块：结束后折叠行取命令行（首行），不再跟随输�
   assert.ok(!html.includes("succeeded"), "结束后不再显示输出末行");
 });
 
+test("工具块：无命令行时结束后折叠行回退到输出首行（空串不能被 ?? 挡住）", () => {
+  // getToolCommand 恒返回 string：无参工具给的是空串，`??` 只认 null/undefined，
+  // 于是空串会挡住回退分支，折叠行变空。这条用 DOM 渲染盯住修复后的实际显示。
+  const message = {
+    role: "assistant",
+    content: [{ type: "toolCall", toolCallId: "tool-1", toolName: "read_file", input: {} }],
+  };
+  const html = renderMessage(message, {
+    toolResults: new Map([["tool-1", {
+      role: "toolResult",
+      toolCallId: "tool-1",
+      toolName: "read_file",
+      content: [{ type: "text", text: "alpha\nbeta" }],
+    }]]),
+    toolExecutionSnapshots: [{
+      toolCallId: "tool-1",
+      toolName: "read_file",
+      output: "alpha\nbeta",
+      startedAt: Date.now() - 2000,
+      endedAt: Date.now(),
+      status: "success",
+    }],
+  });
+
+  assert.ok(html.includes('aria-expanded="false"'));
+  assert.ok(html.includes("alpha"), "无命令行时折叠行取输出首行");
+  assert.ok(!html.includes("beta"), "折叠行只取首行");
+});
+
 test("源码契约：实时输出段只在运行中渲染（结束后不与配对结果重复）", () => {
+  // 为何是源码契约：卡片展开态是组件内 useState，SSR 驱动不了；而「展开后同一份输出
+  // 只出现一次」只有在展开态同时挂着实时段与结果段时才可观察。行为判据由
+  // lib/message-display.test.mjs 的 shouldRenderLiveToolOutput 全覆盖（含「已结束 +
+  // 有配对结果 → 关闭实时段」），这里只钉住渲染真的接上了那个开关；端到端观感由
+  // 父会话的无头浏览器验收覆盖（展开一张已结束的工具卡数输出出现次数）。
   const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
   const block = source.slice(source.indexOf("function ToolCallBlock("), source.indexOf("function AnsiToolLines("));
   assert.match(block, /shouldRenderLiveToolOutput\(\{/, "实时段的开关要走共享判据");
