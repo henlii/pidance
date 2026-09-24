@@ -551,13 +551,25 @@ test("A12：对端 writer 租约 → 锁定条出现并在释放后消失", { ti
     // 确定性前置：**先**打开页面并等到「聊天区已挂载 + 当前没有锁定条」，此时本进程空闲、
     // 没有任何对端租约。然后才让对端抢锁 —— 这才是要验的发现路径（页面已开着，写权中途被
     // 另一个实例拿走），也把「页面还没加载完」排除在窗口之外。
-    await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(createdId)}`, "--session", SESSION], { json: false });
-    await ensureAuthed();
-    await waitForCondition(
-      `document.querySelector('[data-pidance-chat="true"]')`,
-      "测试会话聊天区未挂载（导航/恢复失败，不是验收通过）",
-      { attempts: 40, stepMs: 500 },
-    );
+    // 导航/水合是既有竞态（会话列表 SWR + URL 恢复；见 #64 与本仓 context 用例的同一说明）。
+    // 这里做**有界重试**：三次重新导航仍挂不上才判失败——把「页面还没加载完」与「锁定条逻辑」
+    // 分开，避免后者被前者伪装成抖动。
+    let mounted = false;
+    for (let attempt = 0; attempt < 3 && !mounted; attempt += 1) {
+      await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(createdId)}`, "--session", SESSION], { json: false }).catch(() => {});
+      await ensureAuthed();
+      try {
+        await waitForCondition(
+          `document.querySelector('[data-pidance-chat="true"]')`,
+          "测试会话聊天区未挂载（导航/恢复失败，不是验收通过）",
+          { attempts: 40, stepMs: 500 },
+        );
+        mounted = true;
+      } catch (error) {
+        if (attempt === 2) throw error;
+        await new Promise((r) => setTimeout(r, 1_000));
+      }
+    }
     assert.equal(
       Boolean(await evalResult(`Boolean(${LOCK_BANNER})`)),
       false,
