@@ -73,6 +73,8 @@ interface Props {
   /** 最近一轮 run 的延迟/吞吐，供顶栏显示。 */
   onTurnMetricsChange?: (metrics: TurnMetrics) => void;
   onOpenFile?: (filePath: string) => void;
+  /** 会话外发起的「定位到某条历史」请求（全文搜索命中）：切会话后由导航条消费 */
+  entryJumpRequest?: { sessionId: string; entryId: string; nonce: number } | null;
   /** 输入框下方 footer（状态条）是否折叠：由 AppShell 持有（ChatWindow 按 sessionKey
    *  重挂载，本页选择必须待在更上层的稳定宿主里）。 */
   footerCollapsed: boolean;
@@ -105,12 +107,20 @@ function planItemStableKey(
   return messageKeys[idx] ?? `idx:${idx}`;
 }
 
-export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, projectRoots, onGuideTargetChange, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onTurnMetricsChange, onOpenFile, footerCollapsed, onFooterToggle }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, projectRoots, onGuideTargetChange, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onTurnMetricsChange, onOpenFile, entryJumpRequest, footerCollapsed, onFooterToggle }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
   // 只读（subagent 持久化）会话：历史正常读，一切写入口关闭，编辑器换成只读提示。
   const isReadOnly = session?.readOnly === true;
+
+  /** 传给导航条的定位请求：memo 住身份，否则每次渲染都变成新对象、触发重复跳转。 */
+  const railJumpRequest = useMemo(
+    () => entryJumpRequest && session?.id === entryJumpRequest.sessionId
+      ? { entryId: entryJumpRequest.entryId, nonce: entryJumpRequest.nonce }
+      : null,
+    [entryJumpRequest, session?.id],
+  );
 
   // OpenChamber draft-target 语义：空态引导页选中的目标目录（项目 = 目录）。
   // 持久化到 localStorage（对应 OpenChamber oc.chatInput.lastDraftTarget），
@@ -723,6 +733,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
               entryIds={entryIds}
               resolveMessageElementRef={resolveMessageElementRef}
               jumpToEntry={jumpToEntry}
+              // 命中定位只交给当前会话：切会话前的迟到请求由 AppShell 的 sessionId 丢弃
+              jumpRequest={railJumpRequest}
               isAtLiveTail={!hasMoreAfter}
             />
           </div>
@@ -765,11 +777,16 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
               };
 
               // 供导航条跳转使用：按 entryId 找已渲染的消息元素。
+              // 命中的可能是 toolResult 等不可见条目（全文搜索按 JSONL entry 命中），
+              // 此时上溯到最近的可见消息（同属这一轮），跳转才会落到用户看得到的位置。
               resolveMessageElementRef.current = (entryId: string) => {
                 const index = entryIds.indexOf(entryId);
                 if (index < 0) return null;
-                const refIndex = visibleRefIndexByMessage.get(index);
-                return refIndex === undefined ? null : (messageRefs.current[refIndex] ?? null);
+                for (let i = index; i >= 0; i--) {
+                  const refIndex = visibleRefIndexByMessage.get(i);
+                  if (refIndex !== undefined) return messageRefs.current[refIndex] ?? null;
+                }
+                return null;
               };
 
               const renderMessage = (item: ChatRenderItem): ReactNode => {

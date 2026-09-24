@@ -346,7 +346,9 @@ export function extractSearchableTextFromJsonlLine(line: string): {
   if (!message || typeof message !== "object") return null;
   const msg = message as Record<string, unknown>;
   const role = typeof msg.role === "string" ? msg.role : undefined;
-  if (role !== "user" && role !== "assistant" && role !== "system") return null;
+  // system 条目是 Pi 0.86 起落盘的系统提示词，不是对话内容：放进索引会让搜系统提示词
+  // 的常见词命中一票会话，是纯噪音。
+  if (role !== "user" && role !== "assistant") return null;
   const text = flattenMessageContent(msg.content);
   if (!text) return null;
   return {

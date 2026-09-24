@@ -338,6 +338,8 @@ export const zhCN: Record<TranslationKey, string> = {
   message_toolCommand: '命令',
   message_toolLiveOutput: '实时输出',
   message_toolOutputTruncated: '输出已在 64 KB 处截断',
+  message_truncatedTitle: '回复被截断',
+  message_truncated: '这条回复已达到模型输出上限而中止。可以补一句继续。',
   message_toolWaitingOutput: '等待输出…',
   message_toolStatusRunning: '执行中',
   message_toolStatusSuccess: '已完成',

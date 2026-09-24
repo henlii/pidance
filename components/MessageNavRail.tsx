@@ -45,6 +45,11 @@ interface Props {
   jumpToEntry: (entryId: string) => Promise<boolean>;
   /** 当前窗口是否就是最新一段（用于「窗口内没有提问」时判定当前提问） */
   isAtLiveTail: boolean;
+  /**
+   * 会话外发起的定位请求（全文搜索命中）：nonce 变化就按 entryId 跳一次。
+   * 目标尚未进时间线时保留请求，等下一次时间线变化重试。
+   */
+  jumpRequest?: { entryId: string; nonce: number } | null;
 }
 
 /** 短横线：12×2，圆角 1 —— 与设计稿一致（浅灰；当前项深色）。 */
@@ -74,6 +79,7 @@ export function MessageNavRail({
   resolveMessageElementRef,
   jumpToEntry,
   isAtLiveTail,
+  jumpRequest,
 }: Props) {
   const { t } = useI18n();
   const [railHeight, setRailHeight] = useState(0);
@@ -415,9 +421,9 @@ export function MessageNavRail({
    *    等目标渲染出来、布局稳定后再平滑滚动到位；
    * 3) 服务端失败 → 退回「撑开渲染窗口」的本地兜底。
    */
-  const jumpTo = useCallback(async (entryId: string) => {
+  const jumpTo = useCallback(async (entryId: string): Promise<boolean> => {
     const scrollEl = scrollContainer.current;
-    if (!scrollEl) return;
+    if (!scrollEl) return false;
     // 点击即刻把该点设为当前项：不依赖异步流程末尾的解析结果。
     // 理由：跳转会整体替换时间线，解析需要等新窗口渲染 + 滚动稳定，这期间用户已
     // 经点过了；若末尾解析因窗口内无提问等原因返回 null（见 resolveActiveOutlineEntry），
@@ -569,14 +575,14 @@ export function MessageNavRail({
     if (immediate) {
       handedOff = true;
       scrollToTarget(immediate);
-      return;
+      return true;
     }
     setJumpingTo(entryId);
     // 必须在替换时间线**之前**取锚点：之后 DOM 已经是新窗口，量不到旧视口的内容。
     const anchor = captureAnchor();
     try {
       const located = await jumpToEntry(entryId);
-      if (!located || !isCurrent()) return;
+      if (!located || !isCurrent()) return false;
       const target = await waitForTarget();
       if (target && isCurrent()) {
         handedOff = true;
@@ -594,7 +600,30 @@ export function MessageNavRail({
       // 漏这一步的后果不是“高亮不准”，而是导航条**永久停止跟随**。
       if (!handedOff && jumpPinRef.current === entryId) jumpPinRef.current = null;
     }
+    return handedOff;
   }, [jumpToEntry, resolveMessageElementRef, scrollContainer, syncActiveRef]);
+
+  /**
+   * 待消费的外部定位请求（全文搜索命中）。
+   *
+   * 切会话首帧时间线尚未到达时 jumpTo 会失败：失败后短延时重试，最多 8 次（约 2s）。
+   * 成功或超限就停——不靠时间线变化驱动，避免与渲染频率耦合。
+   */
+  useEffect(() => {
+    if (!jumpRequest) return;
+    let cancelled = false;
+    let attempt = 0;
+    const run = async () => {
+      if (cancelled) return;
+      const located = await jumpTo(jumpRequest.entryId);
+      if (cancelled || located) return;
+      attempt += 1;
+      if (attempt >= 8) return;
+      window.setTimeout(() => void run(), 250);
+    };
+    void run();
+    return () => { cancelled = true; };
+  }, [jumpRequest, jumpTo]);
 
   const onKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;

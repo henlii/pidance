@@ -338,6 +338,8 @@ export const en = {
   message_toolCommand: 'Command',
   message_toolLiveOutput: 'Live output',
   message_toolOutputTruncated: 'Output truncated at 64 KB',
+  message_truncatedTitle: 'Response cut off',
+  message_truncated: 'This response stopped at the model’s output limit. Send a follow-up to continue.',
   message_toolWaitingOutput: 'Waiting for output…',
   message_toolStatusRunning: 'Running',
   message_toolStatusSuccess: 'Done',

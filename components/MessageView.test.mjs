@@ -457,3 +457,55 @@ test("带 body 的 400：上游已给原因，不追加容量提示", () => {
   const html = renderMessage(errorAssistant("OpenAI API error (400): invalid request: unknown model"));
   assert.ok(!html.includes("rejected this request without a reason"));
 });
+
+test("截断：stopReason=length 且正文为空的回复仍出提示，不整卡隐藏", () => {
+  const html = renderMessage({
+    role: "assistant",
+    model: "gpt-5",
+    provider: "openai",
+    stopReason: "length",
+    content: [],
+  });
+  assert.ok(html.length > 0, "不得渲染成空白卡片");
+  assert.ok(html.includes('role="alert"'), "截断必须给出可视反馈");
+  assert.ok(
+    html.includes("输出上限") || html.includes("output limit"),
+    "文案说明是模型输出上限截断",
+  );
+
+  // 回归：同样空正文但不是截断/错误，仍然不渲染（不制造无内容气泡）
+  const plain = renderMessage({
+    role: "assistant",
+    model: "gpt-5",
+    provider: "openai",
+    stopReason: "end_turn",
+    content: [],
+  });
+  assert.equal(plain, "");
+});
+
+test("apply_patch：折叠摘要列出涉及文件，不倾倒 V4A 原文", () => {
+  const patch = [
+    "*** Begin Patch",
+    "*** Update File: src/app.ts",
+    "@@",
+    "-const a = 1;",
+    "+const a = 2;",
+    "*** End Patch",
+  ].join("\n");
+  const html = renderMessage(
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "ap-1", toolName: "apply_patch", input: { input: patch } }],
+    },
+    {
+      toolResults: new Map([["ap-1", {
+        role: "toolResult",
+        toolCallId: "ap-1",
+        content: [{ type: "text", text: "Done!" }],
+      }]]),
+    },
+  );
+  assert.ok(html.includes("src/app.ts"), "折叠态摘要显示涉及的文件");
+  assert.ok(!html.includes("*** Begin Patch"), "折叠态不把整块 V4A 原文倒出来");
+});

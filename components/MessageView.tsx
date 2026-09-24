@@ -20,11 +20,18 @@ import { getBranchSummaryFileMetadata } from "@/lib/branch-bookmarks";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isUnexplainedUpstreamRejection } from "@/lib/provider-error";
 import { humanizeExtensionIdentifier } from "@/lib/extension-labels";
-import { isActiveStreamBlock, isEmptyThinkingBlock } from "@/lib/message-display";
+import { isActiveStreamBlock, isAssistantTruncated, isEmptyThinkingBlock } from "@/lib/message-display";
 import { getThinkingText, projectDisplayBlocks } from "@/lib/thinking-content";
 import { parseAnsiLine } from "@/lib/ansi";
 import type { ToolExecutionSnapshot, ToolExecutionStatus } from "@/lib/tool-execution-buffer";
-import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
+import { parseUnifiedPatch, type SplitDiffCell, type SplitDiffFile } from "@/lib/patch";
+import {
+  applyPatchPreviewToFiles,
+  applyPatchResultHasFailures,
+  extractApplyPatchPaths,
+  getApplyPatchInputText,
+  parseApplyPatchInput,
+} from "@/lib/apply-patch";
 import { useI18n } from "@/lib/i18n";
 import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE } from "@/lib/chat-column";
 import { encodeFilePathForApi } from "@/lib/file-paths";
@@ -652,9 +659,11 @@ function AssistantMessageView({
   const isApiError = stopReason === "error" || (errorMessage.length > 0 && stopReason !== "end_turn" && stopReason !== "toolUse" && stopReason !== "length");
   const isAborted = stopReason === "aborted";
   const hasErrorFeedback = isApiError || isAborted || errorMessage.length > 0;
+  // 输出上限截断：content 可能为空（全烧在思考里），单独给一条反馈，不跟 API 错误混用文案。
+  const isTruncated = isAssistantTruncated(message);
 
-  // 空 content 的错误/中止消息仍须展示反馈，不得整卡隐藏
-  if (blocks.length === 0 && !isStreaming && !hasErrorFeedback) return null;
+  // 空 content 的错误/中止/截断消息仍须展示反馈，不得整卡隐藏
+  if (blocks.length === 0 && !isStreaming && !hasErrorFeedback && !isTruncated) return null;
 
   return (
     <div
@@ -776,6 +785,28 @@ function AssistantMessageView({
               ) : null}
             </div>
           ) : null}
+        </div>
+      )}
+
+      {/* 模型输出上限截断：正文可能为空，不提示就看着像卡死 */}
+      {!isStreaming && isTruncated && (
+        <div
+          role="alert"
+          style={{
+            marginTop: 10,
+            padding: "10px 12px",
+            borderRadius: 8,
+            border: "1px solid var(--status-warning-border, var(--border))",
+            background: "var(--status-warning-bg, var(--bg-subtle))",
+            color: "var(--status-warning, var(--text))",
+            fontSize: 12,
+            lineHeight: 1.5,
+            whiteSpace: "pre-wrap",
+            overflowWrap: "anywhere",
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>{t("message_truncatedTitle")}</div>
+          <div>{t("message_truncated")}</div>
         </div>
       )}
 
@@ -1204,6 +1235,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
   // 仍在执行（无 result 且有运行中快照/已知 pending）：折叠态显示实时输出最后一行。
   const isRunning = !result && (snapshot?.status === "running" || pending === true);
   const isEditTool = isEditToolName(block.toolName);
+  const isApplyPatchTool = isApplyPatchToolName(block.toolName);
   // 首屏可能 deferredHeavy：展开后懒加载完整 details 再算 diff
   const effectiveResult = result && (resolvedDetails !== undefined || resolvedResultContent !== undefined)
     ? {
@@ -1213,6 +1245,9 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
       }
     : result;
   const resultDiff = effectiveResult && !effectiveResult.isError ? getResultDiff(effectiveResult) : null;
+  // apply_patch（Codex 系）：对照行来自调用参数里的 V4A 文档，扩展结果 preview 作兜底。
+  const applyPatchFiles = isApplyPatchTool ? getApplyPatchFiles(block, effectiveResult) : null;
+  const applyPatchSummary = isApplyPatchTool ? summarizeApplyPatchInput(block) : null;
 
   // Result display
   const resultText = effectiveResult
@@ -1222,7 +1257,9 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
     ? effectiveResult.content.filter((b): b is ImageContent => b.type === "image")
     : [];
   const resultIsEmpty = resultText === null ? false : (resultText.trim() === "(no output)" || resultText.trim() === "");
-  const isError = effectiveResult?.isError ?? false;
+  // pi-apply-patch 把逐文件失败挂在正常结果里（不设 isError），所以单独判一次
+  const isError = (effectiveResult?.isError ?? false)
+    || (isApplyPatchTool && applyPatchResultHasFailures(effectiveResult?.details));
   const status = snapshot?.status;
   // 无快照时从磁盘结果推导：result 存在（非 error）即完成成功（刷新后保持绿色）；
   // pending（bash 执行中恢复）推导运行色。快照仍是内存态权威（实时渲染）。
@@ -1300,7 +1337,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
           label={formatToolBlockLabel(block.toolName)}
           expanded={expanded}
           onToggle={() => setExpanded(!expanded)}
-          summary={!expanded ? (isRunning && liveLastLine.trim() ? liveLastLine : command) : null}
+          summary={!expanded ? (isRunning && liveLastLine.trim() ? liveLastLine : (applyPatchSummary ?? command)) : null}
           meta={elapsedMs === undefined ? null : formatElapsedDuration(elapsedMs)}
           running={isRunning}
         />
@@ -1326,7 +1363,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
         <AnsiToolLines lines={renderedCallLines} statusColor={statusColor} />
       )}
 
-      {expanded && !isEditTool && (
+      {expanded && !isEditTool && !isApplyPatchTool && (
         <div
           style={{
             margin: 0,
@@ -1382,10 +1419,12 @@ maxHeight: streamBlockMaxHeight,
           )}
           {renderedResultLines ? (
             <AnsiToolLines lines={renderedResultLines} statusColor={statusColor} />
-          ) : detailsLoading && isDeferredHeavyToolDetails(result?.details) && !resultDiff ? (
+          ) : detailsLoading && isDeferredHeavyToolDetails(result?.details) && !resultDiff && !applyPatchFiles ? (
             <div style={{ padding: "8px 10px", borderTop: "1px solid var(--border)", color: "var(--text-dim)", fontSize: 11 }}>
               {t("message_thinkingLoading")}
             </div>
+          ) : applyPatchFiles ? (
+            <PairedDiffResult files={applyPatchFiles} />
           ) : resultDiff ? (
             <PairedDiffResult
               diff={resultDiff}
@@ -1480,8 +1519,10 @@ interface ResultDiff {
   text: string;
 }
 
-function PairedDiffResult({ diff }: {
-  diff: ResultDiff;
+function PairedDiffResult({ diff, files }: {
+  diff?: ResultDiff;
+  /** 已解析的对照行（apply_patch 走这条：参数里是 V4A 文档，不是 unified diff） */
+  files?: SplitDiffFile[];
 }) {
   return (
     <div
@@ -1490,14 +1531,14 @@ function PairedDiffResult({ diff }: {
         background: "var(--bg)",
       }}
     >
-      <SplitPatchView text={diff.text} />
+      <SplitPatchView text={diff?.text} files={files} />
     </div>
   );
 }
 
-function SplitPatchView({ text }: { text: string }) {
-  const files = useMemo(() => parseUnifiedPatch(text), [text]);
-  if (!files) return <PatchTextView text={text} />;
+function SplitPatchView({ text, files: providedFiles }: { text?: string; files?: SplitDiffFile[] }) {
+  const files = useMemo(() => providedFiles ?? parseUnifiedPatch(text ?? ""), [providedFiles, text]);
+  if (!files) return <PatchTextView text={text ?? ""} />;
   const showFileHeaders = files.length > 1;
 
   return (
@@ -1707,6 +1748,38 @@ function getResultDiff(result: ToolResultMessage): ResultDiff | null {
   if (diff) return { text: diff };
 
   return null;
+}
+
+function isApplyPatchToolName(toolName: string): boolean {
+  return toolName.toLowerCase().includes("apply_patch");
+}
+
+/**
+ * apply_patch 的对照行：优先解调用参数里的 V4A 文档。
+ *
+ * 扩展产出的已应用结果 preview 含完整旧/新文件（包含未变行），所以只在参数不可用时兜底。
+ * 一次调用可含多个文件操作，每个文件各自成段。
+ */
+function getApplyPatchFiles(block: ToolCallContent, result?: ToolResultMessage): SplitDiffFile[] | null {
+  if (!isApplyPatchToolName(block.toolName)) return null;
+
+  const fromInput = parseApplyPatchInput(getApplyPatchInputText(block.input));
+  if (fromInput) return fromInput;
+
+  const details = result && !result.isError ? (result as ToolResultMessage & { details?: unknown }).details : undefined;
+  if (isRecord(details)) {
+    const fromPreview = applyPatchPreviewToFiles(details.preview);
+    if (fromPreview) return fromPreview;
+  }
+
+  return null;
+}
+
+/** 折叠态摘要：列出这次调用涉及的文件，而不是整块 V4A 文本或原始 JSON。 */
+function summarizeApplyPatchInput(block: ToolCallContent): string | null {
+  const paths = extractApplyPatchPaths(getApplyPatchInputText(block.input));
+  if (paths.length === 0) return null;
+  return paths.join(", ").slice(0, 120);
 }
 
 function isEditToolName(toolName: string): boolean {

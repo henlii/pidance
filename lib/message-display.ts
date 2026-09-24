@@ -17,6 +17,15 @@ export function getDisplayableAssistantBlocks(
 }
 
 /**
+ * 回复因模型输出上限被截断（`stopReason === "length"`）。
+ *
+ * 这类回复可能只烧在思考里、正文为空：必须给出显式反馈，不能整卡隐藏成「卡死」。
+ */
+export function isAssistantTruncated(message: Pick<AssistantMessage, "stopReason">): boolean {
+  return message.stopReason === "length";
+}
+
+/**
  * 流式消息里只有最后一块仍在输出。思考/工具块应在本块不再是活跃输出时立刻收回，
  * 而不是等到整轮 agent 结束或下一次模型调用。
  */
