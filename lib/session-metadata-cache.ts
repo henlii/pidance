@@ -14,9 +14,9 @@
  */
 import { createInterface } from "readline";
 import { createReadStream } from "fs";
-import { readdir, stat } from "fs/promises";
+import { readdir, realpath, stat } from "fs/promises";
 import { readFileSync, writeFileSync, existsSync, renameSync } from "fs";
-import { join } from "path";
+import { isAbsolute, join, relative } from "path";
 import { getAgentDir } from "./pi-paths";
 
 export interface CachedSessionInfo {
@@ -94,6 +94,18 @@ function cacheFilePath(): string {
 // 顶层扫描：列出 sessions 根下所有 *.jsonl + stat（不读内容）
 // ---------------------------------------------------------------------------
 
+/**
+ * realpath 之后是否仍落在扫描根之内。
+ *
+ * 与有界定位（session-reader 的 findSessionPathById）同口径：那边也会对候选做
+ * realpath 复核。只给 `dirent.isSymbolicLink()` 的条目付 realpath 成本，常规文件
+ * 走原路径。根外文件一旦被当成会话列出来，列表元数据、摘要与深链都会跟着它走。
+ */
+function isInsideRoot(real: string, realRoot: string): boolean {
+	const rel = relative(realRoot, real);
+	return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
 async function statSafe(p: string): Promise<SessionFileStat | null> {
 	try {
 		const st = await stat(p);
@@ -115,15 +127,22 @@ export async function scanSessionFiles(
 	} catch {
 		return [];
 	}
+	const realRoot = await realpath(sessionRoot).catch(() => sessionRoot);
 	const files: string[] = [];
 	const readPromises: Promise<void>[] = [];
 	for (const dir of dirs) {
 		readPromises.push(
 			(async () => {
 				try {
-					const names = await readdir(dir);
-					for (const name of names) {
-						if (name.endsWith(".jsonl")) files.push(join(dir, name));
+					const entries = await readdir(dir, { withFileTypes: true });
+					for (const entry of entries) {
+						if (!entry.name.endsWith(".jsonl")) continue;
+						const full = join(dir, entry.name);
+						if (entry.isSymbolicLink()) {
+							const real = await realpath(full).catch(() => null);
+							if (!real || !isInsideRoot(real, realRoot)) continue;
+						}
+						files.push(full);
 					}
 				} catch {
 					// 目录不可读/已删除：跳过
