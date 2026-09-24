@@ -121,6 +121,7 @@ import {
   appendPidanceFileDeliveryPrompt,
   createSendFileToUserExecutor,
   SEND_FILE_TO_USER_PARAMETERS,
+  SEND_FILE_TO_USER_TOOL_LABEL,
   SEND_FILE_TO_USER_TOOL_NAME,
   type SendFileToUserParams,
 } from "./send-file-to-user";
@@ -176,6 +177,31 @@ type ToolRenderStateEntry = {
 /** toolCallId 收窄成渲染状态键（非空字符串）。 */
 function asToolCallId(value: unknown): string | null {
   return typeof value === "string" && value !== "" ? value : null;
+}
+
+/**
+ * 斜杠命令参数候选的规范化（issue #75）。
+ *
+ * 插件（AutocompleteItem[]）的形状是 `{ value, label, description? }`，但插件写壤时不能
+ * 把非法值传给前端：没有可用 value 的条目一律丢弃（value 是要替进输入框的文本）。
+ */
+function normalizeArgumentCompletions(value: unknown): Array<{ value: string; label: string; description?: string }> {
+  if (!Array.isArray(value)) return [];
+  const items: Array<{ value: string; label: string; description?: string }> = [];
+  for (const raw of value) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const record = raw as { value?: unknown; label?: unknown; description?: unknown };
+    if (typeof record.value !== "string" || record.value === "") continue;
+    const label = typeof record.label === "string" && record.label !== "" ? record.label : record.value;
+    items.push({
+      value: record.value,
+      label,
+      ...(typeof record.description === "string" && record.description !== ""
+        ? { description: record.description }
+        : {}),
+    });
+  }
+  return items;
 }
 
 /**
@@ -1885,7 +1911,55 @@ export class SdkSessionHost {
       // （同一帧既要带上下文占用、也要带吞吐读数）。
       if (usage) eventToEmit = { ...eventToEmit, contextUsage: usage };
     }
+    // 工具定义的显示元数据（label / renderShell，issue #75）：不依赖主题，
+    // 因此放在渲染桥之前 —— 主题加载失败时仍然应该带上人类可读名与外壳声明。
+    eventToEmit = this.withToolDisplayMeta(eventToEmit);
     this.emit(this.withRenderedToolLines(eventToEmit));
+  }
+
+  /**
+   * 给 `tool_execution_start` 附上工具定义的显示元数据（issue #75）。
+   *
+   * 来源是会话的 `ExtensionRunner.getToolDefinition`：它只汇总**扩展注册**的工具，
+   * 与历史投影（扩展表 + `collectToolDisplayMeta`）同一来源、同一规则（先注册者胜）。
+   * 不能改用 `session.getToolDefinition`：那条路会把 SDK **内置**定义也带进来，而内置工具的
+   * `label` 就是小写工具名（`bash`/`edit`/`read`）、`edit` 还带 `renderShell: "self"` ——
+   * 采纳后标题会从 `Bash` 变成 `bash` 并在有/无快照之间跳动，而内置工具的外壳声明属于 TUI
+   * 内部样式（我们的卡片同时承载运行状态色与折叠入口，不能因为一条内部声明就丢掉它们）。
+   *
+   * 只读投影：读不到定义 / 没有展示字段就原样返回，客户端回退到工具名格式化。
+   * 只在 start 上附：一个工具调用的 label 与壳声明在一次调用内不会变。
+   */
+  private withToolDisplayMeta(event: SdkAgentEvent): SdkAgentEvent {
+    if (event.type !== "tool_execution_start") return event;
+    try {
+      const runner = this.session.extensionRunner as
+        | { getToolDefinition?: (toolName: string) => unknown }
+        | undefined;
+      if (typeof runner?.getToolDefinition !== "function") return event;
+      const toolName = typeof event.toolName === "string" ? event.toolName : "";
+      if (toolName === "") return event;
+      const definition = runner.getToolDefinition(toolName) as
+        | { label?: unknown; renderShell?: unknown }
+        | undefined;
+      if (!definition) return event;
+      // label 精确等于工具名视为没声明名字（内置工具的自称写法）—— 与历史路径同一道门槛。
+      // 只比精确相等：真插件会用大小写做显示改进（pi-mcp-adapter 给 `mcp` 的 label 是 `MCP`）。
+      const rawLabel = typeof definition.label === "string" ? definition.label.trim() : "";
+      const label = rawLabel !== "" && rawLabel !== toolName
+        ? rawLabel
+        : undefined;
+      const shell = definition.renderShell === "self" ? ("self" as const) : undefined;
+      if (label === undefined && shell === undefined) return event;
+      return {
+        ...event,
+        ...(label !== undefined ? { toolLabel: label } : {}),
+        ...(shell !== undefined ? { toolShell: shell } : {}),
+      };
+    } catch {
+      // 显示元数据缺失不能影响事件流
+      return event;
+    }
   }
 
   /**
@@ -2292,7 +2366,7 @@ export class SdkSessionHost {
         });
         const sendFileTool: ToolDefinition = {
           name: SEND_FILE_TO_USER_TOOL_NAME,
-          label: "Send file to user",
+          label: SEND_FILE_TO_USER_TOOL_LABEL,
           description: "Publish an agent-created project file as a user-visible attachment with preview/download support.",
           promptSnippet: "deliver a generated file to the user as a downloadable attachment",
           promptGuidelines: [
@@ -2926,6 +3000,25 @@ export class SdkSessionHost {
         return null;
       }
 
+      case "get_command_argument_completions": {
+        // 斜杠命令的参数补全（issue #75）：与 TUI 同一语义 ——
+        // prefix 是**命令名之后的整段文本**（含空串），插件返回的 value 是要替换进去的完整参数文本。
+        const name = typeof command.name === "string" ? command.name : "";
+        const prefix = typeof command.prefix === "string" ? command.prefix : "";
+        if (!name) return { items: [] };
+        const registered = session.extensionRunner.getRegisteredCommands()
+          .find((cmd) => cmd.invocationName === name) as { getArgumentCompletions?: unknown } | undefined;
+        const resolve = registered?.getArgumentCompletions;
+        if (typeof resolve !== "function") return { items: [] };
+        try {
+          const result = await (resolve as (p: string) => unknown).call(registered, prefix);
+          return { items: normalizeArgumentCompletions(result) };
+        } catch {
+          // 插件补全抛错不能影响输入：当作没有候选
+          return { items: [] };
+        }
+      }
+
       case "get_commands": {
         const commands: Array<Record<string, unknown>> = [];
         for (const cmd of session.extensionRunner.getRegisteredCommands()) {
@@ -2934,6 +3027,11 @@ export class SdkSessionHost {
             description: cmd.description,
             source: "extension",
             sourceInfo: cmd.sourceInfo,
+            // 参数补全（`/cmd <prefix>`）：客户端据此决定要不要问下一级补全（issue #75）。
+            // 只标能力，不在这一帧里跑插件代码——补全按输入前缀单独请求。
+            ...(typeof (cmd as { getArgumentCompletions?: unknown }).getArgumentCompletions === "function"
+              ? { hasArgumentCompletions: true }
+              : {}),
           });
         }
         for (const template of session.promptTemplates) {

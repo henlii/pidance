@@ -17,6 +17,12 @@ export type SlashCommandInfo = {
   name: string;
   description?: string;
   sourceInfo?: { source?: string; scope?: string };
+  /**
+   * 该命令是否提供参数补全（`/cmd <prefix>`，issue #75）。
+   * 服务端只在插件真的注册了 `getArgumentCompletions` 时才置 true；
+   * 客户端据此决定要不要在命令名之后继续问下一级候选。
+   */
+  hasArgumentCompletions?: boolean;
   [key: string]: unknown;
 };
 export type Theme = {

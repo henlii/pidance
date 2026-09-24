@@ -20,6 +20,13 @@ function normalizeToolCallBlock(block: unknown): ToolCallContent | null {
   if (Array.isArray(block.renderedCallLines) && block.renderedCallLines.every((line) => typeof line === "string")) {
     normalized.renderedCallLines = [...block.renderedCallLines] as string[];
   }
+  // 工具定义的显示元数据（issue #75）：本函数重建块对象，不透传就会在归一这一步丢掉。
+  if (typeof block.toolLabel === "string" && block.toolLabel.trim() !== "") {
+    normalized.toolLabel = block.toolLabel;
+  }
+  if (block.toolShell === "self") {
+    normalized.toolShell = "self";
+  }
   return normalized;
 }
 

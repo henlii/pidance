@@ -3,7 +3,7 @@
 import React, { useRef, useState, useCallback, useEffect, useMemo, useId, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
 import { thinkingLabel as resolveThinkingLabel } from "@/lib/thinking-level-policy";
 import { createPortal } from "react-dom";
-import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessageRow as QueuedRow, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
+import type { BuiltinSlashCommandResult, CommandArgumentCompletion, CompactResultInfo, QueuedMessageRow as QueuedRow, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft-store";
 import { getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { listThinkingDisplayLevel, modelClickThinkingLevel } from "@/lib/thinking-level-policy";
@@ -128,6 +128,11 @@ interface Props {
   slashCommands?: SlashCommandInfo[];
   slashCommandsLoading?: boolean;
   onLoadSlashCommands?: () => Promise<SlashCommandInfo[]> | SlashCommandInfo[];
+  /**
+   * 斜杠命令的参数候选（issue #75）：`prefix` 是命令名之后的整段文本。
+   * 与 onLoadSlashCommands 同一注入口径 —— 组件不直接发命令请求。
+   */
+  onLoadCommandArgumentCompletions?: (name: string, prefix: string) => Promise<CommandArgumentCompletion[]>;
   onBuiltinCommand?: (message: string) => Promise<BuiltinSlashCommandResult>;
   soundEnabled?: boolean;
   onSoundToggle?: () => void;
@@ -369,7 +374,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onAbortCompaction, isCompacting, compactError, compactResult,
   thinkingLevel, thinkingReady, onThinkingLevelChange, defaultThinkingLevel, availableThinkingLevels, thinkingLevelMap, thinkingLevelMaps,
   retryInfo, queuedMessages, onRecallQueue, onSendQueueAsSteer,
-  slashCommands, slashCommandsLoading, onLoadSlashCommands,
+  slashCommands, slashCommandsLoading, onLoadSlashCommands, onLoadCommandArgumentCompletions,
   onBuiltinCommand,
   onAudioUnlock,
   onPromptWithStreamingBehavior,
@@ -438,6 +443,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const bashMode = attachedImages.length === 0 && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
+  // 斜杠命令的参数候选（issue #75）：与命令名菜单互斥（由 argQuery 驱动）。
+  const [argItems, setArgItems] = useState<CommandArgumentCompletion[]>([]);
+  const [argActiveIndex, setArgActiveIndex] = useState(0);
+  const [argLoading, setArgLoading] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [atQuery, setAtQuery] = useState<AtQueryMatch | null>(null);
   const [atMenuOpen, setAtMenuOpen] = useState(false);
@@ -465,6 +474,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const lastCompositionEndAtRef = useRef(0);
   const slashCommandsRequestedRef = useRef(false);
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const argOverlayRef = useRef<HTMLDivElement>(null);
+  const argItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  /** 参数补全请求序号：迟到的响应不得覆盖最新一次请求的结果。 */
+  const argRequestSeqRef = useRef(0);
   const atItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const fileIndexMetaRef = useRef<{ cwd: string; fetchedAt: number } | null>(null);
   const fileIndexFetchingRef = useRef<string | null>(null);
@@ -1132,6 +1145,105 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       });
   })();
 
+  /**
+   * 斜杠命令的**参数**补全（issue #75）。
+   *
+   * 触发条件与 pi-tui 一致：**光标所在行**的、光标之前的文本以 `/命令名 ` 开头
+   * （命令名之后有空格），且该命令声明了 `hasArgumentCompletions`。
+   * prefix 是命令名之后、光标之前的文本（含空串）—— 光标之后的内容不算 prefix，
+   * 它在应用候选时原样保留。多行输入里只看光标那一行：补全只改这一行，
+   * 不会动用户的换行结构。
+   */
+  const argQuery = (() => {
+    // 与 pi-tui 同口径（autocomplete.js 的 CombinedAutocompleteProvider.getSuggestions）：
+    // 只看**光标所在行、光标之前**的文本 —— 命令名在该行行首、之后一个空格、再后面是 prefix（含空串）。
+    // 用光标之后的正文当 prefix 会在「回到参数中间改字」时按错误前缀取候选，再只替换到光标处，
+    // 结果是拼出一个用户没要的参数。
+    const caret = textareaRef.current?.selectionStart ?? value.length;
+    const lineStart = value.lastIndexOf("\n", Math.max(0, caret - 1)) + 1;
+    const lineBeforeCaret = value.slice(lineStart, caret);
+    if (!lineBeforeCaret.startsWith("/")) return null;
+    const spaceIndex = lineBeforeCaret.indexOf(" ");
+    if (spaceIndex === -1) return null;
+    const name = lineBeforeCaret.slice(1, spaceIndex);
+    if (!name) return null;
+    const command = (slashCommands ?? []).find((c) => c.name === name && c.hasArgumentCompletions);
+    if (!command) return null;
+    return { name, prefix: lineBeforeCaret.slice(spaceIndex + 1) };
+  })();
+
+  const argMenuOpen = argQuery !== null;
+  // 取出原始值再进 effect：argQuery 每次渲染都是新对象，直接依赖它会让父级任何一次重渲染
+  // 都取消防抖、作废序号（等于每帧重发一次请求），而 effect 里引用它又会被 exhaustive-deps 记一条。
+  const argCommandName = argQuery?.name ?? null;
+  const argPrefix = argQuery?.prefix ?? null;
+
+  // 前缀（含命令名）变化：立刻丢掉上一轮的候选并作废在途请求 —— 否则会短暂显示
+  // 与当前输入不相干的旧候选，或者在途响应回来后重新打开菜单。
+  const argQueryKey = argCommandName === null || argPrefix === null ? null : `${argCommandName} ${argPrefix}`;
+  useEffect(() => {
+    argRequestSeqRef.current += 1;
+    setArgItems([]);
+    setArgActiveIndex(0);
+  }, [argQueryKey]);
+
+  useEffect(() => {
+    if (argCommandName === null || argPrefix === null || !onLoadCommandArgumentCompletions) {
+      setArgItems([]);
+      setArgLoading(false);
+      return;
+    }
+    const seq = ++argRequestSeqRef.current;
+    setArgLoading(true);
+    // 轻量防抖：连续键入只发最后一次（与 @ 菜单同一思路，避免每个字符一次往返）。
+    const timer = setTimeout(() => {
+      void Promise.resolve(onLoadCommandArgumentCompletions(argCommandName, argPrefix))
+        .then((items) => {
+          if (argRequestSeqRef.current !== seq) return; // 迟到的响应不得覆盖最新一次
+          setArgItems(Array.isArray(items) ? items : []);
+          setArgActiveIndex(0);
+        })
+        .catch(() => {
+          if (argRequestSeqRef.current !== seq) return;
+          setArgItems([]);
+        })
+        .finally(() => {
+          if (argRequestSeqRef.current === seq) setArgLoading(false);
+        });
+    }, 120);
+    return () => clearTimeout(timer);
+  }, [argCommandName, argPrefix, onLoadCommandArgumentCompletions]);
+
+  /**
+   * 应用参数候选：替换**参数区间**（命令名之后到光标处），光标后的内容原样保留。
+   * 不额外补空格 —— pi-tui 的 applyCompletion 就是这么做的，候选 value 自己带空格
+   * （例如 `"token set "`）表示还能继续补下一级。
+   */
+  const applyArgCompletion = useCallback((item: CommandArgumentCompletion) => {
+    if (!argQuery) return;
+    // 替换区间按**当前**光标重新推导（候选可能在光标移动之后才被点或按 Tab）：只改光标
+    // 所在行，区间是命令名与它后面那个空格之后、到光标处 —— 光标后的正文与其它行原样保留。
+    // 若这一行已经不是该命令的参数（光标移到别处、用户改了命令名），直接不动。
+    const caret = textareaRef.current?.selectionStart ?? value.length;
+    const lineStart = value.lastIndexOf("\n", Math.max(0, caret - 1)) + 1;
+    const commandPrefix = "/" + argQuery.name + " ";
+    if (!value.slice(lineStart, caret).startsWith(commandPrefix)) return;
+    const from = lineStart + commandPrefix.length;
+    if (from > caret) return;
+    const nextValue = value.slice(0, from) + item.value + value.slice(caret);
+    const nextCaret = from + item.value.length;
+    setValue(nextValue);
+    setArgActiveIndex(0);
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(nextCaret, nextCaret);
+      ta.style.height = "auto";
+      ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+    });
+  }, [argQuery, value]);
+
   const groupedSlashCommands = (() => {
     const groups = new Map<SlashCommandSource, { source: SlashCommandSource; items: { command: SlashCommandPaletteItem; index: number }[] }>();
     for (const source of SLASH_SOURCES) {
@@ -1416,6 +1528,32 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         return;
       }
 
+      if (argMenuOpen && argItems.length > 0) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setArgActiveIndex((i) => Math.min(argItems.length - 1, i + 1));
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setArgActiveIndex((i) => Math.max(0, i - 1));
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          // 作废在途请求：否则响应回来会把菜单又打开（用户已经关掉了它）。
+          argRequestSeqRef.current += 1;
+          setArgItems([]);
+          setArgLoading(false);
+          return;
+        }
+        if ((e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) && argItems[argActiveIndex]) {
+          e.preventDefault();
+          applyArgCompletion(argItems[argActiveIndex]);
+          return;
+        }
+      }
+
       if (slashMenuOpen && slashQuery !== null) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
@@ -1513,7 +1651,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }
       }
     },
-    [isStreaming, isMobile, streamingEnterDefault, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, queuedMessages, onSendQueueAsSteer, flushQueueAsSteer]
+    // argMenuOpen / argItems / argActiveIndex / applyArgCompletion 必须在这里：少了它们，
+    // 闭包停留在「候选还没到」的那一帧，Tab/Enter 拦不住 —— Enter 会把没补全的正文直接发出去。
+    [isStreaming, isMobile, streamingEnterDefault, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, argMenuOpen, argItems, argActiveIndex, applyArgCompletion, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, queuedMessages, onSendQueueAsSteer, flushQueueAsSteer]
   );
 
   const handleInput = useCallback(() => {
@@ -1566,6 +1706,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (!slashMenuOpen) return;
     slashItemRefs.current[slashActiveIndex]?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [slashActiveIndex, slashMenuOpen]);
+
+  useEffect(() => {
+    argItemRefs.current.length = argItems.length;
+  }, [argItems.length]);
+
+  useEffect(() => {
+    if (!argMenuOpen) return;
+    argItemRefs.current[argActiveIndex]?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [argActiveIndex, argMenuOpen]);
 
   // 第一阶段：共享运行时目录（modelList/modelNames）和 serverPrefs 中的每模型
   // 思考缓存先到位。第二阶段：把当前会话选择叠加到列表；当前模型即使因
@@ -1643,6 +1792,16 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     gap: 8,
     margin: 8,
     maxHeight: 460,
+    width: "anchor",
+  });
+  const argOverlay = useAnchoredOverlay({
+    open: argMenuOpen && (argItems.length > 0 || argLoading),
+    anchorRef: inputContainerRef,
+    overlayRef: argOverlayRef,
+    preferredPlacement: "above",
+    gap: 8,
+    margin: 8,
+    maxHeight: 260,
     width: "anchor",
   });
   const atOverlay = useAnchoredOverlay({
@@ -2198,6 +2357,81 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     </section>
                   ))
                 )}
+              </div>
+            </div>
+          )}
+          {argMenuOpen && (argItems.length > 0 || argLoading) && (
+            <div
+              ref={argOverlayRef}
+              style={{
+                ...argOverlay.style,
+                zIndex: 118,
+                background: "var(--bg)",
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                boxShadow: argOverlay.placement === "above" ? "0 -6px 20px rgba(0,0,0,0.12)" : "0 6px 20px rgba(0,0,0,0.12)",
+                overflow: "hidden",
+                display: "flex",
+                flexDirection: "column",
+              }}
+            >
+              <div
+                style={{
+                  padding: "8px 10px",
+                  borderBottom: "1px solid var(--border)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 8,
+                  fontSize: 11,
+                  color: "var(--text-dim)",
+                  flexShrink: 0,
+                }}
+              >
+                <span>{argLoading && argItems.length === 0 ? t("input_commandArgsLoading") : t("input_commandArgs", { name: argQuery?.name ?? "" })}</span>
+                <span style={{ fontFamily: "var(--font-mono)" }}>{t("input_tabEnter")}</span>
+              </div>
+              <div role="listbox" aria-label={t("input_commandArgs", { name: argQuery?.name ?? "" })} style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 4 }}>
+                {argItems.map((item, index) => {
+                  const active = index === argActiveIndex;
+                  return (
+                    <button
+                      key={`${item.value}:${index}`}
+                      ref={(node) => { argItemRefs.current[index] = node; }}
+                      role="option"
+                      aria-selected={active}
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        applyArgCompletion(item);
+                      }}
+                      onMouseEnter={() => setArgActiveIndex(index)}
+                      style={{
+                        width: "100%",
+                        minWidth: 0,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        padding: "7px 9px",
+                        // 触摸端够大：与 @ 菜单同一口径
+                        minHeight: isMobile ? 44 : 32,
+                        border: `1px solid ${active ? "var(--accent)" : "transparent"}`,
+                        borderRadius: 6,
+                        background: active ? "var(--bg-selected)" : "transparent",
+                        color: "var(--text)",
+                        fontSize: 12,
+                        fontFamily: "var(--font-mono)",
+                        cursor: "pointer",
+                        textAlign: "left",
+                      }}
+                    >
+                      <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.label}</span>
+                      {item.description && (
+                        <span style={{ marginLeft: "auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontSize: 11 }}>{item.description}</span>
+                      )}
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}

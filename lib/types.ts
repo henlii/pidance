@@ -123,6 +123,18 @@ export interface ThinkingContent {
   deferred?: boolean;
 }
 
+/**
+ * 工具定义里的显示元数据（issue #75）：`label` 是人类可读名（pi-mcp-adapter 给 "MCP"、
+ * pi-lsp 给 "LSP: Diagnostics"），`renderShell: "self"` 表示该工具**自带外壳**、
+ * 宿主不得再套一层卡片边框与底色。
+ *
+ * 只承载显示语义，不参与工具执行。
+ */
+export interface ToolDisplayMeta {
+  label?: string;
+  renderShell?: "self";
+}
+
 export interface ToolCallContent {
   type: "toolCall";
   toolCallId: string;
@@ -130,6 +142,10 @@ export interface ToolCallContent {
   input: Record<string, unknown>;
   /** 插件 renderCall 在服务端 headless 渲染得到的 ANSI 行。 */
   renderedCallLines?: string[];
+  /** 工具定义的显示名（`ToolDefinition.label`）；缺省时客户端回退到工具名格式化。 */
+  toolLabel?: string;
+  /** 工具定义声明自带外壳（`renderShell: "self"`）：客户端不套卡片边框/底色。 */
+  toolShell?: "self";
 }
 
 export type AssistantContentBlock = TextContent | ImageContent | ThinkingContent | ToolCallContent;
@@ -366,7 +382,7 @@ export interface ExtensionWidgetItem {
  * rendered_lines_update 是宿主自己的重渲事件（插件 invalidate / 宽度变化）。
  */
 export type ToolRenderedAgentEvent =
-  | { type: "tool_execution_start"; renderedCallLines?: string[] }
+  | { type: "tool_execution_start"; renderedCallLines?: string[]; toolLabel?: string; toolShell?: "self" }
   | { type: "tool_execution_update"; renderedLines?: string[] }
   | { type: "tool_execution_end"; renderedResultLines?: string[] }
   | { type: "rendered_lines_update"; renderedCallLines?: string[]; renderedResultLines?: string[] };

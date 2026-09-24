@@ -313,6 +313,8 @@ export const zhCN: Record<TranslationKey, string> = {
   input_slashCommands: '斜杠命令',
   input_loadingCommands: '正在加载命令…',
   input_tabEnter: 'Tab / Enter',
+  input_commandArgs: '命令参数 · {name}',
+  input_commandArgsLoading: '正在取命令参数…',
   input_noCommands: '没有找到命令',
   // message
   message_copy: '复制消息',

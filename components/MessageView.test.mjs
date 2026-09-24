@@ -722,3 +722,68 @@ test("文件条目：引用到输入框与打开文件是两个动作，引用�
     assert.match(dict, /files_insertIntoChat:/, `${locale} 缺少 files_insertIntoChat`);
   }
 });
+
+test("工具定义 label 优先做标题，缺省时回退工具名格式化（issue #75）", () => {
+  const message = toolMessage("status");
+  message.content[0].toolName = "mcp";
+  message.content[0].toolLabel = "MCP";
+
+  const withLabel = renderMessage(message);
+  assert.ok(withLabel.includes("MCP·"), "有 label 时标题用 label");
+  assert.ok(!withLabel.includes("Mcp·"), "有 label 时不再显示工具名格式化结果");
+
+  const withoutLabel = renderMessage(toolMessage("status"));
+  assert.ok(withoutLabel.includes("Bash·"), "没有 label 时回退到工具名格式化");
+});
+
+test("renderShell: \"self\" + 真有渲染行：不套卡片外壳，但保留标题与折叠入口（issue #75）", () => {
+  const message = toolMessage("status");
+  message.content[0].toolName = "ask_advisor";
+  message.content[0].toolLabel = "Ask Advisor";
+  message.content[0].toolShell = "self";
+  // 插件真的画了行（自带外壳的前提）：这时才去壳，否则会出现一张没有边框、没有状态色的空块
+  message.content[0].renderedCallLines = ["╭─ advisor ─╮", "│ answer     │", "╰───────────╯"];
+  const html = renderMessage(message);
+  assert.ok(html.includes("Ask Advisor·"), "自带外壳的工具仍要有标题（折叠入口与耗时不能丢）");
+  assert.ok(!html.includes("border-radius:var(--radius-md)"), "自带外壳的工具不再套我们的圆角卡片");
+  assert.ok(!html.includes("1px solid var(--border)"), "自带外壳的工具不再套我们的边框");
+  assert.ok(!html.includes("background:var(--tool-bg)"), "自带外壳的工具不再套我们的底色");
+
+  // 对照：默认外壳的工具仍有卡片样式
+  const normal = renderMessage(toolMessage("status"));
+  assert.ok(normal.includes("border-radius:var(--radius-md)"), "默认工具仍套卡片外壳");
+});
+
+test("renderShell: \"self\" 但插件什么都没画：保留既有卡片（否则信息全丢）（issue #75）", () => {
+  const message = toolMessage("status");
+  message.content[0].toolName = "ask_advisor";
+  message.content[0].toolLabel = "Ask Advisor";
+  message.content[0].toolShell = "self";
+  const html = renderMessage(message);
+  assert.ok(html.includes("Ask Advisor·"), "标题仍在");
+  assert.ok(
+    html.includes("border-radius:var(--radius-md)") && html.includes("background:var(--tool-bg)"),
+    "没有渲染行时不能去壳：边框/底色/状态色是我们承载运行状态的地方",
+  );
+});
+
+test("源码契约：自带外壳时调用/结果 ANSI 槽一并去掉宿主底色与分隔线（issue #75）", () => {
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  const barePropUses = source.match(/bare=\{bareShell\}/g) ?? [];
+  assert.equal(barePropUses.length, 2, "调用槽与结果槽都要跟随外壳声明");
+  // 源码是 CRLF，断言按单行片段写，避免行尾差异把契约测试变成环境测试
+  assert.ok(source.includes("style={bareShell"), "外层样式必须由外壳声明驱动");
+  assert.ok(source.includes('renderShell: \"self\"'), "注释里要写明这与 TUI 的 renderShell: self 同源");
+  // 表头标题统一走 headerLabel（label 优先、回退工具名）
+  assert.equal(source.includes("label={formatToolBlockLabel(block.toolName)}"), false, "工具卡标题不能再直接用工具名");
+});
+
+test("源码契约：工具块响应扩展的全局展开请求，但只在请求那一刻改写（issue #75）", () => {
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  assert.ok(source.includes("export function ToolExpansionRequestProvider"), "provider 必须导出（ChatWindow 要包消息列）");
+  const block = source.slice(source.indexOf("function ToolCallBlock"), source.indexOf("function ToolCallBlock") + 4000);
+  assert.ok(block.includes("useToolExpansionRequest()"), "工具块必须消费展开请求");
+  assert.match(block, /setExpanded\(toolsExpandedRequest\.expanded\)/, "请求值要写进本块展开态");
+  assert.match(block, /\}, \[toolsExpandedRevision\]\)/, "只绑 revision：绑值会在用户手动切换后被拉回");
+  assert.ok(!/\[toolsExpandedRequest\]/.test(block), "依赖里不能带整个请求对象");
+});

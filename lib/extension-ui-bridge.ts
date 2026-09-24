@@ -24,6 +24,19 @@ export interface ExtensionUiState {
   workingVisible: boolean;
   /** 扩展自定义的运行指示动画帧（setWorkingIndicator）；frames 为空数组 = 隐藏指示器。 */
   workingIndicator: { frames: string[]; intervalMs: number } | null;
+  /**
+   * 扩展请求的全局工具展开态（`setToolsExpanded`）。
+   *
+   * null = 扩展从未请求过（客户端保持每块的用户选择）；布尔值 = 最近一次请求的值。
+   * 与 TUI 同语义：false 把所有工具块收起来，true 全部展开。已装插件（pi-subagents 三处）
+   * **都是 set(false)**，展开态只为语义完整。
+   */
+  toolsExpanded: boolean | null;
+  /**
+   * 请求序号：同一个值被连续请求两次也必须让客户端再执行一次
+   * （每块有自己的折叠状态，靠「值相同」判重会漏掉用户中途手动展开的那块）。
+   */
+  toolsExpandedRevision: number;
   /** 阻塞请求 FIFO 内部队列；dialog 始终由队首投影 */
   blockingQueue: ExtensionUiBlockingRequest[];
 }
@@ -39,6 +52,8 @@ export function createEmptyExtensionUiState(  partial?: Partial<Pick<ExtensionUi
     workingMessage: null,
     workingVisible: true,
     workingIndicator: null,
+    toolsExpanded: null,
+    toolsExpandedRevision: 0,
     blockingQueue: [],
   };
 }
@@ -177,6 +192,9 @@ export function resetExtensionUiForSession(state: ExtensionUiState): ExtensionUi
     workingMessage: null,
     workingVisible: true,
     workingIndicator: null,
+    // 切会话要把「扩展请求的展开态」清掉：新会话不该继承上一个会话的请求。
+    toolsExpanded: null,
+    toolsExpandedRevision: 0,
   };
 }
 
@@ -245,6 +263,12 @@ export function applyExtensionUiRequest(
       return state.workingMessage === request.message
         ? { state, effects: [] }
         : { state: { ...state, workingMessage: request.message }, effects: [] };
+    case "setToolsExpanded":
+      // 值相同也要递增序号：客户端据此把「一次请求」与「当前值」区分开。
+      return {
+        state: { ...state, toolsExpanded: request.toolsExpanded, toolsExpandedRevision: state.toolsExpandedRevision + 1 },
+        effects: [],
+      };
     case "setWorkingVisible":
       return state.workingVisible === request.visible
         ? { state, effects: [] }

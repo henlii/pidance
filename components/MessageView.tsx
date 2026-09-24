@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useState, useRef, useEffect, useMemo, type ReactNode } from "react";
+import { createContext, memo, useContext, useState, useRef, useEffect, useMemo, type ReactNode } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { AlertTriangle, AtSign, Check, CheckCircle2, ChevronDown, ChevronUp, Copy, FilePlus, GitBranch, Terminal, XCircle } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
@@ -1010,6 +1010,28 @@ function formatBlockLabel(name: string): string {
   return `${name}·`;
 }
 
+/**
+ * 扩展请求的全局工具展开态（issue #75）。
+ *
+ * `setToolsExpanded` 是全局语义（TUI 里一个开关管所有工具行），而 Web 的工具块折叠态
+ * 是每块自己的 `useState`。用 context 把请求下传，比逐层透传 props 更小：
+ * 走 props 就必须同时改 MessageView 的记忆化比较器，漏一个字段就是「有时没反应」。
+ *
+ * `null` = 扩展从未请求过（保持每块的用户选择）。`revision` 用来区分「新的一次请求」
+ * 与「同一个值的当前状态」。
+ */
+export type ToolExpansionRequest = { expanded: boolean; revision: number } | null;
+
+const ToolExpansionRequestContext = createContext<ToolExpansionRequest>(null);
+
+export function ToolExpansionRequestProvider({ value, children }: { value: ToolExpansionRequest; children: ReactNode }) {
+  return <ToolExpansionRequestContext.Provider value={value}>{children}</ToolExpansionRequestContext.Provider>;
+}
+
+function useToolExpansionRequest(): ToolExpansionRequest {
+  return useContext(ToolExpansionRequestContext);
+}
+
 function formatToolBlockLabel(toolName: string): string {
   const trimmed = toolName.trim() || "tool";
   return formatBlockLabel(trimmed.charAt(0).toUpperCase() + trimmed.slice(1));
@@ -1228,8 +1250,18 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, onReferen
 }) {
   const { t } = useI18n();
   const streamBlockMaxHeight = useStreamBlockMaxHeight();
-  // 折叠/展开完全由用户决定：运行中也不自动展开，结束后也不自动收回。
+  // 折叠/展开完全由用户决定：运行中也不自动展开，结束后也不自动收回 ——
+  // 唯一例外是扩展显式请求的全局展开态（`setToolsExpanded`，issue #75）：
+  // 每次请求（按 revision 识别）把本块设成请求的值，之后仍归用户。
   const [expanded, setExpanded] = useState(defaultExpanded === true);
+  const toolsExpandedRequest = useToolExpansionRequest();
+  const toolsExpandedRevision = toolsExpandedRequest?.revision;
+  useEffect(() => {
+    if (!toolsExpandedRequest) return;
+    setExpanded(toolsExpandedRequest.expanded);
+    // 只响应「一次新的请求」：把值写进依赖会在用户手动切换后被请求值拉回去。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toolsExpandedRevision]);
   const [now, setNow] = useState(() => Date.now());
   const [resolvedDetails, setResolvedDetails] = useState<unknown>(undefined);
   const [resolvedResultContent, setResolvedResultContent] = useState<ToolResultMessage["content"] | undefined>(undefined);
@@ -1276,6 +1308,25 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, onReferen
   const renderedCallLines = getRenderableAnsiLines(snapshot?.renderedCallLines ?? block.renderedCallLines);
   const renderedLiveLines = getRenderableAnsiLines(snapshot?.renderedLines);
   const renderedResultLines = getRenderableAnsiLines(snapshot?.renderedResultLines ?? effectiveResult?.renderedResultLines);
+  /**
+   * 工具定义的显示元数据（issue #75）：`label` 是人类可读名，`renderShell` 决定要不要套壳。
+   * 活路径由 `tool_execution_start` 投影带来（快照优先），历史路径由会话读取投影写在块上。
+   * 都没有时回退到工具名格式化——不因为缺元数据而少显示任何东西。
+   * 只认**扩展声明**的元数据：SDK 内置工具的 label 就是小写工具名、`edit` 还带 self，
+   * 采纳它们只会让标题在 `Bash`/`bash` 之间跳动并让 edit 丢掉状态色（见 lib/tool-display-meta.ts）。
+   */
+  const toolLabel = snapshot?.toolLabel ?? block.toolLabel;
+  /**
+   * 自带外壳（`renderShell: "self"`）：TUI 里这类工具不进宿主的默认 Box。
+   * 但**只有它真的渲染出了行**才去壳 —— 插件什么都没画时（渲染器失败、还没出内容），
+   * 去壳只会得到一张没有边框、没有状态色、没有底的可折叠空白块，等于把信息丢了。
+   */
+  const declaredSelfShell = (snapshot?.toolShell ?? block.toolShell) === "self";
+  const hasRenderedLines = Boolean(renderedCallLines || renderedLiveLines || renderedResultLines);
+  const bareShell = declaredSelfShell && hasRenderedLines;
+  const headerLabel = toolLabel && toolLabel.trim() !== ""
+    ? formatBlockLabel(toolLabel.trim())
+    : formatToolBlockLabel(block.toolName);
   const elapsedMs = snapshot
     ? Math.max(0, (snapshot.status === "running" ? now : (snapshot.endedAt ?? snapshot.startedAt)) - snapshot.startedAt)
     : startedAt !== undefined
@@ -1343,20 +1394,26 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, onReferen
 
   return (
     <div
-      style={{
-        borderRadius: "var(--radius-md)",
-        overflow: "hidden",
-        fontSize: 12,
-        border: "1px solid var(--border)",
-        borderLeft: `3px solid ${statusColor}`,
-        background: "var(--tool-bg)",
-      }}
+      style={bareShell
+        // 自带外壳（renderShell: "self"）：插件自己画框（例如 ask_advisor 的 ANSI 框线），
+        // 再套一层我们的边框与底色就会出现「框里套框」。TUI 的做法同类：这类工具不进
+        // 默认 Box，因此不继承宿主的底色与内边距。表头行保留 —— 折叠入口与耗时是我们
+        // 自己的交互面，去掉它会让自带外壳的工具无法折叠。
+        ? { fontSize: 12 }
+        : {
+            borderRadius: "var(--radius-md)",
+            overflow: "hidden",
+            fontSize: 12,
+            border: "1px solid var(--border)",
+            borderLeft: `3px solid ${statusColor}`,
+            background: "var(--tool-bg)",
+          }}
     >
       {/* 标签与内容同一行：折叠/运行中整块只有一行（不再有标题栏 + 预览行两层）。
           展开且存在命令分区时，标签并进该分区表头（展开后同样不出现标题行）。 */}
       {(!expanded || !command) && (
         <BlockHeaderRow
-          label={formatToolBlockLabel(block.toolName)}
+          label={headerLabel}
           expanded={expanded}
           onToggle={() => setExpanded(!expanded)}
           summary={!expanded ? collapsedSummary : null}
@@ -1367,9 +1424,9 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, onReferen
 
       {/* ── Expanded: 参数友好摘要（替代原始 JSON，OpenChamber 风格） ── */}
       {expanded && command && (
-        <div style={{ background: "var(--bg-subtle)" }}>
+        <div style={bareShell ? undefined : { background: "var(--bg-subtle)" }}>
           <BlockHeaderRow
-            label={formatToolBlockLabel(block.toolName)}
+            label={headerLabel}
             expanded={expanded}
             onToggle={() => setExpanded(!expanded)}
             summary={null}
@@ -1382,7 +1439,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, onReferen
       )}
 
       {expanded && renderedCallLines && (
-        <AnsiToolLines lines={renderedCallLines} statusColor={statusColor} />
+        <AnsiToolLines lines={renderedCallLines} statusColor={statusColor} bare={bareShell} />
       )}
 
       {expanded && !isEditTool && !isApplyPatchTool && (
@@ -1397,8 +1454,8 @@ maxHeight: streamBlockMaxHeight,
             overflow: "auto",
             overscrollBehavior: "auto",
             touchAction: "pan-y",
-            background: "var(--bg-subtle)",
-            borderTop: `1px solid color-mix(in srgb, ${statusColor} 20%, var(--border))`,
+            background: bareShell ? undefined : "var(--bg-subtle)",
+            borderTop: bareShell ? undefined : `1px solid color-mix(in srgb, ${statusColor} 20%, var(--border))`,
             display: "flex",
             flexDirection: "column",
             gap: 3,
@@ -1414,7 +1471,7 @@ maxHeight: streamBlockMaxHeight,
       )}
 
       {expanded && showLiveOutput && snapshot && (
-        <div style={{ borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--tool-bg)" }}>
+        <div style={bareShell ? undefined : { borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--tool-bg)" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "6px 10px 4px", color: "var(--text-dim)", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em" }}>
             <span>{t("message_toolLiveOutput")}</span>
             {snapshot.truncated && <span style={{ color: "var(--warning)", textTransform: "none", letterSpacing: 0 }}>{t("message_toolOutputTruncated")}</span>}
@@ -1440,7 +1497,7 @@ maxHeight: streamBlockMaxHeight,
             </div>
           )}
           {renderedResultLines ? (
-            <AnsiToolLines lines={renderedResultLines} statusColor={statusColor} />
+            <AnsiToolLines lines={renderedResultLines} statusColor={statusColor} bare={bareShell} />
           ) : detailsLoading && isDeferredHeavyToolDetails(result?.details) && !resultDiff && !applyPatchFiles ? (
             <div style={{ padding: "8px 10px", borderTop: "1px solid var(--border)", color: "var(--text-dim)", fontSize: 11 }}>
               {t("message_thinkingLoading")}
@@ -1543,12 +1600,16 @@ function renderAnsiLines(lines: string[], keyPrefix: string): ReactNode[] {
 }
 
 /** 插件 TUI 行沿用工具卡片的边框、底色和等宽排版，不引入新视觉语义。 */
-function AnsiToolLines({ lines, statusColor }: { lines: string[]; statusColor: string }) {
+function AnsiToolLines({ lines, statusColor, bare = false }: { lines: string[]; statusColor: string; bare?: boolean }) {
   const maxHeight = useStreamBlockMaxHeight();
   return (
     <pre
       tabIndex={0}
-      style={{ margin: 0, padding: "8px 10px", maxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--bg-subtle)", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, whiteSpace: "pre" }}
+      style={bare
+        // 自带外壳的工具（`renderShell: "self"`）：TUI 里这类工具不进默认 Box，
+        // 也就不继承宿主的底色与边框（插件的行自己画框）。
+        ? { margin: 0, padding: "8px 10px", maxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, whiteSpace: "pre" }
+        : { margin: 0, padding: "8px 10px", maxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y", borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--bg-subtle)", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, whiteSpace: "pre" }}
     >
       {renderAnsiLines(lines, "tool-rendered")}
     </pre>

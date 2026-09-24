@@ -30,6 +30,8 @@ export function useExtensionUiState() {
   const [extensionWorkingMessage, setExtensionWorkingMessage] = useState<string | null>(null);
   const [extensionWorkingVisible, setExtensionWorkingVisible] = useState(true);
   const [extensionWorkingIndicator, setExtensionWorkingIndicator] = useState<{ frames: string[]; intervalMs: number } | null>(null);
+  /** 扩展请求的全局工具展开态（issue #75）：null = 从未请求过，客户端保持每块自己的折叠。 */
+  const [extensionToolsExpandedRequest, setExtensionToolsExpandedRequest] = useState<{ expanded: boolean; revision: number } | null>(null);
 
   const extensionUiStateRef = useRef<ExtensionUiState>(createEmptyExtensionUiState({
     customUi: extensionCustomUi,
@@ -47,6 +49,9 @@ export function useExtensionUiState() {
     setExtensionWorkingMessage(next.workingMessage);
     setExtensionWorkingVisible(next.workingVisible);
     setExtensionWorkingIndicator(next.workingIndicator);
+    setExtensionToolsExpandedRequest(next.toolsExpanded === null
+      ? null
+      : { expanded: next.toolsExpanded, revision: next.toolsExpandedRevision });
   }, []);
 
   const patchExtensionUiState = useCallback((patch: Partial<ExtensionUiState>) => {
@@ -73,6 +78,7 @@ export function useExtensionUiState() {
     extensionUiStateRef,
     commitExtensionUiState,
     patchExtensionUiState,
+    extensionToolsExpandedRequest,
     dismissExtensionUiRequest,
   };
 }
