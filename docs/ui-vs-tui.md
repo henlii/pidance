@@ -115,7 +115,7 @@
 | dialog（select/confirm/input/editor） | `ExtensionDialog` 模态 | `components/ExtensionDialog.tsx`、`lib/extension-ui-bridge.ts` | 同 |
 | custom 面板（整屏替换） | `ExtensionCustomPanel` | `components/ExtensionCustomPanel.tsx` | 同；Web 面板可滚动、可关闭 |
 | notify | notice shelf | `components/ChatWindow.tsx`（同文件内 `NoticeShelf`）、`lib/notice-reducer.ts` | Web 支持钉住/堆叠/错误分类 |
-| `setTitle` | 浏览器标签标题 | `lib/window-title.ts` ↔ `components/AppShell.tsx` | 覆盖 **30s TTL**，到期静默回落到项目名（避免插件名永久占标题）—— 属**刻意分叉** |
+| `setTitle` | 浏览器标签标题 | `lib/window-title.ts` ↔ `components/AppShell.tsx` | 覆盖顶在项目名之上，**直到下一次标题写入**（切项目 / 切会话 / 插件再 `setTitle`）—— 与 Pi 的 TUI 一致（它直接写终端标题，没有到期这回事）。此前是 30s TTL 自动回落，已按 #76 改掉 |
 | `setEditorText` | 光标处插入文本 | `hooks/useAgentSession.ts` | 同 |
 | todo（rpiv-todo 面板） | todo 面板 | `components/ChatWindow.tsx`、`lib/todo-parser.ts` | 扩展已提供 todo widget 时隐藏内置镜像，避免双份 |
 | 子代理（pi-subagents） | 侧栏运行中徽标 + 顶栏谱系下拉 + 消息区工具块 | `components/SessionSidebar.tsx`、`components/SessionLineage.tsx`、`lib/subagent-*` | Web 侧栏**隐藏**子代理会话，导航靠谱系下拉（TUI 里它们是普通会话） |
@@ -148,7 +148,7 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
 
 1. **widget 的 placement**：缺省按 `aboveEditor` 处理（与 Pi 默认一致），所以扩展不写 placement 时，Web 就会把它渲染在**输入框上方**。
 2. **组件工厂形式**（`setWidget(key, (tui, theme) => Component)`）：工厂只调用一次，组件实例常驻在适配器里，`tui.requestRender()` 触发重新渲染并按 microtask 合并，产出走与字符串数组相同的 `setWidget` 通道（`lib/web-extension-ui.ts` 的 `mountWidgetFactory` + `lib/tui-render-bridge.ts` 的 `renderWidgetComponentLines`）。渲染失败保留上一次的行（不推空帧）；卸载、替换成字符串数组或适配器 dispose 时调组件的 `dispose?.()`。工厂收到的 `tui` 是有 `requestRender` + `terminal` 的真对象（此前传 `undefined`）。
-3. **`custom()` 的 overlay 与 keybindings**：`ctx.ui.custom(factory, options)` 接收第二参，把 `overlayOptions` 的 `anchor` / `width` / `minWidth` / `maxHeight` / `margin` 归一化成 `ExtensionUiCustomLayout` 随事件下发（`lib/web-extension-ui.ts` 的 `normalizeCustomOverlayLayout`），前端由 `lib/extension-overlay-layout.ts` 映射成浮层的对齐与尺寸。**没有 layout 的 custom 仍是全屏模态**——那对齐的是 `overlay: false` 的语义（替换 editor 区域，如 pi-subagents 的 SelectorComponent）。回调第 3 参注入真的 `KeybindingsManager`（键名定义取 pi-tui 的 `TUI_KEYBINDINGS`）；pi 的应用级键位（如 `app.editor.external`）不在这份定义里，对应的 `matches()` 恒为 false。`tui.stop()` / `tui.start()` 是 no-op 占位（Web 没有可让出的终端），插件的外部编辑器路径会因 spawn 不到 tty 自行失败。
+3. **`custom()` 的 overlay 与 keybindings**：`ctx.ui.custom(factory, options)` 接收第二参，把 `overlayOptions` 的 `anchor` / `width` / `minWidth` / `maxHeight` / `margin` 归一化成 `ExtensionUiCustomLayout` 随事件下发（`lib/web-extension-ui.ts` 的 `normalizeCustomOverlayLayout`），前端由 `lib/extension-overlay-layout.ts` 映射成浮层的对齐与尺寸。**没有 layout 的 custom 仍是全屏模态**——那对齐的是 `overlay: false` 的语义（替换 editor 区域，如 pi-subagents 的 SelectorComponent）。回调第 3 参注入真的 `KeybindingsManager`（键名定义取 pi-tui 的 `TUI_KEYBINDINGS`）；pi 的应用级键位（如 `app.editor.external`）不在这份定义里，对应的 `matches()` 恒为 false。`tui.stop()` / `tui.start()` 是 no-op 占位（Web 没有可让出的终端），插件的外部编辑器路径会因 spawn 不到 tty 自行失败；`stop()` 会经 `notifyUnsupported` **报一次可见失败**（#76），免得用户只看到面板静静地卡住。
 4. **`mode` 是 `"tui"`**（`lib/sdk-session-host.ts` 的 `bindExtensions`）：宿主声明能渲染扩展自绘组件，插件因此走富路径而不是降级——pi-subagents 的 async widget 走组件工厂、pi-mcp-adapter 启用 `/mcp` 的 overlay、pi-advisor-flow 才进 `custom()`。`lib/subagent-async-widget.ts` 仍保留 rpc 快照载荷的解析（`PI_SUBAGENT_ASYNC_JSON:`），作为旧会话与兼容路径。
 5. **`mode === "rpc"` 快照已解码**：pi-subagents 在检测到宿主是 rpc 模式时，发的是同一份数据的一行快照
    `PI_SUBAGENT_ASYNC_JSON:{"kind":"pi-subagents.async-status-snapshot",…}`（见其 `src/tui/render.ts` 与 `src/runs/background/async-status-snapshot.ts`）。
@@ -163,7 +163,7 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
 
    代价与限制：选择态下 `j`/`k` 是导航而非字母，所以只能在「空输入框 + 已激活」时拦；插件在 Web 端的 `Esc` 取消长任务仍然没接（只接了 widget 选择态里的 `Esc`）。
    **注册时会告知覆盖范围**（issue #74）：`onTerminalInput` 落地时发一条只发一次的 warning（`lib/web-extension-ui.ts` 的 `notifyLimitedSupport`），逐字写明两个窗口——① widget 存在且输入框**聚焦且为空**时，`↓`/`←` 开局、之后方向键/`j`/`k`/`Enter`/`Esc` 才会路由；② 存在**已收起**的扩展面板时 `Esc`、`F1`–`F12`、`Alt+<字符>`、`Ctrl+<字符>`（浏览器保留组合与 `Ctrl+Space` 除外）会路由——以及「普通打字到不了」。否则插件无从区分「用户没按」和「Web 端收不到」，这块交互会静默消失 —— 但也不能写成「不支持」：按键确实会送达，只是覆盖面窄。
-7. **面板内鼠标事件**：`ExtensionCustomPanel` 把点击换算成字符行列后发 `extension_ui_mouse`，服务端调**面板组件**的 `handleMouse`。只转 click，不转 move / drag / wheel。`setWidget` 的组件收不到鼠标（`inputCustomMouse` 只查 custom 面板）—— widget 的折叠由共用卡片头承担，体验不丢，但组件级鼠标仍是缺口（见 `docs/extension-compat-gaps.md`）。
+7. **面板内鼠标事件**：`ExtensionCustomPanel` 把点击换算成字符行列后发 `extension_ui_mouse`，服务端调**面板组件**的 `handleMouse`。只转 click，不转 move / drag / wheel。`setWidget` 的组件收不到鼠标（`inputCustomMouse` 只查 custom 面板）—— **刻意分叉**：已装插件里只有 pi-subagents 的 fleet widget 实现了 `handleMouse`，且只对「第 0 行左键点击」切换它自己的收起态；Web 的折叠由共用卡片头承担（粒度不同：卡片级 vs 插件内部子树），方向键驱动的 roster 也已在 #83 打通，所以不为它开口子。custom 面板的 overlay 句柄同理：`focus()` / `unfocus()` 是空实现（Web 只有这一层面板，键本来就路由给它），`getBounds()` 恒 `undefined`（没有终端单元格几何，且已装插件 0 处使用）；`hide()` 则按 pi-tui 契约做成**永久移除**（#76）。
 8. **`getToolsExpanded` / `setToolsExpanded` 自洽**：服务端维护布尔并下发事件，插件 set 之后自己 get 得到的是一致的值；界面上的工具块仍按各自的折叠规则（`setToolsExpanded(true)` 不会展开所有块）。
 9. **没有等价语义的能力改成可见失败**：`setFooter` / `setHeader` / `setEditorComponent` / `addAutocompleteProvider` / `setHiddenThinkingLabel` / `getAllThemes` / `getTheme` 会发一条 warning 通知（每种能力只发一次），不再静默 no-op —— 静默会让插件作者以为生效了（例如 `getAllThemes()` 返回空数组、`getTheme()` 返回 undefined，插件以为主题没配）。`setEditorComponent` 仍然告警（Web 输入区是自己的 React 组件，**不会**用插件的工厂去渲染），但工厂值会存下来并被 `getEditorComponent()` 如实回传（SDK 契约是「当前**配置的**工厂」，未配置才是 undefined），「拿旧的包一层再设回去」的写法不再断链（issue #74）。传 `undefined` / 无参的「恢复默认」不算降级，不提示。`setWorkingMessage` / `setWorkingVisible` / `setWorkingIndicator` **已经实现**（不再走告警）。
 
@@ -200,6 +200,8 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
 | 手机抽屉与安全区适配 | 窄视口下三栏并排不可用 |
 | Electron 壳的托盘/通知/更新 | 壳专属；页面只通过 preload bridge 消费（当前接线见 #51） |
 | 不显示 TUI 键位提示 | 键位在浏览器里无意义（例如 widget 里的 `↓/← to inspect`） |
+| widget 组件级鼠标事件（`handleMouse`） | 已装插件只有 pi-subagents 用它切自己的子树收起态，折叠已由共用卡片头承担；见 §5 |
+| overlay `focus()` / `unfocus()` / `getBounds()` | Web 只有一层面板，键始终路由给它；没有终端单元格几何，且已装插件 0 处使用 `getBounds()` |
 
 ---
 

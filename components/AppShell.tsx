@@ -52,8 +52,8 @@ import {
   getWindowTitleState,
   resolveWindowTitle,
   setWindowTitleBase,
+  setWindowTitleSession,
   subscribeWindowTitle,
-  windowTitleOverrideRemainingMs,
 } from "@/lib/window-title";
 import {
   CHANGES_PANEL_WIDTH_DEFAULT,
@@ -1194,41 +1194,27 @@ function AppShellInner() {
   const windowTitle = activeCwdName ? `${activeCwdName} - Pidance` : "Pidance";
 
   // 窗口标题：AppShell 是唯一写者。base = 「<目录名> - Pidance」；扩展的 setTitle 走
-  // lib/window-title 的临时覆盖（带 TTL，切项目/会话即作废），到期在这里回落。
+  // lib/window-title 的覆盖，直到下一次标题写入（切项目 / 切会话 / 插件再 setTitle）。
+  // 这里没有回落定时器：Pi 的 TUI 也不给扩展标题设到期（issue #76）。
+  const titleSessionKey = chatSession?.id ?? pendingHighlightId ?? null;
   useEffect(() => {
     setWindowTitleBase(windowTitle);
+    setWindowTitleSession(titleSessionKey);
     const apply = () => {
-      const next = resolveWindowTitle(getWindowTitleState(), Date.now());
+      const next = resolveWindowTitle(getWindowTitleState());
       if (document.title !== next) document.title = next;
     };
-    let revertTimer: ReturnType<typeof setTimeout> | null = null;
-    const scheduleRevert = () => {
-      if (revertTimer) clearTimeout(revertTimer);
-      revertTimer = null;
-      const remaining = windowTitleOverrideRemainingMs(getWindowTitleState(), Date.now());
-      if (remaining <= 0) return;
-      revertTimer = setTimeout(() => {
-        revertTimer = null;
-        apply();
-        scheduleRevert();
-      }, remaining);
-    };
     apply();
-    scheduleRevert();
-    const unsubscribe = subscribeWindowTitle(() => {
-      apply();
-      scheduleRevert();
-    });
+    const unsubscribe = subscribeWindowTitle(apply);
     // 兜底：别处（扩展直接写 document.title）动了标题就拉回「应当的标题」。
-    // 写的是解析后的值，因此不会把仍在有效期内的扩展标题打掉。
+    // 写的是解析后的值，因此覆盖生效时会写回扩展标题，不打掉它。
     const observer = new MutationObserver(apply);
     observer.observe(document.head, { childList: true, subtree: true, characterData: true });
     return () => {
       unsubscribe();
-      if (revertTimer) clearTimeout(revertTimer);
       observer.disconnect();
     };
-  }, [windowTitle]);
+  }, [windowTitle, titleSessionKey]);
 
   const sidebarContent = (
     <>

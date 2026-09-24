@@ -42,6 +42,15 @@ export interface HeadlessCustomUiTuiOptions {
    * 为 undefined），与注入前的行为一致。
    */
   isEditorFocused?: () => boolean;
+  /**
+   * `stop()` 被调用时报告一次「宿主做不了这件事」。
+   *
+   * Web 没有可让出的终端，所以 `stop()/start()` 只能是 no-op；但**不能安静地**
+   * 装作让出成功：插件的典型用法是「让出终端 → spawn 外部编辑器 → 收回」
+   * （rpiv-ask-user 的 Ctrl+G 路径），而这里 spawn 出来的编辑器继承的不是 tty，
+   * 挂住或立刻失败都无从告知用户。交给调用方（适配器）去发可见提示。
+   */
+  onUnsupported?: (feature: string) => void;
 }
 
 export interface HeadlessCustomUiTui {
@@ -62,6 +71,9 @@ export interface HeadlessCustomUiTui {
    * no-op 不等于「编辑器一定失败」：插件随后 spawn 的编辑器若退出码为 0，会被它
    * 当成编辑成功；若那个进程挂住（继承来的 stdin 不是 tty），面板会一直等下去。
    * 这条路径在 Web 上没有等价语义。
+   *
+   * 所以 `stop()` 会通过 `onUnsupported` **报一次可见失败**（见 issue #76）：
+   * 用户至少知道「按了 Ctrl+G 但这里做不了」，而不是面板静静地卡住。
    */
   stop(): void;
   start(): void;
@@ -92,10 +104,17 @@ export function createHeadlessCustomUiTui(
 
   const probe = createEditorFocusProbe();
   const readFocused = options.isEditorFocused;
+  // 每次「让出终端」只报一次：插件的保存流程可能反复 stop/start，不该刷屏。
+  // （适配器侧还有一层按能力名去重，两层都不漏。）
+  let reportedHandover = false;
   const tui = {
     terminal: Object.freeze(terminal),
     requestRender,
-    stop() {},
+    stop() {
+      if (reportedHandover) return;
+      reportedHandover = true;
+      options.onUnsupported?.("tui.stop()/start() (external editor handover)");
+    },
     start() {},
   } as HeadlessCustomUiTui & { focusedComponent?: HeadlessCustomUiEditorProbe };
   Object.defineProperty(tui, "focusedComponent", {

@@ -990,6 +990,14 @@ function getSessionContextSettingsLocal(path: SessionEntry[]): {
 export type EntryLinesResolver = (entry: unknown) => string[] | null;
 
 /**
+ * 插件自定义消息的渲染行解析器（由服务层注入）。
+ *
+ * 与 entry 侧的区别在失败语义：entry 拿不到行就整条不显示；消息拿不到行**退回原文**
+ * （消息本来就有 content），所以这里只需要返回 null 表示「不覆盖」。
+ */
+export type MessageLinesResolver = (message: unknown) => string[] | null;
+
+/**
  * 工具定义的显示元数据解析器（由调用方注入，issue #75）。
  *
  * 拿到工具名 → `{ label?, renderShell? }`；null 表示没有元数据（客户端走既有回退）。
@@ -1007,6 +1015,11 @@ export interface SessionReaderProjectionOptions {
    * 缺省时未知 customType 的 entry 不投影（与历史行为一致）。
    */
   entryLines?: EntryLinesResolver;
+  /**
+   * 插件用 `registerMessageRenderer` 注册的自定义消息渲染器（issue #76）。
+   * 缺省时消息只带 `content`（客户端显示原文）——与实时路径一致不了，但信息不丢。
+   */
+  messageLines?: MessageLinesResolver;
   /**
    * 工具定义的显示元数据（`label` / `renderShell`）。
    * 缺省时不附字段，客户端按工具名回退。
@@ -1027,6 +1040,30 @@ export function isPidanceOwnCustomType(customType: unknown): boolean {
  * 未知 customType 的 entry → 插件渲染行。
  * 任何异常/非法输出都归为「不渲染」（不显示），绝不让会话读取失败。
  */
+/**
+ * 自定义消息 → 插件渲染行；拿不到就返回 null（调用方退回 `content` 原文）。
+ *
+ * 只接受非空的全字符串数组：空数组/含非字符串一律当「没有渲染」，
+ * 免得把插件渲染失败的空结果盖在明明有内容的消息上。
+ */
+function customMessageLines(
+  entry: SessionEntry,
+  options: SessionReaderProjectionOptions,
+): string[] | null {
+  const customType = (entry as { customType?: unknown }).customType;
+  if (typeof customType !== "string" || customType === "") return null;
+  const resolve = options.messageLines;
+  if (!resolve) return null;
+  let lines: string[] | null;
+  try {
+    lines = resolve(entry);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(lines) || lines.length === 0) return null;
+  return lines.every((line) => typeof line === "string") ? lines : null;
+}
+
 function entryCustomLines(
   entry: SessionEntry,
   options: SessionReaderProjectionOptions,
@@ -1362,15 +1399,20 @@ function entryToUiMessage(
         },
         timestamp: parseEntryTimestamp(entry.timestamp),
       };
-    case "custom_message":
+    case "custom_message": {
+      // 实时路径由宿主调 `getMessageRenderer` 渲染（见 lib/sdk-session-host.ts）；
+      // 读盘路径原本没有这一步，刷新后退回原文，而 TUI 重开会重画（issue #76）。
+      const messageLines = customMessageLines(entry, options);
       return {
         role: "custom",
         customType: entry.customType,
         content: entry.content,
         display: entry.display,
         details: entry.details,
+        ...(messageLines ? { renderedLines: messageLines } : {}),
         timestamp: parseEntryTimestamp(entry.timestamp),
       };
+    }
     case "custom": {
       // type:"custom" 不进入 LLM；仅投影合法 pidance.activity 到 UI timeline。
       // 插件用 registerEntryRenderer 注册的自定义 entry（supervisor reply、watchdog
