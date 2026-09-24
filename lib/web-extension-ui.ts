@@ -101,8 +101,8 @@ export type WebExtensionUIAdapter = {
   inputCustom: (id: string, data: string) => boolean;
   /** 面板内的鼠标事件（pi-subagents 的 widget 靠它点标题行折叠）。 */
   inputCustomMouse: (id: string, event: Record<string, unknown>) => boolean;
-  /** 按新的可用列数重排已挂载的插件界面（custom 面板 + widget 工厂）。 */
-  setRenderWidth: (width: number) => boolean;
+  /** 按新的可用尺寸重排已挂载的插件界面（custom 面板 + widget 工厂）。 */
+  setRenderSize: (size: { width: number; rows: number }) => boolean;
   /**
    * 把前端的一个按键交给插件注册的全局监听器（对齐 pi-tui 的 addInputListener：
    * 逐个调用，`consume` 结束传播，`data` 改写后续输入；改写成空串则丢弃）。
@@ -239,10 +239,15 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
   /** 扩展请求的全局工具展开态（pi-subagents 跑子代理前会 setToolsExpanded(false)）。 */
   let toolsExpanded = false;
 
-  /** 当前渲染列数：前端按可用宽度上报，插件组件按它排版（见 setRenderWidth）。 */
+  /**
+   * 当前渲染尺寸：前端按可用宽高上报，插件组件按它排版与裁切（见 setRenderSize）。
+   * 两个维度必须同源 —— columns 是真值而 rows 是常量时，按行数裁切的插件会把
+   * 本可以显示的行真丢掉（裁掉的行不在输出里）。
+   */
   let renderWidth = RENDER_WIDTH;
+  let renderRows = DEFAULT_CUSTOM_UI_ROWS;
 
-  /** custom 面板的重渲入口（setRenderWidth 用）：按当前宽度重渲并下发。 */
+  /** custom 面板的重渲入口（setRenderSize 用）：按当前尺寸重渲并下发。 */
   const customRenderers = new Set<() => void>();
 
   /** 每个能力只提示一次：插件可能反复调用同一条不支持的 API。 */
@@ -391,7 +396,7 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
         queueMicrotask(publish);
       },
       () => renderWidth,
-      DEFAULT_CUSTOM_UI_ROWS,
+      () => renderRows,
       { isEditorFocused },
     );
     entry.requestRender = tui.requestRender;
@@ -576,7 +581,6 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       // /btw 等 overlay 扩展依赖 theme.fg/bg 与 requestRender；缺 lines 会让 React 崩页面。
       // options 决定面板是浮层（按插件给的尺寸/锚点）还是全屏模态。
       const id = randomUUID();
-      const rows = DEFAULT_CUSTOM_UI_ROWS;
       const layout = normalizeCustomOverlayLayout(options);
       return new Promise((resolve) => {
         let doneCalled = false;
@@ -675,7 +679,7 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
         customSessions.set(id, { handleInput, handleMouse, done });
         const tui = createHeadlessCustomUiTui(() => {
           emitLines();
-        }, () => renderWidth, rows, { isEditorFocused });
+        }, () => renderWidth, () => renderRows, { isEditorFocused });
         customRenderers.add(emitLines);
         const theme = loadPiTheme() ?? uiContext.theme;
         // onHandle 在组件建好之后调，对齐 pi-tui 的顺序（先 showOverlay，再给句柄）
@@ -814,11 +818,15 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       session.handleMouse(event);
       return true;
     },
-    setRenderWidth(width) {
+    setRenderSize(size) {
+      const width = Math.round(size.width);
+      const rows = Math.round(size.rows);
       if (!Number.isFinite(width) || width <= 0) return false;
-      const next = Math.round(width);
-      if (next === renderWidth) return false;
-      renderWidth = next;
+      if (!Number.isFinite(rows) || rows <= 0) return false;
+      if (width === renderWidth && rows === renderRows) return false;
+      renderWidth = width;
+      renderRows = rows;
+      // 两个维度一起生效：插件是在同一次 render 里读它们做布局与裁切的。
       for (const render of [...customRenderers]) render();
       for (const entry of [...widgetFactories.values()]) entry.requestRender();
       return true;
