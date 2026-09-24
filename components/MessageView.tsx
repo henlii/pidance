@@ -20,7 +20,7 @@ import { getBranchSummaryFileMetadata } from "@/lib/branch-bookmarks";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isUnexplainedUpstreamRejection } from "@/lib/provider-error";
 import { humanizeExtensionIdentifier } from "@/lib/extension-labels";
-import { isActiveStreamBlock, isAssistantTruncated, isEmptyThinkingBlock } from "@/lib/message-display";
+import { collapsedSummaryLine, isActiveStreamBlock, isAssistantTruncated, isEmptyThinkingBlock, shouldRenderLiveToolOutput } from "@/lib/message-display";
 import { getThinkingText, projectDisplayBlocks } from "@/lib/thinking-content";
 import { parseAnsiLine } from "@/lib/ansi";
 import type { ToolExecutionSnapshot, ToolExecutionStatus } from "@/lib/tool-execution-buffer";
@@ -35,7 +35,7 @@ import {
   parseApplyPatchInput,
 } from "@/lib/apply-patch";
 import { useI18n } from "@/lib/i18n";
-import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE } from "@/lib/chat-column";
+import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE, THINKING_BODY_STYLE } from "@/lib/chat-column";
 import { encodeFilePathForApi } from "@/lib/file-paths";
 import { extractMediaPathsFromText } from "@/lib/file-types";
 import type { ContextUsage } from "@/lib/pi-types";
@@ -1073,15 +1073,11 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
   blockIndex: number;
 }) {
   const { t } = useI18n();
-  const streamBlockMaxHeight = useStreamBlockMaxHeight();
   // 折叠/展开完全由用户决定：不随流式自动展开，也不随流式结束自动收回。
   const [expanded, setExpanded] = useState(false);
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const bodyRef = useRef<HTMLDivElement>(null);
-  const followBodyRef = useRef(true);
-  const pinningBodyRef = useRef(false);
 
   // 不跟随流式状态改写 expanded：用户收起就被收起，流式结束也不弹开。
   const bodyText = loading
@@ -1089,18 +1085,15 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
     : error ?? (block.deferred ? content : getThinkingText(block));
 
   /**
-   * 折叠态那一行：显示思考输出的末行（流式中随输出滚动更新，历史块显示已有内容）。
+   * 折叠态那一行：**流式中显示末行，结束后显示首行**（统一口径，见 `collapsedSummaryLine`）。
    *
    * 历史块的正文在服务端是 deferred（`thinking: ""`），所以要先把内容取回来才有得显示 ——
    * 见下面的进视口惰性加载。这是「折叠态不显示内容」的根因：不是留空规则，
    * 而是那时正文根本没加载。
    */
-  const collapsedText = (() => {
-    if (loading) return t("message_thinkingLoading");
-    const text = bodyText ?? "";
-    if (!text.trim()) return "";
-    return text.trimEnd().split("\n").pop() ?? "";
-  })();
+  const collapsedText = loading
+    ? t("message_thinkingLoading")
+    : collapsedSummaryLine(bodyText, { streaming: isStreaming });
 
   /**
    * 历史 deferred 思考内容：**进入视口才加载**（提前一屏）。
@@ -1154,15 +1147,6 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
     if (nextExpanded && block.deferred && content === null) await loadIfDeferred();
   };
 
-  useEffect(() => {
-    if (expanded) followBodyRef.current = true;
-  }, [expanded]);
-
-  // 展开后内容增长时块内自动向下；用户上滚后停止，滚回底部再恢复。
-  useEffect(() => {
-    pinStreamBlockToBottom(bodyRef.current, expanded && followBodyRef.current, pinningBodyRef);
-  }, [expanded, bodyText]);
-
   return (
     <div
       ref={holderRef}
@@ -1183,23 +1167,11 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
       />
       {expanded && (
         <div
-          ref={bodyRef}
           tabIndex={0}
           className="chat-selectable"
-          onScroll={(event) => {
-            if (pinningBodyRef.current) return;
-            followBodyRef.current = isNearStreamBlockBottom(event.currentTarget);
-          }}
           style={{
-            padding: "0 10px 8px",
+            ...THINKING_BODY_STYLE,
             color: error ? "var(--error-text)" : "var(--text-muted)",
-            fontSize: 12,
-            lineHeight: 1.6,
-            whiteSpace: "pre-wrap",
-            maxHeight: streamBlockMaxHeight,
-            overflow: "auto",
-            overscrollBehavior: "auto",
-            touchAction: "pan-y",
           }}
         >
           {bodyText}
@@ -1280,10 +1252,24 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
       : duration === undefined ? undefined : duration * 1000;
 
   /**
-   * 折叠态那一行：运行中显示实时输出末行（随流式滚动更新），其余情况显示命令行 ——
-   * 命令行是识别这次调用的稳定信息，不随输出变化。
+   * 折叠态那一行（统一口径）：**运行中取输出末行**（跟随流式滚动），**结束后取首行** ——
+   * 工具块的首行就是命令行（用户 2026-09-24 确认），它不随输出变化，是稳定标识。
+   * 无命令行时才回退到输出首行。
    */
-  const liveLastLine = (snapshot?.output ?? "").trimEnd().split("\n").pop() ?? "";
+  const collapsedSummary = isRunning
+    ? (collapsedSummaryLine(snapshot?.output, { streaming: true }) || command)
+    // 必须用 `||` 而不是 `??`：getToolCommand 恒返回 string，无参数工具给的是空串，
+    // `??` 只在 null/undefined 时回退，于是空串会挡住后面的输出首行（折叠行为空）。
+    : (applyPatchSummary || command || collapsedSummaryLine(snapshot?.output, { streaming: false }));
+  /**
+   * 实时输出段：仅在运行中渲染；已结束但配对结果缺失时保留（见 shouldRenderLiveToolOutput）。
+   * 否则终态快照会和「配对结果」段一起上屏，同一份输出展示两遍。
+   */
+  const showLiveOutput = shouldRenderLiveToolOutput({
+    hasSnapshot: snapshot !== undefined,
+    isRunning,
+    hasResult: effectiveResult !== undefined,
+  });
 
   useEffect(() => {
     if (!isRunning) return;
@@ -1342,7 +1328,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
           label={formatToolBlockLabel(block.toolName)}
           expanded={expanded}
           onToggle={() => setExpanded(!expanded)}
-          summary={!expanded ? (isRunning && liveLastLine.trim() ? liveLastLine : (applyPatchSummary ?? command)) : null}
+          summary={!expanded ? collapsedSummary : null}
           meta={elapsedMs === undefined ? null : formatElapsedDuration(elapsedMs)}
           running={isRunning}
         />
@@ -1396,7 +1382,7 @@ maxHeight: streamBlockMaxHeight,
         </div>
       )}
 
-      {expanded && snapshot && (
+      {expanded && showLiveOutput && snapshot && (
         <div style={{ borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--tool-bg)" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "6px 10px 4px", color: "var(--text-dim)", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em" }}>
             <span>{t("message_toolLiveOutput")}</span>
@@ -1918,6 +1904,8 @@ function CompactionMessageView({ message }: { message: CustomMessage }) {
   const summary = getMessageText(message.content);
   const parsedSummary = useMemo(() => parseCompactionSummary(summary), [summary]);
   const time = formatTime(message.timestamp);
+  // 折叠行统一口径：本块不会流式输出，所以恒取首行（摘要的开头）。
+  const summaryLine = collapsedSummaryLine(summary, { streaming: false });
   // 默认收起：压缩摘要通常是一大段 markdown，先把卡片收成一行，展开与否由用户决定。
   const [expanded, setExpanded] = useState(false);
   const toggleLabel = expanded ? t("message_collapse") : t("message_expand");
@@ -1968,6 +1956,11 @@ function CompactionMessageView({ message }: { message: CustomMessage }) {
           <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>
             {t("message_compaction")}
           </span>
+          {!expanded && summaryLine && (
+            <span style={{ minWidth: 0, flex: "1 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontSize: 12 }}>
+              {summaryLine}
+            </span>
+          )}
           {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
         </button>
 
@@ -2035,6 +2028,8 @@ function BranchSummaryMessageView({ message }: { message: CustomMessage }) {
   const readFiles = structuredFiles?.readFiles ?? parsedSummary.readFiles;
   const modifiedFiles = structuredFiles?.modifiedFiles ?? parsedSummary.modifiedFiles;
   const time = formatTime(message.timestamp);
+  // 折叠行统一口径：本块不会流式输出，所以恒取首行（摘要的开头）。
+  const summaryLine = collapsedSummaryLine(summary, { streaming: false });
   // 与压缩块同款：系统生成的块默认收起，摘要正文按需展开。
   const [expanded, setExpanded] = useState(false);
   const toggleLabel = expanded ? t("message_collapse") : t("message_expand");
@@ -2092,6 +2087,11 @@ function BranchSummaryMessageView({ message }: { message: CustomMessage }) {
           <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>
             {t("message_branchSummary")}
           </span>
+          {!expanded && summaryLine && (
+            <span style={{ minWidth: 0, flex: "1 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontSize: 12 }}>
+              {summaryLine}
+            </span>
+          )}
           {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
         </button>
 
@@ -2439,7 +2439,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
               textAlign: "left",
             }}
           >
-            {text ? previewText(text, t("message_noExtensionMessage")) : t("message_showExtensionMessage")}
+            {text ? previewText(collapsedSummaryLine(text, { streaming: false }) || text, t("message_noExtensionMessage")) : t("message_showExtensionMessage")}
           </button>
         )}
 

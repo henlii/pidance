@@ -190,11 +190,11 @@ test("custom 渲染桥：空数组和非法载荷回退现有文本与详情逻�
   }
 });
 
-test("custom fallback 语义保持：compaction 仍走专用压缩卡片，且默认收起", () => {
+test("custom fallback 语义保持：compaction 仍走专用压缩卡片，且默认收起（折叠行给摘要首行）", () => {
   const message = {
     role: "custom",
     customType: "compaction",
-    content: "summary body",
+    content: "摘要第一行\n摘要第二行",
     display: true,
     details: { tokensBefore: 100, firstKeptEntryId: "x" },
   };
@@ -203,25 +203,28 @@ test("custom fallback 语义保持：compaction 仍走专用压缩卡片，且�
   // 走专用卡片（不是通用扩展消息回退），标题行可见、可展开。
   assert.ok(html.includes(">Compaction</span>"), "标题行应显示压缩标签");
   assert.ok(!html.includes(">pidance.activity</span>"));
-  // 默认收起：折叠开关是收起态，摘要正文不渲染（首屏就是一行）。
+  // 默认收起：折叠开关是收起态，正文不整段渲染（首屏就是一行）。
   assert.ok(html.includes('aria-expanded="false"'), "初始应为收起态");
   assert.ok(html.includes('aria-label="Compaction · Expand"'));
   assert.ok(!html.includes("Conversation compacted"), "收起时正文不渲染");
-  assert.ok(!html.includes("summary body"), "收起时摘要正文不渲染");
+  // 折叠行统一口径：本块不会流式输出，所以取摘要首行（不跟随末行）。
+  assert.ok(html.includes("摘要第一行"), "收起时给摘要首行");
+  assert.ok(!html.includes("摘要第二行"), "收起时不渲染整段摘要");
 });
 
-test("branch_summary 也是可折叠块，且默认收起", () => {
+test("branch_summary 也是可折叠块，且默认收起（折叠行给摘要首行）", () => {
   const html = renderMessage({
     role: "custom",
     customType: "branch_summary",
-    content: "branch summary body",
+    content: "分支摘要首行\n分支摘要末行",
     display: true,
     details: {},
   });
 
   assert.ok(html.includes(">Branch summary</span>"), "标题行应显示分支摘要标签");
   assert.ok(html.includes('aria-expanded="false"'), "初始应为收起态");
-  assert.ok(!html.includes("branch summary body"), "收起时摘要正文不渲染");
+  assert.ok(html.includes("分支摘要首行"), "收起时给摘要首行");
+  assert.ok(!html.includes("分支摘要末行"), "收起时不渲染整段摘要");
 });
 
 test("扩展自定义消息默认收起：正文不整段渲染，只给一行预览", () => {
@@ -265,13 +268,13 @@ test("思考块：流式中保持折叠，单行显示最后一行输出", () =>
   assert.ok(!html.includes("第二行推理"), "折叠态不渲染整段内容");
 });
 
-test("思考块：非流式（历史消息）折叠态同样显示末行内容", () => {
+test("思考块：非流式（历史消息）折叠态显示首行内容", () => {
   const html = renderMessage(thinkingMessage("旧推理第一行\n旧推理末行"));
   assert.ok(html.includes('aria-expanded="false"'));
   assert.ok(html.includes("Thinking·"));
-  // 折叠态也要能看见内容（此前历史块只有标签，看起来像内容丢失）
-  assert.ok(html.includes("旧推理末行"), "历史块折叠态显示末行");
-  assert.ok(!html.includes("旧推理第一行"), "折叠态不渲染整段内容");
+  // 折叠行统一口径：流式结束（历史）取首行，作为不随输出变化的稳定标识。
+  assert.ok(html.includes("旧推理第一行"), "历史块折叠态显示首行");
+  assert.ok(!html.includes("旧推理末行"), "结束后不再跟随末行");
 });
 
 test("思考块：用户展开后渲染完整内容", () => {
@@ -534,4 +537,82 @@ test("apply_patch 逐文件失败：列出失败原因，且对照 diff 不再�
     const dict = readFileSync(fileURLToPath(new URL(`../lib/locales/${locale}.ts`, import.meta.url)), "utf8");
     assert.match(dict, /message_applyPatchFailed:/, `${locale} 缺少 message_applyPatchFailed`);
   }
+});
+
+test("工具块：结束后折叠行取命令行（首行），不再跟随输出末行", () => {
+  const html = renderMessage(toolMessage("npm run build"), {
+    toolResults: new Map([["tool-1", {
+      role: "toolResult",
+      toolCallId: "tool-1",
+      toolName: "bash",
+      content: [{ type: "text", text: "compiled\nsucceeded" }],
+    }]]),
+    toolExecutionSnapshots: [{
+      toolCallId: "tool-1",
+      toolName: "bash",
+      output: "compiled\nsucceeded",
+      startedAt: Date.now() - 3000,
+      endedAt: Date.now(),
+      status: "success",
+    }],
+  });
+
+  assert.ok(html.includes('aria-expanded="false"'));
+  // 折叠行统一口径：结束后取首行；工具块的首行就是命令行（用户确认）。
+  assert.ok(html.includes("npm run build"), "结束后折叠行显示命令行");
+  assert.ok(!html.includes("succeeded"), "结束后不再显示输出末行");
+});
+
+test("工具块：无命令行时结束后折叠行回退到输出首行（空串不能被 ?? 挡住）", () => {
+  // getToolCommand 恒返回 string：无参工具给的是空串，`??` 只认 null/undefined，
+  // 于是空串会挡住回退分支，折叠行变空。这条用 DOM 渲染盯住修复后的实际显示。
+  const message = {
+    role: "assistant",
+    content: [{ type: "toolCall", toolCallId: "tool-1", toolName: "read_file", input: {} }],
+  };
+  const html = renderMessage(message, {
+    toolResults: new Map([["tool-1", {
+      role: "toolResult",
+      toolCallId: "tool-1",
+      toolName: "read_file",
+      content: [{ type: "text", text: "alpha\nbeta" }],
+    }]]),
+    toolExecutionSnapshots: [{
+      toolCallId: "tool-1",
+      toolName: "read_file",
+      output: "alpha\nbeta",
+      startedAt: Date.now() - 2000,
+      endedAt: Date.now(),
+      status: "success",
+    }],
+  });
+
+  assert.ok(html.includes('aria-expanded="false"'));
+  assert.ok(html.includes("alpha"), "无命令行时折叠行取输出首行");
+  assert.ok(!html.includes("beta"), "折叠行只取首行");
+});
+
+test("源码契约：实时输出段只在运行中渲染（结束后不与配对结果重复）", () => {
+  // 为何是源码契约：卡片展开态是组件内 useState，SSR 驱动不了；而「展开后同一份输出
+  // 只出现一次」只有在展开态同时挂着实时段与结果段时才可观察。行为判据由
+  // lib/message-display.test.mjs 的 shouldRenderLiveToolOutput 全覆盖（含「已结束 +
+  // 有配对结果 → 关闭实时段」），这里只钉住渲染真的接上了那个开关；端到端观感由
+  // 父会话的无头浏览器验收覆盖（展开一张已结束的工具卡数输出出现次数）。
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  const block = source.slice(source.indexOf("function ToolCallBlock("), source.indexOf("function AnsiToolLines("));
+  assert.match(block, /shouldRenderLiveToolOutput\(\{/, "实时段的开关要走共享判据");
+  assert.match(block, /\{expanded && showLiveOutput && snapshot && \(/, "实时段未被开关收口，会和结果段重复渲染");
+  assert.match(block, /message_toolLiveOutput/, "实时段标题仍在（运行中要显示）");
+});
+
+test("源码契约：思考块展开正文不再限高/内部滚动，工具块仍受限高保护", () => {
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  const thinking = source.slice(source.indexOf("function ThinkingBlock("), source.indexOf("function ToolCallBlock("));
+  assert.match(thinking, /\.\.\.THINKING_BODY_STYLE/, "思考块展开正文改用不限高样式");
+  assert.ok(!thinking.includes("streamBlockMaxHeight"), "思考块不得再引用块内限高");
+  assert.ok(!thinking.includes("maxHeight"), "思考块展开不得设 max-height");
+  assert.ok(!thinking.includes("overflow: \"auto\""), "思考块展开不得内部滚动");
+  // 工具块保持有界：实时输出与插件行仍走共享限高
+  const tool = source.slice(source.indexOf("function ToolCallBlock("), source.indexOf("function PairedResult("));
+  assert.ok(tool.includes("streamBlockMaxHeight"), "工具块仍须限高");
 });
