@@ -1,3 +1,4 @@
+import { trackLiveEventSource } from "./live-event-sources";
 export type AgentStreamEvent = {
   type: string;
   [key: string]: unknown;
@@ -95,6 +96,8 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
   const cancelFrame = options.cancelFrame ?? defaultCancelFrame;
 
   let current: EventSourceLike | null = null;
+  // 关闭时从 live-event-sources 注销（pagehide 会集中关掉登记过的连接）。
+  let untrackCurrent: (() => void) | null = null;
   let connectedSessionId: string | null = null;
   let reconnectTimer: TimerHandle = null;
   let cancelPendingDelivery: (() => void) | null = null;
@@ -106,14 +109,21 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
     }
   };
 
-  const close = () => {
-    clearReconnect();
-    cancelPendingDelivery?.();
-    cancelPendingDelivery = null;
+  /** 释放当前连接：关闭 + 注销登记（两处调用点共用，避免漏掉注销）。 */
+  const releaseCurrent = () => {
     if (current) {
       current.close();
       current = null;
     }
+    untrackCurrent?.();
+    untrackCurrent = null;
+  };
+
+  const close = () => {
+    clearReconnect();
+    cancelPendingDelivery?.();
+    cancelPendingDelivery = null;
+    releaseCurrent();
     connectedSessionId = null;
   };
 
@@ -124,13 +134,11 @@ export function createEventStreamManager(options: EventStreamManagerOptions = {}
     clearReconnect();
     cancelPendingDelivery?.();
     cancelPendingDelivery = null;
-    if (current) {
-      current.close();
-      current = null;
-    }
+    releaseCurrent();
 
     const source = createEventSource(getEventsUrl(sessionId));
     current = source;
+    untrackCurrent = trackLiveEventSource(source);
     connectedSessionId = sessionId;
     let pendingMessageUpdate: AgentStreamEvent | null = null;
     let frameId: TimerHandle = null;

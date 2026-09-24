@@ -54,6 +54,8 @@ import { useChatAutoFollow } from "@/hooks/useChatAutoFollow";
 import { ensureServerPrefsLoaded, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { resolveDisplayModel, settleModelOverride } from "@/lib/model-selection";
 import { useI18n } from "@/lib/i18n";
+import { LoadFailedError, loadWithBoundedRetry } from "@/lib/load-retry";
+import { subscribeLiveStreamRestore } from "@/lib/live-event-sources";
 import { guidePageThinkingUpdate, shouldAcceptRemoteThinking, thinkingLevelForEnsureBody } from "@/lib/thinking-level-policy";
 import { isThinkingLevel, type AgentThinkingLevel } from "@/lib/agent-settings";
 
@@ -379,6 +381,19 @@ function delay(ms: number): Promise<void> {
 
 /** 引导乐观消息：落位标记由 registry.appendLocal 按运行时状态统一打（见 appendLocal）。 */
 type SteerOptimisticMessage = AgentMessage;
+
+/**
+ * 会话详情加载的超时与有界重试（#91）。
+ *
+ * 为什么需要超时：同源连接被饿住时请求**一个字节都收不到**，既不 resolve 也不 reject，
+ * 界面会永久停在 loading（实测挂住 20s+，而同时刻服务端 curl 只要 5–6ms）。
+ * 为什么需要重试：饿住是时序性的（旧文档的连接释放后就通），重试往往第二次就成。
+ * 上限取 3 次尝试（1 + 2 重试）、每次 12s —— 最坏约 40s 后给出**可见且可点重试**的提示，
+ * 而不是无限空白。
+ */
+const DETAIL_LOAD_TIMEOUT_MS = 12_000;
+const DETAIL_LOAD_MAX_RETRIES = 2;
+const DETAIL_LOAD_RETRY_DELAY_MS = 1_500;
 
 /**
  * 请求被取消（切换会话 / 新的加载取代了本次）—— 不是失败，不得写 error。
@@ -927,7 +942,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         deferMedia: "1",
         limit: String(DEFAULT_SESSION_TAIL_LIMIT),
       });
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}?${params}`, { signal });
+      // 带超时 + 有界重试：连接被饿住时不至于把界面永久留在 loading（#91）。
+      // 取消语义不变：signal aborted 时助手抛 AbortError，下面的 isAbortError 照旧当「不是错误」。
+      const res = await loadWithBoundedRetry({
+        url: `/api/sessions/${encodeURIComponent(sid)}?${params}`,
+        signal,
+        timeoutMs: DETAIL_LOAD_TIMEOUT_MS,
+        maxRetries: DETAIL_LOAD_MAX_RETRIES,
+        retryDelayMs: DETAIL_LOAD_RETRY_DELAY_MS,
+      });
       if (loadRequestSeq !== loadRequestSeqRef.current || sessionIdRef.current !== sid) return null;
       if (res.status === 404) {
         if (showLoading) {
@@ -1069,8 +1092,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
       try {
         // 热：不 wake。打开会话只读投影，不抢写锁；发送时再 ensureLive。
-        const hotRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`, { signal });
-        if (hotRes.ok) {
+        // 热状态是**优化**：读不到就退回磁盘投影即可。但被饿住时这个端点同样会挂住，
+        // 而外层 finally 要等它结束才会把 loading 放掉 —— 于是界面卡在「正在加载会话…」（#91）。
+        // 所以这里同样带超时 + 有界重试，并且**失败只跳过热状态**，不让整个加载停住。
+        const hotRes = await loadWithBoundedRetry({
+          url: `/api/sessions/${encodeURIComponent(sid)}/state`,
+          signal,
+          timeoutMs: DETAIL_LOAD_TIMEOUT_MS,
+          maxRetries: DETAIL_LOAD_MAX_RETRIES,
+          retryDelayMs: DETAIL_LOAD_RETRY_DELAY_MS,
+        }).catch((error: unknown) => {
+          // 切走/被取代：照旧当取消向上抛（外层按取消处理，不写 error）。
+          if (isAbortError(error)) throw error;
+          console.warn("[pidance] hot state load failed; falling back to the on-disk projection:", error);
+          return null;
+        });
+        if (hotRes?.ok) {
           const hot = await hotRes.json() as {
             live?: boolean;
             running?: boolean;
@@ -1105,12 +1142,32 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     } catch (e) {
       // 切走/被新加载取代导致的取消不是错误，不写 error。
-      if (!isAbortError(e)) setError(String(e));
+      if (!isAbortError(e)) {
+        // 重试用尽：给用户看得懂的一句话（细节留在控制台），文案由聊天区的重试按钮配上（#91）。
+        if (e instanceof LoadFailedError) {
+          console.warn("[pidance] session detail load failed:", e.failure, "attempts:", e.attempts);
+          setError(t("chat_loadFailed", { attempts: e.attempts }));
+        } else {
+          setError(String(e));
+        }
+      }
       return null;
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
   }, [applyExtensionUiProjection, applyProjectedQueues, applyRemoteThinking, beginLoadRequest, notifyAutoFollowBranchReset, patchExtensionUiState, queueEntryNow]);
+
+  /**
+   * 重试当前会话的内容加载（#91）：加载超时/失败后聊天区给出的可点入口。
+   * 参数与切回会话时的加载一致（showLoading 回到「正在加载会话…」、includeState 同步状态），
+   * 先清掉上一次的 error，避免重试期间还显示旧失败。
+   */
+  const retryLoadSession = useCallback(() => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    setError(null);
+    void loadSession(sid, true, true);
+  }, [loadSession]);
 
   /**
    * 向上滚动加载更旧历史（OpenChamber loadOlder 语义）。
@@ -1999,9 +2056,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     registry.setTabVisibility(document.visibilityState === "visible");
     document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("focus", onActivate);
+    // bfcache 恢复（#91）：pagehide 已把本页的长期连接让出去（不关的话旧文档会占着同源
+    // 6 条连接，把新文档的普通请求饿住），文档回来必须重连 + 对账 —— 复用同一条激活路径。
+    // 与 #86 的区别：那条管「文档还在跑但切后台」，这条管「文档走了又回来」。
+    const unsubscribeRestore = subscribeLiveStreamRestore(() => {
+      registry.setTabVisibility(document.visibilityState === "visible");
+      recovery.notify();
+    });
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("focus", onActivate);
+      unsubscribeRestore();
       recovery.dispose();
     };
   }, [syncOnTabReturn]);
@@ -3768,6 +3833,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     jumpButtonVisible, jumpToBottom,
     // Actions
     loadOlderHistory,
+    retryLoadSession,
     loadNewerHistory,
     hasMoreAfter,
     jumpToEntry,

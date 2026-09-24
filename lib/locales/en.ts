@@ -123,6 +123,8 @@ export const en = {
   sidebar_searchPlaceholderFulltext: 'Search message content…',
   sidebar_clearSearch: 'Clear search',
   sidebar_loading: 'Loading…',
+  sidebar_loadFailedRetry: 'Retry',
+  sidebar_loadFailed: 'Failed to load the session list',
   sidebar_searchEmpty: "No sessions match “{query}”",
   sidebar_searchModeMeta: 'Name',
   sidebar_searchModeFulltext: 'Full text',
@@ -246,6 +248,8 @@ export const en = {
   chat_showProcess: 'Show process',
   chat_hideProcess: 'Hide process',
   chat_loadingSession: 'Loading session…',
+  chat_loadFailedHint: 'The server may be fine but this connection did not deliver the content — retry to load it again.',
+  chat_loadFailed: 'Failed to load this session (retried {attempts} times)',
   chat_loadEarlier: 'Load {count} earlier messages',
 
 

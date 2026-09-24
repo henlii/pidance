@@ -172,7 +172,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   }, [onAgentEnd]);
 
   const {
-    loading, historyLoading, hasMoreBefore, error, messages, entryIds, messageKeys, streamState,
+    loading, historyLoading, hasMoreBefore, error, retryLoadSession, messages, entryIds, messageKeys, streamState,
     agentRunning, turnMetrics, bashRunning, pendingBash, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, thinkingReady,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, defaultThinkingLevel,
@@ -681,9 +681,18 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   }
 
   if (error) {
+    // 加载失败（含超时/连接被饿住，见 #91）：给一句可读的原因 + 可点的重试，
+    // 而不是把裸错误串铺在主区、让用户只能刷新页面。
     return (
-      <div className="flex h-full items-center justify-center text-[var(--error-text)]">
-        {error}
+      <div
+        role="alert"
+        className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center"
+      >
+        <div className="text-[var(--error-text)]">{error}</div>
+        <div className="text-[12px] text-[var(--text-muted)]">{t("chat_loadFailedHint")}</div>
+        <button type="button" onClick={retryLoadSession} className="mt-1">
+          {t("app_retry")}
+        </button>
       </div>
     );
   }
