@@ -126,6 +126,7 @@ import {
   type SendFileToUserParams,
 } from "./send-file-to-user";
 import { DEFAULT_CUSTOM_UI_ROWS } from "./custom-ui-terminal";
+import { readComposerDraftText } from "./composer-draft-text";
 import type { BinaryMessageData, BinaryMessageInput } from "./types";
 import {
   loadPiTheme,
@@ -1528,10 +1529,15 @@ export class SdkSessionHost {
   private async rebindSession(): Promise<void> {
     const session = this.session;
     this.extensionUi?.dispose();
-    this.extensionUi = createWebExtensionUIAdapter((event) => {
-      this.trackExtensionSideEffects(event);
-      this.emit(event as SdkAgentEvent);
-    });
+    this.extensionUi = createWebExtensionUIAdapter(
+      (event) => {
+        this.trackExtensionSideEffects(event);
+        this.emit(event as SdkAgentEvent);
+      },
+      // `ctx.ui.getEditorText()` 回传本会话的输入框草稿：读的是客户端已经同步到
+      // 服务端偏好的那份镜像（见 lib/composer-draft-text.ts 的语义边界）。
+      { readComposerText: () => readComposerDraftText(this.realSessionId) },
+    );
     // 渲染桥的**宿主配置类**告警出口（issue #69）：SDK 全局主题槽位装不进去时，插件
     // 渲染器里依赖 SDK 主题助手的部分（内置 edit 的 diff 等）会整段不显示 —— 那要变成
     // 一条用户可见的 warning 通知，而不是被渲染桥静默吞掉。
