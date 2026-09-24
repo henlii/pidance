@@ -7,7 +7,7 @@ import { parseAnsiLine } from "@/lib/ansi";
 import { humanizeExtensionIdentifier } from "@/lib/extension-labels";
 import { composeChatPlan, type ChatRenderItem } from "@/lib/chat-compositor";
 import type { TurnMetrics } from "@/lib/browser-session-runtime-registry";
-import { MessageView } from "./MessageView";
+import { MessageView, ToolExpansionRequestProvider } from "./MessageView";
 import { collectTurnWrittenFiles, shouldRenderTurnWrittenFiles } from "@/lib/turn-written-files";
 import { ImagePreviewOverlay } from "./MessageImage";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
@@ -177,7 +177,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, defaultThinkingLevel,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse,
+    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse,
     todos,
     isAutoModelSelection,
     agentPhase, toolExecutionSnapshots,
@@ -838,6 +838,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
             padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px`,
           }}
         >
+          <ToolExpansionRequestProvider value={extensionToolsExpandedRequest}>
           <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS, margin: "0 auto" }}>
             {/* 状态条与 aboveEditor widget 已移至输入区（对齐 TUI footer/editor 布局） */}
 
@@ -1017,6 +1018,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
                 取代旧的 agentRunning 整视口占位——跟随钉底由 useAgentSession 的自动跟随负责。 */}
             <div aria-hidden="true" style={{ height: isMobile ? 40 : "10vh" }} />
           </div>
+          </ToolExpansionRequestProvider>
         </div>
         {/* 回到底部：仅 released 且不在末端区域时可见（样式与动效在 globals.css，
             150ms 淡入/位移/缩放，prefers-reduced-motion 时禁用位移）。 */}

@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useState, useRef, useEffect, useMemo, type ReactNode } from "react";
+import { createContext, memo, useContext, useState, useRef, useEffect, useMemo, type ReactNode } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { AlertTriangle, AtSign, Check, CheckCircle2, ChevronDown, ChevronUp, Copy, FilePlus, GitBranch, Terminal, XCircle } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
@@ -1010,6 +1010,28 @@ function formatBlockLabel(name: string): string {
   return `${name}·`;
 }
 
+/**
+ * 扩展请求的全局工具展开态（issue #75）。
+ *
+ * `setToolsExpanded` 是全局语义（TUI 里一个开关管所有工具行），而 Web 的工具块折叠态
+ * 是每块自己的 `useState`。用 context 把请求下传，比逐层透传 props 更小：
+ * 走 props 就必须同时改 MessageView 的记忆化比较器，漏一个字段就是「有时没反应」。
+ *
+ * `null` = 扩展从未请求过（保持每块的用户选择）。`revision` 用来区分「新的一次请求」
+ * 与「同一个值的当前状态」。
+ */
+export type ToolExpansionRequest = { expanded: boolean; revision: number } | null;
+
+const ToolExpansionRequestContext = createContext<ToolExpansionRequest>(null);
+
+export function ToolExpansionRequestProvider({ value, children }: { value: ToolExpansionRequest; children: ReactNode }) {
+  return <ToolExpansionRequestContext.Provider value={value}>{children}</ToolExpansionRequestContext.Provider>;
+}
+
+function useToolExpansionRequest(): ToolExpansionRequest {
+  return useContext(ToolExpansionRequestContext);
+}
+
 function formatToolBlockLabel(toolName: string): string {
   const trimmed = toolName.trim() || "tool";
   return formatBlockLabel(trimmed.charAt(0).toUpperCase() + trimmed.slice(1));
@@ -1228,8 +1250,18 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, onReferen
 }) {
   const { t } = useI18n();
   const streamBlockMaxHeight = useStreamBlockMaxHeight();
-  // 折叠/展开完全由用户决定：运行中也不自动展开，结束后也不自动收回。
+  // 折叠/展开完全由用户决定：运行中也不自动展开，结束后也不自动收回 ——
+  // 唯一例外是扩展显式请求的全局展开态（`setToolsExpanded`，issue #75）：
+  // 每次请求（按 revision 识别）把本块设成请求的值，之后仍归用户。
   const [expanded, setExpanded] = useState(defaultExpanded === true);
+  const toolsExpandedRequest = useToolExpansionRequest();
+  const toolsExpandedRevision = toolsExpandedRequest?.revision;
+  useEffect(() => {
+    if (!toolsExpandedRequest) return;
+    setExpanded(toolsExpandedRequest.expanded);
+    // 只响应「一次新的请求」：把值写进依赖会在用户手动切换后被请求值拉回去。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toolsExpandedRevision]);
   const [now, setNow] = useState(() => Date.now());
   const [resolvedDetails, setResolvedDetails] = useState<unknown>(undefined);
   const [resolvedResultContent, setResolvedResultContent] = useState<ToolResultMessage["content"] | undefined>(undefined);

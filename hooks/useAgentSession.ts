@@ -583,6 +583,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets,
     extensionTerminalInputListenerCount,
     extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator,
+    extensionToolsExpandedRequest,
     extensionUiStateRef, commitExtensionUiState, patchExtensionUiState, dismissExtensionUiRequest,
   } = useExtensionUiState();
   /**
@@ -3787,7 +3788,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     liveNoticeActivities,
     dismissNotice,
     toggleNoticePin,
-    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse,
+    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse,
     todos,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,

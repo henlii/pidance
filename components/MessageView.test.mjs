@@ -762,3 +762,13 @@ test("源码契约：自带外壳时调用/结果 ANSI 槽一并去掉宿主底�
   // 表头标题统一走 headerLabel（label 优先、回退工具名）
   assert.equal(source.includes("label={formatToolBlockLabel(block.toolName)}"), false, "工具卡标题不能再直接用工具名");
 });
+
+test("源码契约：工具块响应扩展的全局展开请求，但只在请求那一刻改写（issue #75）", () => {
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  assert.ok(source.includes("export function ToolExpansionRequestProvider"), "provider 必须导出（ChatWindow 要包消息列）");
+  const block = source.slice(source.indexOf("function ToolCallBlock"), source.indexOf("function ToolCallBlock") + 4000);
+  assert.ok(block.includes("useToolExpansionRequest()"), "工具块必须消费展开请求");
+  assert.match(block, /setExpanded\(toolsExpandedRequest\.expanded\)/, "请求值要写进本块展开态");
+  assert.match(block, /\}, \[toolsExpandedRevision\]\)/, "只绑 revision：绑值会在用户手动切换后被拉回");
+  assert.ok(!/\[toolsExpandedRequest\]/.test(block), "依赖里不能带整个请求对象");
+});
