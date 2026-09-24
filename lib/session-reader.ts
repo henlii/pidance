@@ -923,8 +923,10 @@ function getSessionContextSettingsLocal(path: SessionEntry[]): {
   model?: { provider?: string; modelId?: string; id?: string };
 } {
   let thinkingLevel: string | undefined;
+  // 对齐 SDK session-manager.getSessionContextSettings：沿路径**最后写者胜** ——
+  // model_change 与 assistant 消息上报的 provider/model 共用同一个槽位。
+  // 原先「model_change 永远压过 assistant 上报」会在切模型后报出旧模型。
   let model: { provider?: string; modelId?: string; id?: string } | undefined;
-  let lastAssistantModel: { provider: string; modelId: string; id: string } | undefined;
   for (const e of path) {
     if (e.type === "thinking_level_change" && typeof (e as { thinkingLevel?: string }).thinkingLevel === "string") {
       thinkingLevel = (e as { thinkingLevel: string }).thinkingLevel;
@@ -938,12 +940,53 @@ function getSessionContextSettingsLocal(path: SessionEntry[]): {
     if (e.type === "message") {
       const msg = (e as { message?: { role?: string; provider?: string; model?: string } }).message;
       if (msg?.role === "assistant" && typeof msg.provider === "string" && msg.provider && typeof msg.model === "string" && msg.model) {
-        lastAssistantModel = { provider: msg.provider, modelId: msg.model, id: msg.model };
+        model = { provider: msg.provider, modelId: msg.model, id: msg.model };
       }
     }
   }
-  return { thinkingLevel, model: model ?? lastAssistantModel };
+  return { thinkingLevel, model };
 }
+/**
+ * context_edit 条目（0.87.0 起 SDK 会写）：`targetId` 指向被编辑的条目，
+ * `replacement` 为 `null` 表示整条从模型上下文里省略，否则是替换内容。
+ */
+interface ContextEditEntryShape {
+  type: string;
+  targetId?: unknown;
+  replacement?: unknown;
+}
+
+/**
+ * 按 targetId 收集 context_edit，**后者覆盖前者**（SDK 用 Map 赋值取每个目标的最后一条）。
+ */
+function collectContextEdits(contextEntries: readonly SessionEntry[]): Map<string, { replacement: unknown }> {
+  const edits = new Map<string, { replacement: unknown }>();
+  for (const entry of contextEntries as readonly ContextEditEntryShape[]) {
+    if (entry.type !== "context_edit") continue;
+    if (typeof entry.targetId !== "string" || entry.targetId === "") continue;
+    edits.set(entry.targetId, { replacement: entry.replacement });
+  }
+  return edits;
+}
+
+/**
+ * 把一条编辑应用到投影消息上（对齐 SDK session-manager.projectContextEntry）：
+ * - assistant / toolResult 且替换内容是字符串 → 收敛成一个 text 块；
+ * - 其余角色直接用替换内容（字符串或内容块数组）。
+ * 形状无法识别时返回原消息：宁可显示原文，也不因为一条编辑记录把内容吞掉。
+ */
+function applyContextEdit(message: AgentMessage, replacement: unknown): AgentMessage {
+  if (!isRecord(replacement)) return message;
+  const content = (replacement as { content?: unknown }).content;
+  if (content === undefined) return message;
+  if ((message.role === "assistant" || message.role === "toolResult") && typeof content === "string") {
+    return { ...message, content: [{ type: "text", text: content }] } as AgentMessage;
+  }
+  if (typeof content === "string") return { ...message, content } as AgentMessage;
+  if (Array.isArray(content)) return { ...message, content } as AgentMessage;
+  return message;
+}
+
 export function buildSessionContext(
   entries: SessionEntry[],
   leafId?: string | null,
@@ -952,6 +995,9 @@ export function buildSessionContext(
   const path = buildSessionPathLocal(entries, leafId);
   const settings = getSessionContextSettingsLocal(path);
   const contextEntries = buildContextEntriesLocal(entries, leafId);
+  // context_edit：目标条目在模型上下文里被整条省略或被替换成编辑内容。
+  // 投影跟着应用，时间线才与模型实际看到的内容一致（TUI 同样显示替换后内容）。
+  const contextEdits = collectContextEdits(contextEntries);
 
   // Convert the selected context entries and their IDs together. This keeps
   // fork/navigation targets aligned while preserving compaction ordering.
@@ -967,7 +1013,11 @@ export function buildSessionContext(
     thinkingByEntryId.set(entry.id, replayThinking);
   }
   for (const entry of contextEntries) {
-    const m = entryToUiMessage(entry, options);
+    const edit = contextEdits.get(entry.id);
+    // replacement === null 是「把这条从模型上下文里省略」：投影也不留行。
+    if (edit && edit.replacement === null) continue;
+    let m = entryToUiMessage(entry, options);
+    if (m && edit) m = applyContextEdit(m, edit.replacement);
     if (m?.role === "custom" && m.customType === PIDANCE_BINARY_CUSTOM_TYPE) {
       const binary = parseBinaryMessageData(m.details);
       const targetIndex = binary?.messageEntryId
@@ -1177,8 +1227,10 @@ function entryToUiMessage(
     case "custom": {
       // type:"custom" 不进入 LLM；仅投影合法 pidance.activity 到 UI timeline。
       // 其它 customType（om / workspace-history 等）保持侧栏投影，不进聊天气泡。
-      // 非法/未知 version 安全跳过。压缩语义跟随 piBuildContextEntries 可见集：
-      // 被压缩掉的普通消息前的 activity 不复活。
+      // 非法/未知 version 安全跳过。**刻意分叉**：这里跟随的是整条路径
+      // （buildContextEntriesLocal = buildSessionPathLocal），不按压缩可见集截断 ——
+      // 与「压缩可见集不截断（多显示历史）」的取舍一致，所以被压缩掉的普通消息
+      // 之前的 activity 仍会复活；SDK 的 buildContextEntries 才会按压缩截断。
       if (entry.customType === PIDANCE_BINARY_CUSTOM_TYPE) {
         const binary = parseBinaryMessageData(entry.data);
         if (!binary) return null;

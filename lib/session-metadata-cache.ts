@@ -296,9 +296,11 @@ export async function scanSessionFileFast(
 				continue;
 			}
 			if (entry.type === "session_info") {
+				// SDK 语义（session-manager.getSessionName）：取**最新**一条 session_info，
+				// 空名字是**显式清除**标题（"Empty names explicitly clear the session title."）。
+				// 只在非空时保留旧值会让侧栏与 SDK 给出两个不同的会话名。
 				const infoName = (entry as { name?: unknown }).name;
-				if (typeof infoName === "string" && infoName.trim())
-					name = infoName.trim();
+				name = typeof infoName === "string" ? (infoName.trim() || undefined) : undefined;
 				continue;
 			}
 			if (entry.type !== "message") continue;
