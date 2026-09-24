@@ -24,6 +24,7 @@ import {
   resolveReadablePath,
 } from "@/lib/file-read";
 import { handleSaveRequest } from "@/lib/file-save-route";
+import { registerEventStreamCloser } from "@/lib/server-shutdown";
 import {
   copyEntry,
   createDirectory,
@@ -665,6 +666,7 @@ export async function GET(
       let watcher: fs.FSWatcher | null = null;
       let lastMtimeMs = stat.mtimeMs;
       let lastSize = stat.size;
+      let unregisterCloser: () => void = () => {};
       const stream = new ReadableStream({
         start(controller) {
           const send = (eventName: string, data: Record<string, unknown>) => {
@@ -677,6 +679,10 @@ export async function GET(
           };
           // Send initial ping so client knows connection is live
           send("connected", { filePath });
+          // 进程退出时硬断：文件监听流是无限长的，留着会让 server.close() 等到超时。
+          unregisterCloser = registerEventStreamCloser(() => {
+            try { controller.error(new Error("pidance server shutting down")); } catch { /* already closed */ }
+          });
           try {
             watcher = fs.watch(realPath, () => {
               try {
@@ -700,6 +706,7 @@ export async function GET(
           }
         },
         cancel() {
+          unregisterCloser();
           try { watcher?.close(); } catch { /* ignore */ }
         },
       });

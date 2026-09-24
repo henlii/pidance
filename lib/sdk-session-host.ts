@@ -14,6 +14,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "./pi-paths";
 import { hasActiveSubagentRunForSession, listSubagentRuns } from "./subagent-runs";
+import { hasActiveExternalWork as hasRegisteredExternalWork } from "./session-liveness";
+import { createStreamSnapshotCache, type StreamSnapshot } from "./stream-snapshot";
 import {
   getPidancePref,
   readPidancePrefs,
@@ -337,6 +339,12 @@ export class SdkSessionHost {
   private renderWidth = RENDER_WIDTH;
   /** toolCallId → 渲染状态（跨 tool_call → update → result 共享）。 */
   private readonly toolRenderStates = new Map<string, ToolRenderStateEntry>();
+  /**
+   * 连接快照：最近一条流式 message 事件 + 活跃工具的最新 start/update。
+   * 中途接入的页面（新标签/重连/冷挂载）靠它立刻看到已生成的内容，
+   * 不必等下一个 chunk（见 lib/stream-snapshot.ts）。
+   */
+  private readonly streamSnapshot = createStreamSnapshotCache();
   /** tool_execution_update 渲染最短间隔（ms），防高频 partial 阻塞事件循环。 */
   private static readonly PARTIAL_RENDER_MIN_INTERVAL_MS = 100;
 
@@ -505,6 +513,21 @@ export class SdkSessionHost {
     };
   }
 
+  /**
+   * 连接首帧快照：当前流式消息 + 活跃工具的最新 start/update。
+   *
+   * 回放对象就是原本要 emit 的投影事件（带 streamRunSeq / renderedLines），
+   * 所以浏览器侧不需要第二条解释路径。`isStreaming` 告诉连接方要不要先把
+   * 运行态对齐——不对齐的话，紧随其后的 message_* 会被当成过期帧丢掉。
+   */
+  connectionSnapshot(): StreamSnapshot {
+    const snapshot = this.streamSnapshot.snapshot();
+    // 带上本轮序号：首帧回放不含 `agent_start`（快照缓存会在 agent_start 时清空），
+    // 客户端只会在 `agent_start` 里写序号。不带的后果是把本轮终止事件当
+    // 「迟到的上一轮」丢掉，运行态落不下来。
+    return this.streamRunSeq > 0 ? { ...snapshot, streamRunSeq: this.streamRunSeq } : snapshot;
+  }
+
   beginExtensionBinding(): void {
     /* start() 内 bind */
   }
@@ -514,6 +537,9 @@ export class SdkSessionHost {
   }
 
   private emit(event: SdkAgentEvent): void {
+    // 先更新连接快照，再分发：新连接的首帧回放与这条事件流同形，
+    // 不能出现「已经 emit 但快照没记住」的窗口。
+    this.streamSnapshot.remember(event);
     for (const listener of this.listeners) {
       try {
         listener(event);
@@ -549,6 +575,22 @@ export class SdkSessionHost {
     }
   }
 
+  /**
+   * 本会话名下是否还有本宿主不能丢的外部工作：子代理 run，或扩展注册的自持活
+   * （MCP 子进程/长任务，见 lib/session-liveness.ts）。
+   *
+   * fail-closed：扩展 provider 抛错按「不活跃」处理，否则一个抛错的扩展能让会话与
+   * 跨进程 writer 租约永久不释放（与上面 subagent 判定同一取舍；上游是 fail-open，
+   * 这是有意分叉）。
+   */
+  private hasActiveExternalWork(): boolean {
+    if (this.hasActiveSubagentRun()) return true;
+    return hasRegisteredExternalWork({
+      sessionId: this.realSessionId,
+      sessionFile: this.realSessionFile,
+    });
+  }
+
   private resetIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
@@ -573,9 +615,10 @@ export class SdkSessionHost {
       }
       // fire 时又出现订阅者（30s 窗口内端点重开）：取消释放，继续保活。
       if (this.listeners.length > 0) return;
-      // 本会话名下还有子代理在跑：保活到它结束，否则完成事件没有 owner 宿主可投递，
-      // 父会话不会被唤起（见 hasActiveSubagentRun 的注释）。每轮空闲窗口复查一次。
-      if (this.hasActiveSubagentRun()) {
+      // 本会话名下还有子代理/扩展后台工作在跑：保活到它结束，否则完成事件没有
+      // owner 宿主可投递，父会话不会被唤起（见 hasActiveSubagentRun 与
+      // hasActiveExternalWork 的注释）。每轮空闲窗口复查一次。
+      if (this.hasActiveExternalWork()) {
         this.resetIdleTimer();
         return;
       }
@@ -1683,15 +1726,16 @@ export class SdkSessionHost {
         // agent_settled 表示 SDK 已完成本轮及其内部 continuation。没有未 hold
         // 的产品队列时立即销毁 host，释放跨进程 writer lease；否则继续由队列
         // flush 持有 host，直到最后一轮完成。
-        // 本会话名下还有子代理在跑时不销毁：完成事件要靠这个 live host 里的扩展实例
-        // 投递（pi-subagents 的 notify 带 triggerTurn 才能唤起父会话）；宿主一没，
-        // 用户只会看到「子代理跑完了但主会话没被唤起」。子代理结束后那一轮 settle
-        // 会正常销毁；run 记录陈旧/消失则由空闲定时器的复查兜底。
+        // 本会话名下还有子代理/扩展后台工作在跑时不销毁：完成事件要靠这个 live host
+        // 里的扩展实例投递（pi-subagents 的 notify 带 triggerTurn 才能唤起父会话）；
+        // 宿主一没，用户只会看到「子代理/后台任务跑完了但主会话没被唤起」。
+        // 那类工作结束后那一轮 settle 会正常销毁；run 记录陈旧/消失则由空闲定时器的
+        // 复查兜底。
         const disposeAfterSettle =
           event.type === "agent_settled"
           && !this.flushingFollowUp
           && (!this.hasWaitingFollowUp() || this.isFollowUpHeld())
-          && !this.hasActiveSubagentRun();
+          && !this.hasActiveExternalWork();
         this.resetIdleTimer();
         if (disposeAfterSettle) {
           void this.destroyAsync().catch(() => {

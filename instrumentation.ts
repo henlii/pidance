@@ -55,6 +55,16 @@ export async function register(): Promise<void> {
     console.error("[pidance] recover follow-up queues failed:", error);
   }
 
+  // 退出收尾：先 await dispose 全部 live host（交出 JSONL writer 与跨进程租约），
+  // 再硬断所有 SSE。顺序不能反：先断流会让 server.close() 立刻完成、
+  // 正在写的一轮消息来不及落盘（见 lib/server-shutdown.ts 的头注释）。
+  try {
+    const { installShutdownHooks } = await import("@/lib/server-shutdown");
+    installShutdownHooks();
+  } catch (error) {
+    console.error("[pidance] 安装退出收尾钩子失败（已忽略）:", error);
+  }
+
   // 项目信任对齐：主 Agent 走同进程 SDK，本来就不做信任判定；subagent 走 pi CLI
   // 子进程，会真的判定 —— 不写条目时 ask + 无 UI = false，子代理里项目技能/扩展
   // 会缺失。启动时按侧栏现状把信任面拉齐（打开的写 true、关闭的撤销），顺带补齐

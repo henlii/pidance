@@ -224,7 +224,13 @@ export function applyToolExecutionUpdate(state: ToolExecutionBufferState, event:
   if (!existing || existing.status !== "running") return state;
   const { text, truncated } = clampOutput(stringifyPartial(event.partialResult));
   const command = existing.command ?? extractToolCommand(event.args);
-  const renderedLines = optionalRenderedLines(event.renderedLines);
+  // 服务端按 toolCallId 节流渲染：被节流那帧**根本没有** `renderedLines` 字段。
+  // 缺字段表示「这一帧没重渲」，不等于「把已渲染的行清掉」——后者会让 ANSI 输出在
+  // 连续帧上闪烁并降级成原始文本。显式给了字段（含空/畸形数组）就按它来：
+  // 插件这一帧确实没渲染，就回退到原始 output。
+  const renderedLines = Object.prototype.hasOwnProperty.call(event, "renderedLines")
+    ? optionalRenderedLines(event.renderedLines)
+    : existing.renderedLines;
   if (text === existing.output && truncated === (existing.truncated ?? false) && command === existing.command && renderedLines === existing.renderedLines) {
     return state;
   }
