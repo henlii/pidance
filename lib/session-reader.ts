@@ -8,7 +8,7 @@ import {
   resolve as resolvePath,
   sep,
 } from "path";
-import type { AgentMessage, SessionEntry, SessionHeader, SessionInfo, SessionContext, ToolDisplayMeta } from "./types";
+import type { AgentMessage, CustomMessage, SessionEntry, SessionHeader, SessionInfo, SessionContext, ToolDisplayMeta } from "./types";
 import { PIDANCE_COMMAND_CUSTOM_TYPE, parseCommandEntryData } from "./session-command-entry";
 import {
   scanSessionFiles,
@@ -1047,16 +1047,16 @@ export function isPidanceOwnCustomType(customType: unknown): boolean {
  * 免得把插件渲染失败的空结果盖在明明有内容的消息上。
  */
 function customMessageLines(
-  entry: SessionEntry,
+  message: { customType?: unknown },
   options: SessionReaderProjectionOptions,
 ): string[] | null {
-  const customType = (entry as { customType?: unknown }).customType;
+  const customType = message.customType;
   if (typeof customType !== "string" || customType === "") return null;
   const resolve = options.messageLines;
   if (!resolve) return null;
   let lines: string[] | null;
   try {
-    lines = resolve(entry);
+    lines = resolve(message);
   } catch {
     return null;
   }
@@ -1402,16 +1402,21 @@ function entryToUiMessage(
     case "custom_message": {
       // 实时路径由宿主调 `getMessageRenderer` 渲染（见 lib/sdk-session-host.ts）；
       // 读盘路径原本没有这一步，刷新后退回原文，而 TUI 重开会重画（issue #76）。
-      const messageLines = customMessageLines(entry, options);
-      return {
+      //
+      // 渲染器拿到的必须是**消息形状**，与实时路径（SDK `createCustomMessage` →
+      // `{role:"custom", customType, content, display, details, timestamp:number}`）
+      // 同一形状：JSONL entry 没有 `role`、`timestamp` 是 ISO 字符串，直接喂过去
+      // 会让只读 `role`/`timestamp` 的渲染器拿到 undefined（issue #76 修复轮）。
+      const message: CustomMessage = {
         role: "custom",
         customType: entry.customType,
         content: entry.content,
         display: entry.display,
         details: entry.details,
-        ...(messageLines ? { renderedLines: messageLines } : {}),
         timestamp: parseEntryTimestamp(entry.timestamp),
       };
+      const messageLines = customMessageLines(message, options);
+      return messageLines ? { ...message, renderedLines: messageLines } : message;
     }
     case "custom": {
       // type:"custom" 不进入 LLM；仅投影合法 pidance.activity 到 UI timeline。

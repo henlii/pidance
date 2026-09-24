@@ -4,13 +4,23 @@
  * 原先扩展直接写 `document.title`，而 AppShell 用 MutationObserver 把标题拉回
  * 「<目录名> - Pidance」——扩展标题在用户看到之前就被覆盖，谁也没定义它该活多久。
  * 现在：base 由 AppShell 按当前项目维护；扩展标题作为 override 顶在 base 之上，
- * **一直有效到下一次标题写入**（切项目、切会话、或插件再 setTitle 一次）。
+ * **一直有效到下一次标题写入**——切项目（base 变）、切会话（`sessionKey` 变）、
+ * 或插件再 setTitle 一次。
  *
  * 生命周期为什么不是「固定 N 秒」（issue #76）：pi-tui 的 `ctx.ui.setTitle` 直接写
  * 终端标题（`terminal.setTitle(title)`，见 SDK 的 UI 适配层），之后**只有应用自己**
  * 在会话/项目变化时重写它——Pi 的 TUI 里没有到期这回事。固定 TTL 会让插件标题在
  * run 还没结束时就自己消失，属于我们自造的语义。改成「下次标题写入即作废」既跟 Pi
- * 一致，又保证标题不会永远压在项目名上（会话切换会重写 base）。
+ * 一致，又保证标题不会永远压在项目名上。
+ *
+ * 「切会话作废」不能只靠 base：同一项目下的两个会话 base 完全相同（都是
+ * 「<目录名> - Pidance」），只比 base 插件标题会跨会话粘住。所以这里额外记
+ * `sessionKey`，由 AppShell 上报当前会话 id（`components/AppShell.tsx` 的
+ * `titleSessionKey`/`setWindowTitleSession`），会话一变就作废覆盖。
+ *
+ * 与 TUI 的**已知差异**（issue #76 修复轮记录，未实现）：同会话**改名**不会清掉
+ * 插件标题——TUI 会按 `session_info_changed` 重写标题，而 Web 这里只在项目/会话
+ * 变化或插件再次 setTitle 时重写。已装插件 0 处调用 setTitle，故未为它开口子。
  *
  * 状态在模块级，因此**每个标签页各自一份**，多标签互不影响。
  */

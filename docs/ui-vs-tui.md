@@ -163,7 +163,7 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
 
    代价与限制：选择态下 `j`/`k` 是导航而非字母，所以只能在「空输入框 + 已激活」时拦；插件在 Web 端的 `Esc` 取消长任务仍然没接（只接了 widget 选择态里的 `Esc`）。
    **注册时会告知覆盖范围**（issue #74）：`onTerminalInput` 落地时发一条只发一次的 warning（`lib/web-extension-ui.ts` 的 `notifyLimitedSupport`），逐字写明两个窗口——① widget 存在且输入框**聚焦且为空**时，`↓`/`←` 开局、之后方向键/`j`/`k`/`Enter`/`Esc` 才会路由；② 存在**已收起**的扩展面板时 `Esc`、`F1`–`F12`、`Alt+<字符>`、`Ctrl+<字符>`（浏览器保留组合与 `Ctrl+Space` 除外）会路由——以及「普通打字到不了」。否则插件无从区分「用户没按」和「Web 端收不到」，这块交互会静默消失 —— 但也不能写成「不支持」：按键确实会送达，只是覆盖面窄。
-7. **面板内鼠标事件**：`ExtensionCustomPanel` 把点击换算成字符行列后发 `extension_ui_mouse`，服务端调**面板组件**的 `handleMouse`。只转 click，不转 move / drag / wheel。`setWidget` 的组件收不到鼠标（`inputCustomMouse` 只查 custom 面板）—— **刻意分叉**：已装插件里只有 pi-subagents 的 fleet widget 实现了 `handleMouse`，且只对「第 0 行左键点击」切换它自己的收起态；Web 的折叠由共用卡片头承担（粒度不同：卡片级 vs 插件内部子树），方向键驱动的 roster 也已在 #83 打通，所以不为它开口子。custom 面板的 overlay 句柄同理：`focus()` / `unfocus()` 是空实现（Web 只有这一层面板，键本来就路由给它），`getBounds()` 恒 `undefined`（没有终端单元格几何，且已装插件 0 处使用）；`hide()` 则按 pi-tui 契约做成**永久移除**（#76）。
+7. **面板内鼠标事件**：`ExtensionCustomPanel` 把点击换算成字符行列后发 `extension_ui_mouse`，服务端调**面板组件**的 `handleMouse`。只转 click，不转 move / drag / wheel。`setWidget` 的组件收不到鼠标（`inputCustomMouse` 只查 custom 面板）—— **刻意分叉**：已装插件里只有 pi-subagents 的 fleet widget 实现了 `handleMouse`，行为是「第 0 行左键点击」把**整块**在「一行摘要」与「全列表」之间来回切（`collapsed` 局部标志 → 要么 `buildSingleLineWidgetLines` 一行，要么完整自适应列表；`src/tui/render.ts:2837-2845,2887`）；Web 的折叠由共用卡片头承担（粒度不同：卡片级 vs **整块摘要/全列表**），方向键驱动的 roster 也已在 #83 打通，所以不为它开口子。custom 面板的 overlay 句柄同理：`focus()` / `unfocus()` 是空实现（Web 只有这一层面板，键本来就路由给它），`getBounds()` 恒 `undefined`（没有终端单元格几何，且已装插件 0 处使用）；`hide()` 则按 pi-tui 契约做成**永久移除**（#76）。
 8. **`getToolsExpanded` / `setToolsExpanded` 自洽**：服务端维护布尔并下发事件，插件 set 之后自己 get 得到的是一致的值；界面上的工具块仍按各自的折叠规则（`setToolsExpanded(true)` 不会展开所有块）。
 9. **没有等价语义的能力改成可见失败**：`setFooter` / `setHeader` / `setEditorComponent` / `addAutocompleteProvider` / `setHiddenThinkingLabel` / `getAllThemes` / `getTheme` 会发一条 warning 通知（每种能力只发一次），不再静默 no-op —— 静默会让插件作者以为生效了（例如 `getAllThemes()` 返回空数组、`getTheme()` 返回 undefined，插件以为主题没配）。`setEditorComponent` 仍然告警（Web 输入区是自己的 React 组件，**不会**用插件的工厂去渲染），但工厂值会存下来并被 `getEditorComponent()` 如实回传（SDK 契约是「当前**配置的**工厂」，未配置才是 undefined），「拿旧的包一层再设回去」的写法不再断链（issue #74）。传 `undefined` / 无参的「恢复默认」不算降级，不提示。`setWorkingMessage` / `setWorkingVisible` / `setWorkingIndicator` **已经实现**（不再走告警）。
 
@@ -200,7 +200,7 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
 | 手机抽屉与安全区适配 | 窄视口下三栏并排不可用 |
 | Electron 壳的托盘/通知/更新 | 壳专属；页面只通过 preload bridge 消费（当前接线见 #51） |
 | 不显示 TUI 键位提示 | 键位在浏览器里无意义（例如 widget 里的 `↓/← to inspect`） |
-| widget 组件级鼠标事件（`handleMouse`） | 已装插件只有 pi-subagents 用它切自己的子树收起态，折叠已由共用卡片头承担；见 §5 |
+| widget 组件级鼠标事件（`handleMouse`） | 已装插件只有 pi-subagents 用它把整块在「一行摘要 / 全列表」间切换（不是内部子树），折叠已由共用卡片头承担；见 §5 |
 | overlay `focus()` / `unfocus()` / `getBounds()` | Web 只有一层面板，键始终路由给它；没有终端单元格几何，且已装插件 0 处使用 `getBounds()` |
 
 ---
