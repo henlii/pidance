@@ -65,6 +65,8 @@
   --diff-removed-bg: #b7493f17;
   --diff-removed-border: #b7493f99;
   --diff-hunk-bg: #2d72c41f;
+  /* 媒体（视频）画布底色：亮色主题下也保持黑，letterbox 不该跟着页面变浅 */
+  --media-canvas: #000000;
   --live-indicator-glow: 0 0 6px #5f8d3d99;
   --warning: var(--status-warning);
   --danger: var(--status-danger);

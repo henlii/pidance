@@ -29,6 +29,8 @@ import {
   applyPatchPreviewToFiles,
   applyPatchResultHasFailures,
   extractApplyPatchPaths,
+  getApplyPatchAppliedFiles,
+  getApplyPatchFailures,
   getApplyPatchInputText,
   parseApplyPatchInput,
 } from "@/lib/apply-patch";
@@ -1248,6 +1250,9 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, pending, 
   // apply_patch（Codex 系）：对照行来自调用参数里的 V4A 文档，扩展结果 preview 作兜底。
   const applyPatchFiles = isApplyPatchTool ? getApplyPatchFiles(block, effectiveResult) : null;
   const applyPatchSummary = isApplyPatchTool ? summarizeApplyPatchInput(block) : null;
+  // 逐文件失败与实际写入的文件：diff 一旦画出来就不再画结果正文，不单独列出来就等于静默丢失败原因
+  const applyPatchFailures = isApplyPatchTool ? getApplyPatchFailures(effectiveResult?.details) : [];
+  const applyPatchApplied = isApplyPatchTool ? getApplyPatchAppliedFiles(effectiveResult?.details) : [];
 
   // Result display
   const resultText = effectiveResult
@@ -1424,10 +1429,11 @@ maxHeight: streamBlockMaxHeight,
               {t("message_thinkingLoading")}
             </div>
           ) : applyPatchFiles ? (
-            <PairedDiffResult files={applyPatchFiles} />
+            <PairedDiffResult files={applyPatchFiles} isError={isError} />
           ) : resultDiff ? (
             <PairedDiffResult
               diff={resultDiff}
+              isError={isError}
             />
           ) : (
             <PairedResult
@@ -1435,6 +1441,56 @@ maxHeight: streamBlockMaxHeight,
               isEmpty={resultIsEmpty}
               isError={isError}
             />
+          )}
+          {applyPatchFailures.length > 0 && (
+            <div
+              role="alert"
+              style={{
+                padding: "8px 10px",
+                borderTop: "1px solid var(--status-danger-border)",
+                background: "var(--status-danger-bg)",
+                color: "var(--error-text)",
+                fontSize: 12,
+                lineHeight: 1.5,
+                overflowWrap: "anywhere",
+              }}
+            >
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>{t("message_applyPatchFailed")}</div>
+              <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 3 }}>
+                {applyPatchFailures.map((failure, index) => (
+                  <li key={`${failure.filePath}-${index}`}>
+                    <span style={{ fontFamily: "var(--font-mono)", fontSize: 11.5 }}>{failure.filePath || "?"}</span>
+                    {failure.message ? ` — ${failure.message}` : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {applyPatchApplied.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "baseline",
+                gap: 6,
+                padding: "6px 10px",
+                borderTop: "1px solid var(--border)",
+                background: "var(--bg-subtle)",
+                color: "var(--text-dim)",
+                fontSize: 11,
+              }}
+            >
+              <span>{t("message_modifiedFiles")}</span>
+              {applyPatchApplied.map((filePath) => (
+                <code
+                  key={filePath}
+                  title={filePath}
+                  style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text)", overflowWrap: "anywhere" }}
+                >
+                  {filePath}
+                </code>
+              ))}
+            </div>
           )}
         </>
       )}
@@ -1519,15 +1575,17 @@ interface ResultDiff {
   text: string;
 }
 
-function PairedDiffResult({ diff, files }: {
+function PairedDiffResult({ diff, files, isError = false }: {
   diff?: ResultDiff;
   /** 已解析的对照行（apply_patch 走这条：参数里是 V4A 文档，不是 unified diff） */
   files?: SplitDiffFile[];
+  /** 结果不是成功（逐文件失败也走这条）：边框不得再报 success */
+  isError?: boolean;
 }) {
   return (
     <div
       style={{
-        borderTop: "1px solid var(--status-success-border)",
+        borderTop: `1px solid ${isError ? "var(--status-danger-border)" : "var(--status-success-border)"}`,
         background: "var(--bg)",
       }}
     >

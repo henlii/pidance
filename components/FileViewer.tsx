@@ -584,7 +584,7 @@ function VideoViewer({ filePath, cwd, sourceSessionId }: Props) {
             src={src}
             onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
             onError={() => setError(t("viewer_loadFailed"))}
-            style={{ width: "100%", maxHeight: "min(480px, 60vh)", background: "#000" }}
+            style={{ width: "100%", maxHeight: "min(480px, 60vh)", background: "var(--media-canvas)" }}
           />
         </div>
       </div>

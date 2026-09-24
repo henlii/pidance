@@ -509,3 +509,29 @@ test("apply_patch：折叠摘要列出涉及文件，不倾倒 V4A 原文", () =
   assert.ok(html.includes("src/app.ts"), "折叠态摘要显示涉及的文件");
   assert.ok(!html.includes("*** Begin Patch"), "折叠态不把整块 V4A 原文倒出来");
 });
+
+test("apply_patch 逐文件失败：列出失败原因，且对照 diff 不再报 success", () => {
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  const toolBlock = source.slice(source.indexOf("function ToolCallBlock("), source.indexOf("function getRenderableAnsiLines("));
+  assert.match(toolBlock, /getApplyPatchFailures\(effectiveResult\?\.details\)/, "未读出逐文件失败清单");
+  assert.match(toolBlock, /getApplyPatchAppliedFiles\(effectiveResult\?\.details\)/, "未列出实际写入的文件");
+  const failureSection = toolBlock.slice(
+    toolBlock.indexOf("applyPatchFailures.length > 0"),
+    toolBlock.indexOf("applyPatchApplied.length > 0"),
+  );
+  assert.ok(failureSection.length > 0, "失败清单没有渲染分支");
+  assert.match(failureSection, /role="alert"/, "失败清单没有可见承载（需读屏可见）");
+  assert.match(failureSection, /message_applyPatchFailed/, "失败清单没有标题文案");
+  assert.match(failureSection, /applyPatchFailures\.map\(/, "失败清单未逐条渲染");
+  const appliedSection = toolBlock.slice(toolBlock.indexOf("applyPatchApplied.length > 0"));
+  assert.match(appliedSection, /message_modifiedFiles/, "实际写入的文件没有标题");
+  // 对照 diff 的顶边颜色必须跟着结果（失败时是 danger，不是 success）
+  assert.match(toolBlock, /<PairedDiffResult files=\{applyPatchFiles\} isError=\{isError\} \/>/);
+  const paired = source.slice(source.indexOf("function PairedDiffResult("), source.indexOf("function SplitPatchView("));
+  assert.match(paired, /isError \? "var\(--status-danger-border\)" : "var\(--status-success-border\)"/, "PairedDiffResult 边框写死 success");
+  // 双语都要有文案键
+  for (const locale of ["en", "zh-CN"]) {
+    const dict = readFileSync(fileURLToPath(new URL(`../lib/locales/${locale}.ts`, import.meta.url)), "utf8");
+    assert.match(dict, /message_applyPatchFailed:/, `${locale} 缺少 message_applyPatchFailed`);
+  }
+});

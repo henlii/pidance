@@ -61,9 +61,53 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * 不设 `isError`，所以调用方要单独判一次。
  */
 export function applyPatchResultHasFailures(details: unknown): boolean {
-  if (!isRecord(details) || !isRecord(details.result)) return false;
+  return getApplyPatchFailures(details).length > 0;
+}
+
+/** 逐文件失败（`details.result.failures`）：`{ filePath, message }`，容忍字符串条目。 */
+export interface ApplyPatchFailure {
+  filePath: string;
+  message?: string;
+}
+
+/**
+ * 读逐文件失败清单。
+ *
+ * 为什么要读出来：pi-apply-patch 把失败挂在**正常结果**上（不设 isError），而调用方
+ * 一旦把对照 diff 画出来就不会再画结果正文 —— 不单独列出来的话，失败原因就静默消失了。
+ */
+export function getApplyPatchFailures(details: unknown): ApplyPatchFailure[] {
+  if (!isRecord(details) || !isRecord(details.result)) return [];
   const failures = details.result.failures;
-  return Array.isArray(failures) && failures.length > 0;
+  if (!Array.isArray(failures)) return [];
+  const out: ApplyPatchFailure[] = [];
+  for (const raw of failures) {
+    if (typeof raw === "string") {
+      const filePath = raw.trim();
+      if (filePath) out.push({ filePath });
+      continue;
+    }
+    if (!isRecord(raw)) continue;
+    const filePath = typeof raw.filePath === "string" ? raw.filePath.trim() : "";
+    const message = typeof raw.message === "string" && raw.message.trim() ? raw.message.trim() : undefined;
+    if (!filePath && !message) continue;
+    out.push(message ? { filePath, message } : { filePath });
+  }
+  return out;
+}
+
+/** 实际写入的文件（`details.result.appliedFiles`）；重命名给的是新路径。 */
+export function getApplyPatchAppliedFiles(details: unknown): string[] {
+  if (!isRecord(details) || !isRecord(details.result)) return [];
+  const applied = details.result.appliedFiles;
+  if (!Array.isArray(applied)) return [];
+  const out: string[] = [];
+  for (const raw of applied) {
+    if (typeof raw !== "string") continue;
+    const filePath = raw.trim();
+    if (filePath && !out.includes(filePath)) out.push(filePath);
+  }
+  return out;
 }
 
 // ── 共享行构建 ───────────────────────────────────────────────────────────────

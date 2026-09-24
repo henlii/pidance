@@ -353,6 +353,7 @@ export const en = {
   message_read: 'Read',
   message_modified: 'Modified',
   message_modifiedFiles: 'Modified files',
+  message_applyPatchFailed: 'Not applied',
   message_readFiles: 'Read files',
   message_hiddenExtensionMessage: 'Extension message hidden',
   message_noExtensionMessage: 'No extension message',

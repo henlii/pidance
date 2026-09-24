@@ -18,7 +18,15 @@ export interface SessionSearchHit {
   readonly role?: string;
   readonly snippet: string;
   readonly timestamp: string;
-  /** hermes messages.id 或 JSONL entry id（若有）。 */
+  /**
+   * JSONL entry id：只有这条命中来自 JSONL 扫描时才给。
+   *
+   * 为什么不再复用 messageId：hermes sessions.db 的 `messages.id` 与 JSONL entry id
+   * 不是同一套标识，拿它去 `around=` 定位永远找不到（表现为重试 8 次后停在尾部）。
+   * 只有本字段存在才跳。
+   */
+  readonly entryId?: string;
+  /** hermes messages.id 或 JSONL entry id（若有）；仅作展示/去重用处 */
   readonly messageId?: string;
 }
 
@@ -256,7 +264,7 @@ function searchFts(
         snippet(message_fts, 0, '«', '»', '…', 12) AS snippet
       FROM message_fts
       JOIN messages m ON m.rowid = message_fts.rowid
-      WHERE message_fts MATCH ?
+      WHERE message_fts MATCH ? AND m.role <> 'system'
       ORDER BY m.timestamp DESC
       LIMIT ?
     `;
@@ -300,7 +308,7 @@ function searchFts(
         m.id AS message_id,
         m.content AS snippet
       FROM messages m
-      WHERE m.content LIKE ? ESCAPE '\\'
+      WHERE m.content LIKE ? ESCAPE '\\' AND m.role <> 'system'
       ORDER BY m.timestamp DESC
       LIMIT ?
     `;
@@ -324,6 +332,8 @@ function searchFts(
 export function extractSearchableTextFromJsonlLine(line: string): {
   sessionId?: string;
   messageId?: string;
+  /** JSONL entry id（与 messageId 同值，供定位使用；hermes 路径不产生它） */
+  entryId?: string;
   role?: string;
   timestamp?: string;
   text: string;
@@ -352,6 +362,7 @@ export function extractSearchableTextFromJsonlLine(line: string): {
   const text = flattenMessageContent(msg.content);
   if (!text) return null;
   return {
+    entryId: typeof record.id === "string" ? record.id : undefined,
     messageId: typeof record.id === "string" ? record.id : undefined,
     role,
     timestamp: typeof record.timestamp === "string"
@@ -422,6 +433,7 @@ export async function scanJsonlFileForQuery(
         role: parsed.role,
         snippet: buildSnippet(parsed.text, query, limits.snippetRadius),
         timestamp: parsed.timestamp ?? "",
+        entryId: parsed.entryId,
         messageId: parsed.messageId,
       });
     }

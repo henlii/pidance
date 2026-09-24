@@ -263,7 +263,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     snippet: string;
     timestamp: string;
     role?: string;
-    /** JSONL entry id：命中行可直接定位到该条消息 */
+    /** JSONL entry id：只有 JSONL 扫描来的命中才有，可用于定位；hermes id 不可用 */
+    entryId?: string;
     messageId?: string;
   }>>([]);
   const [fulltextSessionIds, setFulltextSessionIds] = useState<string[]>([]);
@@ -998,7 +999,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           const res = await fetch(`/api/sessions/search?q=${encodeURIComponent(q)}&limit=40`);
           const data = await res.json().catch(() => ({})) as {
             error?: string;
-            hits?: Array<{ sessionId: string; snippet: string; timestamp: string; role?: string; messageId?: string }>;
+            hits?: Array<{ sessionId: string; snippet: string; timestamp: string; role?: string; entryId?: string; messageId?: string }>;
             sessionIds?: string[];
             source?: "fts" | "jsonl" | "none";
           };
@@ -1569,7 +1570,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             <button
               key={`${hit.sessionId}-${hit.timestamp}-${index}`}
               type="button"
-              onClick={() => openSessionById(hit.sessionId, hit.messageId)}
+              onClick={() => openSessionById(hit.sessionId, hit.entryId)}
               title={t("sidebar_searchFulltextSnippet")}
               style={{
                 display: "block", width: "100%", textAlign: "left",

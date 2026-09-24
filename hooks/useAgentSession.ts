@@ -3708,6 +3708,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     loadNewerHistory,
     hasMoreAfter,
     jumpToEntry,
+    /** 进入「浏览历史」态：跳转前必须离开跟随态（窗口内命中也走这条，否则会被钉回底部） */
+    notifyBrowsingHistory,
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue, handleSendQueueAsSteer,
