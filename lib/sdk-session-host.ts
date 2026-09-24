@@ -9,6 +9,7 @@ import {
   createAgentSessionServices,
   renderDiff,
   SessionManager,
+  collectEntriesForBranchSummary,
   type AgentSession,
   type AgentSessionRuntime,
   type AgentSessionServices,
@@ -76,6 +77,12 @@ import {
   writeLeafSidecar,
 } from "./session-leaf-sidecar";
 import {
+  applyTreeNavigation,
+  planBranchFromAssistant,
+  planSelectLeafExact,
+} from "./session-tree-navigation";
+import {
+  asDiskSessionView,
   materializeSessionFile,
   openSessionManager,
   createSessionManager,
@@ -3249,35 +3256,13 @@ export class SdkSessionHost {
       case "select_leaf_exact": {
         const entryId = asString(command.entryId);
         if (!entryId) throw new Error("entryId is required");
-        const navigation = this.options.navigationActions;
-        if (navigation) {
-          // 交出自己的 writer 后由 Service 离线写：本命令排除自己，不自等待。
-          const handoff = () => this.destroyExcluding(1);
-          return await navigation.selectLeafExact(this.sessionId, entryId, handoff);
-        }
-        // 无注入时直接 navigate
-        const result = await session.navigateTree(entryId, { summarize: false });
-        if (!result.cancelled && this.realSessionFile) {
-          const leaf = session.sessionManager.getLeafId();
-          const lastEntry = session.sessionManager.getEntries().at(-1)?.id;
-          if (leaf && lastEntry && leaf !== lastEntry) {
-            writeLeafSidecar(this.realSessionFile, leaf);
-          } else {
-            clearLeafSidecar(this.realSessionFile);
-          }
-        }
-        return { cancelled: result.cancelled };
+        return await this.navigateTreeCommand("select_leaf_exact", entryId);
       }
 
       case "branch_from_assistant": {
         const assistantEntryId = asString(command.assistantEntryId);
         if (!assistantEntryId) throw new Error("assistantEntryId is required");
-        const navigation = this.options.navigationActions;
-        if (navigation) {
-          const handoff = () => this.destroyExcluding(1);
-          return await navigation.branchFromAssistant(this.sessionId, assistantEntryId, handoff);
-        }
-        throw new Error("branch_from_assistant is unavailable");
+        return await this.navigateTreeCommand("branch_from_assistant", assistantEntryId);
       }
 
       case "create_session_from_leaf": {
@@ -3285,8 +3270,10 @@ export class SdkSessionHost {
         if (!entryId) throw new Error("entryId is required");
         const navigation = this.options.navigationActions;
         if (navigation) {
-          const handoff = () => this.destroyExcluding(1);
-          return await navigation.createSessionFromLeaf(this.sessionId, entryId, handoff);
+          return await navigation.createSessionFromLeaf(this.sessionId, entryId, {
+            // 新文件写：只需 writer 交接，不需要 Host 的 live writer。
+            handoff: () => this.destroyExcluding(1),
+          });
         }
         throw new Error("create_session_from_leaf is unavailable");
       }
@@ -3321,6 +3308,169 @@ export class SdkSessionHost {
     } finally {
       this.activeCommandCount = Math.max(0, this.activeCommandCount - 1);
       if (this.activeCommandCount === 0) this.resetIdleTimer();
+    }
+  }
+
+  /**
+   * 树导航命令的统一入口：`select_leaf_exact` / `branch_from_assistant`（issue #90）。
+   *
+   * 这两个命令过去整条交给 Service 的离线写（交出自己的 writer → 开磁盘视图 → 改 leaf +
+   * sidecar），于是完全绕过 Pi 的 `session_before_tree`（可取消）/ `session_tree`：注册了这两个
+   * 事件的插件（维护分支索引、要 veto 切分支）在 Pidance 里看不到任何分支动作。
+   *
+   * 事件只能由**本会话自己的** extension runner 派发，这就是顺序必须写成
+   * 「before → 写 → tree → 再交出 writer」的原因：
+   * - SDK 的 `AgentSessionRuntime.dispose()` → `AgentSession.dispose()` →
+   *   `_extensionRunner.invalidate(...)`：交接之后再 emit，插件拿到的 ctx 全是 stale 的；
+   * - 扩展实例也不跨加载共享（同进程两次加载同一批路径拿到的是不同实例），另建 runner 等于
+   *   把事件发给一组没有状态、也没有 ctx 的实例。
+   * 所以写入用本 Host 自己的 writer（Service 的 liveWriter 模式），写完才交接。
+   *
+   * 前置与 Pi 的 `navigateTree` 对齐：streaming / compacting 时拒绝（Pi 也拒绝），
+   * 无变化（目标就是当前 leaf）时不发事件直接返回。
+   *
+   * 计划只算一次（`plan*`），两条落地路径共用：有 Service 注入时由它用 live writer 写，
+   * 没有注入时（例如队列恢复拉起的 host）由本 Host 用同一份计划自己写 —— 后者不能再退回
+   * SDK 的 `navigateTree`，那会让 `select_leaf_exact` 变成 Pi 的「user / custom_message
+   * 退到 parent」语义，并让 `branch_from_assistant` 直接不可用。
+   */
+  private async navigateTreeCommand(
+    kind: "select_leaf_exact" | "branch_from_assistant",
+    targetId: string,
+  ): Promise<{ cancelled: boolean }> {
+    const session = this.session;
+    if (this.bashRunning) {
+      throw new Error(
+        kind === "select_leaf_exact"
+          ? "Cannot switch branch while a shell command is running"
+          : "Cannot branch while a shell command is running",
+      );
+    }
+    if (session.isStreaming) {
+      throw new Error("Wait for the current response to finish before navigating the session tree.");
+    }
+    if (session.isCompacting) {
+      throw new Error(
+        "Wait for the current compaction or tree navigation to finish before navigating the session tree.",
+      );
+    }
+    const sessionManager = session.sessionManager;
+    // 视图只做代理：getLastEntryId 是 Pidance 的助手（SDK 的 manager 没有），branch() 仍然落在
+    // 本 Host 自己的 writer 上。Service 与这里因此共用同一份判定所需的面。
+    const sessionView = asDiskSessionView(sessionManager);
+    // 计划只算一次：事件 payload 与「写什么」必须出自同一份判定，两条落地路径不会分叉。
+    const plan =
+      kind === "select_leaf_exact"
+        ? planSelectLeafExact(sessionView, targetId)
+        : planBranchFromAssistant(sessionView, targetId);
+    // 无变化：Pi 在 emit 之前就返回（agent-session.js:2864），这里同样不发事件、不写任何东西。
+    if (plan.kind === "noop") return { cancelled: false };
+
+    const oldLeafId = sessionManager.getLeafId();
+    // 目标就是当前 leaf（典型：已经在轮末又点一次同一条 assistant）：Pi 同款提前返回。
+    // sidecar 是 Pidance 自己的磁盘指针，此刻该清就顺手清掉，但不发事件、也不交接 writer。
+    if (plan.leafId === oldLeafId) {
+      if (plan.clearSidecar && this.realSessionFile) {
+        clearLeafSidecar(this.realSessionFile);
+        this.options.onSessionListInvalidate?.();
+      }
+      return { cancelled: false };
+    }
+
+    const navigation = this.options.navigationActions;
+    const dispatched = await this.dispatchTreeNavigation({
+      oldLeafId,
+      // 事件 payload 用的是**落地后的 leaf**（branch_from_assistant 是本轮的轮末 entry），
+      // 与 Pi 的 navigateTree(targetId) 一致：非 user / custom_message 目标时 newLeafId === targetId。
+      targetLeafId: plan.leafId,
+      apply: async () => {
+        if (navigation && this.realSessionFile) {
+          const navigate = kind === "select_leaf_exact"
+            ? navigation.selectLeafExact
+            : navigation.branchFromAssistant;
+          // 把被选中的 entry 交给 Service：它用同一份 plan* 纯函数算出同一个 leaf。
+          return await navigate.call(navigation, this.sessionId, targetId, {
+            // 本命令排除自己，不自等待。
+            handoff: () => this.destroyExcluding(1),
+            liveWriter: { sessionManager: sessionView, sessionFile: this.realSessionFile },
+          });
+        }
+        // 无 Service 注入（例如队列恢复拉起的 host）：用本 Host 自己的 writer、同一份计划落地。
+        applyTreeNavigation({ sessionManager: sessionView, sessionFile: this.realSessionFile, plan });
+        this.options.onSessionListInvalidate?.();
+        return { cancelled: false };
+      },
+    });
+    if (dispatched.cancelled) return { cancelled: true };
+
+    // 与旧行为一致：导航后交出 writer（会话不再 live）。leaf 与 sidecar 都已经提交，
+    // 若此刻 destroy 撞上另一条命令而 busy，就不能再把失败抛给调用方：那会让它以为导航没生效
+    // （磁盘与内存其实都已一致）。留给下一次命令或 idle 回收 dispose。
+    try {
+      await this.destroyExcluding(1);
+    } catch {
+      /* busy（另一条命令仍在跑）：见上 */
+    }
+    return { cancelled: false };
+  }
+
+  /**
+   * 事件时序的唯一实现：挂上「导航中」标记 → `session_before_tree`（可取消）→ 落地 →
+   * `session_tree`。两条落地路径（Service / 本 Host）共用它，顺序不会分叉。
+   *
+   * 「导航中」标记用的就是 Pi 自己的 `_branchSummaryAbortController`：SDK 的 `isCompacting`
+   * 是「三个 abort controller 任一存在」（agent-session.js:928-931），Pi 在整段导航里都挂着它，
+   * 于是导航期间新 prompt 被拒（:876）、第二次导航被拒（:2859）、`abort()` 能取消 before（:2004）。
+   * 本命令的 await 留在 live 会话上（`send` 不串行），不挂这个字段就把这层闸门丢掉了：
+   * 另一端来的 prompt 会与 branch() 打在同一 manager 上。
+   */
+  private async dispatchTreeNavigation(options: {
+    oldLeafId: string | null;
+    targetLeafId: string;
+    apply: () => Promise<{ cancelled: boolean }>;
+  }): Promise<{ cancelled: boolean }> {
+    const session = this.session;
+    const runner = session.extensionRunner;
+    const branchSummaryAbort = new AbortController();
+    // SDK 把该字段声明为 private（agent-session.d.ts:217）：走 unknown 转型访问，
+    // 写的与 Pi 的 navigateTree 是同一个字段（同样的赋值时机：emit 之前、try/finally 之内）。
+    const gate = session as unknown as { _branchSummaryAbortController?: AbortController };
+    gate._branchSummaryAbortController = branchSummaryAbort;
+    try {
+      if (runner.hasHandlers("session_before_tree")) {
+        // preparation 用 SDK 自己的 collectEntriesForBranchSummary：与 Pi 的 navigateTree
+        // 同一份凭据（我们不做摘要，userWantsSummary 恒 false）。targetId 必须是落地后的 leaf：
+        // 用被点击的 assistant id 会让插件记下的目标与共同祖先都跟磁盘不一致。
+        const collected = collectEntriesForBranchSummary(
+          session.sessionManager,
+          options.oldLeafId,
+          options.targetLeafId,
+        );
+        const result = await runner.emit({
+          type: "session_before_tree",
+          preparation: {
+            targetId: options.targetLeafId,
+            oldLeafId: options.oldLeafId,
+            commonAncestorId: collected.commonAncestorId,
+            entriesToSummarize: collected.entries,
+            userWantsSummary: false,
+          },
+          signal: branchSummaryAbort.signal,
+        });
+        // 扩展取消 = 零改动：连 leaf 与 sidecar 都不动，writer 也不交出去（与 Pi 一致）。
+        if (result?.cancel) return { cancelled: true };
+      }
+      const applied = await options.apply();
+      if (applied.cancelled) return { cancelled: true };
+      // 事后通知：newLeafId 取写完的 leaf。
+      await runner.emit({
+        type: "session_tree",
+        newLeafId: session.sessionManager.getLeafId(),
+        oldLeafId: options.oldLeafId,
+      });
+      return { cancelled: false };
+    } finally {
+      gate._branchSummaryAbortController = undefined;
     }
   }
 

@@ -106,13 +106,12 @@ interface ExtensionRunnerLike {
   }>;
   setUIContext?(uiContext?: unknown, mode?: "tui" | "rpc" | "json" | "print"): void;
   /**
-   * 通用扩展事件发射（运行时存在，SDK 类型未暴露）。
+   * 通用扩展事件发射（SDK 的 ExtensionRunner 运行时与类型都有）。
    *
-   * **目前没有任何调用方**：离线分支（`select_leaf_exact` / `branch_from_assistant`）绕过
-   * SDK 的 `session_before_tree` / `session_tree`（见 docs/extension-compat-gaps.md 第 6 条）。
-   * 离线路径会先交出 writer 再写盘（单写者护栏），那一刻已经没有绑好扩展的运行器，
-   * 所以「补事件」不是一行调用就能了事：要么在交出 writer 前补发 pre 事件（post 事件仍缺），
-   * 要么改回经由存活会话的 session.navigateTree（语义/资源取舍变了）。需要单独拍板。
+   * #90 之后树导航由 Host 用**本会话的** runner 直接派发 `session_before_tree` /
+   * `session_tree`（见 lib/sdk-session-host.ts 的 `navigateTreeCommand`）：两条事件必须在改动
+   * 前后由同一个 runner 发出，而交出 writer 会 dispose Host（SDK 在那里 invalidate runner）。
+   * 这个结构成员本身目前没有调用方。
    */
   emit?(event: unknown): Promise<{ cancel?: boolean } | undefined>;
 }
