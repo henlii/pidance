@@ -1536,7 +1536,7 @@ export class SdkSessionHost {
       },
       // `ctx.ui.getEditorText()` 回传本会话的输入框草稿：读的是客户端已经同步到
       // 服务端偏好的那份镜像（见 lib/composer-draft-text.ts 的语义边界）。
-      { readComposerText: () => readComposerDraftText(this.realSessionId) },
+      { readComposerText: () => readComposerDraftText(this.realSessionId, this.agentDir) },
     );
     // 渲染桥的**宿主配置类**告警出口（issue #69）：SDK 全局主题槽位装不进去时，插件
     // 渲染器里依赖 SDK 主题助手的部分（内置 edit 的 diff 等）会整段不显示 —— 那要变成

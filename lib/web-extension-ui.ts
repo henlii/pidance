@@ -346,6 +346,12 @@ export function createWebExtensionUIAdapter(
    * ——所以注册时给一次可见提示。同样只报一次，且去重范围就是**这个适配器（这个会话）**：
    * 插件会反复注册监听器，而通知是发往该会话的 SSE —— 放到进程级去重，会让「在没人开着的
    * 会话里注册」那一次丢掉之后永远不再出现。
+   *
+   * 文案用英文：与 `notifyUnsupported` 同属面向插件生态的诊断信息（客户端也把这类
+   * 通知固定成 `Extension warning` / `Extension error` 英文标题，见
+   * `hooks/useAgentSession.ts`），不为它单独开一条服务端 → 客户端的文案键协议。
+   * **但文案必须与 `lib/extension-panel-keys.ts` 的实际窗口逐字一致** —— 说错窗口
+   * 比不说更糟：插件作者会照着一份不存在的契约去设计交互。
    */
   const notifyLimitedSupport = (feature: string, detail: string) => {
     if (capabilityNoticesSent.has(feature)) return;
@@ -527,9 +533,14 @@ export function createWebExtensionUIAdapter(
       // 无从知道是「用户没按」还是「Web 端收不到」，这块交互就静默消失了。
       notifyLimitedSupport(
         "onTerminalInput",
-        "handlers receive navigation keys only while the composer is focused and empty, " +
-          "or Escape / F1-F12 / Ctrl+Alt+key while a collapsed extension panel exists; " +
-          "ordinary typing never reaches them.",
+        "handlers only receive keys in two narrow windows: " +
+          // 窗口 1：widget 选择态（lib/extension-panel-keys.ts 的 resolveExtensionWidgetKeyAction）
+          "(1) with a widget present and the composer focused and empty, Down/Left start a selection, " +
+          "after which arrows, j, k, Enter and Escape are routed while the selection lasts; " +
+          // 窗口 2：收起的面板（同文件 shouldRouteKeyToExtensionListener）
+          "(2) while a collapsed extension panel exists, Escape, F1-F12, Alt+<char> and Ctrl+<char> " +
+          "(browser-reserved chords and Ctrl+Space excluded) are routed. " +
+          "Ordinary typing never reaches them.",
       );
       terminalInputListeners.add(handler);
       emitTerminalInputListeners();
