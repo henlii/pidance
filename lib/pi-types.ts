@@ -101,7 +101,12 @@ interface ExtensionRunnerLike {
   setUIContext?(uiContext?: unknown, mode?: "tui" | "rpc" | "json" | "print"): void;
   /**
    * 通用扩展事件发射（运行时存在，SDK 类型未暴露）。
-   * select_leaf_exact 用它触发 session_before_tree / session_tree，保证扩展生命周期不被绕过。
+   *
+   * **目前没有任何调用方**：离线分支（`select_leaf_exact` / `branch_from_assistant`）绕过
+   * SDK 的 `session_before_tree` / `session_tree`（见 docs/extension-compat-gaps.md 第 6 条）。
+   * 离线路径会先交出 writer 再写盘（单写者护栏），那一刻已经没有绑好扩展的运行器，
+   * 所以「补事件」不是一行调用就能了事：要么在交出 writer 前补发 pre 事件（post 事件仍缺），
+   * 要么改回经由存活会话的 session.navigateTree（语义/资源取舍变了）。需要单独拍板。
    */
   emit?(event: unknown): Promise<{ cancel?: boolean } | undefined>;
 }
