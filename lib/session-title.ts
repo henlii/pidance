@@ -15,8 +15,18 @@ import { loadSettingsFile } from "./settings-store";
 
 const TITLE_TIMEOUT_MS = 90_000;
 const MAX_TITLE_LENGTH = 80;
-/** 参与标题生成的最近消息上限（取最后 N 条 user/assistant） */
-const MAX_TITLE_HISTORY_MESSAGES = 12;
+
+// 单条上限：标题需要的是「用户要什么」（每条 user 都保留）+「结果是什么」（最后一条
+// 回复保留更多）；中间的回复只需开头一行。tool call/result 不进文本投影（见
+// messageToText）：它们占 token 又不说明意图。
+const USER_CHARS = 800;
+const ASSISTANT_CHARS = 300;
+const LAST_ASSISTANT_CHARS = 600;
+/** 全部消息合计预算：没有它请求仍会随会话变长线性膨胀（实测 120 轮 ≈ 74k token）。 */
+const TRANSCRIPT_CHARS = 6000;
+/** 留给会话开头的份额：会话常在最前面交代目标，之后漂进琐事。 */
+const TRANSCRIPT_HEAD_CHARS = Math.round(TRANSCRIPT_CHARS * 0.4);
+const ELISION = "[…]";
 
 const TITLE_PROMPT = `Create a concise title for this session based on the conversation above.
 
@@ -91,6 +101,84 @@ export function appendTitleRequestToTrailingUser(
         ];
 
   return [...messages.slice(0, -1), { ...lastMessage, content }];
+}
+
+function clip(text: string, max: number): string {
+  const characters = Array.from(text);
+  return characters.length <= max ? text : `${characters.slice(0, max).join("")}…`;
+}
+
+function titleTextLength(message: TitleRequestMessage): number {
+  return typeof message.content === "string" ? Array.from(message.content).length : 0;
+}
+
+/**
+ * 总量预算：头部先装到 TRANSCRIPT_HEAD_CHARS（首条无论如何保留），余下额度给最新的
+ * 若干条，中间丢掉的部分在头部末尾标一个省略号。会话目标常在最前面，只花在新消息上
+ * 会把会话命名成最后一件琐事。
+ */
+function boundByBudget(messages: TitleRequestMessage[]): TitleRequestMessage[] {
+  const total = messages.reduce((sum, message) => sum + titleTextLength(message), 0);
+  if (total <= TRANSCRIPT_CHARS || messages.length < 2) return messages;
+
+  // 省略号本身也要占额度
+  let used = ELISION.length + 2;
+  const head: TitleRequestMessage[] = [];
+  let next = 0;
+  for (; next < messages.length; next++) {
+    const size = used + titleTextLength(messages[next]);
+    if (head.length > 0 && size > TRANSCRIPT_HEAD_CHARS) break;
+    head.push(messages[next]);
+    used = size;
+  }
+
+  const tail: TitleRequestMessage[] = [];
+  for (let i = messages.length - 1; i >= next; i--) {
+    const size = used + titleTextLength(messages[i]);
+    if (size > TRANSCRIPT_CHARS) break;
+    tail.unshift(messages[i]);
+    used = size;
+  }
+
+  // 装得下（预算只是看起来紧）：原样返回，不插省略号
+  if (next + tail.length >= messages.length) return messages;
+
+  const lastHead = head[head.length - 1];
+  return [
+    ...head.slice(0, -1),
+    { ...lastHead, content: `${String(lastHead.content)}\n${ELISION}` },
+    ...tail,
+  ];
+}
+
+/**
+ * 把会话压成有界的标题输入：逐条限长 + 总量预算。
+ * 每条 user 都进（它携带意图），回复只留开头；末条回复限额更宽（通常写着结果）。
+ */
+export function boundTitleMessages(
+  messages: Array<{ role: string; content: unknown }>,
+): TitleRequestMessage[] {
+  let lastAssistantIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "assistant") {
+      lastAssistantIndex = i;
+      break;
+    }
+  }
+
+  const clipped: TitleRequestMessage[] = [];
+  messages.forEach((message, index) => {
+    if (message.role !== "user" && message.role !== "assistant") return;
+    const text = messageToText(message.content);
+    if (!text) return;
+    const max = message.role === "user"
+      ? USER_CHARS
+      : index === lastAssistantIndex
+        ? LAST_ASSISTANT_CHARS
+        : ASSISTANT_CHARS;
+    clipped.push({ role: message.role, content: clip(text, max) });
+  });
+  return boundByBudget(clipped);
 }
 
 function stripWrappingQuotes(value: string): string {
@@ -170,7 +258,7 @@ function parseUsage(usage: Record<string, unknown>): GeneratedSessionTitle["usag
 /**
  * 从消息列表生成会话标题：HTTP POST {baseUrl}/chat/completions（openai-completions）。
  * - 无 user 消息 → throw
- * - 取最近 MAX_TITLE_HISTORY_MESSAGES 条 user/assistant 文本摘要，末尾折叠 TITLE_PROMPT
+ * - 输入先经 boundTitleMessages 压成有界文本（逐条限长 + 总量 6000 字符，40% 留给会话开头）
  * - 超时 TITLE_TIMEOUT_MS；外部 signal 中止同样生效（两者任一先触发）
  */
 export async function generateSessionTitleFromMessages(options: {
@@ -190,12 +278,8 @@ export async function generateSessionTitleFromMessages(options: {
     throw new Error("The session has no user messages to name");
   }
 
-  // 取最近若干条 user/assistant 文本摘录（跳过 toolResult/custom 等；空文本 assistant 跳过）
-  const recent: TitleRequestMessage[] = messages
-    .filter((message) => message.role === "user" || message.role === "assistant")
-    .slice(-MAX_TITLE_HISTORY_MESSAGES)
-    .map((message) => ({ role: message.role, content: messageToText(message.content) }))
-    .filter((message) => message.role === "user" || (typeof message.content === "string" && message.content.length > 0));
+  // 取有界摘要（跳过 toolResult/custom 等；空文本 assistant 跳过）
+  const recent: TitleRequestMessage[] = boundTitleMessages(messages);
 
   // 末尾折叠标题请求；末条非 user 时追加一条标题请求
   const prepared = appendTitleRequestToTrailingUser(recent);

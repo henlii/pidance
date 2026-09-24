@@ -47,6 +47,66 @@ function clampLimit(limit: number | undefined, fallback: number): number {
 }
 
 /**
+ * 窗口预算只数「会渲染成独立一行的消息」：user/assistant、压缩与分支摘要、
+ * 扩展自定义消息、bash 执行记录都算；toolResult 渲染在所属工具调用内部，
+ * 搭车但不算数（同 Pi 原生 TUI 的读法）。
+ *
+ * 按原始条数计数会让工具密集的会话饿死用户提问：实测 15 条 user 散在
+ * 562 条记录里，100 条窗口只覆盖 1 条用户消息，其余都要手点「加载更早」。
+ */
+export function countsTowardWindow(message: { role?: string }): boolean {
+  return message.role !== "toolResult";
+}
+
+/** 单页原始条数上界的最小值（工具流里可见消息稀疏时兜底）。 */
+export const MIN_RAW_WINDOW_SPAN = 200;
+
+/**
+ * 单页原始条数硬上界：可见消息预算的 6 倍。
+ * 一段纯工具流里可能夹着极少的可见消息，只按可见预算取窗会让单页 payload
+ * 无界膨胀；超出上界时宁可切断一轮。
+ */
+export function rawWindowSpanCap(budget: number): number {
+  const n = Number.isFinite(budget) && budget > 0 ? Math.floor(budget) : 1;
+  return Math.max(MIN_RAW_WINDOW_SPAN, n * 6);
+}
+
+/**
+ * 从 endExclusive 往前数 budget 条可见消息，返回窗口起点下标（含上界截断）。
+ * 可见消息不足 budget 条时回到 0。
+ */
+function visibleWindowStart(
+  messages: readonly { role?: string }[],
+  endExclusive: number,
+  budget: number,
+): number {
+  let visible = 0;
+  let start = endExclusive;
+  while (start > 0 && visible < budget) {
+    start--;
+    if (countsTowardWindow(messages[start])) visible++;
+  }
+  return Math.max(start, endExclusive - rawWindowSpanCap(budget));
+}
+
+/**
+ * 从 startInclusive 往后数 budget 条可见消息，返回窗口终点下标（不含）。
+ */
+function visibleWindowEnd(
+  messages: readonly { role?: string }[],
+  startInclusive: number,
+  budget: number,
+): number {
+  let visible = 0;
+  let end = startInclusive;
+  while (end < messages.length && visible < budget) {
+    if (countsTowardWindow(messages[end])) visible++;
+    end++;
+  }
+  return Math.min(end, startInclusive + rawWindowSpanCap(budget));
+}
+
+/**
  * 解析查询参数中的 limit/tail；缺省返回 null（调用方表示不切片）。
  * `tail` 与 `limit` 同义（兼容两种命名）。
  */
@@ -83,8 +143,9 @@ export function sessionExceedsModelWindow(
 }
 
 /**
- * 取 leaf 上下文的尾部窗口（最新 limit 条）。
+ * 取 leaf 上下文的尾部窗口（最新 limit 条可见消息）。
  * messages/entryIds 平行切片；model/thinkingLevel 原样保留。
+ * toolResult 搭车，不消耗 limit；原始跨度另有硬上界（见 rawWindowSpanCap）。
  */
 export function sliceContextTail(
   context: SessionContext,
@@ -92,21 +153,16 @@ export function sliceContextTail(
 ): SessionContextWindow {
   const totalMessageCount = context.messages.length;
   const n = clampLimit(limit, DEFAULT_SESSION_TAIL_LIMIT);
-  if (totalMessageCount <= n) {
-    return {
-      ...context,
-      hasMoreBefore: false,
-      hasMoreAfter: false,
-      totalMessageCount,
-    };
-  }
-  const start = alignToTurnStart(context.messages as { role?: string }[], totalMessageCount - n, n);
+  const visibleStart = visibleWindowStart(context.messages as { role?: string }[], totalMessageCount, n);
+  // 起点对齐到最近的提问；上界仍以原始跨度为硬顶（宁可切断一轮）。
+  const aligned = alignToTurnStart(context.messages as { role?: string }[], visibleStart, n);
+  const start = Math.max(aligned, totalMessageCount - rawWindowSpanCap(n));
   return {
     messages: context.messages.slice(start),
     entryIds: context.entryIds.slice(start),
     thinkingLevel: context.thinkingLevel,
     model: context.model,
-    hasMoreBefore: true,
+    hasMoreBefore: start > 0,
     hasMoreAfter: false,
     totalMessageCount,
   };
@@ -152,6 +208,7 @@ export function sliceContextAround(
 /**
  * 取 afterEntryId 之后的更新窗口（不含 after 本身）。
  * 与 sliceContextBefore 对称，供「定位到历史后继续向下加载」使用。
+ * 与首页同口径：预算按可见消息计，toolResult 搭车。
  */
 export function sliceContextAfter(
   context: SessionContext,
@@ -172,7 +229,7 @@ export function sliceContextAfter(
     };
   }
   const n = clampLimit(limit, DEFAULT_SESSION_HISTORY_PAGE);
-  const end = Math.min(totalMessageCount, idx + 1 + n);
+  const end = visibleWindowEnd(context.messages as { role?: string }[], idx + 1, n);
   return {
     messages: context.messages.slice(idx + 1, end),
     entryIds: context.entryIds.slice(idx + 1, end),
@@ -187,6 +244,8 @@ export function sliceContextAfter(
 /**
  * 取 beforeEntryId 之前的更旧窗口（不含 before 本身）。
  * before 不在列表中时返回空窗 + hasMoreBefore=false（调用方可当 400/空处理）。
+ * 与首页同口径：预算按可见消息计，toolResult 搭车——否则「加载更早」在
+ * 工具密集的会话里只多出几条工具记录，用户看不到新的提问。
  */
 export function sliceContextBefore(
   context: SessionContext,
@@ -207,7 +266,9 @@ export function sliceContextBefore(
     };
   }
   const n = clampLimit(limit, DEFAULT_SESSION_HISTORY_PAGE);
-  const start = alignToTurnStart(context.messages as { role?: string }[], Math.max(0, idx - n), n);
+  const visibleStart = visibleWindowStart(context.messages as { role?: string }[], idx, n);
+  const aligned = alignToTurnStart(context.messages as { role?: string }[], visibleStart, n);
+  const start = Math.max(aligned, idx - rawWindowSpanCap(n));
   return {
     messages: context.messages.slice(start, idx),
     entryIds: context.entryIds.slice(start, idx),

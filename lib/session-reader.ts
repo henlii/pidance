@@ -1,5 +1,13 @@
-import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "fs";
-import { join as joinPath, normalize as normalizePath } from "path";
+import { closeSync, type Dirent, existsSync, openSync, readdirSync, readSync, statSync } from "fs";
+import { readdir } from "fs/promises";
+import {
+  isAbsolute,
+  join as joinPath,
+  normalize as normalizePath,
+  relative,
+  resolve as resolvePath,
+  sep,
+} from "path";
 import type { AgentMessage, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
 import { PIDANCE_COMMAND_CUSTOM_TYPE, parseCommandEntryData } from "./session-command-entry";
 import {
@@ -26,6 +34,7 @@ import {
 import { discoverSubagentSessions } from "./subagent-sessions";
 import { getAgentDir } from "./pi-paths";
 import { openSessionView } from "./pi-session-io";
+import { openCachedSessionReadView } from "./session-read-manager-cache";
 import { getThinkingText, isThinkingLikeType } from "./thinking-content";
 
 export { getAgentDir };
@@ -280,13 +289,25 @@ function getCachedDiscovery(
   }
 }
 
-export async function listAllSessions(): Promise<SessionInfo[]> {
+export async function listAllSessions(options: { allowStale?: boolean } = {}): Promise<SessionInfo[]> {
   const generation = globalThis.__piSessionListGeneration ?? 0;
+  const cache = globalThis.__piSessionListCache;
 
   // Return cached result if still fresh (avoids re-scanning session files
   // and re-spawning git processes on every page load).
-  if (globalThis.__piSessionListCache && Date.now() - globalThis.__piSessionListCache.ts < SESSION_LIST_CACHE_TTL_MS) {
-    return globalThis.__piSessionListCache.data;
+  if (cache && cache.generation === generation && Date.now() - cache.ts < SESSION_LIST_CACHE_TTL_MS) {
+    return cache.data;
+  }
+
+  // 只消费会话元数据的调用方（搜索命中映射到侧栏行、归档范围过滤）可以先用
+  // 上一轮扫描：agent 的活动本身就会不停作废缓存，而重建要重新读每个 fork/
+  // subagent 会话（数百 ms），跟调用方的请求没有关系。代价：刚刚创建的会话
+  // 在这几秒内搜不到。
+  // 只允许目录扫描类调用方用 stale；会话存在性/权限判定不得走这里。
+  if (options.allowStale && cache) {
+    // 后台重建（经 listAllSessions 的合并去重，多个读者不会各扫一遍）
+    void listAllSessions().catch(() => undefined);
+    return cache.data;
   }
 
   // Coalescing dedup: concurrent callers share the same in-flight promise
@@ -299,7 +320,7 @@ export async function listAllSessions(): Promise<SessionInfo[]> {
     // An invalidation may happen while the scan is in flight. Do not let that
     // older result repopulate the cache after a session mutation.
     if ((globalThis.__piSessionListGeneration ?? 0) === generation) {
-      globalThis.__piSessionListCache = { data, ts: Date.now() };
+      globalThis.__piSessionListCache = { data, ts: Date.now(), generation };
     }
     return data;
   });
@@ -324,14 +345,19 @@ declare global {
   var __piSessionListPromise: Promise<SessionInfo[]> | undefined;
   var __piSessionListPromiseGeneration: number | undefined;
   var __piSessionListGeneration: number | undefined;
-  var __piSessionListCache: { data: SessionInfo[]; ts: number } | undefined;
+  /** generation 是扫描时的代际：失效只推 generation，旧数据留给 allowStale 读者。 */
+  var __piSessionListCache: { data: SessionInfo[]; ts: number; generation: number } | undefined;
 }
 
 const SESSION_LIST_CACHE_TTL_MS = 30_000;
 
+/**
+ * 作废会话列表缓存：推进 generation 并保留上一轮扫描结果。
+ * 保留不是为了普通读者（他们要 generation 相符才算新鲜），而是为了让
+ * `listAllSessions({ allowStale: true })` 能直接用旧目录，不必同步重建。
+ */
 export function invalidateSessionListCache(): void {
   globalThis.__piSessionListGeneration = (globalThis.__piSessionListGeneration ?? 0) + 1;
-  globalThis.__piSessionListCache = undefined;
 }
 
 function getPathCache(): Map<string, string> {
@@ -344,11 +370,104 @@ function getPathToIdCache(): Map<string, string> {
   return globalThis.__piPathToSessionIdCache;
 }
 
+/** 会话 id 允许的字符集（只用于拼文件名候选；权威校验仍是有界 header）。 */
+const SESSION_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+
+function defaultSessionsDir(): string {
+  return joinPath(getAgentDir(), "sessions");
+}
+
+/** 路径必须落在 sessions 根内（根自身与越界返回 null）。 */
+function resolvePathWithinDefaultSessions(
+  filePath: string,
+  sessionsDir = resolvePath(defaultSessionsDir()),
+): string | null {
+  const candidatePath = resolvePath(filePath);
+  const relativePath = relative(sessionsDir, candidatePath);
+  return relativePath !== ""
+    && relativePath !== ".."
+    && !relativePath.startsWith(`..${sep}`)
+    && !isAbsolute(relativePath)
+    ? candidatePath
+    : null;
+}
+
+/**
+ * 按文件名 `*_<id>.jsonl` 有界定位会话文件（不做全目录扫描）。
+ *
+ * 文件名只是候选提示，仍读有界 header 校验 id；布局未知、候选损坏或同一 id
+ * 有多个候选时返回 null，退回目录扫描的权威口径（不做负缓存）。
+ * 深链首次打开、重启、多标签冷启动本来要等 2-7s 全扫。
+ */
+async function findSessionPathById(sessionId: string): Promise<string | null> {
+  if (!SESSION_ID_PATTERN.test(sessionId)) return null;
+  const sessionsDir = resolvePath(defaultSessionsDir());
+  let projectDirs: Dirent[];
+  try {
+    projectDirs = await readdir(sessionsDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const suffix = `_${sessionId}.jsonl`;
+  let match: string | undefined;
+  for (const projectDir of projectDirs) {
+    if (!projectDir.isDirectory() && !projectDir.isSymbolicLink()) continue;
+    const projectPath = resolvePathWithinDefaultSessions(joinPath(sessionsDir, projectDir.name), sessionsDir);
+    if (!projectPath) continue;
+
+    let files: string[];
+    try {
+      files = await readdir(projectPath);
+    } catch {
+      continue;
+    }
+
+    for (const file of files) {
+      if (!file.endsWith(suffix)) continue;
+      const candidate = resolvePathWithinDefaultSessions(joinPath(projectPath, file), sessionsDir);
+      if (!candidate) continue;
+      try {
+        if (readSessionHeader(candidate)?.id !== sessionId) continue;
+      } catch {
+        continue;
+      }
+      // 同一 id 多个候选：不自行选一，交回目录扫描的既有语义
+      if (match && match !== candidate) return null;
+      match = candidate;
+    }
+  }
+
+  return match ?? null;
+}
+
+/** 已知文件路径 → id：必须在 sessions 根内且 header 可信。 */
+function findSessionIdByPath(filePath: string): string | undefined {
+  if (!filePath.endsWith(".jsonl")) return undefined;
+  const candidate = resolvePathWithinDefaultSessions(filePath);
+  if (!candidate) return undefined;
+  try {
+    const sessionId = readSessionHeader(candidate)?.id;
+    if (!sessionId) return undefined;
+    cacheSessionPath(sessionId, candidate);
+    return sessionId;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function resolveSessionPath(sessionId: string): Promise<string | null> {
   const cached = getPathCache().get(sessionId);
   if (cached) {
     if (existsSync(cached)) return cached;
     invalidateSessionPathCache(sessionId);
+  }
+
+  // 缓存未命中：先有界定位，避免为一次深链/冷启动全扫 sessions 目录
+  const targeted = await findSessionPathById(sessionId);
+  if (targeted) {
+    cacheSessionPath(sessionId, targeted);
+    return targeted;
   }
 
   // Cache miss or stale path: scan all sessions to populate cache, then retry
@@ -365,6 +484,9 @@ export async function resolveSessionIdByPath(filePath: string): Promise<string |
   const pathKey = normalizePath(filePath);
   const cached = getPathToIdCache().get(pathKey);
   if (cached) return cached;
+
+  const targeted = findSessionIdByPath(filePath);
+  if (targeted) return targeted;
 
   await listAllSessions();
   return getPathToIdCache().get(pathKey);
@@ -458,7 +580,7 @@ export type LiveSessionReadSource = {
 /**
  * 选择 sessions GET 的权威读视图：
  * - 有存活 live 且含 inner.sessionManager 时用 live（inprocess 遗留）
- * - 否则 openSessionView（Pi SessionManager 只读）
+ * - 否则按指纹复用只读视图（openCachedSessionReadView；无 live 时不再每请求重解 JSONL）
  * 不 start 新会话、不 mutate live 状态。
  */
 export function resolveSessionManagerForRead(options: {
@@ -473,7 +595,9 @@ export function resolveSessionManagerForRead(options: {
   const open =
     options.openFromDisk ??
     ((path: string) => {
-      const sm = openSessionView(path);
+      // 只读视图复用（指纹含正文 size/mtime 与 leaf sidecar）：翻页/刷新的重开
+      // 不再全量重解 JSONL。写路径不走这里（见 session-read-manager-cache）。
+      const sm = openCachedSessionReadView(path);
       return {
         getEntries: () => sm.getEntries(),
         getLeafId: () => sm.getLeafId(),
