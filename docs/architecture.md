@@ -98,6 +98,8 @@
 
 部分浏览器适配仍兼容旧 `running` 字段；新接口说明应使用 `live/activeRun`，不要把空闲 live 写成 running。
 
+`lockedByOther` 的**发现路径**：这个事实只能由客户端轮询 —— 租约文件由**另一个进程**持有，本进程没有事件可订阅（全局 running 集合只反映本进程）。未上锁时每 3s 打一次只读探针 `GET /api/sessions/[id]/lock`（一次租约文件读，不做状态投影；标签页隐藏时不发请求），上锁后用既有的 1s `/state` 轮询感知释放。**不要**拿空闲期的状态刷新当发现路径：那是 2 分钟一档（`RECONCILE_IDLE_MS`）。展示优先级：`isReadOnly` 优先于 `lockedByOther` —— 只读是会话自身属性，锁定条给的是「等下就能写」的预期，对只读会话是错的。
+
 ## 4. 数据与写入边界
 
 - Pi JSONL 是带 `id/parentId` 的会话树，不是普通追加日志。Fork 创建独立文件；navigate 改同文件活动路径。
