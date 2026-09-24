@@ -689,7 +689,17 @@ export function buildSessionNavigationSnapshot(
   const tree = projectTreeForResponse(
     stripMetadataNodes(sm.getTree() as Parameters<typeof stripMetadataNodes>[0]),
   );
-  const context = buildSessionContext(entries, leafId, options);
+  // 导航 leaf 上溯到最近的真实消息；投影 leaf 保留链尾元数据，否则停在链尾的
+  // context_edit 不在路径上，「省略 / 替换」会在首屏静默失效（见 resolveContextProjectionLeafId）。
+  const context = buildSessionContext(
+    entries,
+    resolveContextProjectionLeafId(
+      entries as Array<{ id: string; type: string; parentId: string | null }>,
+      sm.getLeafId(),
+      leafId,
+    ),
+    options,
+  );
   return {
     entries,
     leafId,
@@ -731,6 +741,30 @@ export function resolveNavigationLeafId(
     current = byId.get(current.parentId);
   }
   return current?.id ?? null;
+}
+
+/**
+ * 上下文投影用哪个 leaf —— 与导航 leaf 不同，这里**不能**上溯掉元数据尾。
+ *
+ * `context_edit` 只对「在当前路径上」的条目生效（`collectContextEdits` 只看路径），而 SDK 写入
+ * 这条记录时它自己就是链尾：若投影也用上溯后的导航 leaf，这条 edit 不在路径上，「省略 / 替换」
+ * 于是在首屏与分页里都静默失效（TUI 会生效）。导航落点仍要上溯（分支导航不该露出 `usage` 这类类型名），
+ * 所以两者分开：导航用 `resolveNavigationLeafId`，投影用本函数。
+ *
+ * 请求的 leaf 未指定、或就等于「上溯后的原始 leaf」（客户端把首屏拿到的导航 leaf 回传分页时是这种情形）
+ * → 用原始 leaf；请求了别的 leaf（浏览历史）→ 按请求的来。
+ */
+export function resolveContextProjectionLeafId(
+  entries: ReadonlyArray<{ id: string; type: string; parentId: string | null }>,
+  rawLeafId: string | null | undefined,
+  requestedLeafId?: string | null,
+): string | null | undefined {
+  // 只有拿到真实字符串 leaf 时才谈得上归一：null 是「无活动分支」（保持空路径语义），
+  // undefined 是「调用方没给」（保持原有「回退文件末条目」语义）—— 两种都不该被本函数改写。
+  if (typeof rawLeafId !== "string" || rawLeafId === "") return requestedLeafId;
+  const navigationLeafId = resolveNavigationLeafId(entries, rawLeafId);
+  if (requestedLeafId == null || requestedLeafId === navigationLeafId) return rawLeafId;
+  return requestedLeafId;
 }
 
 /**

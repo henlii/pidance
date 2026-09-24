@@ -38,6 +38,7 @@ import {
   buildSessionContext,
   buildSessionPathLocal,
   resolveNavigationLeafId,
+  resolveContextProjectionLeafId,
   buildSessionNavigationSnapshot,
   cacheSessionPath,
   invalidateSessionListCache,
@@ -981,9 +982,19 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
     async getContextPage(sessionId, options) {
       const view = await service.getReadView(sessionId);
       if (!view) return { context: null };
-      const sm = view.manager as { getEntries?: () => Parameters<typeof buildSessionContext>[0] };
+      const sm = view.manager as {
+        getEntries?: () => Parameters<typeof buildSessionContext>[0];
+        getLeafId?: () => string | null;
+      };
       const entries = (sm.getEntries?.() ?? []) as Parameters<typeof buildSessionContext>[0];
-      const full = buildSessionContext(entries, options.leafId, {
+      // 客户端把首屏拿到的**导航 leaf**（可能已从 label/usage/context_edit 尾上溯）回传分页；
+      // 投影要按原始 leaf 走，否则停在链尾的 context_edit 不在路径上，「省略 / 替换」在分页里失效。
+      const projectionLeafId = resolveContextProjectionLeafId(
+        entries as Array<{ id: string; type: string; parentId: string | null }>,
+        sm.getLeafId?.(),
+        options.leafId,
+      );
+      const full = buildSessionContext(entries, projectionLeafId, {
         deferThinking: options.deferThinking,
         deferToolResultImages: options.deferToolResultImages,
       });
