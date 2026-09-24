@@ -1,6 +1,6 @@
 import { sessionService } from "@/lib/session-service";
 import { getPidancePrefsBus } from "@/lib/pidance-prefs-bus";
-import { registerEventStreamCloser } from "@/lib/server-shutdown";
+import { isShuttingDown, registerEventStreamCloser, SHUTDOWN_REASON } from "@/lib/server-shutdown";
 
 export const dynamic = "force-dynamic";
 
@@ -61,16 +61,19 @@ export async function GET(req: Request) {
         clearInterval(heartbeat);
         unsubscribe();
         unsubscribePrefs();
-        unregisterCloser();
+        // 收尾期间同样走 error（见 [id]/events 的同类注释）。
+        const reason = shutdownReason ?? (isShuttingDown() ? SHUTDOWN_REASON : undefined);
         try {
           // 进程退出必须用 error 硬断：close() 会被 Next 管道吞掉，进程照样等连接。
-          if (shutdownReason) controller.error(new Error(shutdownReason));
+          if (reason) controller.error(new Error(reason));
           else controller.close();
         } catch { /* already closed */ }
+        // 断流之后才注销：先注销会让收尾阶段的 closeAllEventStreams 找不到这条流。
+        unregisterCloser();
       };
 
       unregisterCloser = registerEventStreamCloser(() =>
-        cleanup("pidance server shutting down"),
+        cleanup(SHUTDOWN_REASON),
       );
 
       req.signal?.addEventListener("abort", () => cleanup());

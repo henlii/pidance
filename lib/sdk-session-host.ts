@@ -521,7 +521,11 @@ export class SdkSessionHost {
    * 运行态对齐——不对齐的话，紧随其后的 message_* 会被当成过期帧丢掉。
    */
   connectionSnapshot(): StreamSnapshot {
-    return this.streamSnapshot.snapshot();
+    const snapshot = this.streamSnapshot.snapshot();
+    // 带上本轮序号：首帧回放不含 `agent_start`（快照缓存会在 agent_start 时清空），
+    // 客户端只会在 `agent_start` 里写序号。不带的后果是把本轮终止事件当
+    // 「迟到的上一轮」丢掉，运行态落不下来。
+    return this.streamRunSeq > 0 ? { ...snapshot, streamRunSeq: this.streamRunSeq } : snapshot;
   }
 
   beginExtensionBinding(): void {
@@ -581,7 +585,10 @@ export class SdkSessionHost {
    */
   private hasActiveExternalWork(): boolean {
     if (this.hasActiveSubagentRun()) return true;
-    return hasRegisteredExternalWork(this.realSessionFile);
+    return hasRegisteredExternalWork({
+      sessionId: this.realSessionId,
+      sessionFile: this.realSessionFile,
+    });
   }
 
   private resetIdleTimer(): void {

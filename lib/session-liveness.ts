@@ -10,22 +10,35 @@
  * （fail-open）；这里一律按「不活跃」处理（fail-closed），与仓库既有取舍一致——
  * 读不到状态宁可回收，也不要因为一个抛错的扩展让会话和跨进程 writer 租约永久不释放。
  *
+ * 与上游一致的部分：`sessionId` 必填、按 id 或文件命中、注销按注册 token 只删自己
+ * （同名后注册不会被先返回的注销函数误删）。
+ *
  * 键沿用上游符号名，pi-web 系扩展可直接复用。
  */
 
 const LIVENESS_REGISTRY_KEY = Symbol.for("@agegr/pi-web/session-liveness/v1");
 
 export type SessionLivenessProvider = {
-  /** 诊断用名字；同一名字重复注册视为同一提供者（后注册覆盖先注册）。 */
+  /** 诊断用名字；同名可以注册多个，各自独立注销。 */
   name: string;
-  /** 省略表示对所有会话生效；给了就只对该会话文件生效。 */
+  /** 提供者所属的会话 id。**必填**：不给就不能确定作用范围，只能对所有会话生效——
+   *  那会让一个扩展拖住其它会话的回收与跨进程 writer 租约。 */
+  sessionId: string;
+  /** 可选：会话文件路径，与 sessionId 二选一命中即可。 */
   sessionFile?: string;
   isActive: () => boolean;
 };
 
+/** 查询方的会话身份（宿主同时有两项）。 */
+export type SessionIdentity = {
+  sessionId?: string;
+  sessionFile?: string;
+};
+
 type LivenessRegistry = {
-  providers: Map<string, SessionLivenessProvider>;
-  warned: Set<string>;
+  /** 键是注册时生成的 token：注销只删自己那份，不会被同名的先注销者误删（与上游一致）。 */
+  providers: Map<symbol, SessionLivenessProvider>;
+  warned: Set<symbol>;
 };
 
 function registry(): LivenessRegistry {
@@ -38,8 +51,8 @@ function registry(): LivenessRegistry {
   return created;
 }
 
-function providerKey(provider: SessionLivenessProvider): string {
-  return `${provider.name}\u0000${provider.sessionFile ?? ""}`;
+function providerKey(provider: SessionLivenessProvider): symbol {
+  return Symbol(provider.name);
 }
 
 /**
@@ -54,18 +67,24 @@ export function registerSessionLiveness(provider: SessionLivenessProvider): () =
     || typeof provider.name !== "string"
     || provider.name === ""
     || typeof provider.isActive !== "function"
+    || typeof provider.sessionId !== "string"
+    || provider.sessionId === ""
     || (provider.sessionFile !== undefined && typeof provider.sessionFile !== "string")
   ) {
-    console.warn("[pidance] 忽略形状非法的 session liveness 注册:", provider);
+    console.warn("[pidance] 忽略形状非法的 session liveness 注册（需要 name / sessionId / isActive）:", provider);
     return () => {};
   }
   const store = registry();
-  const key = providerKey(provider);
-  store.providers.set(key, provider);
-  store.warned.delete(key);
+  const token = providerKey(provider);
+  store.providers.set(token, provider);
+  store.warned.delete(token);
+  let disposed = false;
   return () => {
-    store.providers.delete(key);
-    store.warned.delete(key);
+    // 幂等且只删自己那份：同名/同会话的后注册不会被先返回的注销函数删掉。
+    if (disposed) return;
+    disposed = true;
+    store.providers.delete(token);
+    store.warned.delete(token);
   };
 }
 
@@ -80,15 +99,22 @@ export function listSessionLivenessProviders(): string[] {
  * fail-closed：provider 抛错按「不活跃」处理，并只告警一次（空闲窗口每轮都会问，
  * 不能每次都刷日志）。
  */
-export function hasActiveExternalWork(sessionFile: string): boolean {
+export function hasActiveExternalWork(session: SessionIdentity): boolean {
   const store = registry();
-  for (const [key, provider] of store.providers) {
-    if (provider.sessionFile !== undefined && provider.sessionFile !== sessionFile) continue;
+  const identities = new Set(
+    [session.sessionId, session.sessionFile].filter((value): value is string => Boolean(value)),
+  );
+  if (identities.size === 0) return false;
+  for (const [token, provider] of store.providers) {
+    // 按 id 或文件命中（与上游一致）：两者都不命中就不属于本会话。
+    const matches = identities.has(provider.sessionId)
+      || (provider.sessionFile !== undefined && identities.has(provider.sessionFile));
+    if (!matches) continue;
     try {
       if (provider.isActive() === true) return true;
     } catch (error) {
-      if (!store.warned.has(key)) {
-        store.warned.add(key);
+      if (!store.warned.has(token)) {
+        store.warned.add(token);
         console.warn(`[pidance] session liveness provider 抛错，按不活跃处理: ${provider.name}`, error);
       }
     }

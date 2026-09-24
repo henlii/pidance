@@ -1036,6 +1036,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const capturedUploads = attachedUploads.filter(
       (item): item is typeof item & { path: string } => item.status === "ready" && typeof item.path === "string",
     );
+    // 内建命令提交期上锁：判断必须在**任何副作用之前**——下面会写 `sentDraftRef` 并清空
+    // 输入框；锁检查晚一步的话，重复提交会把上一次的草稿引用改写成已清空的状态，
+    // 于是命令失败时 restoreSentDraft 还给用户一个空草稿（正文被静默吃掉）。
+    const isBuiltinCommand = !capturedImages.length
+      && !capturedUploads.length
+      && base.startsWith("/")
+      && Boolean(onBuiltinCommand);
+    if (isBuiltinCommand && builtinCommandPendingRef.current) return;
     const msg = composeMessageWithUploads(base);
     const binaryBlocks = attachmentBinaryBlocks(
       capturedImages,
@@ -1049,13 +1057,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       imageKeys: capturedImages.map(attachmentIdentity),
       uploadPaths: capturedUploads.map((item) => item.path),
     };
-    // 内建命令提交期上锁：判断必须在清空输入框**之前**——重复提交时直接返回，
-    // 用户的正文原样留在草稿里，不能被静默吃掉。
-    const isBuiltinCommand = !capturedImages.length
-      && !capturedUploads.length
-      && base.startsWith("/")
-      && Boolean(onBuiltinCommand);
-    if (isBuiltinCommand && builtinCommandPendingRef.current) return;
     clearInput();
     if (isBuiltinCommand && onBuiltinCommand) {
       // 命令是异步的（/compact 会真的跑一整轮），同帧双 Enter（或回车+点击）

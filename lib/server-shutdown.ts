@@ -20,6 +20,9 @@ const SHUTDOWN_STATE_KEY = Symbol.for("pidance/server-shutdown/v1");
 /** dispose 阶段的时间上限：超过就放弃等待，交给 8s 兜底强杀。 */
 export const SHUTDOWN_DISPOSE_CAP_MS = 3_000;
 
+/** 关机期间断流用的原因文案（route 传给 `controller.error`）。 */
+export const SHUTDOWN_REASON = "pidance server shutting down";
+
 /** 可参与收尾的 live host 最小面。 */
 export type ShutdownHost = {
   sessionId?: string;
@@ -36,6 +39,7 @@ type ShutdownState = {
   closers: Set<() => void>;
   hooksInstalled: boolean;
   pending: Promise<void> | null;
+  shuttingDown: boolean;
   signalHandler: ((signal: NodeJS.Signals) => void) | null;
 };
 
@@ -46,6 +50,7 @@ function state(): ShutdownState {
     closers: new Set(),
     hooksInstalled: false,
     pending: null,
+    shuttingDown: false,
     signalHandler: null,
   };
   (globalThis as Record<symbol, ShutdownState | undefined>)[SHUTDOWN_STATE_KEY] = created;
@@ -59,6 +64,18 @@ export function registerEventStreamCloser(closer: () => void): () => void {
   return () => {
     closers.delete(closer);
   };
+}
+
+/**
+ * 是否已进入收尾阶段。
+ *
+ * SSE route 在 host 销毁（`onDestroy`）与收尾之间做区分：收尾期间必须走
+ * `controller.error` 硬断（`close()` 会被 Next 管道吞掉），平时（空闲回收/删除）
+ * 走 `close()` 让浏览器按需重连。这个标志在任何 dispose 之前同步置位——route 的
+ * `onDestroy` 是 dispose 过程中同步触发的，晚置位就来不及了。
+ */
+export function isShuttingDown(): boolean {
+  return state().shuttingDown;
 }
 
 /** 硬断所有已注册的连接；返回实际调用的条数。单条抛错不影响其它连接。 */
@@ -124,6 +141,8 @@ export async function disposeLiveHosts(
 export function runGracefulShutdown(options: GracefulShutdownOptions = {}): Promise<void> {
   const current = state();
   if (current.pending) return current.pending;
+  // 必须在创建 promise **之前**同步置位：dispose 过程中的 onDestroy 回调依赖它。
+  current.shuttingDown = true;
   const log = options.log ?? ((message: string) => console.log(message));
   current.pending = (async () => {
     try {
@@ -170,6 +189,7 @@ export function resetShutdownStateForTests(): void {
   const current = state();
   current.closers.clear();
   current.pending = null;
+  current.shuttingDown = false;
   current.hooksInstalled = false;
   if (current.signalHandler) {
     process.off("SIGINT", current.signalHandler);

@@ -1,7 +1,7 @@
 import { sessionService, READ_ONLY_SUBAGENT_ERROR, requireWritableSession, httpStatusForSessionError } from "@/lib/session-service";
 import { projectAgentEvent } from "@/lib/agent-event-stream";
 import { isEventIncludedInSnapshot, type SnapshotEvent } from "@/lib/stream-snapshot";
-import { registerEventStreamCloser } from "@/lib/server-shutdown";
+import { isShuttingDown, registerEventStreamCloser, SHUTDOWN_REASON } from "@/lib/server-shutdown";
 
 export const dynamic = "force-dynamic";
 
@@ -64,12 +64,26 @@ export async function GET(
         encode(frame);
       });
 
-      // 首帧：connected 带 isStreaming，随后回放当前流式消息与活跃工具。
+      // 首帧：connected 带 isStreaming 与本轮 run 序号，随后回放当前流式消息与活跃工具。
       // 中途接入的页面（新标签/重连/冷挂载）因此立刻看到已生成的部分回复与正在跑
       // 的工具输出，而不是等到下一个 chunk。
+      //
+      // 序号必须一起下发：客户端只在 `agent_start` 里写序号，而首帧回放不含
+      // `agent_start`；不带的话浏览器会留着上一轮的序号，把本轮 `agent_end` 当
+      // 「迟到的上一轮」丢掉，运行态就永远落不下来。
       const snapshot = session.connectionSnapshot();
-      encode({ type: "connected", sessionId: id, isStreaming: snapshot.isStreaming });
-      for (const event of snapshot.events) encode(event);
+      encode({
+        type: "connected",
+        sessionId: id,
+        isStreaming: snapshot.isStreaming,
+        ...(snapshot.streamRunSeq !== undefined ? { streamRunSeq: snapshot.streamRunSeq } : {}),
+      });
+      // 回放事件必须与实时路径同形：快照缓存存的是宿主 emit 的原始事件，
+      // 未过 projectAgentEvent（实时路径会删掉 assistantMessageEvent 这类大字段）。
+      for (const event of snapshot.events) {
+        const projected = projectAgentEvent(event);
+        if (projected !== null) encode(projected);
+      }
       snapshotSent = true;
       for (const event of buffered) {
         if (isEventIncludedInSnapshot(event, snapshot)) continue;
@@ -95,20 +109,25 @@ export async function GET(
         // 已断开的流必须退订：否则 host 的销毁通知集合会随连接数增长。
         releaseDestroy?.();
         releaseDestroy = null;
-        unregisterCloser();
+        // 收尾期间 host dispose 也会回调到这里（onDestroy）。那时必须同样走 error：
+        // 否则 close() 被 Next 管道吞掉，closer 也被注销，后面的
+        // closeAllEventStreams 再也找不到这条流，server.close() 只能等满 8 秒。
+        const reason = shutdownReason ?? (isShuttingDown() ? SHUTDOWN_REASON : undefined);
         try {
           // 收尾（进程退出）必须用 error 硬断：close() 会被 Next 管道吞掉，
           // 连接照旧挂着，server.close() 继续等。
-          if (shutdownReason) controller.error(new Error(shutdownReason));
+          if (reason) controller.error(new Error(reason));
           else controller.close();
         } catch {
           // already closed
         }
+        // 注销必须放在断流**之后**：先注销会让收尾阶段找不到这条流（同上）。
+        unregisterCloser();
       };
 
       // 进程退出时由 lib/server-shutdown.ts 硬断本流（顺序：先 dispose writer 再断流）。
       unregisterCloser = registerEventStreamCloser(() =>
-        cleanup("pidance server shutting down"),
+        cleanup(SHUTDOWN_REASON),
       );
 
       // host destroy（空闲 dispose/删除）时主动终断 SSE 流

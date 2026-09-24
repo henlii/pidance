@@ -789,6 +789,9 @@ export function createBrowserSessionRuntimeRegistry(
       // 服务端首帧快照：先把运行态对齐，否则紧随其后的 message_* 会被
       // 「agentRunning 为假 = 过期帧」的防护丢掉。服务端只在本轮确实有流式内容
       // （消息或工具）时才置 isStreaming，所以这里不会凭空把会话弄成运行中。
+      // 序号一并采纳：快照回放不含 `agent_start`，不采纳的话槽里会留着上一轮的
+      // 序号，本轮的 agent_end/prompt_done 会被当成迟到的上一轮丢掉，运行态卡死。
+      if (streamRunSeq !== null) slot.snapshot.streamRunSeq = streamRunSeq;
       if ((event as { isStreaming?: unknown }).isStreaming === true) {
         slot.snapshot.agentRunning = true;
         slot.snapshot.streamState = { isStreaming: true, streamingMessage: null };
@@ -807,10 +810,13 @@ export function createBrowserSessionRuntimeRegistry(
       slot.metrics = {};
     } else if (type === "agent_end" || type === "prompt_done") {
       // 迟到的上一轮终止事件：新一轮已经 agent_start（序号前移），不能把它的运行态
-      // 判成结束（复核 G1）。同一轮的终止事件序号相符，照常收尾。
-      if (streamRunSeq !== null && slot.snapshot.streamRunSeq !== null && streamRunSeq !== slot.snapshot.streamRunSeq) {
+      // 判成结束（复核 G1）。**只丢更旧的**：序号更大说明我们错过了新轮的
+      // agent_start（重连只拿到 connected + 快照），那种情况必须收尾，否则
+      // agentRunning 永远落不下来。
+      if (streamRunSeq !== null && slot.snapshot.streamRunSeq !== null && streamRunSeq < slot.snapshot.streamRunSeq) {
         return;
       }
+      if (streamRunSeq !== null) slot.snapshot.streamRunSeq = streamRunSeq;
       slot.snapshot.agentRunning = false;
       slot.snapshot.completedRunId = slot.snapshot.promptRunId;
       slot.snapshot.streamState = emptyStream();
