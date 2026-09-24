@@ -12,7 +12,7 @@ import {
 } from "./pidance-auth-gate.js";
 
 const jiti = createJiti(import.meta.url);
-const { resolvePassword: resolveGuardPassword, clearAuthPasswordCache } =
+const { resolvePassword: resolveGuardPassword, rescrabAuthPassword, clearAuthPasswordCache } =
 	await jiti.import("../lib/request-guard.ts");
 
 test("isLoopbackHost：回环地址放行，非回环/未指定拒绝", () => {
@@ -129,4 +129,29 @@ test("SDK bash 工具的命令环境不含密码（净化后 process.env 已空�
 		delete process.env.PIDANCE_PASSWORD;
 		delete process.env.PI_WEB_PASSWORD;
 	}
+});
+
+test("Next 载入 .env 写回密码后，重新净化仍让 shell 环境保持干净", () => {
+	// @next/env 的 loadEnvConfig 会 replaceProcessEnv(初始快照) 并把 .env* 里
+	// 快照没有的键并进来 —— 启动时删掉的密码键会被填回 process.env。
+	const env = { PIDANCE_PASSWORD: "s3cret", KEEP: "x" };
+	primeAndScrubPassword(env);
+	env.PIDANCE_PASSWORD = "from-dotenv";
+	assert.equal(rescrabAuthPassword(env), "s3cret", "启动时定过的优先级不被 .env 覆盖");
+	const commandEnvironment = { ...env };
+	assert.equal(commandEnvironment.PIDANCE_PASSWORD, undefined);
+	assert.equal(JSON.stringify(commandEnvironment).includes("from-dotenv"), false);
+	assert.equal(resolveGuardPassword(env), "s3cret", "认证不受影响");
+	clearAuthPasswordCache();
+});
+
+test("只有 .env 提供密码时，重新净化采纳它而不是 fail-open", () => {
+	const env = {};
+	primeAndScrubPassword(env);
+	assert.equal(resolveGuardPassword(env), null, "启动时确实没有密码");
+	env.PIDANCE_PASSWORD = "from-dotenv";
+	assert.equal(rescrabAuthPassword(env), "from-dotenv");
+	assert.equal(resolveGuardPassword(env), "from-dotenv", "缓存建立后 env 已删，仍要能认证");
+	assert.equal(JSON.stringify({ ...env }).includes("from-dotenv"), false);
+	clearAuthPasswordCache();
 });

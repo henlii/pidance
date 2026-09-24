@@ -219,15 +219,22 @@ function ptyGuardHeaders(req) {
     secFetchUser: header(req, "sec-fetch-user"),
     authorization: header(req, "authorization"),
     cookie: header(req, "cookie"),
+    xForwardedFor: header(req, "x-forwarded-for"),
     method: "GET",
     url,
     pathname,
   };
 }
 
-function reject(socket, status, message) {
+function reject(socket, status, message, extraHeaders) {
+  const headers = {
+    Connection: "close",
+    "Content-Length": 0,
+    ...(extraHeaders || {}),
+  };
+  const lines = Object.keys(headers).map((name) => `${name}: ${headers[name]}\r\n`).join("");
   try {
-    socket.write(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+    socket.write(`HTTP/1.1 ${status} ${message}\r\n${lines}\r\n`);
   } catch {
     // ignore
   }
@@ -236,6 +243,99 @@ function reject(socket, status, message) {
   } catch {
     // ignore
   }
+}
+
+// ── 密码尝试限流（与 lib/auth-throttle.ts 同桶）──────────────────────────
+//
+// WebSocket 升级不经过 Next middleware，所以这里必须自己挡一次：否则 /api/pty
+// 就是一条不限速的密码预言机（Basic 可全速猜）。状态放在与 lib/auth-throttle.ts
+// 相同的 globalThis 键、相同结构上，两条入口在同进程里共用同一个桶。
+//
+// bin/ 是自包含发布物（见文件头注释，不依赖 lib/ 源码树），所以退避公式与常量
+// 在内联实现里保持语义一致；bin/pty-ws.test.mjs 有一条与 lib/auth-throttle.ts
+// 的 parity 断言，改一边不改另一边会红。
+
+const AUTH_THROTTLE_GLOBAL_KEY = "__piAuthThrottle";
+const AUTH_THROTTLE_BASE_DELAY_MS = 1000;
+const AUTH_THROTTLE_MAX_DELAY_MS = 60000;
+const AUTH_THROTTLE_RESET_AFTER_MS = 5 * 60 * 1000;
+const AUTH_THROTTLE_MAX_BUCKETS = 256;
+
+function authThrottleStore() {
+  if (!globalThis[AUTH_THROTTLE_GLOBAL_KEY]) globalThis[AUTH_THROTTLE_GLOBAL_KEY] = new Map();
+  return globalThis[AUTH_THROTTLE_GLOBAL_KEY];
+}
+
+function backoffDelayMs(failures) {
+  if (failures <= 0) return 0;
+  const exponent = Math.min(failures - 1, 31);
+  return Math.min(AUTH_THROTTLE_BASE_DELAY_MS * 2 ** exponent, AUTH_THROTTLE_MAX_DELAY_MS);
+}
+
+function expireIfStale(state, now) {
+  if (state.failures > 0 && now - state.lastFailureAt >= AUTH_THROTTLE_RESET_AFTER_MS) {
+    state.failures = 0;
+    state.lastFailureAt = 0;
+    state.blockedUntil = 0;
+  }
+}
+
+/** 该桶还需等多久（毫秒）；0 表示可以尝试。 */
+function getAuthRetryAfterMs(key, now = Date.now()) {
+  const state = authThrottleStore().get(key);
+  if (!state) return 0;
+  expireIfStale(state, now);
+  return Math.max(0, state.blockedUntil - now);
+}
+
+function pruneAuthThrottle(now) {
+  const map = authThrottleStore();
+  if (map.size <= AUTH_THROTTLE_MAX_BUCKETS) return;
+  for (const [key, state] of map) {
+    if (state.failures === 0 || now - state.lastFailureAt >= AUTH_THROTTLE_RESET_AFTER_MS) map.delete(key);
+  }
+  while (map.size > AUTH_THROTTLE_MAX_BUCKETS) {
+    const oldest = [...map.entries()].sort((a, b) => a[1].lastFailureAt - b[1].lastFailureAt)[0];
+    if (!oldest) break;
+    map.delete(oldest[0]);
+  }
+}
+
+/** 记一次失败并返回施加的退避（毫秒）。 */
+function recordAuthFailure(key, now = Date.now()) {
+  const map = authThrottleStore();
+  let state = map.get(key);
+  if (!state) {
+    state = { failures: 0, lastFailureAt: 0, blockedUntil: 0 };
+    map.set(key, state);
+  }
+  expireIfStale(state, now);
+  state.failures += 1;
+  state.lastFailureAt = now;
+  state.blockedUntil = now + backoffDelayMs(state.failures);
+  pruneAuthThrottle(now);
+  return backoffDelayMs(state.failures);
+}
+
+/**
+ * 限流分桶的身份，与 lib/request-guard.ts 的 `authIdentity` 同规则：
+ * 只在显式 `PIDANCE_TRUST_PROXY` 时信 `x-forwarded-for`，否则用对端地址；
+ * 都拿不到时退回固定全局桶（宁可误伤也不放行）。
+ */
+function authThrottleKey(socket, headers, env) {
+  const trustProxy = env.PIDANCE_TRUST_PROXY === "1" || env.PIDANCE_TRUST_PROXY === "true";
+  if (trustProxy) {
+    const first = (headers.xForwardedFor || "").split(",")[0];
+    const trimmed = first ? first.trim() : "";
+    if (trimmed) return trimmed.replace(/^::ffff:/, "");
+  }
+  const peer = typeof socket?.remoteAddress === "string" ? socket.remoteAddress.trim() : "";
+  if (peer) return peer.replace(/^::ffff:/, "");
+  return "unknown";
+}
+
+function retryAfterSeconds(retryAfterMs) {
+  return Math.max(1, Math.ceil(retryAfterMs / 1000));
 }
 
 async function handlePtyUpgrade(req, socket, head) {
@@ -255,10 +355,20 @@ async function handlePtyUpgrade(req, socket, head) {
     return;
   }
   if (passwordEnabled(process.env)) {
+    // 与 middleware / 登录表单共用同一个桶：封锁期内密码正确也不放行，
+    // 否则升级路径就是一条不限速的密码预言机。
+    const throttleKey = authThrottleKey(socket, guardHeaders, process.env);
+    const retryAfterMs = getAuthRetryAfterMs(throttleKey);
+    if (retryAfterMs > 0) {
+      reject(socket, 429, "Too Many Requests", { "Retry-After": retryAfterSeconds(retryAfterMs) });
+      return;
+    }
     if (!checkAuthenticated(guardHeaders, process.env)) {
+      recordAuthFailure(throttleKey);
       reject(socket, 401, "auth-required");
       return;
     }
+    // 成功不回退计数：Basic 每个请求都带，复位会让穿插猜测回到基准延迟。
   } else if (!isLoopbackHost(guardHeaders.host)) {
     // fail-closed 兜底：未设密码时仅放行回环请求（与 middleware 一致）。
     reject(socket, 401, "auth-required");
@@ -272,4 +382,13 @@ async function handlePtyUpgrade(req, socket, head) {
   completePtyUpgrade(req, socket, head, cwd);
 }
 
-module.exports = { handlePtyUpgrade, ptyGuardHeaders };
+module.exports = {
+  handlePtyUpgrade,
+  ptyGuardHeaders,
+  // 导出限流内联实现：bin/pty-ws.test.mjs 用它断言与 lib/auth-throttle.ts 的
+  // 退避公式一致、且两条入口共用同一个桶。
+  authThrottleKey,
+  backoffDelayMs,
+  getAuthRetryAfterMs,
+  recordAuthFailure,
+};

@@ -1,6 +1,12 @@
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
 
+  // 密码重新净化：Next 载入 `.env*` 会把启动时搬走的密码键写回 process.env
+  // （详见 lib/request-guard.ts 的 rescrabAuthPassword 注释）。这里是 env 载入之后、
+  // 任何请求与 agent 会话之前唯一的稳定钩子，必须放在本函数最前面。
+  const { rescrabAuthPassword } = await import("@/lib/request-guard");
+  rescrabAuthPassword(process.env);
+
   const { configureHttpDispatcher } = await import("@/lib/http-dispatcher");
   configureHttpDispatcher();
 

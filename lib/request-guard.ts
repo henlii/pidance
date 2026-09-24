@@ -158,6 +158,29 @@ export function clearAuthPasswordCache(): void {
   globalThis.__piAuthPassword = undefined;
 }
 
+/**
+ * Next 载入 `.env*` 之后重新净化一次。
+ *
+ * 为什么必须再净化一次：`@next/env` 的 `loadEnvConfig` 会先
+ * `replaceProcessEnv(initialEnv)` 把启动时的进程环境快照写回 `process.env`，
+ * 再把 `.env*` 里、快照中没有的键并进来（`processEnv` 里 `u[t] = parsed[t]` 的前提
+ * 是 `a[t] === undefined`）。两条路都会把启动时删掉的密码键填回去，然后被 SDK bash 的
+ * `{ ...process.env }` 看见 —— 等于前面的搬走白做。
+ *
+ * 缓存为 null（启动时只有 `.env` 提供了密码）时先采纳 env 的值再删：缓存一旦建立，
+ * `resolvePassword` 就不再读 env，只删不采纳会让认证 fail-open（非回环监听变成免密）。
+ * 已有值的缓存不被 `.env` 覆盖：优先级在启动时已经定过。
+ */
+export function rescrabAuthPassword(env: Record<string, string | undefined>): string | null {
+  const cached = globalThis.__piAuthPassword;
+  const envValue = readPasswordFromEnv(env);
+  const value = cached && !(cached.value === null && envValue !== null) ? cached.value : envValue;
+  globalThis.__piAuthPassword = { value };
+  delete env.PIDANCE_PASSWORD;
+  delete env.PI_WEB_PASSWORD;
+  return value;
+}
+
 function readPasswordFromEnv(env: Record<string, string | undefined>): string | null {
   const p =
     env.PIDANCE_PASSWORD && env.PIDANCE_PASSWORD.length > 0
