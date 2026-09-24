@@ -76,7 +76,13 @@ export interface ToolRenderScheduler {
   flushAll(keys: Iterable<string>): void;
   /** 该键当前是否在渲染（测试与诊断用）。 */
   isRendering(key: string): boolean;
-  /** 清掉所有待执行定时器（宿主 dispose 时调用：别让定时器在销毁后再推事件）。 */
+  /**
+   * 清掉所有待执行定时器并**关闭调度**（宿主 dispose 时调用）。
+   *
+   * 关闭之后 `request` / `flush` 一律空跑：宿主销毁后仍可能收到插件的 invalidate
+   * （异步回调在飞），只清定时器会让下一次 request 新建状态再 emit —— 那就是销毁后
+   * 还在推事件。
+   */
   dispose(): void;
 }
 
@@ -95,6 +101,8 @@ export function createToolRenderScheduler<TChange>(
   const setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
   const clearTimer = options.clearTimer ?? ((handle) => { clearTimeout(handle as ReturnType<typeof setTimeout>); });
   const states = new Map<string, KeyState>();
+  /** 已 dispose：此后不再重算、不再推事件（异步回调可能在销毁后才到）。 */
+  let disposed = false;
 
   const stateOf = (key: string): KeyState => {
     let state = states.get(key);
@@ -128,6 +136,7 @@ export function createToolRenderScheduler<TChange>(
   };
 
   const request = (key: string): void => {
+    if (disposed) return;
     const state = stateOf(key);
     if (state.rendering) {
       state.pending = true;
@@ -146,6 +155,7 @@ export function createToolRenderScheduler<TChange>(
   };
 
   const flush = (key: string): void => {
+    if (disposed) return;
     const state = stateOf(key);
     if (state.timer !== null) {
       clearTimer(state.timer);
@@ -164,6 +174,7 @@ export function createToolRenderScheduler<TChange>(
       return states.get(key)?.rendering === true;
     },
     dispose() {
+      disposed = true;
       for (const state of states.values()) {
         if (state.timer !== null) {
           clearTimer(state.timer);
