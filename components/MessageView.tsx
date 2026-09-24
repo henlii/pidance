@@ -1312,9 +1312,18 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, onReferen
    * 工具定义的显示元数据（issue #75）：`label` 是人类可读名，`renderShell` 决定要不要套壳。
    * 活路径由 `tool_execution_start` 投影带来（快照优先），历史路径由会话读取投影写在块上。
    * 都没有时回退到工具名格式化——不因为缺元数据而少显示任何东西。
+   * 只认**扩展声明**的元数据：SDK 内置工具的 label 就是小写工具名、`edit` 还带 self，
+   * 采纳它们只会让标题在 `Bash`/`bash` 之间跳动并让 edit 丢掉状态色（见 lib/tool-display-meta.ts）。
    */
   const toolLabel = snapshot?.toolLabel ?? block.toolLabel;
-  const bareShell = (snapshot?.toolShell ?? block.toolShell) === "self";
+  /**
+   * 自带外壳（`renderShell: "self"`）：TUI 里这类工具不进宿主的默认 Box。
+   * 但**只有它真的渲染出了行**才去壳 —— 插件什么都没画时（渲染器失败、还没出内容），
+   * 去壳只会得到一张没有边框、没有状态色、没有底的可折叠空白块，等于把信息丢了。
+   */
+  const declaredSelfShell = (snapshot?.toolShell ?? block.toolShell) === "self";
+  const hasRenderedLines = Boolean(renderedCallLines || renderedLiveLines || renderedResultLines);
+  const bareShell = declaredSelfShell && hasRenderedLines;
   const headerLabel = toolLabel && toolLabel.trim() !== ""
     ? formatBlockLabel(toolLabel.trim())
     : formatToolBlockLabel(block.toolName);
@@ -1415,7 +1424,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, onReferen
 
       {/* ── Expanded: 参数友好摘要（替代原始 JSON，OpenChamber 风格） ── */}
       {expanded && command && (
-        <div style={{ background: "var(--bg-subtle)" }}>
+        <div style={bareShell ? undefined : { background: "var(--bg-subtle)" }}>
           <BlockHeaderRow
             label={headerLabel}
             expanded={expanded}
@@ -1445,8 +1454,8 @@ maxHeight: streamBlockMaxHeight,
             overflow: "auto",
             overscrollBehavior: "auto",
             touchAction: "pan-y",
-            background: "var(--bg-subtle)",
-            borderTop: `1px solid color-mix(in srgb, ${statusColor} 20%, var(--border))`,
+            background: bareShell ? undefined : "var(--bg-subtle)",
+            borderTop: bareShell ? undefined : `1px solid color-mix(in srgb, ${statusColor} 20%, var(--border))`,
             display: "flex",
             flexDirection: "column",
             gap: 3,
@@ -1462,7 +1471,7 @@ maxHeight: streamBlockMaxHeight,
       )}
 
       {expanded && showLiveOutput && snapshot && (
-        <div style={{ borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--tool-bg)" }}>
+        <div style={bareShell ? undefined : { borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--tool-bg)" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "6px 10px 4px", color: "var(--text-dim)", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em" }}>
             <span>{t("message_toolLiveOutput")}</span>
             {snapshot.truncated && <span style={{ color: "var(--warning)", textTransform: "none", letterSpacing: 0 }}>{t("message_toolOutputTruncated")}</span>}

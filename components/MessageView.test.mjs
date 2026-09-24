@@ -736,11 +736,13 @@ test("工具定义 label 优先做标题，缺省时回退工具名格式化（i
   assert.ok(withoutLabel.includes("Bash·"), "没有 label 时回退到工具名格式化");
 });
 
-test("renderShell: \"self\" 的工具不套卡片外壳，但仍保留标题与折叠入口（issue #75）", () => {
+test("renderShell: \"self\" + 真有渲染行：不套卡片外壳，但保留标题与折叠入口（issue #75）", () => {
   const message = toolMessage("status");
   message.content[0].toolName = "ask_advisor";
   message.content[0].toolLabel = "Ask Advisor";
   message.content[0].toolShell = "self";
+  // 插件真的画了行（自带外壳的前提）：这时才去壳，否则会出现一张没有边框、没有状态色的空块
+  message.content[0].renderedCallLines = ["╭─ advisor ─╮", "│ answer     │", "╰───────────╯"];
   const html = renderMessage(message);
   assert.ok(html.includes("Ask Advisor·"), "自带外壳的工具仍要有标题（折叠入口与耗时不能丢）");
   assert.ok(!html.includes("border-radius:var(--radius-md)"), "自带外壳的工具不再套我们的圆角卡片");
@@ -750,6 +752,19 @@ test("renderShell: \"self\" 的工具不套卡片外壳，但仍保留标题与�
   // 对照：默认外壳的工具仍有卡片样式
   const normal = renderMessage(toolMessage("status"));
   assert.ok(normal.includes("border-radius:var(--radius-md)"), "默认工具仍套卡片外壳");
+});
+
+test("renderShell: \"self\" 但插件什么都没画：保留既有卡片（否则信息全丢）（issue #75）", () => {
+  const message = toolMessage("status");
+  message.content[0].toolName = "ask_advisor";
+  message.content[0].toolLabel = "Ask Advisor";
+  message.content[0].toolShell = "self";
+  const html = renderMessage(message);
+  assert.ok(html.includes("Ask Advisor·"), "标题仍在");
+  assert.ok(
+    html.includes("border-radius:var(--radius-md)") && html.includes("background:var(--tool-bg)"),
+    "没有渲染行时不能去壳：边框/底色/状态色是我们承载运行状态的地方",
+  );
 });
 
 test("源码契约：自带外壳时调用/结果 ANSI 槽一并去掉宿主底色与分隔线（issue #75）", () => {

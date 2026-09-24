@@ -1148,23 +1148,40 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   /**
    * 斜杠命令的**参数**补全（issue #75）。
    *
-   * 触发条件与 pi-tui 一致：输入以 `/命令名 ` 开头（命令名之后有空格），且该命令声明了
-   * `hasArgumentCompletions`。prefix 是命令名之后的整段文本。
-   * 多行输入不参与（补全要替换参数区间，跨行替换会吃掉用户的换行结构）——这时不弹菜单，
-   * 用户照常手打，属于可见降级而不是静默吞键。
+   * 触发条件与 pi-tui 一致：**光标所在行**的、光标之前的文本以 `/命令名 ` 开头
+   * （命令名之后有空格），且该命令声明了 `hasArgumentCompletions`。
+   * prefix 是命令名之后、光标之前的文本（含空串）—— 光标之后的内容不算 prefix，
+   * 它在应用候选时原样保留。多行输入里只看光标那一行：补全只改这一行，
+   * 不会动用户的换行结构。
    */
   const argQuery = (() => {
-    if (!value.startsWith("/") || value.includes("\n")) return null;
-    const spaceIndex = value.indexOf(" ");
+    // 与 pi-tui 同口径（autocomplete.js 的 CombinedAutocompleteProvider.getSuggestions）：
+    // 只看**光标所在行、光标之前**的文本 —— 命令名在该行行首、之后一个空格、再后面是 prefix（含空串）。
+    // 用光标之后的正文当 prefix 会在「回到参数中间改字」时按错误前缀取候选，再只替换到光标处，
+    // 结果是拼出一个用户没要的参数。
+    const caret = textareaRef.current?.selectionStart ?? value.length;
+    const lineStart = value.lastIndexOf("\n", Math.max(0, caret - 1)) + 1;
+    const lineBeforeCaret = value.slice(lineStart, caret);
+    if (!lineBeforeCaret.startsWith("/")) return null;
+    const spaceIndex = lineBeforeCaret.indexOf(" ");
     if (spaceIndex === -1) return null;
-    const name = value.slice(1, spaceIndex);
+    const name = lineBeforeCaret.slice(1, spaceIndex);
     if (!name) return null;
     const command = (slashCommands ?? []).find((c) => c.name === name && c.hasArgumentCompletions);
     if (!command) return null;
-    return { name, prefix: value.slice(spaceIndex + 1) };
+    return { name, prefix: lineBeforeCaret.slice(spaceIndex + 1) };
   })();
 
   const argMenuOpen = argQuery !== null;
+
+  // 前缀（含命令名）变化：立刻丢掉上一轮的候选并作废在途请求 —— 否则会短暂显示
+  // 与当前输入不相干的旧候选，或者在途响应回来后重新打开菜单。
+  const argQueryKey = argQuery ? `${argQuery.name} ${argQuery.prefix}` : null;
+  useEffect(() => {
+    argRequestSeqRef.current += 1;
+    setArgItems([]);
+    setArgActiveIndex(0);
+  }, [argQueryKey]);
 
   useEffect(() => {
     if (!argQuery || !onLoadCommandArgumentCompletions) {
@@ -1191,7 +1208,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         });
     }, 120);
     return () => clearTimeout(timer);
-  }, [argQuery?.name, argQuery?.prefix, onLoadCommandArgumentCompletions, argQuery]);
+    // 依赖只留这两个字符串与回调：argQuery 每次渲染都是新对象，把它放进依赖会让父级
+    // 任何一次重渲染都取消防抖、作废序号（等于每帧重发一次请求）。
+  }, [argQuery?.name, argQuery?.prefix, onLoadCommandArgumentCompletions]);
 
   /**
    * 应用参数候选：替换**参数区间**（命令名之后到光标处），光标后的内容原样保留。
@@ -1200,9 +1219,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
    */
   const applyArgCompletion = useCallback((item: CommandArgumentCompletion) => {
     if (!argQuery) return;
-    const spaceIndex = value.indexOf(" ");
+    // 替换区间按**当前**光标重新推导（候选可能在光标移动之后才被点或按 Tab）：只改光标
+    // 所在行，区间是命令名与它后面那个空格之后、到光标处 —— 光标后的正文与其它行原样保留。
+    // 若这一行已经不是该命令的参数（光标移到别处、用户改了命令名），直接不动。
     const caret = textareaRef.current?.selectionStart ?? value.length;
-    const from = Math.min(spaceIndex + 1, caret);
+    const lineStart = value.lastIndexOf("\n", Math.max(0, caret - 1)) + 1;
+    const commandPrefix = "/" + argQuery.name + " ";
+    if (!value.slice(lineStart, caret).startsWith(commandPrefix)) return;
+    const from = lineStart + commandPrefix.length;
+    if (from > caret) return;
     const nextValue = value.slice(0, from) + item.value + value.slice(caret);
     const nextCaret = from + item.value.length;
     setValue(nextValue);
@@ -1514,7 +1539,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }
         if (e.key === "Escape") {
           e.preventDefault();
+          // 作废在途请求：否则响应回来会把菜单又打开（用户已经关掉了它）。
+          argRequestSeqRef.current += 1;
           setArgItems([]);
+          setArgLoading(false);
           return;
         }
         if ((e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) && argItems[argActiveIndex]) {
@@ -1621,7 +1649,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }
       }
     },
-    [isStreaming, isMobile, streamingEnterDefault, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, queuedMessages, onSendQueueAsSteer, flushQueueAsSteer]
+    // argMenuOpen / argItems / argActiveIndex / applyArgCompletion 必须在这里：少了它们，
+    // 闭包停留在「候选还没到」的那一帧，Tab/Enter 拦不住 —— Enter 会把没补全的正文直接发出去。
+    [isStreaming, isMobile, streamingEnterDefault, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, argMenuOpen, argItems, argActiveIndex, applyArgCompletion, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, queuedMessages, onSendQueueAsSteer, flushQueueAsSteer]
   );
 
   const handleInput = useCallback(() => {
@@ -1674,6 +1704,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (!slashMenuOpen) return;
     slashItemRefs.current[slashActiveIndex]?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [slashActiveIndex, slashMenuOpen]);
+
+  useEffect(() => {
+    argItemRefs.current.length = argItems.length;
+  }, [argItems.length]);
+
+  useEffect(() => {
+    if (!argMenuOpen) return;
+    argItemRefs.current[argActiveIndex]?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [argActiveIndex, argMenuOpen]);
 
   // 第一阶段：共享运行时目录（modelList/modelNames）和 serverPrefs 中的每模型
   // 思考缓存先到位。第二阶段：把当前会话选择叠加到列表；当前模型即使因

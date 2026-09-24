@@ -121,6 +121,7 @@ import {
   appendPidanceFileDeliveryPrompt,
   createSendFileToUserExecutor,
   SEND_FILE_TO_USER_PARAMETERS,
+  SEND_FILE_TO_USER_TOOL_LABEL,
   SEND_FILE_TO_USER_TOOL_NAME,
   type SendFileToUserParams,
 } from "./send-file-to-user";
@@ -1919,18 +1920,34 @@ export class SdkSessionHost {
   /**
    * 给 `tool_execution_start` 附上工具定义的显示元数据（issue #75）。
    *
+   * 来源是会话的 `ExtensionRunner.getToolDefinition`：它只汇总**扩展注册**的工具，
+   * 与历史投影（扩展表 + `collectToolDisplayMeta`）同一来源、同一规则（先注册者胜）。
+   * 不能改用 `session.getToolDefinition`：那条路会把 SDK **内置**定义也带进来，而内置工具的
+   * `label` 就是小写工具名（`bash`/`edit`/`read`）、`edit` 还带 `renderShell: "self"` ——
+   * 采纳后标题会从 `Bash` 变成 `bash` 并在有/无快照之间跳动，而内置工具的外壳声明属于 TUI
+   * 内部样式（我们的卡片同时承载运行状态色与折叠入口，不能因为一条内部声明就丢掉它们）。
+   *
    * 只读投影：读不到定义 / 没有展示字段就原样返回，客户端回退到工具名格式化。
    * 只在 start 上附：一个工具调用的 label 与壳声明在一次调用内不会变。
    */
   private withToolDisplayMeta(event: SdkAgentEvent): SdkAgentEvent {
     if (event.type !== "tool_execution_start") return event;
     try {
-      const definition = this.getToolRenderDefinition(event.toolName) as
+      const runner = this.session.extensionRunner as
+        | { getToolDefinition?: (toolName: string) => unknown }
+        | undefined;
+      if (typeof runner?.getToolDefinition !== "function") return event;
+      const toolName = typeof event.toolName === "string" ? event.toolName : "";
+      if (toolName === "") return event;
+      const definition = runner.getToolDefinition(toolName) as
         | { label?: unknown; renderShell?: unknown }
         | undefined;
       if (!definition) return event;
-      const label = typeof definition.label === "string" && definition.label.trim() !== ""
-        ? definition.label.trim()
+      // label 精确等于工具名视为没声明名字（内置工具的自称写法）—— 与历史路径同一道门槛。
+      // 只比精确相等：真插件会用大小写做显示改进（pi-mcp-adapter 给 `mcp` 的 label 是 `MCP`）。
+      const rawLabel = typeof definition.label === "string" ? definition.label.trim() : "";
+      const label = rawLabel !== "" && rawLabel !== toolName
+        ? rawLabel
         : undefined;
       const shell = definition.renderShell === "self" ? ("self" as const) : undefined;
       if (label === undefined && shell === undefined) return event;
@@ -2349,7 +2366,7 @@ export class SdkSessionHost {
         });
         const sendFileTool: ToolDefinition = {
           name: SEND_FILE_TO_USER_TOOL_NAME,
-          label: "Send file to user",
+          label: SEND_FILE_TO_USER_TOOL_LABEL,
           description: "Publish an agent-created project file as a user-visible attachment with preview/download support.",
           promptSnippet: "deliver a generated file to the user as a downloadable attachment",
           promptGuidelines: [

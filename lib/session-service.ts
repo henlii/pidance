@@ -473,10 +473,12 @@ async function resolveToolMeta(
   filePath: string,
   deps: Pick<SessionServiceDeps, "archiveAgentDir" | "resolveToolMetaProvider">,
 ): Promise<ToolMetaResolver | null> {
-  const cwd = readSessionHeader(filePath)?.cwd;
-  if (!cwd) return null;
   const resolveProvider = deps.resolveToolMetaProvider ?? resolveToolMetaProvider;
   try {
+    // readSessionHeader 在 try 里：头文件读不出来（文件被外部删掉、权限变化、openSync 抛错）
+    // 只是「没有元数据」，不能把整条只读投影变成 500。
+    const cwd = readSessionHeader(filePath)?.cwd;
+    if (!cwd) return null;
     return await resolveProvider({
       cwd,
       agentDir: deps.archiveAgentDir?.() ?? getAgentDir(),

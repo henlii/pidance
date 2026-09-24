@@ -15,6 +15,15 @@ import type { BinaryMessageInput } from "./types";
 export const SEND_FILE_TO_USER_TOOL_NAME = "send_file_to_user";
 
 /**
+ * 工具的人类可读名（ToolDefinition.label）。
+ *
+ * 由宿主与「历史投影的展示元数据表」共用：这个工具通过 inline extension 注册，
+ * 只活在运行中的会话里，重启后读盘投影看不到它的定义；共用一个常量才能保证
+ * 同一张卡片在活会话与刷新后显示同一个名字。
+ */
+export const SEND_FILE_TO_USER_TOOL_LABEL = "Send file to user";
+
+/**
  * This is deliberately code-owned instead of relying only on a user-editable
  * APPEND_SYSTEM.md. It remains present when a user supplies SYSTEM.md.
  */
