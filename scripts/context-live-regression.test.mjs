@@ -194,7 +194,23 @@ test("顶栏上下文读数在 run 结束前就已更新", { timeout: 150_000 },
       };
     })()`);
     assert.ok(released, "未找到聊天滚动容器");
-    assert.ok(released.overflow > 80, `流式输出未产生可滚动内容（overflow=${released.overflow}）`);
+    // 「上滚位置保持」需要一个真的滚得起来的页面，而它取决于模型这次输出多长（工具块还有 320px 上限 + 内部滚动，
+    // 所以 1280×720 下整段对话可能正好放得下 → overflow=0）。**不要把视口留在会随机成立的尺寸上**：
+    // 这段断言之前把视口压矮，让「可滚动」成为确定条件；随后所有滚动测量都在同一尺寸下进行。
+    await ab(["set", "viewport", "1280", "420", "--session", SESSION], false).catch(() => {});
+    await new Promise((r) => setTimeout(r, 800));
+    let overflow = 0;
+    for (let i = 0; i < 10; i += 1) {
+      const sample = await evalResult(`(() => {
+        const scroller = document.querySelector('[data-pidance-chat="true"]')?.querySelector('[data-chat-scroller="true"]');
+        if (!scroller) return null;
+        return scroller.scrollHeight - scroller.clientHeight;
+      })()`);
+      if (typeof sample === "number") overflow = sample;
+      if (overflow > 80) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    assert.ok(overflow > 80, `压矮视口后仍不可滚动（overflow=${overflow}）`);
     assert.ok(
       released.distance > 40,
       `用户上滚后被自动跟随抢回底部（距底 ${released.distance}px）`,
