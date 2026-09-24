@@ -1,6 +1,9 @@
 /**
  * Pidance UI 会话（对齐 OpenChamber ui-auth 语义，#18）：
- * - Cookie：pidance_ui_session，HttpOnly + SameSite=Strict + Secure(HTTPS)
+ * - Cookie：pidance_ui_session，HttpOnly + SameSite=Lax + Secure(HTTPS)
+ *   Lax 而非 Strict：手机端从其它 App／通知做顶层导航进来时 Strict 不带 Cookie，
+ *   会掉登录；POST 的跨站防护由 middleware 的 origin/sec-fetch-site 校验负责
+ *   （见 lib/request-guard.ts 的 checkCsrf），不依赖 SameSite。
  * - JWT HS256（node:crypto，无 jose 依赖）
  * - TTL：12h 默认 / trustDevice 长期有效（10 年，删除设备即失效）
  * - 密钥落盘：~/.pi/agent/pidance-ui-jwt-secret（或 PIDANCE_UI_JWT_SECRET / OPENCODE_JWT_SECRET）
@@ -67,7 +70,9 @@ export function buildSetCookieHeader(options: {
     `${name}=${value}`,
     "Path=/",
     "HttpOnly",
-    "SameSite=Strict",
+    // Lax：跨站顶层 GET 会带 Cookie（手机端从外部入口回来不掉登录），跨站 POST
+    // 不带；真正的 CSRF 防护在 middleware 的 checkCsrf（origin/sec-fetch-site）。
+    "SameSite=Lax",
     `Max-Age=${maxAge}`,
     `Expires=${expires}`,
   ];

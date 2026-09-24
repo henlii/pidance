@@ -1953,13 +1953,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 尾页，走两遍既浪费又会互相打断。用激活合并器：同批只跑一次，执行期间又来的激活
     // 结束后补跑一次（宁可多一次也不漏）。
     const recovery = createActivationRecovery({ perform: () => syncOnTabReturn() });
+    const registry = getOrCreateBrowserSessionRuntimeRegistry();
+    // 可见性**两向**都要上报（issue #86）：隐藏超过阈值就收掉本标签的事件流，
+    // 回前台取消待执行的关闭；重连 + 对账 + 重拉尾页仍由 recovery 走既有激活路径。
+    const onVisibilityChange = () => {
+      const visible = document.visibilityState === "visible";
+      registry.setTabVisibility(visible);
+      if (visible) recovery.notify();
+    };
     const onActivate = () => {
       if (document.visibilityState === "visible") recovery.notify();
     };
-    document.addEventListener("visibilitychange", onActivate);
+    // 挂载时先如实报一次：带着「已隐藏」状态恢复的页面（移动端冻结后重建）也要走同一规则。
+    registry.setTabVisibility(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("focus", onActivate);
     return () => {
-      document.removeEventListener("visibilitychange", onActivate);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("focus", onActivate);
       recovery.dispose();
     };
