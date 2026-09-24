@@ -114,7 +114,7 @@ export type WebExtensionUIAdapter = {
    * 注入后插件读到的 `tui.focusedComponent` 才有值（鸭子类型探针）；
    * 不注入就永远 undefined，插件的「编辑器有焦点」分支永远不成立。
    */
-  setEditorFocus: (focused: boolean) => boolean;
+  setEditorFocus: (focused: boolean, clientId?: string) => boolean;
   dispose: () => void;
 };
 
@@ -221,20 +221,30 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
   };
 
   /**
-   * 主编辑器焦点状态（客户端在聚焦/失焦/切后台时上报）。
+   * 主编辑器焦点状态（客户端在聚焦/失焦/切后台时上报，带本标签的 clientId）。
    *
-   * TTL 是为了「标签页被直接关掉」：没有心跳时焦点必须自己过期，否则插件会
-   * 永远以为编辑器有焦点。客户端在路由按键之前会重新上报一次，所以正常使用
-   * 中不会出现「一直聚焦却过期」。
+   * 按 clientId 做**「任一标签聚焦即聚焦」**：多标签下后台标签的失焦/隐藏上报
+   * 不能把前台标签的焦点一起清掉（旧实现是单槽 last-write，谁最后上报算谁的）。
+   * 每项带 TTL：标签页被直接关掉时没有心跳，焦点必须自己过期，否则插件会永远
+   * 以为编辑器有焦点。路由按键那条命令会在同一请求里刷新焦点，正常使用不会过期。
    */
   const EDITOR_FOCUS_TTL_MS = 60_000;
-  let editorFocusedUntil = 0;
-  const isEditorFocused = () => Date.now() < editorFocusedUntil;
+  const editorFocusClients = new Map<string, number>();
+  const pruneEditorFocus = (now: number) => {
+    for (const [clientId, expiresAt] of editorFocusClients) {
+      if (expiresAt <= now) editorFocusClients.delete(clientId);
+    }
+  };
+  const isEditorFocused = () => {
+    pruneEditorFocus(Date.now());
+    return editorFocusClients.size > 0;
+  };
 
-  const setEditorFocus = (focused: boolean): boolean => {
+  const setEditorFocus = (focused: boolean, clientId: string = "default"): boolean => {
     const wasFocused = isEditorFocused();
-    editorFocusedUntil = focused ? Date.now() + EDITOR_FOCUS_TTL_MS : 0;
-    if (wasFocused === focused) return false;
+    if (focused) editorFocusClients.set(clientId, Date.now() + EDITOR_FOCUS_TTL_MS);
+    else editorFocusClients.delete(clientId);
+    if (wasFocused === isEditorFocused()) return false;
     // 焦点会改变插件组件的形态：让挂了工厂的 widget 与 custom 面板重渲一帧。
     for (const entry of [...widgetFactories.values()]) entry.requestRender();
     for (const render of [...customRenderers]) render();
@@ -805,7 +815,7 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
     },
     setEditorFocus,
     dispose() {
-      editorFocusedUntil = 0;
+      editorFocusClients.clear();
       for (const [id, entry] of pending) {
         pending.delete(id);
         pendingSnapshot.delete(id);

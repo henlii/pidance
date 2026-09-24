@@ -159,7 +159,7 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
    子代理全部结束后 pi-subagents 会 `setWidget(key, undefined)`，面板消失。
 6. **`onTerminalInput`（插件全局按键）有两条窄道**：pi-tui 的 `addInputListener` 是全局同步的，Web 没有等价层，**也不做「每个键都往返」**。现在只有两种情形会把按键 POST 给 `terminal_input`（服务端按 pi-tui 语义逐个调监听器：先 `consume` 再 `data` 改写，见 `dispatchTerminalInput`）：
    - **面板收起**（`hidden` 且注册了监听器）：前端把白名单键（Escape / F1–F12 / Ctrl·Alt + 非保留字符，见 `lib/extension-panel-keys.ts` 的 `shouldRouteKeyToExtensionListener`）拿去问插件。rpiv-ask-user 的折叠键靠它把面板重新展开。
-   - **插件 widget 的选择态**（`hooks/useExtensionWidgetKeys.ts`）：没有 custom 面板、该会话存在 widget、且有监听器时，输入框**为空且聚焦**的前提下——未入选择态只送 `↓`/`←`（插件的激活键，且**不拦截**，空输入框里这两个键本来没可见行为）；插件消费了就进入选择态，此后只路由导航键（方向键 / `j` / `k` / `Enter` / `Esc`，这些会 `preventDefault`）；任何其它键立刻退出选择态并把按键原样留给输入框。普通打字一次请求都不发。
+   - **插件 widget 的选择态**（`hooks/useExtensionWidgetKeys.ts`）：没有 custom 面板、该会话存在 widget、且有监听器时，输入框**为空且聚焦**的前提下——未入选择态只送 `↓`/`←`（插件的激活键，且**不拦截**，空输入框里这两个键本来没可见行为）；插件消费了就进入选择态，此后只路由导航键（方向键 / `j` / `k` / `Enter` / `Esc`，这些会 `preventDefault`）；任何其它键立刻退出选择态并把按键原样留给输入框。普通打字一次请求都不发。选择态是**本地推断**（看插件有没有消费上一次按键），所以有三道复位：`Esc`/`Enter` 被消费也**无条件清零**（它们是插件的离开/提交键，继续记着会把之后的 `j`/`k`/回车吞掉）、任何非导航键清零、超过 10 秒没有路由过按键即视为已离开。切后台、失焦、换会话同样复位。输入法合成中（含 `keyCode === 229` 与 `compositionend` 之后的 80ms 宽限）一律不参与，避免合成提交那一下被当成导航键拦截。
 
    代价与限制：选择态下 `j`/`k` 是导航而非字母，所以只能在「空输入框 + 已激活」时拦；插件在 Web 端的 `Esc` 取消长任务仍然没接（只接了 widget 选择态里的 `Esc`）。
 7. **面板内鼠标事件**：`ExtensionCustomPanel` 把点击换算成字符行列后发 `extension_ui_mouse`，服务端调**面板组件**的 `handleMouse`。只转 click，不转 move / drag / wheel。`setWidget` 的组件收不到鼠标（`inputCustomMouse` 只查 custom 面板）—— widget 的折叠由共用卡片头承担，体验不丢，但组件级鼠标仍是缺口（见 `docs/extension-compat-gaps.md`）。
@@ -168,7 +168,7 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
 
 10. **仍存在的差异**：
    - `subagent-fleet-status`（placement `belowEditor`）是 TUI 组件，经渲染桥转成文本，里面的 `↓/← to inspect` 是终端键位。Web 侧现在改写这行：去掉键位提示段，保留 agent 数与 token 读数（`rewriteFleetStatusLines`）；整行只剩提示时不渲染该 widget。
-   - **`tui.focusedComponent` 已注入**（2026-09-24）：客户端在输入框聚焦/失焦/切后台时上报 `editor_focus`，服务端把它投影成 `tui.focusedComponent`——有焦点时给一个**鸭子类型探针**（只有 `render`/`invalidate`/`handleInput`/`getText`/`setText` 五个 no-op 成员，见 `lib/custom-ui-terminal.ts` 的 `createEditorFocusProbe`），无焦点时 `undefined`。pi-subagents 的 fleet widget 靠它决定方向键能不能进选择态（`fleet-status.ts` 的 `editorHasFocus()`），配合第 6 条的 widget 选择态窄道即可用。焦点带 60 秒 TTL，客户端在路由按键前会补报一次（避免长时间聚焦后过期）。
+   - **`tui.focusedComponent` 已注入**（2026-09-24）：客户端在输入框聚焦/失焦/切后台时上报 `editor_focus`，服务端把它投影成 `tui.focusedComponent`——有焦点时给一个**鸭子类型探针**（只有 `render`/`invalidate`/`handleInput`/`getText`/`setText` 五个 no-op 成员，见 `lib/custom-ui-terminal.ts` 的 `createEditorFocusProbe`），无焦点时 `undefined`。pi-subagents 的 fleet widget 靠它决定方向键能不能进选择态（`fleet-status.ts` 的 `editorHasFocus()`），配合第 6 条的 widget 选择态窄道即可用。焦点按**标签**（clientId）聚合：任一标签的输入框聚焦即视为聚焦，后台标签失焦不会清掉前台标签的焦点（旧实现是单槽 last-write）；每项带 60 秒 TTL，标签被直接关掉后焦点自己过期。客户端不为补报单独发请求——按键那条 `terminal_input` 命令带 `assertFocus`，服务端把按键交给插件**之前**先刷新焦点（拆成两条 HTTP 会乱序，表现为冷启动或过期后第一次 `↓` 不激活）。
    - **`getEditorText()` 仍恒为空串**：本仓没有把输入框正文回灌给适配器，而 pi-subagents 的激活门槛正是 `ctx.ui.getEditorText() === ""`。目前由**客户端**把守这个门槛（空输入框才路由），行为正确；但若别的插件依赖读到真实文本，需要另开一条「输入框文本上报」的口子（每次输入都上报会加往返，需单独设计）。
    - ~~新开页面拿不到已存在的 widget~~ **已核实不是问题**：widget 会随状态水合（`/api/sessions/<id>/state` 的 `state.extensionWidgets`）在打开会话时出现。此前判定「拿不到」是探针口径造成的误判。
    - **左侧用户消息导航条铺满整列**（2026-09-22 决定）：短横线首尾贴住列内缩位置、中间按条数均分，**一条横线的纵向位置就对应它在会话里的先后** —— 贴底时「当前」那条落在轨道最下面（此前整条限高 320px、垂直居中，当前项落在屏幕中部，看不出与会话位置的关系）。条数多到每格矮于 8px（点不中）时退回旧的「限高 + 居中 + 内部滚动」，此时才显示上下小三角。

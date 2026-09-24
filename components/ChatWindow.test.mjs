@@ -71,5 +71,29 @@ test("ChatInput 在输入框失焦/聚焦时同步焦点，且把空文本门槛
 test("宿主处理 editor_focus：把客户端焦点投影给适配器", () => {
   const source = readFileSync(fileURLToPath(new URL("../lib/sdk-session-host.ts", import.meta.url)), "utf8");
   assert.match(source, /case "editor_focus": \{/, "宿主未处理 editor_focus 命令");
-  assert.ok(source.includes("setEditorFocus(focused)"), "宿主未把焦点交给扩展 UI 适配器");
+  assert.ok(source.includes("setEditorFocus(focused, clientId)"), "宿主未把焦点与 clientId 交给扩展 UI 适配器");
+  assert.ok(source.includes("assertFocus === true"), "terminal_input 必须先刷新焦点再交给插件（同一条命令，避免两条 HTTP 乱序）");
+});
+
+test("#83 修复轮：按键路由的四处收口（clientId / 同命令刷新焦点 / Esc 清零 / 保鲜期 / 输入法）", () => {
+  const hook = readFileSync(fileURLToPath(new URL("../hooks/useExtensionWidgetKeys.ts", import.meta.url)), "utf8");
+  // 多标签聚合：上报必须带本标签 clientId，否则后台标签的失焦会清掉前台标签的焦点。
+  assert.ok(hook.includes("clientId: clientIdRef.current"), "焦点上报未带 clientId");
+  // 焦点与按键同一条命令：拆两条 HTTP 会乱序，冷启动/过期后第一次 ↓ 不激活。
+  assert.ok(hook.includes("assertFocus: true"), "按键未在同一条命令里刷新焦点");
+  // 本地选择态必须走纯函数迁移（Esc/Enter 无条件清零），不能在钩子里手写布尔赋值。
+  assert.ok(hook.includes("nextWidgetInteractionState("), "本地选择态未走纯函数迁移");
+  assert.ok(hook.includes("isWidgetInteractionLive("), "本地选择态缺少保鲜期判定");
+  // 输入法：合成结束的宽限期，配合 keyCode 229 判定。
+  assert.ok(hook.includes("isImeComposing("), "输入法判定未覆盖 keyCode 229 与合成宽限");
+  assert.ok(hook.includes("compositionend"), "未监听合成结束（提交那一下会被当成导航键）");
+  // 状态回收：切后台/门槛变化要复位。
+  assert.ok(hook.includes("interactionRef.current = initialState()"), "未复位选择态");
+  const host = readFileSync(fileURLToPath(new URL("../lib/sdk-session-host.ts", import.meta.url)), "utf8");
+  assert.ok(host.includes("setEditorFocus(true, asString(command.clientId)"), "宿主未在同一条 terminal_input 里先刷新焦点");
+  const termCase = host.slice(host.indexOf("case \"terminal_input\": {"), host.indexOf("case \"editor_focus\": {"));
+  assert.ok(
+    termCase.indexOf("setEditorFocus(true") < termCase.indexOf("dispatchTerminalInput("),
+    "顺序反了：必须先把焦点交给适配器，再把按键交给插件",
+  );
 });
