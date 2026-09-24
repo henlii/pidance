@@ -2,10 +2,12 @@
  * 同进程 Pi SDK host：拥有 AgentSessionRuntime、事件投影、类型化 send 与 dispose/rebind。
  * 浏览器协议字段与外部 RPC 时代对齐，前端契约不变。
  */
+import { randomUUID } from "node:crypto";
 import {
   createAgentSessionFromServices,
   createAgentSessionRuntime,
   createAgentSessionServices,
+  renderDiff,
   SessionManager,
   type AgentSession,
   type AgentSessionRuntime,
@@ -131,6 +133,9 @@ import {
   renderCustomMessageLines,
   renderToolCallLines,
   renderToolResultLines,
+  setRenderBridgeWarningSink,
+  setSdkThemeProbe,
+  verifySdkGlobalTheme,
   type Theme,
 } from "./tui-render-bridge";
 import { createToolRenderScheduler, pickChangedSlots } from "./tool-render-scheduler";
@@ -1501,6 +1506,26 @@ export class SdkSessionHost {
       this.trackExtensionSideEffects(event);
       this.emit(event as SdkAgentEvent);
     });
+    // 渲染桥的**宿主配置类**告警出口（issue #69）：SDK 全局主题槽位装不进去时，插件
+    // 渲染器里依赖 SDK 主题助手的部分（内置 edit 的 diff 等）会整段不显示 —— 那要变成
+    // 一条用户可见的 warning 通知，而不是被渲染桥静默吞掉。
+    // 出口是进程级单例（槽位本身就是进程级的），所以宿主存活期内保持接入。
+    setRenderBridgeWarningSink((message) => {
+      if (!this._alive) return;
+      this.emit({
+        type: "extension_ui_request",
+        id: randomUUID(),
+        method: "notify",
+        message,
+        notifyType: "warning",
+      });
+    });
+    // 自检槽位是否真能被 SDK 的主题助手读到：探针是 SDK 自己的 renderDiff
+    // （渲染桥不 import SDK，探针由这里注入）。失败会经由上面的出口报一次 warning。
+    setSdkThemeProbe(() => {
+      renderDiff("+ added\n- removed\n context\n");
+    });
+    verifySdkGlobalTheme();
 
     await session.bindExtensions({
       uiContext: this.extensionUi.uiContext,
