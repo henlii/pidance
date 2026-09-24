@@ -171,6 +171,11 @@ function AppShellInner() {
    */
   /** 新会话占位行高亮（真实 sid 尚未写入 selectedSession / URL） */
   const [pendingHighlightId, setPendingHighlightId] = useState<string | null>(null);
+  /** 全文搜索命中：切会话后定位到命中条目。sessionId 用于丢弃切会话前的迟到请求。 */
+  const [entryJumpRequest, setEntryJumpRequest] = useState<{ sessionId: string; entryId: string; nonce: number } | null>(null);
+  const entryJumpNonceRef = useRef(0);
+  /** 定位请求已消费（成功或重试超限）：清掉，否则会被下一次渲染重新消费 */
+  const handleEntryJumpHandled = useCallback(() => setEntryJumpRequest(null), []);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPageId | null>(null);
   // 桌面壳托盘里的「桌面版设置…」会发 desktop-settings:open（#51）：此前 Web 端没人订阅，
@@ -708,7 +713,7 @@ function AppShellInner() {
     syncUrl("/");
   }, [identity.cwd, identity.projectRoot, selectedSession, invalidateHydrate, syncUrl]);
 
-  const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
+  const handleSelectSession = useCallback((session: SessionInfo, isRestore = false, entryId?: string | null) => {
     if (typeof window !== "undefined") {
     }
     // 显式点选会话：先跳过身份 watcher（必须在本函数任何 state 变更之前）。
@@ -733,6 +738,8 @@ function AppShellInner() {
     newSessionIntentRef.current = null;
     setNewSessionIntent(null);
     setPendingHighlightId(null);
+    // 全文搜索命中：切会话后由聊天区导航条消费这条定位请求（同会话重复点击用 nonce 区分）。
+    setEntryJumpRequest(entryId ? { sessionId: session.id, entryId, nonce: entryJumpNonceRef.current += 1 } : null);
     setSystemPrompt(null);
     setInitialSessionRestored(true);
     if (sessionRestoreStatus !== "ready") setSessionRestoreStatus("ready");
@@ -1566,6 +1573,8 @@ function AppShellInner() {
                 onContextUsageChange={handleContextUsageChange}
                 onTurnMetricsChange={handleTurnMetricsChange}
                 onOpenFile={handleOpenLinkedFile}
+                entryJumpRequest={entryJumpRequest}
+                onEntryJumpHandled={handleEntryJumpHandled}
                 footerCollapsed={footerCollapsed}
                 onFooterToggle={handleFooterToggle}
               />

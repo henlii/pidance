@@ -457,3 +457,81 @@ test("带 body 的 400：上游已给原因，不追加容量提示", () => {
   const html = renderMessage(errorAssistant("OpenAI API error (400): invalid request: unknown model"));
   assert.ok(!html.includes("rejected this request without a reason"));
 });
+
+test("截断：stopReason=length 且正文为空的回复仍出提示，不整卡隐藏", () => {
+  const html = renderMessage({
+    role: "assistant",
+    model: "gpt-5",
+    provider: "openai",
+    stopReason: "length",
+    content: [],
+  });
+  assert.ok(html.length > 0, "不得渲染成空白卡片");
+  assert.ok(html.includes('role="alert"'), "截断必须给出可视反馈");
+  assert.ok(
+    html.includes("输出上限") || html.includes("output limit"),
+    "文案说明是模型输出上限截断",
+  );
+
+  // 回归：同样空正文但不是截断/错误，仍然不渲染（不制造无内容气泡）
+  const plain = renderMessage({
+    role: "assistant",
+    model: "gpt-5",
+    provider: "openai",
+    stopReason: "end_turn",
+    content: [],
+  });
+  assert.equal(plain, "");
+});
+
+test("apply_patch：折叠摘要列出涉及文件，不倾倒 V4A 原文", () => {
+  const patch = [
+    "*** Begin Patch",
+    "*** Update File: src/app.ts",
+    "@@",
+    "-const a = 1;",
+    "+const a = 2;",
+    "*** End Patch",
+  ].join("\n");
+  const html = renderMessage(
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "ap-1", toolName: "apply_patch", input: { input: patch } }],
+    },
+    {
+      toolResults: new Map([["ap-1", {
+        role: "toolResult",
+        toolCallId: "ap-1",
+        content: [{ type: "text", text: "Done!" }],
+      }]]),
+    },
+  );
+  assert.ok(html.includes("src/app.ts"), "折叠态摘要显示涉及的文件");
+  assert.ok(!html.includes("*** Begin Patch"), "折叠态不把整块 V4A 原文倒出来");
+});
+
+test("apply_patch 逐文件失败：列出失败原因，且对照 diff 不再报 success", () => {
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  const toolBlock = source.slice(source.indexOf("function ToolCallBlock("), source.indexOf("function getRenderableAnsiLines("));
+  assert.match(toolBlock, /getApplyPatchFailures\(effectiveResult\?\.details\)/, "未读出逐文件失败清单");
+  assert.match(toolBlock, /getApplyPatchAppliedFiles\(effectiveResult\?\.details\)/, "未列出实际写入的文件");
+  const failureSection = toolBlock.slice(
+    toolBlock.indexOf("applyPatchFailures.length > 0"),
+    toolBlock.indexOf("applyPatchApplied.length > 0"),
+  );
+  assert.ok(failureSection.length > 0, "失败清单没有渲染分支");
+  assert.match(failureSection, /role="alert"/, "失败清单没有可见承载（需读屏可见）");
+  assert.match(failureSection, /message_applyPatchFailed/, "失败清单没有标题文案");
+  assert.match(failureSection, /applyPatchFailures\.map\(/, "失败清单未逐条渲染");
+  const appliedSection = toolBlock.slice(toolBlock.indexOf("applyPatchApplied.length > 0"));
+  assert.match(appliedSection, /message_modifiedFiles/, "实际写入的文件没有标题");
+  // 对照 diff 的顶边颜色必须跟着结果（失败时是 danger，不是 success）
+  assert.match(toolBlock, /<PairedDiffResult files=\{applyPatchFiles\} isError=\{isError\} \/>/);
+  const paired = source.slice(source.indexOf("function PairedDiffResult("), source.indexOf("function SplitPatchView("));
+  assert.match(paired, /isError \? "var\(--status-danger-border\)" : "var\(--status-success-border\)"/, "PairedDiffResult 边框写死 success");
+  // 双语都要有文案键
+  for (const locale of ["en", "zh-CN"]) {
+    const dict = readFileSync(fileURLToPath(new URL(`../lib/locales/${locale}.ts`, import.meta.url)), "utf8");
+    assert.match(dict, /message_applyPatchFailed:/, `${locale} 缺少 message_applyPatchFailed`);
+  }
+});

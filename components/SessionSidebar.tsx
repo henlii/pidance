@@ -144,7 +144,7 @@ import { RunningTimeContext, WaitingSessionIdsContext } from "@/components/sessi
 
 interface Props {
   selectedSessionId: string | null;
-  onSelectSession: (session: SessionInfo, isRestore?: boolean) => void;
+  onSelectSession: (session: SessionInfo, isRestore?: boolean, entryId?: string | null) => void;
   onNewSession?: (cwd?: string) => void;
   initialSessionId?: string | null;
   skipInitialProjectSelection?: boolean;
@@ -263,6 +263,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     snippet: string;
     timestamp: string;
     role?: string;
+    /** JSONL entry id：只有 JSONL 扫描来的命中才有，可用于定位；hermes id 不可用 */
+    entryId?: string;
+    messageId?: string;
   }>>([]);
   const [fulltextSessionIds, setFulltextSessionIds] = useState<string[]>([]);
   const [fulltextSource, setFulltextSource] = useState<"fts" | "jsonl" | "none" | null>(null);
@@ -996,7 +999,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           const res = await fetch(`/api/sessions/search?q=${encodeURIComponent(q)}&limit=40`);
           const data = await res.json().catch(() => ({})) as {
             error?: string;
-            hits?: Array<{ sessionId: string; snippet: string; timestamp: string; role?: string }>;
+            hits?: Array<{ sessionId: string; snippet: string; timestamp: string; role?: string; entryId?: string; messageId?: string }>;
             sessionIds?: string[];
             source?: "fts" | "jsonl" | "none";
           };
@@ -1112,12 +1115,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     searchActive,
   );
 
-  /** 全文命中深链：按 id 打开已加载会话；列表尚未包含时忽略（refresh 后可再点）。 */
-  const openSessionById = useCallback((sessionId: string) => {
+  /** 全文命中深链：按 id 打开已加载会话；列表尚未包含时忽略（refresh 后可再点）。
+   *  entryId 非空时打开后会定位到该条命中。 */
+  const openSessionById = useCallback((sessionId: string, entryId?: string | null) => {
     const target = allSessions.find((s) => s.id === sessionId);
     if (!target) return;
-    handleSelectSessionFromList(target);
-  }, [allSessions, handleSelectSessionFromList]);
+    onSelectSession(target, false, entryId ?? null);
+  }, [allSessions, onSelectSession]);
 
 
   // 选中或 URL 恢复会话时自动展开 project/session 两级祖先，
@@ -1566,7 +1570,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             <button
               key={`${hit.sessionId}-${hit.timestamp}-${index}`}
               type="button"
-              onClick={() => openSessionById(hit.sessionId)}
+              onClick={() => openSessionById(hit.sessionId, hit.entryId)}
               title={t("sidebar_searchFulltextSnippet")}
               style={{
                 display: "block", width: "100%", textAlign: "left",

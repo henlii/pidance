@@ -40,6 +40,7 @@ import { useI18n } from "@/lib/i18n";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useExtensionTerminalInput } from "@/hooks/useExtensionTerminalInput";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useMessageJump, type MessageJumpRailHandle } from "@/hooks/useMessageJump";
 import { useRenderWidth } from "@/hooks/useRenderWidth";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { SessionActivity } from "@/lib/session-activity";
@@ -73,6 +74,10 @@ interface Props {
   /** 最近一轮 run 的延迟/吞吐，供顶栏显示。 */
   onTurnMetricsChange?: (metrics: TurnMetrics) => void;
   onOpenFile?: (filePath: string) => void;
+  /** 会话外发起的「定位到某条历史」请求（全文搜索命中）：切会话后由 ChatWindow 消费 */
+  entryJumpRequest?: { sessionId: string; entryId: string; nonce: number } | null;
+  /** 定位请求已消费（成功或重试超限）：AppShell 据此清掉，避免运行态变化反复重跳 */
+  onEntryJumpHandled?: () => void;
   /** 输入框下方 footer（状态条）是否折叠：由 AppShell 持有（ChatWindow 按 sessionKey
    *  重挂载，本页选择必须待在更上层的稳定宿主里）。 */
   footerCollapsed: boolean;
@@ -105,7 +110,7 @@ function planItemStableKey(
   return messageKeys[idx] ?? `idx:${idx}`;
 }
 
-export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, projectRoots, onGuideTargetChange, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onTurnMetricsChange, onOpenFile, footerCollapsed, onFooterToggle }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, projectRoots, onGuideTargetChange, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onTurnMetricsChange, onOpenFile, entryJumpRequest, onEntryJumpHandled, footerCollapsed, onFooterToggle }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -174,6 +179,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     loadOlderHistory,
     loadNewerHistory,
     jumpToEntry,
+    notifyBrowsingHistory,
     hasMoreAfter,
     lockedByOther,
     handleSend, handleAbort, handleModelChange,
@@ -216,6 +222,58 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
    * 导航条自己算会指错消息（实测跳 2 号落到 1 号）。
    */
   const resolveMessageElementRef = useRef<((entryId: string) => HTMLElement | null) | null>(null);
+
+  /**
+   * 导航条把「重算高亮 + 即刻设当前项」注册进来（手机端不挂导航条，为空）。
+   *
+   * 定位机制住在 ChatWindow，因为它必须**始终挂载**：导航条在 ≤640px 不渲染、没有
+   * 提问时自己也返回 null；消费逻辑留在导航条里就是「手机点搜索命中只切会话、不滚动」。
+   */
+  const railHandleRef = useRef<MessageJumpRailHandle | null>(null);
+  const messageJump = useMessageJump({
+    scrollContainer: scrollContainerRef,
+    resolveMessageElementRef,
+    jumpToEntry,
+    railHandleRef,
+    notifyBrowsingHistory,
+  });
+
+  /**
+   * 待消费的外部定位请求（全文搜索命中）。
+   *
+   * 三个约束：
+   * - 等 `loading` 落下再跳：首屏载荷与 jumpToEntry 共用 abort 通道，抢跑会把它
+   *   取消掉（模型、分支树就不会落地）；
+   * - 目标可能还没进时间线：短延时重试，最多 8 次（约 2s），不跟渲染频率耦合；
+   * - 成功或超限都回报上层清掉请求 —— 实现身份会随 agentRunning 变化，请求只要还在
+   *   就会被下一次渲染重新消费（实测：运行态一变就重跳）。
+   *
+   * 跳转实现只走 ref：本 effect 不绑 jumpTo 身份。
+   */
+  const jumpToRef = useRef(messageJump.jumpTo);
+  const onEntryJumpHandledRef = useRef(onEntryJumpHandled);
+  useEffect(() => {
+    jumpToRef.current = messageJump.jumpTo;
+    onEntryJumpHandledRef.current = onEntryJumpHandled;
+  });
+  useEffect(() => {
+    if (!entryJumpRequest || entryJumpRequest.sessionId !== session?.id || loading) return;
+    const entryId = entryJumpRequest.entryId;
+    let cancelled = false;
+    let attempt = 0;
+    const done = () => { if (!cancelled) onEntryJumpHandledRef.current?.(); };
+    const run = async () => {
+      if (cancelled) return;
+      const located = await jumpToRef.current(entryId);
+      if (cancelled) return;
+      if (located) { done(); return; }
+      attempt += 1;
+      if (attempt >= 8) { done(); return; }
+      window.setTimeout(() => void run(), 250);
+    };
+    void run();
+    return () => { cancelled = true; };
+  }, [entryJumpRequest, session?.id, loading]);
   const outlineSessionId = session?.id ?? null;
   /**
    * 窗口里最后一条用户消息的 entryId。
@@ -721,8 +779,11 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
               scrollContainer={scrollContainerRef}
               outline={railOutline}
               entryIds={entryIds}
-              resolveMessageElementRef={resolveMessageElementRef}
-              jumpToEntry={jumpToEntry}
+              // 跳转机制归 ChatWindow（三端都在）：导航条只消费它做交互与视觉
+              jumpTo={messageJump.jumpTo}
+              jumpingTo={messageJump.jumpingTo}
+              jumpPinRef={messageJump.jumpPinRef}
+              railHandleRef={railHandleRef}
               isAtLiveTail={!hasMoreAfter}
             />
           </div>
@@ -765,11 +826,16 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
               };
 
               // 供导航条跳转使用：按 entryId 找已渲染的消息元素。
+              // 命中的可能是 toolResult 等不可见条目（全文搜索按 JSONL entry 命中），
+              // 此时上溯到最近的可见消息（同属这一轮），跳转才会落到用户看得到的位置。
               resolveMessageElementRef.current = (entryId: string) => {
                 const index = entryIds.indexOf(entryId);
                 if (index < 0) return null;
-                const refIndex = visibleRefIndexByMessage.get(index);
-                return refIndex === undefined ? null : (messageRefs.current[refIndex] ?? null);
+                for (let i = index; i >= 0; i--) {
+                  const refIndex = visibleRefIndexByMessage.get(i);
+                  if (refIndex !== undefined) return messageRefs.current[refIndex] ?? null;
+                }
+                return null;
               };
 
               const renderMessage = (item: ChatRenderItem): ReactNode => {
