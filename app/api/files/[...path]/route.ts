@@ -386,12 +386,29 @@ function getContentDisposition(filePath: string, asDownload = false): string {
   return `${disposition}; filename="${fallback}"; filename*=UTF-8''${encodeHeaderValue(fileName)}`;
 }
 
+/**
+ * 文件流响应头的基础防护。
+ *
+ * - nosniff：禁止浏览器嗅探并改写内容类型（HTML/SVG 等被改写类型后可在应用源内执行）。
+ * - SVG：既能当 <img> 预览、也能被直接导航成文档；直接导航时脚本会在应用同源里运行
+ *   （可带 Cookie/Basic 调 /api），所以一律禁脚本。`<img>` 场景不受影响（图片文档本就禁脚本）。
+ */
+function streamSecurityHeaders(contentType: string): Record<string, string> {
+  const headers: Record<string, string> = { "X-Content-Type-Options": "nosniff" };
+  if (contentType.split(";", 1)[0]!.trim().toLowerCase() === "image/svg+xml") {
+    headers["Content-Security-Policy"] = "default-src 'none'";
+    headers["Referrer-Policy"] = "no-referrer";
+  }
+  return headers;
+}
+
 function streamFile(realPath: string, stat: fs.Stats, contentType: string, rangeHeader: string | null, asDownload = false): Response {
   const headers = {
     "Content-Type": contentType,
     "Cache-Control": "no-cache",
     "Accept-Ranges": "bytes",
     "Content-Disposition": getContentDisposition(realPath, asDownload),
+    ...streamSecurityHeaders(contentType),
   };
 
   if (!rangeHeader) {

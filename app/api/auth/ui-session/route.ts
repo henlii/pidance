@@ -1,12 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { randomBytes } from "node:crypto";
-import { resolvePassword, passwordEnabled } from "@/lib/request-guard";
+import {
+  authIdentity,
+  passwordEnabled,
+  resolvePassword,
+  type AuthIdentityHeaders,
+} from "@/lib/request-guard";
 import { readServerConfig, verifyConfigPassword } from "@/lib/pidance-server-config";
 import {
+  getAuthRetryAfterMs,
+  recordAuthFailure,
+  recordAuthSuccess,
+  retryAfterSeconds,
+} from "@/lib/auth-throttle";
+import {
   buildSetCookieHeader,
-  checkLoginRateLimit,
-  clearLoginFailures,
-  clientIpFromHeaders,
   deviceLabelFromUserAgent,
   getOrCreateJwtSecret,
   isSecureRequest,
@@ -14,7 +22,6 @@ import {
   parseCookieValue,
   readUiDeviceIdCookie,
   readUiSessionJwt,
-  recordLoginFailure,
   removeUiSessionDevice,
   resolveSessionTtlMs,
   saveUiSessionDevice,
@@ -79,21 +86,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Password not configured" }, { status: 500 });
   }
 
-  const ip = clientIpFromHeaders({
-    "x-forwarded-for": req.headers.get("x-forwarded-for"),
-    "x-real-ip": req.headers.get("x-real-ip"),
-  });
-  const rateKey = `login:${ip}`;
-  const rate = checkLoginRateLimit(rateKey);
-  if (!rate.allowed) {
+  const identityHeaders: AuthIdentityHeaders = {
+    peerAddress: req.headers.get("x-pidance-peer-ip"),
+    xForwardedFor: req.headers.get("x-forwarded-for"),
+  };
+  // 与 middleware 的 Basic 尝试共用一个桶：同一个地址下两条入口的失败次数累加。
+  const rateKey = authIdentity(identityHeaders, process.env);
+  const retryAfterMs = getAuthRetryAfterMs(rateKey);
+  if (retryAfterMs > 0) {
     return NextResponse.json(
-      { error: "Too many login attempts, please try again later", retryAfter: rate.retryAfterSeconds },
+      { error: "Too many login attempts, please try again later", retryAfter: retryAfterSeconds(retryAfterMs) },
       {
         status: 429,
         headers: {
-          "Retry-After": String(rate.retryAfterSeconds),
-          "X-RateLimit-Limit": String(rate.limit),
-          "X-RateLimit-Remaining": "0",
+          "Retry-After": String(retryAfterSeconds(retryAfterMs)),
           "Cache-Control": "no-store",
         },
       },
@@ -107,7 +113,7 @@ export async function POST(req: NextRequest) {
   const candidate = typeof body?.password === "string" ? body.password : "";
   const valid = expected ? verifyPassword(candidate, expected) : verifyConfigPassword(candidate, storedHash!);
   if (!valid) {
-    recordLoginFailure(rateKey);
+    recordAuthFailure(rateKey);
     const res = NextResponse.json(
       { error: "Invalid credentials", authenticated: false },
       { status: 401, headers: { "Cache-Control": "no-store" } },
@@ -116,7 +122,8 @@ export async function POST(req: NextRequest) {
     return res;
   }
 
-  clearLoginFailures(rateKey);
+  // 表单登录成功复位计数（Basic 成功不复位，由 request-guard 侧处理）。
+  recordAuthSuccess(rateKey);
   const trustDevice = body?.trustDevice === true;
   const ttlMs = resolveSessionTtlMs(trustDevice);
   const secret = getOrCreateJwtSecret(process.env);

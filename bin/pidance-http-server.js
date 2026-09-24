@@ -58,6 +58,13 @@ async function startPidanceHttpServer(options) {
   const handle = app.getRequestHandler();
   const server = createHttpServer((req, res) => {
     installUpgradeHandler();
+    // 对端地址是我们唯一可信的客户端身份来源：先删掉客户端自带的同名头，
+    // 再写入 socket 地址。限流分桶读它（middleware 里读不到 socket）。
+    if (req.headers) {
+      delete req.headers["x-pidance-peer-ip"];
+      const address = req.socket?.remoteAddress;
+      if (address) req.headers["x-pidance-peer-ip"] = address;
+    }
     // Next 的 compress 只在它自己的内置服务器（router-server）里生效；
     // 自管 server 必须自己压缩，否则 JSON/HTML 明文下发。
     // 见 bin/pidance-compression.js。

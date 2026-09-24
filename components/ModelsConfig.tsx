@@ -1681,6 +1681,8 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // models.json 读不出（服务端 422）：不当作空配置渲染，也不允许保存覆盖它。
+  const [readError, setReadError] = useState<string | null>(null);
   const [savedOk, setSavedOk] = useState(false);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
@@ -1711,8 +1713,16 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
 
   useEffect(() => {
     fetch("/api/models-config")
-      .then((r) => r.json())
-      .then((d: ModelsJson) => {
+      .then(async (r) => {
+        const d = (await r.json().catch(() => ({}))) as ModelsJson & { error?: string };
+        // 422：文件存在但解析不了。空投影不得进 config，否则保存会把 provider 写没。
+        if (!r.ok) {
+          setReadError(typeof d.error === "string" && d.error.trim() ? d.error : `HTTP ${r.status}`);
+          setConfig({ providers: {} });
+          setBaseline(null);
+          return;
+        }
+        setReadError(null);
         const { baseline: b, ...rest } = d;
         const normalized = rest.providers ? rest : { ...rest, providers: {} };
         setConfig(normalized);
@@ -1829,6 +1839,11 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
   }, []);
 
   const handleSave = useCallback(async () => {
+    if (readError) {
+      // 服务端拒绝写这份草稿（模型文件读不出）；直接告知原因，不发无意义的 PUT
+      setSaveError(readError);
+      return;
+    }
     setSaving(true);
     setSaveError(null);
     setSavedOk(false);
@@ -1852,7 +1867,7 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
     } finally {
       setSaving(false);
     }
-  }, [config, baseline]);
+  }, [config, baseline, readError]);
 
   const providers = Object.entries(config.providers ?? {});
   const activeOAuth = oauthProviders.filter((p) => p.loggedIn);
@@ -2140,7 +2155,9 @@ export function ModelsConfig({ onClose, embedded = false, onAuthStateChange }: {
         <SettingsPageFooter
           fixedHint="~/.pi/agent/models.json"
           dynamicHint={
-            saveError ? (
+            readError ? (
+              <span style={{ color: "var(--status-danger)" }}>{t("models_configUnreadable")}</span>
+            ) : saveError ? (
               <span style={{ color: "var(--status-danger)" }}>{saveError}</span>
             ) : savedOk ? (
               <span style={{ color: "var(--accent)" }}>{t("common_saved")}</span>

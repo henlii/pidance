@@ -14,6 +14,8 @@
  *   显式 null → 删除，正常字符串 → 更新；headers 为 merge 覆盖层——
  *   未提交键保留、null 删除、掩码保留现值（provider/model/modelOverride
  *   三级同规则）。
+ * - 读不出（坏 JSON / 非对象 / providers 非对象）抛 ModelsConfigReadError：
+ *   只读投影不降级为空配置，保存路径直接拒绝写盘（GET 422 / PUT 409）。
  * - 原子写：同目录临时文件独占创建（wx）+ chmod 保持权限 + rename 覆盖，
  *   失败清理临时文件、不破坏原文件（参考 lib/file-save.ts 模式）。
  */
@@ -66,23 +68,55 @@ export class ModelsConfigError extends Error {
   }
 }
 
+/**
+ * models.json 存在但读不出可用内容。
+ *
+ * 这种情况下绝不允许覆盖写：面板保存的是整份草稿，空读会把 pi 的 provider 与
+ * apiKey 全部写没（GET 422 / PUT 409，只读投影与保存路径都不降级）。
+ */
+export class ModelsConfigReadError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ModelsConfigReadError";
+  }
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // ── 读取 ─────────────────────────────────────────────────────────────────────
 
+/**
+ * 与 pi 的 JSON 加载器同口径：去掉 `//` 行注释与尾逗号，字符串字面量原样保留。
+ * pi 能加载的文件在我们面板里必须也能读——否则一次保存就会清空它。
+ */
+function stripJsonComments(input: string): string {
+  return input
+    .replace(/"(?:\\.|[^"\\])*"|\/\/[^\n]*/g, (match) => (match[0] === '"' ? match : ""))
+    .replace(/"(?:\\.|[^"\\])*"|,(\s*[}\]])/g, (match, tail?: string) => tail ?? (match[0] === '"' ? match : ""));
+}
+
 function readModelsFile(modelsPath: string): { data: Record<string, unknown>; baseline: Baseline | null } {
   if (!existsSync(modelsPath)) return { data: { providers: {} }, baseline: null };
   const stats = statSync(modelsPath);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(modelsPath, "utf8"));
-  } catch {
-    parsed = { providers: {} }; // 损坏降级：视作空配置，不抛 500
+    const content = readFileSync(modelsPath, "utf8").replace(/^\uFEFF/, "");
+    parsed = content.trim() ? JSON.parse(stripJsonComments(content)) : { providers: {} };
+  } catch (error) {
+    throw new ModelsConfigReadError(
+      `无法解析 ${modelsPath}：${error instanceof Error ? error.message : String(error)}`,
+    );
   }
-  if (!isPlainObject(parsed) || !isPlainObject(parsed.providers)) parsed = { providers: {} };
-  return { data: parsed as Record<string, unknown>, baseline: { mtimeMs: stats.mtimeMs, size: stats.size } };
+  if (!isPlainObject(parsed)) {
+    throw new ModelsConfigReadError(`无法解析 ${modelsPath}：期望一个 JSON 对象`);
+  }
+  if (parsed.providers !== undefined && !isPlainObject(parsed.providers)) {
+    throw new ModelsConfigReadError(`无法解析 ${modelsPath}：providers 必须是对象`);
+  }
+  const data = { ...parsed, providers: isPlainObject(parsed.providers) ? parsed.providers : {} };
+  return { data, baseline: { mtimeMs: stats.mtimeMs, size: stats.size } };
 }
 
 // ── GET 脱敏投影 ─────────────────────────────────────────────────────────────
@@ -388,12 +422,29 @@ export interface SaveModelsConfigResult {
   baseline: Baseline;
 }
 
+export interface SaveModelsConfigOptions {
+  /**
+   * 当前文件读不出时仍允许写。只给 JSON 原文模式用：用户在编辑器里看到原文
+   * 并显式整份替换，这是修复坏文件的唯一入口；基础面板不传 —— 它保存的是
+   * 从投影生成的草稿，读不出就拒绝写。
+   */
+  allowUnreadableCurrent?: boolean;
+}
+
 export function saveModelsConfig(
   modelsPath: string,
   incoming: unknown,
   baseline: Baseline | null,
+  options: SaveModelsConfigOptions = {},
 ): SaveModelsConfigResult {
-  const current = readModelsFile(modelsPath);
+  let current: { data: Record<string, unknown>; baseline: Baseline | null };
+  try {
+    // 读不出即抛：不拿未读到的文件当空配置写回
+    current = readModelsFile(modelsPath);
+  } catch (error) {
+    if (!options.allowUnreadableCurrent) throw error;
+    current = { data: { providers: {} }, baseline: null };
+  }
   if (baseline) {
     if (!current.baseline) {
       throw new ModelsConfigError("conflict", "配置文件已被删除，请刷新后重试");

@@ -39,6 +39,9 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: __dirname,
   },
+  // 仅使用静态 logo，无需 /_next/image 优化端点；显式关闭以消除 sharp/libheif
+  // 的图片优化攻击面（GHSA-2xp9-vwfh-vxw4 影响 16.0.0–16.3.2）。
+  images: { unoptimized: true },
   serverExternalPackages: [
     "undici",
     // 同进程 SDK 必须走 Node require，禁止被 Turbopack/webpack 打包进 server chunk

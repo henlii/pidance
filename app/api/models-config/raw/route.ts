@@ -56,8 +56,9 @@ export async function PUT(req: Request) {
     if (!isPlainObject(parsed)) {
       return NextResponse.json({ error: "models.json must be a JSON object" }, { status: 400 });
     }
-    // 原始 JSON 模式不做 baseline 冲突检测（整文件覆盖意图）；传 null 表示强制写
-    const result = saveModelsConfig(getModelsPath(), parsed, null);
+    // 原始 JSON 模式不做 baseline 冲突检测（整文件覆盖意图）；allowUnreadableCurrent
+    // 让用户能把坏文件从编辑器里改回来。
+    const result = saveModelsConfig(getModelsPath(), parsed, null, { allowUnreadableCurrent: true });
     invalidateModelsCache();
     return NextResponse.json({ ok: true, ...result });
   } catch (error) {
@@ -71,4 +72,4 @@ export async function PUT(req: Request) {
     );
   }
 }
-
+

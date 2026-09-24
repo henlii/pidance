@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { guardRequest, type RequestGuardHeaders } from "@/lib/request-guard";
+import { authIdentity, guardRequest, type RequestGuardHeaders } from "@/lib/request-guard";
+import { getAuthRetryAfterMs, retryAfterSeconds } from "@/lib/auth-throttle";
 import { readServerConfig } from "@/lib/pidance-server-config";
 
 // 请求安全中间件（对齐上游 pi-web 0.8.6 + P0 fail-closed + #18 UI 会话）：
@@ -9,6 +10,7 @@ import { readServerConfig } from "@/lib/pidance-server-config";
 //    （~/.pi/agent/pidance-server.json）启用时接受 Cookie 会话或 Basic（用户名 pi）
 // 4. 兜底：未设密码时仅回环；非回环 401
 // 5. 页面未认证：放行到前端由页内登录处理（不再弹 Basic 对话框）；API 未认证返回 401 JSON
+// 6. 认证限流：带 Basic 头的请求计一次密码尝试（与登录表单共用桶），封锁期 429 + Retry-After
 export const runtime = "nodejs";
 
 function toHeaders(req: NextRequest): RequestGuardHeaders {
@@ -21,6 +23,10 @@ function toHeaders(req: NextRequest): RequestGuardHeaders {
     secFetchUser: req.headers.get("sec-fetch-user"),
     authorization: req.headers.get("authorization"),
     cookie: req.headers.get("cookie"),
+    // 对端地址来自自管 server 注入并覆盖过的头（见 bin/pidance-http-server.js），
+    // 不信任客户端自带的 x-forwarded-for（除非显式开 PIDANCE_TRUST_PROXY）。
+    peerAddress: req.headers.get("x-pidance-peer-ip"),
+    xForwardedFor: req.headers.get("x-forwarded-for"),
     method: req.method,
     url: req.url,
     pathname: req.nextUrl.pathname,
@@ -29,8 +35,12 @@ function toHeaders(req: NextRequest): RequestGuardHeaders {
 
 export function middleware(req: NextRequest) {
   const isApi = req.nextUrl.pathname === "/api" || req.nextUrl.pathname.startsWith("/api/");
-  const verdict = guardRequest(toHeaders(req), process.env, {
+  const headers = toHeaders(req);
+  // 与判定用同一个时间戳读 Retry-After，避免两次数值不一致
+  const now = Date.now();
+  const verdict = guardRequest(headers, process.env, {
     config: readServerConfig(),
+    now,
   });
   switch (verdict) {
     case "untrusted-host":
@@ -39,6 +49,19 @@ export function middleware(req: NextRequest) {
         : new NextResponse("Untrusted request", { status: 403 });
     case "csrf":
       return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
+    case "throttled": {
+      // 连续失败后的指数退避：Basic 与登录表单共用同一个桶
+      const retryAfter = retryAfterSeconds(
+        getAuthRetryAfterMs(authIdentity(headers, process.env), now),
+      );
+      return NextResponse.json(
+        { error: "Too many failed attempts", locked: true },
+        {
+          status: 429,
+          headers: { "Retry-After": String(retryAfter), "Cache-Control": "no-store" },
+        },
+      );
+    }
     case "auth-required":
       // API：401 JSON，不附 WWW-Authenticate（避免浏览器 Basic 弹窗抢主路径）
       if (isApi) {
