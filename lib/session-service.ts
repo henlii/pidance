@@ -27,7 +27,7 @@ import {
   planSelectLeafExact,
 } from "./session-tree-navigation";
 import { invalidateSessionReadCache } from "./session-read-manager-cache";
-import { resolveEntryLinesProvider } from "./extension-entry-renderers";
+import { resolveEntryLinesProvider, resolveMessageLinesProvider } from "./extension-entry-renderers";
 import { resolveToolMetaProvider } from "./tool-display-meta";
 import {
   getRpcSession,
@@ -45,6 +45,7 @@ import {
 import {
   buildSessionContext,
   type EntryLinesResolver,
+  type MessageLinesResolver,
   type ToolMetaResolver,
   isPidanceOwnCustomType,
   buildSessionPathLocal,
@@ -251,6 +252,14 @@ export type SessionServiceDeps = {
     cwd: string;
     agentDir?: string;
   }) => Promise<EntryLinesResolver | null>;
+  /**
+   * 插件自定义消息的渲染器解析（issue #76）。
+   * 缺省走扩展加载（与 entry 渲染器共用同一份缓存）；测试注入以避免加载真实扩展。
+   */
+  resolveMessageLinesProvider?: (options: {
+    cwd: string;
+    agentDir?: string;
+  }) => Promise<MessageLinesResolver | null>;
   /**
    * 工具定义显示元数据的解析（issue #75）。
    * 缺省走扩展加载（可缓存）；测试注入以避免加载真实扩展。
@@ -470,6 +479,27 @@ function needsForeignEntryRenderers(
 }
 
 /**
+ * 是否存在需要插件消息渲染器的自定义消息（issue #76）。
+ *
+ * `compaction` / `branch_summary` 是 SDK 自己的 custom_message，客户端有专门视图
+ * （CompactionMessageView / BranchSummaryMessageView），**不**交给插件渲染器覆盖：
+ * 插件给这两个名字注册渲染器属于撞名，不该改变内置展示。
+ */
+const BUILTIN_CUSTOM_MESSAGE_TYPES = new Set(["compaction", "branch_summary"]);
+
+function needsForeignMessageRenderers(
+  entries: Parameters<typeof buildSessionContext>[0],
+): boolean {
+  return entries.some((entry) => {
+    const e = entry as { type?: unknown; customType?: unknown };
+    return e.type === "custom_message"
+      && typeof e.customType === "string"
+      && e.customType !== ""
+      && !BUILTIN_CUSTOM_MESSAGE_TYPES.has(e.customType);
+  });
+}
+
+/**
  * 解析工具定义的显示元数据（issue #75）。
  *
  * cwd 取会话头（插件按项目加载），agentDir 与归档/插件面板同一口径。
@@ -523,6 +553,27 @@ async function resolveForeignEntryLines(
   const cwd = readSessionHeader(filePath)?.cwd;
   if (!cwd) return null;
   const resolveProvider = deps.resolveEntryLinesProvider ?? resolveEntryLinesProvider;
+  try {
+    return await resolveProvider({
+      cwd,
+      agentDir: deps.archiveAgentDir?.() ?? getAgentDir(),
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 自定义消息的渲染器解析（issue #76）。与 entry 侧同一口径：cwd 取会话头，
+ * 任何失败返回 null（调用方按「退回原文」处理）。
+ */
+async function resolveForeignMessageLines(
+  filePath: string,
+  deps: Pick<SessionServiceDeps, "archiveAgentDir" | "resolveMessageLinesProvider">,
+): Promise<MessageLinesResolver | null> {
+  const cwd = readSessionHeader(filePath)?.cwd;
+  if (!cwd) return null;
+  const resolveProvider = deps.resolveMessageLinesProvider ?? resolveMessageLinesProvider;
   try {
     return await resolveProvider({
       cwd,
@@ -1060,6 +1111,9 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       const navEntryLines = needsForeignEntryRenderers(navEntries)
         ? await resolveForeignEntryLines(navEntries, filePath, deps)
         : null;
+      const navMessageLines = needsForeignMessageRenderers(navEntries)
+        ? await resolveForeignMessageLines(filePath, deps)
+        : null;
       // 工具显示元数据与 getContextPage 同一口径（首屏也走这条路径）。
       const navToolMeta = needsToolDisplayMeta(navEntries)
         ? await resolveToolMeta(filePath, deps)
@@ -1067,6 +1121,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       const { leafId, tree, context, header, sessionName } = buildSessionNavigationSnapshot(sm, {
         ...options,
         ...(navEntryLines ? { entryLines: navEntryLines } : {}),
+        ...(navMessageLines ? { messageLines: navMessageLines } : {}),
         ...(navToolMeta ? { toolMeta: navToolMeta } : {}),
       });
       const parentSessionId = header?.parentSession
@@ -1127,6 +1182,9 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       const entryLines = needsForeignEntryRenderers(entries)
         ? await resolveForeignEntryLines(entries, view.filePath, deps)
         : null;
+      const messageLines = needsForeignMessageRenderers(entries)
+        ? await resolveForeignMessageLines(view.filePath, deps)
+        : null;
       // 工具定义的显示元数据（issue #75）：只影响展示（标题与外壳），不参与执行语义。
       // 与 entry 渲染器同一口径：仅当 entries 里真有工具调用、且该会话有插件时才有元数据。
       const toolMeta = needsToolDisplayMeta(entries)
@@ -1143,6 +1201,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         deferThinking: options.deferThinking,
         deferToolResultImages: options.deferToolResultImages,
         ...(entryLines ? { entryLines } : {}),
+        ...(messageLines ? { messageLines } : {}),
         ...(toolMeta ? { toolMeta } : {}),
       });
       const limit = options.limit;

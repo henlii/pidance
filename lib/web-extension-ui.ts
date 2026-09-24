@@ -493,7 +493,7 @@ export function createWebExtensionUIAdapter(
       },
       () => renderWidth,
       () => renderRows,
-      { isEditorFocused },
+      { isEditorFocused, onUnsupported: notifyUnsupported },
     );
     entry.requestRender = tui.requestRender;
 
@@ -713,7 +713,11 @@ export function createWebExtensionUIAdapter(
         // 最后一次渲染的行：hidden 切换时要把完整状态重发一遍（前端按事件整体替换）
         let lastLines: string[] = [];
         let hidden = false;
+        // hide() 之后面板被永久移除（pi-tui 语义）：后续渲染一律不再下发，
+        // 否则插件一次 invalidate 就把「已摘掉」的面板又画回来。
+        let removed = false;
         const emitCustom = () => {
+          if (removed) return;
           emit({
             type: "extension_ui_request",
             id,
@@ -756,16 +760,38 @@ export function createWebExtensionUIAdapter(
          * 交给插件的 overlay 句柄。Web 端只有一层面板，focus/unfocus 没有
          * 可切换的目标；setHidden 是真效果：前端隐藏面板，插件借此让用户看到
          * 背后的会话内容（rpiv-ask-user 的折叠键就靠它，见它的 set_overlay_hidden）。
+         *
+         * `hide()` 按 pi-tui 的 OverlayHandle 契约实现：**永久移除，不能再显示**
+         * （TUI 是把它从 overlay 栈里 splice 掉，之后 setHidden(false) 不会让它回来）。
+         * 之前把它等同于 setHidden(true) 是个语义谎言：插件若在 hide() 之后再
+         * setHidden(false)，TUI 里永不复活，我们这里会重新弹出面板。
+         * hide() 不 resolve 插件的 await（与 TUI 一致：它只是把 overlay 摘掉）。
          */
         const overlayHandle = {
           hide() {
-            setHidden(true);
+            if (removed || doneCalled) return;
+            removed = true;
+            hidden = true;
+            customSessions.delete(id);
+            if (customSnapshot?.id === id) customSnapshot = null;
+            // 前端按 closed 事件拆除面板；插件自己的 promise 仍挂着（TUI 的 hide() 也只摘
+            // overlay，不 resolve）。
+            emit({
+              type: "extension_ui_request",
+              id,
+              method: "custom",
+              closed: true,
+              lines: [],
+            });
           },
-          setHidden,
+          setHidden(value: boolean) {
+            if (removed) return;
+            setHidden(value);
+          },
           isHidden: () => hidden,
           focus() {},
           unfocus() {},
-          isFocused: () => !hidden,
+          isFocused: () => !removed && !hidden,
           getBounds: () => undefined,
         };
         const handleInput = (data: string) => {
@@ -789,7 +815,7 @@ export function createWebExtensionUIAdapter(
         customSessions.set(id, { handleInput, handleMouse, done });
         const tui = createHeadlessCustomUiTui(() => {
           emitLines();
-        }, () => renderWidth, () => renderRows, { isEditorFocused });
+        }, () => renderWidth, () => renderRows, { isEditorFocused, onUnsupported: notifyUnsupported });
         customRenderers.add(emitLines);
         const theme = loadPiTheme() ?? uiContext.theme;
         // onHandle 在组件建好之后调，对齐 pi-tui 的顺序（先 showOverlay，再给句柄）
