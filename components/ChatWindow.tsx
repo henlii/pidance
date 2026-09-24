@@ -44,7 +44,7 @@ import { useDragDrop } from "@/hooks/useDragDrop";
 import { useExtensionTerminalInput } from "@/hooks/useExtensionTerminalInput";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useMessageJump, type MessageJumpRailHandle } from "@/hooks/useMessageJump";
-import { useRenderWidth } from "@/hooks/useRenderWidth";
+import { useRenderSize } from "@/hooks/useRenderSize";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { SessionActivity } from "@/lib/session-activity";
 import { DEFAULT_SESSION_HISTORY_PAGE } from "@/lib/session-context-window";
@@ -211,9 +211,9 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     enabled: Boolean(extensionCustomUi?.hidden) && extensionTerminalInputListenerCount > 0,
   });
 
-  // 插件组件按可用列数排版：视口变窄时让服务端重新渲染，而不是交给 CSS 硬断行
-  // （硬断行会把方框/表格/选中条拆散，见 lib/render-width.ts）。
-  useRenderWidth({
+  // 插件组件按可用尺寸排版与裁切：视口变化时让服务端重新渲染，而不是交给 CSS 硬断行
+  // （硬断行会把方框/表格/选中条拆散，见 lib/render-width.ts）。列数与行数同源上报。
+  useRenderSize({
     sessionId: sessionIdRef.current,
     containerRef: scrollContainerRef,
     enabled: !isReadOnly,

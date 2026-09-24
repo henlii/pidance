@@ -70,19 +70,22 @@ export interface HeadlessCustomUiTui {
 export function createHeadlessCustomUiTui(
   requestRender: (force?: boolean) => void,
   columns: number | (() => number) = DEFAULT_CUSTOM_UI_COLUMNS,
-  rows = DEFAULT_CUSTOM_UI_ROWS,
+  rows: number | (() => number) = DEFAULT_CUSTOM_UI_ROWS,
   options: HeadlessCustomUiTuiOptions = {},
 ): HeadlessCustomUiTui {
   const readColumns = typeof columns === "function" ? columns : () => columns;
-  // 尺寸用 getter：插件是在 render() 里读 tui.terminal.columns 做布局判断的
-  // （如 rpiv-ask-user 的 dialog-builder），视口变化后它必须与下一次 render(width)
-  // 的参数一致。此前是冻结的常量，宽度变了这边还是旧值。
+  const readRows = typeof rows === "function" ? rows : () => rows;
+  // 尺寸用 getter：插件是在 render() 里读 tui.terminal.columns/rows 做布局与裁切判断的
+  // （如 rpiv-ask-user 的 dialog-builder、pi-subagents 的 fleet 详情视口），
+  // 视口变化后它们必须与下一次 render(width) 的参数一致。
+  // 行数此前是构造时的常量 40：插件按它裁切时会把本可以显示的行真丢掉
+  // （裁掉的行不在输出里），所以两个维度必须同源。
   const terminal = {
     get columns() {
       return readColumns();
     },
     get rows() {
-      return rows;
+      return readRows();
     },
     kittyProtocolActive: false as const,
   };

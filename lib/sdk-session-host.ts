@@ -122,6 +122,7 @@ import {
   SEND_FILE_TO_USER_TOOL_NAME,
   type SendFileToUserParams,
 } from "./send-file-to-user";
+import { DEFAULT_CUSTOM_UI_ROWS } from "./custom-ui-terminal";
 import type { BinaryMessageData, BinaryMessageInput } from "./types";
 import {
   loadPiTheme,
@@ -332,11 +333,13 @@ export class SdkSessionHost {
   private readonly renderBridgeTheme: Theme | null = loadPiTheme();
 
   /**
-   * 当前渲染列数：由前端按可用宽度上报（默认 RENDER_WIDTH）。
-   * 插件的组件按这个宽度排版，所以窄视口不应该再按桌面宽度渲染 ——
-   * 否则方框/表格会被 CSS 硬断行打乱。
+   * 当前渲染尺寸：由前端按可用宽高上报（默认 RENDER_WIDTH / DEFAULT_CUSTOM_UI_ROWS）。
+   * 插件的组件按这个宽度排版、按这个高度裁切，所以视口变化后两个维度都要跟着变 ——
+   * 只报宽度会让按 rows 裁切的插件（pi-subagents 的 fleet 详情视口）继续按 40 行裁，
+   * 裁掉的行不在输出里。
    */
   private renderWidth = RENDER_WIDTH;
+  private renderRows = DEFAULT_CUSTOM_UI_ROWS;
   /** toolCallId → 渲染状态（跨 tool_call → update → result 共享）。 */
   private readonly toolRenderStates = new Map<string, ToolRenderStateEntry>();
   /**
@@ -348,9 +351,11 @@ export class SdkSessionHost {
   /** tool_execution_update 渲染最短间隔（ms），防高频 partial 阻塞事件循环。 */
   private static readonly PARTIAL_RENDER_MIN_INTERVAL_MS = 100;
 
-  /** 渲染列数边界：太窄会把插件界面压烂，太宽没有意义。 */
+  /** 渲染尺寸边界：太窄会把插件界面压烂，太宽没有意义；高度下限保证插件不至于只拿到几行。 */
   private static readonly RENDER_WIDTH_MIN = 40;
   private static readonly RENDER_WIDTH_MAX = 240;
+  private static readonly RENDER_ROWS_MIN = 10;
+  private static readonly RENDER_ROWS_MAX = 200;
 
   constructor(private readonly options: SdkSessionHostOptions) {
     this.realSessionId = options.sessionId;
@@ -2872,9 +2877,9 @@ export class SdkSessionHost {
         return null;
       }
 
+      // 旧名：改名（set_render_width → set_render_size）之前加载的页面仍会发它。
+      // 只更新宽度，行数保持当前值 —— 丢掉上报会让那些页面的插件按默认宽度排版。
       case "set_render_width": {
-        // 前端按可用宽度上报列数：插件组件按这个宽度排版，所以视口变窄时
-        // 不应该再按桌面宽度渲染（否则方框/表格会被 CSS 硬断行打乱）。
         const raw = typeof command.width === "number" ? command.width : NaN;
         if (!Number.isFinite(raw)) return null;
         const width = Math.min(
@@ -2883,8 +2888,33 @@ export class SdkSessionHost {
         );
         if (width === this.renderWidth) return null;
         this.renderWidth = width;
-        this.extensionUi?.setRenderWidth(width);
+        this.extensionUi?.setRenderSize({ width, rows: this.renderRows });
         this.rerenderToolLines();
+        return null;
+      }
+
+      case "set_render_size": {
+        // 前端按可用宽高上报尺寸：插件组件按这个宽度排版（窄视口不按桌面宽度渲染，
+        // 否则方框/表格会被 CSS 硬断行打乱），并按这个高度裁切（行数是常量 40 时
+        // 插件会丢掉本可以显示的行，而裁掉的行不在输出里）。
+        const rawWidth = typeof command.width === "number" ? command.width : NaN;
+        const rawRows = typeof command.rows === "number" ? command.rows : NaN;
+        if (!Number.isFinite(rawWidth) || !Number.isFinite(rawRows)) return null;
+        const width = Math.min(
+          SdkSessionHost.RENDER_WIDTH_MAX,
+          Math.max(SdkSessionHost.RENDER_WIDTH_MIN, Math.round(rawWidth)),
+        );
+        const rows = Math.min(
+          SdkSessionHost.RENDER_ROWS_MAX,
+          Math.max(SdkSessionHost.RENDER_ROWS_MIN, Math.round(rawRows)),
+        );
+        const widthChanged = width !== this.renderWidth;
+        if (!widthChanged && rows === this.renderRows) return null;
+        this.renderWidth = width;
+        this.renderRows = rows;
+        this.extensionUi?.setRenderSize({ width, rows });
+        // 工具行只依赖宽度；只有宽度变了才需要重排（行数变化不该带来额外渲染开销）。
+        if (widthChanged) this.rerenderToolLines();
         return null;
       }
 
