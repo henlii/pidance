@@ -22,10 +22,18 @@ type AuthEvent = {
 };
 
 import { OAUTH_PROVIDER_IDS } from "@/lib/oauth-providers";
+import { createLoginRequestToken } from "@/lib/login-request-token";
 
-// In-memory registry: loginToken -> resolve/reject for the manualCodeInput promise
+/** 挂起记录：token 只做一次性凭据，provider 与结算函数都存在记录里。 */
+type PendingLoginCallbacks = {
+  provider: string;
+  resolve: (v: string) => void;
+  reject: (e: Error) => void;
+};
+
+// In-memory registry: loginToken -> pending callbacks for the manualCodeInput promise
 declare global {
-  var __piLoginCallbacks: Map<string, { resolve: (v: string) => void; reject: (e: Error) => void }> | undefined;
+  var __piLoginCallbacks: Map<string, PendingLoginCallbacks> | undefined;
 }
 
 function getCallbackRegistry() {
@@ -50,8 +58,8 @@ export async function POST(
   if (!callbacks) {
     return Response.json({ error: "No pending login for token" }, { status: 404 });
   }
-  // Verify token belongs to this provider (token format: "<provider>-<ts>-<random>")
-  if (!token.startsWith(`${provider}-`)) {
+  // token 属于哪个 provider 以挂起记录为准：token 本身是不可预测的 UUID，不含 provider
+  if (callbacks.provider !== provider) {
     return Response.json({ error: "Token does not match provider" }, { status: 400 });
   }
 
@@ -117,11 +125,12 @@ export async function GET(
       let pendingManualRequest: { token: string; promise: Promise<string> } | undefined;
 
       const createClientInputRequest = () => {
-        const token = `${provider}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const token = createLoginRequestToken();
         activeTokens.add(token);
 
         const promise = new Promise<string>((resolve, reject) => {
           registry.set(token, {
+            provider,
             resolve: (value) => {
               activeTokens.delete(token);
               registry.delete(token);

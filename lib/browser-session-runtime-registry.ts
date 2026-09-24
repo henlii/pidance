@@ -272,6 +272,8 @@ type RuntimeSlot = {
   hydrateAppliedSeq: number;
   /** 无视图且空闲时延迟关闭 SSE 的兜底定时器 */
   idleCloseTimer: TimerHandle | null;
+  /** 页面隐藏超阈值时关闭本标签 SSE 的定时器（见 HIDDEN_TAB_SSE_CLOSE_DELAY_MS） */
+  hiddenCloseTimer: TimerHandle | null;
   /** SSE 确连失败后的有限重试：当前定时器与已用次数 */
   sseRetryTimer: TimerHandle | null;
   sseRetryAttempt: number;
@@ -287,6 +289,16 @@ type ViewAttachment = {
 
 /** slot 空闲 SSE 关闭兜底窗口：切走后留一小段时间给快速切回，随后释放服务端 host。 */
 export const IDLE_SSE_CLOSE_DELAY_MS = 5_000;
+
+/**
+ * 标签页隐藏多久之后关闭本标签的事件流（issue #86）。
+ *
+ * 5 分钟这个取值的理由：够短，手机切后台/锁屏后不会长期占着服务端 SSE 与 host；
+ * 够长，覆盖切 App、锁屏、接个电话再回来的常见往返，不至于每次回来都重建连接。
+ * 与 IDLE_SSE_CLOSE_DELAY_MS 的区别：那个的判据是「无人观看」，这个的观看者就是
+ * 隐藏的标签页自己（视图还挂着，只是整页不可见）。
+ */
+export const HIDDEN_TAB_SSE_CLOSE_DELAY_MS = 5 * 60 * 1000;
 
 /** 显式取消请求的上限：Stop 不得被不响应的服务端拖死（超时即未知）。 */
 export const CANCEL_SUBMISSION_TIMEOUT_MS = 5_000;
@@ -339,6 +351,11 @@ export type BrowserSessionRuntimeRegistry = {
   dropLocal(sessionId: string, key: string): boolean;
   applyEvent(sessionId: string, event: AgentStreamEvent): void;
   ensureEventsConnected(sessionId: string): void;
+  /**
+   * 上报本标签页的可见性（issue #86）：隐藏 ≥ HIDDEN_TAB_SSE_CLOSE_DELAY_MS 后
+   * 关掉本标签的事件流，回前台取消待执行的关闭（重连由调用方的激活路径负责）。
+   */
+  setTabVisibility(visible: boolean): void;
   /** 本端是否正有一条**有效**的事件流（CLOSED / 被 404 拒过的不算）。
    *  判断「要不要轮询」必须用它：`getEventSource` 对已死的流也返回 source。 */
   hasActiveEventStream(sessionId: string): boolean;
@@ -396,6 +413,7 @@ function createSlot(sessionId: string): RuntimeSlot {
     hydrateSeq: 0,
     hydrateAppliedSeq: 0,
     idleCloseTimer: null,
+    hiddenCloseTimer: null,
     sseRetryTimer: null,
     sseRetryAttempt: 0,
     metrics: {},
@@ -476,6 +494,8 @@ export function createBrowserSessionRuntimeRegistry(
   const clearSchedule: (id: TimerHandle) => void = deps.clearSchedule
     ?? ((id) => clearTimeout(id));
   const slots = new Map<string, RuntimeSlot>();
+  /** 本标签页可见性（issue #86）：隐藏期间新建的连接也要按阈值关掉。 */
+  let tabVisible = true;
   /**
    * 别名 → 规范 id（new 会话 promote 后，pending id 仍要能命中同一 slot）。
    * 只登记映射、不复制 slots 键：否则同一 slot 会有两个键，两边各自 attach
@@ -584,6 +604,55 @@ export function createBrowserSessionRuntimeRegistry(
       // 无在途提交、无未落盘记录时才删，否则只收流不删数据。
       evictIdleSlots();
     }, IDLE_SSE_CLOSE_DELAY_MS);
+  };
+
+  /**
+   * 关闭**本标签**的事件流（隐藏超阈值，issue #86）。
+   *
+   * 与 closeIdleEventStream 的区别：不要求「无人观看」——这里的观看者就是隐藏的
+   * 标签页自己。只收流，不动 slot、timeline 与任何本地记录：回前台走既有激活路径
+   * （useAgentSession 的 syncOnTabReturn：强制重连 + reconcile + 重拉尾页）。
+   *
+   * 每个标签页有自己的 registry 实例，所以「隐藏」天然按标签判断，不会影响仍在
+   * 前台的另一个标签；服务端 host 是否 dispose 仍由它自己「有无监听者」决定。
+   * 代价（有意接受）：隐藏期内本标签收不到 agent_end 等事件，完成提示与队列状态
+   * 要等回到前台的对账才收口。
+   */
+  const closeHiddenTabEventStream = (slot: RuntimeSlot) => {
+    if (slot.hiddenCloseTimer) {
+      clearSchedule(slot.hiddenCloseTimer);
+      slot.hiddenCloseTimer = null;
+    }
+    // 待执行的重试也要撤：否则它会在隐藏期间又接一条流回来
+    if (slot.sseRetryTimer) {
+      clearSchedule(slot.sseRetryTimer);
+      slot.sseRetryTimer = null;
+      slot.sseRetryAttempt = 0;
+    }
+    const manager = slot.eventStream;
+    if (!manager) return;
+    slot.eventStream = null;
+    manager.close();
+    publish(slot);
+  };
+
+  const scheduleHiddenTabEventStreamClose = (slot: RuntimeSlot) => {
+    if (slot.hiddenCloseTimer) {
+      clearSchedule(slot.hiddenCloseTimer);
+      slot.hiddenCloseTimer = null;
+    }
+    // 没有流就无需调度：之后重建连接时（connectEvents）会按当前可见性重新决定
+    if (!slot.eventStream) return;
+    slot.hiddenCloseTimer = schedule(() => {
+      slot.hiddenCloseTimer = null;
+      closeHiddenTabEventStream(slot);
+    }, HIDDEN_TAB_SSE_CLOSE_DELAY_MS);
+  };
+
+  const cancelHiddenTabEventStreamClose = (slot: RuntimeSlot) => {
+    if (!slot.hiddenCloseTimer) return;
+    clearSchedule(slot.hiddenCloseTimer);
+    slot.hiddenCloseTimer = null;
   };
 
   /**
@@ -941,6 +1010,10 @@ export function createBrowserSessionRuntimeRegistry(
   const SSE_ENSURE_RETRY_DELAYS_MS = [500, 1_500, 3_000];
 
   const connectEvents = (slot: RuntimeSlot) => {
+    // 隐藏期间不新建连接（issue #86）：流已按阈值收掉后，不能被轮询/重建路径又接回来
+    // ——否则就成了「关掉→几秒后重建」的循环，等于没收。回前台由 setTabVisibility(true)
+    // 之后的激活路径（syncOnTabReturn → ensureEventsConnected）重连。
+    if (!tabVisible) return;
     // 挂载/新 run 到来：取消待执行的空闲关闭与重试，保持连接。
     if (slot.idleCloseTimer) {
       clearSchedule(slot.idleCloseTimer);
@@ -1430,6 +1503,14 @@ export function createBrowserSessionRuntimeRegistry(
       // 重连也只尝试当前 live host；焦点/可见性恢复不得把冷历史会话唤醒。
       const slot = getSlot(sessionId, true)!;
       connectEvents(slot);
+    },
+    setTabVisibility(visible) {
+      tabVisible = visible;
+      // slots 只存规范 id：别名与它指向同一 slot，不需要额外遍历。
+      for (const slot of slots.values()) {
+        if (visible) cancelHiddenTabEventStreamClose(slot);
+        else scheduleHiddenTabEventStreamClose(slot);
+      }
     },
     getEventSource(sessionId) {
       return getSlot(sessionId, false)?.eventStream?.getCurrentSource() ?? null;
