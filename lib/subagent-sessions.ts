@@ -155,10 +155,17 @@ export function validateSubagentFileForDeletion(file: string, parentRoot: string
   } catch { return false; }
 }
 
+/**
+ * 删除已验证的子会话文件。
+ *
+ * `invalidatePath` 按会话 id 清路径缓存；`invalidateFile` 按文件路径清调用方的
+ * 解析结果缓存（如只读视图缓存）——删掉的文件不能留下已解析的视图。
+ */
 export function deleteValidatedSubagents(
   children: DiscoveredSubagent[],
   parentRoot: string,
   invalidatePath: (id: string) => void,
+  invalidateFile?: (filePath: string) => void,
 ): number {
   let skipped = 0;
   for (const child of [...children].sort((a, b) => b.path.length - a.path.length)) {
@@ -177,6 +184,7 @@ export function deleteValidatedSubagents(
       }
       unlinkSync(child.path);
       invalidatePath(child.header.id);
+      invalidateFile?.(child.path);
       let directory = dirname(child.path);
       for (let level = 0; level < 4; level++) {
         try {

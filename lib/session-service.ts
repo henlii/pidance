@@ -21,6 +21,7 @@ import { buildSessionExport, type SessionExportPayload } from "./session-html-ex
 import { parseContextLimitParam, sliceContextBefore, sliceContextTail, DEFAULT_SESSION_HISTORY_PAGE, DEFAULT_SESSION_TAIL_LIMIT } from "./session-context-window";
 import { getThinkingText, isThinkingLikeType } from "./thinking-content";
 import { clearLeafSidecar, writeLeafSidecar } from "./session-leaf-sidecar";
+import { invalidateSessionReadCache } from "./session-read-manager-cache";
 import {
   getRpcSession,
   waitForSessionStart,
@@ -203,7 +204,8 @@ export type SessionServiceSubmissionApi = {
 };
 
 export type SessionServiceDeps = {
-  listAllSessions: () => Promise<SessionInfo[]>;
+  /** allowStale 只给「目录扫描就够」的调用方（搜索范围过滤）；存在性/权限判定不得用。 */
+  listAllSessions: (options?: { allowStale?: boolean }) => Promise<SessionInfo[]>;
   resolveSessionPath: (sessionId: string) => Promise<string | null>;
   getRpcSession: (sessionId: string) => LiveAgentSession | undefined;
   waitForSessionStart?: (sessionId: string) => Promise<string | null>;
@@ -777,11 +779,14 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         }
         clearLeafSidecar(filePath);
+        // 只读视图缓存按指纹自动失效；这里显式释放，不留已删会话的解析结果
+        invalidateSessionReadCache(filePath);
         const parentRoot = resolve(filePath.slice(0, -6));
         const skippedSubagents = deleteValidatedSubagents(
           verifiedChildren,
           parentRoot,
           invalidateSessionPathCache,
+          invalidateSessionReadCache,
         );
 
         // 5. 删除成功后才清队列/hold/未读时钟。
@@ -1269,7 +1274,9 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       });
       const scope = options.scope ?? "active";
       if (scope === "all") return result;
-      const allSessions = await deps.listAllSessions();
+      // 这里只用目录做归档范围过滤：agent 活动会不停作废列表缓存，
+      // 而同步重建要重读每个 fork/subagent 会话（数百 ms），输入会卡。
+      const allSessions = await deps.listAllSessions({ allowStale: true });
       const records = listArchiveRecords(
         deps.archiveFs ?? realArchiveFs,
         deps.archiveAgentDir?.() ?? getAgentDir(),
