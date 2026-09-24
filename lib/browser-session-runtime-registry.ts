@@ -785,7 +785,15 @@ export function createBrowserSessionRuntimeRegistry(
     if (eventMetrics && (typeof eventMetrics.tokensPerSecond === "number" || typeof eventMetrics.ttftMs === "number")) {
       slot.metrics = { ...eventMetrics };
     }
-    if (type === "agent_start") {
+    if (type === "connected") {
+      // 服务端首帧快照：先把运行态对齐，否则紧随其后的 message_* 会被
+      // 「agentRunning 为假 = 过期帧」的防护丢掉。服务端只在本轮确实有流式内容
+      // （消息或工具）时才置 isStreaming，所以这里不会凭空把会话弄成运行中。
+      if ((event as { isStreaming?: unknown }).isStreaming === true) {
+        slot.snapshot.agentRunning = true;
+        slot.snapshot.streamState = { isStreaming: true, streamingMessage: null };
+      }
+    } else if (type === "agent_start") {
       // 新 run：清掉上一轮读数（服务端会在 TTFT 首帧/每个 step 结束重新下发）
       if (!eventMetrics) slot.metrics = {};
       slot.snapshot.promptRunId += 1;

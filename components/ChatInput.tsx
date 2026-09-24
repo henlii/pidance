@@ -427,6 +427,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [atServerResult, setAtServerResult] = useState<{ cwd: string; query: string; matches: FileIndexEntry[] } | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  /** 内建 slash 提交中：同帧重复提交只发一次（ref 挡同步重入，state 给 a11y 用）。 */
+  const builtinCommandPendingRef = useRef(false);
+  const [builtinCommandPending, setBuiltinCommandPending] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const modelButtonRef = useRef<HTMLButtonElement>(null);
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
@@ -1046,13 +1049,31 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       imageKeys: capturedImages.map(attachmentIdentity),
       uploadPaths: capturedUploads.map((item) => item.path),
     };
+    // 内建命令提交期上锁：判断必须在清空输入框**之前**——重复提交时直接返回，
+    // 用户的正文原样留在草稿里，不能被静默吃掉。
+    const isBuiltinCommand = !capturedImages.length
+      && !capturedUploads.length
+      && base.startsWith("/")
+      && Boolean(onBuiltinCommand);
+    if (isBuiltinCommand && builtinCommandPendingRef.current) return;
     clearInput();
-    if (!capturedImages.length && !capturedUploads.length && base.startsWith("/") && onBuiltinCommand) {
-      const result = await onBuiltinCommand(base);
-      if (result.handled) {
-        if (result.error) restoreSentDraft();
-        else sentDraftRef.current = null;
-        return;
+    if (isBuiltinCommand && onBuiltinCommand) {
+      // 命令是异步的（/compact 会真的跑一整轮），同帧双 Enter（或回车+点击）
+      // 会让同一条命令跑两遍。锁只挡「提交中」的重复提交，不硬禁输入框：
+      // /compact 这类命令可以跑很久，禁了整个编辑器比重复提交更烦人
+      // （用户可见的反馈靠 aria-busy）。
+      builtinCommandPendingRef.current = true;
+      setBuiltinCommandPending(true);
+      try {
+        const result = await onBuiltinCommand(base);
+        if (result.handled) {
+          if (result.error) restoreSentDraft();
+          else sentDraftRef.current = null;
+          return;
+        }
+      } finally {
+        builtinCommandPendingRef.current = false;
+        setBuiltinCommandPending(false);
       }
     }
     const submitted = await onSend(
@@ -1714,6 +1735,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         <fieldset
           disabled={blocked}
           aria-disabled={blocked || undefined}
+          aria-busy={builtinCommandPending || undefined}
           style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}
         >
         {/* Queued follow-up messages（steering 即时投递，不在队列块显示） */}

@@ -1,5 +1,6 @@
 import { sessionService } from "@/lib/session-service";
 import { getPidancePrefsBus } from "@/lib/pidance-prefs-bus";
+import { registerEventStreamCloser } from "@/lib/server-shutdown";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +10,7 @@ export const dynamic = "force-dynamic";
 export async function GET(req: Request) {
   const stream = new ReadableStream({
     start(controller) {
+      let unregisterCloser: () => void = () => {};
       const encode = (data: unknown) => {
         const text = `data: ${JSON.stringify(data)}\n\n`;
         controller.enqueue(new TextEncoder().encode(text));
@@ -55,14 +57,23 @@ export async function GET(req: Request) {
         }
       }, 30_000);
 
-      const cleanup = () => {
+      const cleanup = (shutdownReason?: string) => {
         clearInterval(heartbeat);
         unsubscribe();
         unsubscribePrefs();
-        try { controller.close(); } catch { /* already closed */ }
+        unregisterCloser();
+        try {
+          // 进程退出必须用 error 硬断：close() 会被 Next 管道吞掉，进程照样等连接。
+          if (shutdownReason) controller.error(new Error(shutdownReason));
+          else controller.close();
+        } catch { /* already closed */ }
       };
 
-      req.signal?.addEventListener("abort", cleanup);
+      unregisterCloser = registerEventStreamCloser(() =>
+        cleanup("pidance server shutting down"),
+      );
+
+      req.signal?.addEventListener("abort", () => cleanup());
     },
   });
 
