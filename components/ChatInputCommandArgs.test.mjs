@@ -209,10 +209,23 @@ test("源码契约：handleKeyDown 的依赖数组包含参数菜单的四个名
   }
 });
 
-test("源码契约：取候选的 effect 不以 argQuery 对象作依赖（否则每帧重发一次请求）", () => {
+test("源码契约：前缀变化时清空候选并作废在途请求（否则会显示不相干的旧候选/菜单自己弹回来）", () => {
+  const source = readFileSync(SOURCE, "utf8");
+  const idx = source.indexOf("const argQueryKey =");
+  assert.ok(idx > 0, "缺 argQueryKey（前缀变化的判定）");
+  const block = source.slice(idx, source.indexOf("}, [argQueryKey]);", idx) + "}, [argQueryKey]);".length);
+  assert.ok(block.includes("argRequestSeqRef.current += 1"), "递增序号：在途响应据此丢弃");
+  assert.ok(block.includes("setArgItems([])"), "旧候选要立刻清掉");
+  assert.ok(block.includes("}, [argQueryKey]);"), "只绑前缀键，不绑每次新建的对象");
+});
+
+test("源码契约：取候选的 effect 依赖稳定原始值，而不是每次新建的 argQuery（否则每帧重发一次请求）", () => {
   const source = readFileSync(SOURCE, "utf8");
   assert.ok(
-    source.includes("}, [argQuery?.name, argQuery?.prefix, onLoadCommandArgumentCompletions]);"),
-    "effect 依赖必须只留 name/prefix 与回调",
+    source.includes("}, [argCommandName, argPrefix, onLoadCommandArgumentCompletions]);"),
+    "effect 依赖必须是 name/prefix 的原始值 + 回调",
   );
+  const effectStart = source.indexOf("if (argCommandName === null || argPrefix === null");
+  const effectBody = source.slice(effectStart, source.indexOf("}, [argCommandName", effectStart));
+  assert.ok(!effectBody.includes("argQuery"), "effect 体内不得引用 argQuery 对象（会被 exhaustive-deps 记一条）");
 });

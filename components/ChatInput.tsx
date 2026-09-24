@@ -1173,10 +1173,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   })();
 
   const argMenuOpen = argQuery !== null;
+  // 取出原始值再进 effect：argQuery 每次渲染都是新对象，直接依赖它会让父级任何一次重渲染
+  // 都取消防抖、作废序号（等于每帧重发一次请求），而 effect 里引用它又会被 exhaustive-deps 记一条。
+  const argCommandName = argQuery?.name ?? null;
+  const argPrefix = argQuery?.prefix ?? null;
 
   // 前缀（含命令名）变化：立刻丢掉上一轮的候选并作废在途请求 —— 否则会短暂显示
   // 与当前输入不相干的旧候选，或者在途响应回来后重新打开菜单。
-  const argQueryKey = argQuery ? `${argQuery.name} ${argQuery.prefix}` : null;
+  const argQueryKey = argCommandName === null || argPrefix === null ? null : `${argCommandName} ${argPrefix}`;
   useEffect(() => {
     argRequestSeqRef.current += 1;
     setArgItems([]);
@@ -1184,7 +1188,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, [argQueryKey]);
 
   useEffect(() => {
-    if (!argQuery || !onLoadCommandArgumentCompletions) {
+    if (argCommandName === null || argPrefix === null || !onLoadCommandArgumentCompletions) {
       setArgItems([]);
       setArgLoading(false);
       return;
@@ -1193,7 +1197,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     setArgLoading(true);
     // 轻量防抖：连续键入只发最后一次（与 @ 菜单同一思路，避免每个字符一次往返）。
     const timer = setTimeout(() => {
-      void Promise.resolve(onLoadCommandArgumentCompletions(argQuery.name, argQuery.prefix))
+      void Promise.resolve(onLoadCommandArgumentCompletions(argCommandName, argPrefix))
         .then((items) => {
           if (argRequestSeqRef.current !== seq) return; // 迟到的响应不得覆盖最新一次
           setArgItems(Array.isArray(items) ? items : []);
@@ -1208,9 +1212,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         });
     }, 120);
     return () => clearTimeout(timer);
-    // 依赖只留这两个字符串与回调：argQuery 每次渲染都是新对象，把它放进依赖会让父级
-    // 任何一次重渲染都取消防抖、作废序号（等于每帧重发一次请求）。
-  }, [argQuery?.name, argQuery?.prefix, onLoadCommandArgumentCompletions]);
+  }, [argCommandName, argPrefix, onLoadCommandArgumentCompletions]);
 
   /**
    * 应用参数候选：替换**参数区间**（命令名之后到光标处），光标后的内容原样保留。
