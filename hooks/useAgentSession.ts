@@ -1962,7 +1962,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (visible) recovery.notify();
     };
     const onActivate = () => {
-      if (document.visibilityState === "visible") recovery.notify();
+      if (document.visibilityState !== "visible") return;
+      // focus 可能在 visibilitychange 之外单独到达（同一浏览器内切换窗口、移动端冻结恢复）：
+      // 可见性不同步的话 connectEvents 会一直早退，表现为回前台后 SSE 根本不重建（#86 审查）。
+      // 先同步可见性（幂等，会撤掉待执行的隐藏关流），再走既有激活路径重连 + 对账。
+      registry.setTabVisibility(true);
+      recovery.notify();
     };
     // 挂载时先如实报一次：带着「已隐藏」状态恢复的页面（移动端冻结后重建）也要走同一规则。
     registry.setTabVisibility(document.visibilityState === "visible");
