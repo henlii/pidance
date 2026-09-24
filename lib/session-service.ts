@@ -288,6 +288,8 @@ export type SessionService = {
   /** @deprecated 使用 getLive；保留兼容 agent GET 等调用方 */
   getLiveSession(sessionId: string): LiveAgentSession | undefined;
   isLive(sessionId: string): boolean;
+  /** writer 租约是否被另一个活进程持有（只读探针，不 wake、不投影状态）。 */
+  isLockedByOther(sessionId: string): boolean;
   /** 复用或启动；启动前必须 readOnly 门禁 */
   ensureLive(sessionId: string): Promise<LiveAgentSession>;
   /** 销毁 alive/dead wrapper；不存在 no-op；不走 readOnly 门禁 */
@@ -651,6 +653,19 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
     getLive(sessionId) {
       const session = deps.getRpcSession(sessionId);
       return session?.isAlive() ? session : undefined;
+    },
+
+    /**
+     * 本会话的 writer 租约是否被**另一个活进程**持有（锁定条的权威判据）。
+     *
+     * 这是**只读探针**：只读一个租约文件（existsSync + read + kill(0)），不 resolve
+     * 会话路径、不 wake host、不做状态投影 —— 供客户端空闲期低开销轮询
+     * （`GET /api/sessions/[id]/lock`）。本进程自己是 writer、或持有者进程已死
+     * （可立即接管）时都是 false，与 `acquireRunningLease` 同口径。
+     */
+    isLockedByOther(sessionId: string): boolean {
+      if (!sessionId || typeof sessionId !== "string") return false;
+      return isRunningLeaseHeldByOther(sessionId);
     },
 
     getLiveSession(sessionId) {

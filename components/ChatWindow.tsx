@@ -566,6 +566,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
           </div>
         </div>
       ) : isReadOnly && session ? (
+        // 只读优先于「被对端持有」：只读是会话自身的属性（不受谁拿写权影响），而锁定条
+        // 给的是「等下就能写」的预期——对只读会话那是错的。两者同时成立时只显示只读条。
         <ReadOnlySessionBar session={session} isMobile={isMobile} />
       ) : lockedByOther ? (
         <LockedSessionBar isMobile={isMobile} />

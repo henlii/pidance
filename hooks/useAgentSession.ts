@@ -362,6 +362,16 @@ const AGENT_STATE_RECONCILE_MS = 15_000;
  * 唤醒」，间隔太长用户就盯着旧内容等。）
  */
 const RECONCILE_IDLE_MS = 120_000;
+/**
+ * 未上锁时探测「对端抢锁」的间隔。
+ *
+ * 锁定态来自**另一个进程**持有的租约文件，本进程没有事件可订阅，只能轮询。3s 的
+ * 取舍：用户切回本页、或另一个实例开始写时，一眼就能看到锁定条，而不是盯着可编辑的
+ * 输入框等到下一次状态刷新（空闲且事件流活着时那一档是 RECONCILE_IDLE_MS = 2 分钟）；
+ * 同时它打的是只读探针（一次租约文件读），不是按秒跑 `/state` 的完整状态投影。
+ * 上锁之后改用既有的 1s `/state` 轮询感知释放。
+ */
+const SESSION_LOCK_PROBE_MS = 3_000;
 const BASH_STATE_RECONCILE_MS = 1_000;
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1928,8 +1938,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         })
         .catch(() => undefined);
     };
+    // 对端抢锁的**发现路径**：未上锁时只打这条只读探针（一次租约文件读），而不是按
+    // 秒跑 `/state` 的完整状态投影 —— 空闲期每 3s 一次 /state 等于把 RECONCILE_IDLE_MS
+    // 收紧掉的开销又加回来。探针失败（503/网络）保持现状，不误清已显示的锁定条。
+    const probeLock = () => {
+      if (document.visibilityState !== "visible") return;
+      void fetch(`/api/sessions/${encodeURIComponent(sid)}/lock`, { cache: "no-store" })
+        .then((response) => (response.ok ? response.json() : null))
+        .then((hot: { lockedByOther?: boolean } | null) => {
+          if (cancelled || !hot || sessionIdRef.current !== sid) return;
+          setLockedByOther(hot.lockedByOther === true);
+        })
+        .catch(() => undefined);
+    };
     // 同一次激活的 focus + visibilitychange 合并成一次锁刷新（见 lib/activation-recovery）：
-    // 两个事件一起到时不重复打 /state。轮询是独立周期，直接调 refreshLock，不经过合并器。
+    // 两个事件一起到时不重复打 /state。轮询是独立周期，直接调 refreshLock/probeLock，不经过合并器。
     const recovery = createActivationRecovery({ perform: refreshLock });
     const onVisible = () => {
       if (document.visibilityState === "visible") recovery.notify();
@@ -1937,8 +1960,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", onVisible);
     // 跨进程运行锁在 agent_settled 后立即释放；已显示锁定条的页面用短轮询
-    // 感知释放，避免旧的 5s 窗口让用户还要等一轮才能发送。
-    const interval = lockedByOther ? window.setInterval(refreshLock, 1_000) : undefined;
+    // 感知释放，避免旧的 5s 窗口让用户还要等一轮才能发送。未上锁时反过来：
+    // 用轻量探针发现「对端抢锁」，否则要等下一次状态刷新（空闲时 2 分钟一档）。
+    const interval = lockedByOther
+      ? window.setInterval(refreshLock, 1_000)
+      : window.setInterval(probeLock, SESSION_LOCK_PROBE_MS);
     return () => {
       cancelled = true;
       document.removeEventListener("visibilitychange", onVisible);

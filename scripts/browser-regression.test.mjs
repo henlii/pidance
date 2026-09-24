@@ -517,6 +517,14 @@ test("A12：对端 writer 租约 → 锁定条出现并在释放后消失", { ti
   const { spawn } = await import("node:child_process");
   const agentDir = process.env.PI_CODING_AGENT_DIR || `${os.homedir()}/.pi/agent`;
   const leaseDir = `${agentDir}/pidance-running-leases`;
+  // 等待窗口从 hook 源码读回探针周期（#89）：常量改名/改值时这里跟着变，不会悄悄失配。
+  // 发现路径本身是「未上锁时每 SESSION_LOCK_PROBE_MS 打一次只读 /lock 探针」，所以窗口按
+  // 周期界定，而不是靠「等 28 秒看看会不会出现」把产品问题糊成抖动（#64）。
+  const probeMsSource = fs.readFileSync(new URL("../hooks/useAgentSession.ts", import.meta.url), "utf8")
+    .match(/const SESSION_LOCK_PROBE_MS = ([\d_]+);/)?.[1] ?? "";
+  const probeMs = Number(probeMsSource.replace(/_/g, ""));
+  assert.ok(Number.isFinite(probeMs) && probeMs > 0, "未从 hooks/useAgentSession.ts 读回 SESSION_LOCK_PROBE_MS");
+  const LOCK_BANNER = `document.querySelector('[role="status"][aria-label="另一个 Pidance 实例正在使用此会话"]')`;
   let createdId = null;
   let sleeper = null;
   let leasePath = null;
@@ -540,38 +548,69 @@ test("A12：对端 writer 租约 → 锁定条出现并在释放后消失", { ti
     }
     assert.ok(idle, "测试会话未在预期时间内结束");
 
+    // 确定性前置：**先**打开页面并等到「聊天区已挂载 + 当前没有锁定条」，此时本进程空闲、
+    // 没有任何对端租约。然后才让对端抢锁 —— 这才是要验的发现路径（页面已开着，写权中途被
+    // 另一个实例拿走），也把「页面还没加载完」排除在窗口之外。
+    await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(createdId)}`, "--session", SESSION], { json: false });
+    await ensureAuthed();
+    await waitForCondition(
+      `document.querySelector('[data-pidance-chat="true"]')`,
+      "测试会话聊天区未挂载（导航/恢复失败，不是验收通过）",
+      { attempts: 40, stepMs: 500 },
+    );
+    assert.equal(
+      Boolean(await evalResult(`Boolean(${LOCK_BANNER})`)),
+      false,
+      "前置失败：打开页面时就已经有锁定条（此时不该有租约）",
+    );
+
+    // 无头浏览器里这个标签页未必是前台（document.visibilityState 可能是 hidden），而探针
+    // 本身是可见性守卫的——隐藏时用户看不到横幅，回前台由激活路径（focus/visibilitychange）
+    // 补上，这是有意行为。本用例验的是「未上锁 → 对端抢锁」的发现路径，所以确实隐藏时把可见性
+    // 显式置为 visible（只改这一次，并把原值打进日志，避免把「前台判定」悄悄当成通过条件）。
+    const visibility = await evalResult("document.visibilityState");
+    if (visibility !== "visible") {
+      console.log(`[browser-regression] A12：页面在前台判定为 ${String(visibility)}，为验发现路径显式置为 visible`);
+      await evalResult("Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })");
+    }
+
     sleeper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], { stdio: "ignore" });
     fs.mkdirSync(leaseDir, { recursive: true, mode: 0o700 });
     leasePath = `${leaseDir}/${createdId}.json`;
     fs.writeFileSync(leasePath, `${JSON.stringify({ pid: sleeper.pid, sessionId: createdId, heartbeatAt: Date.now(), startedAt: Date.now() })}\n`);
 
-    await ab(["open", `${URL_BASE}/?session=${encodeURIComponent(createdId)}`, "--session", SESSION], { json: false });
-    // 锁定条由客户端按 /state 的 lockedByOther 渲染（挂载一次 + 短轮询）：等待窗口要覆盖冷加载，
-    // 窗口太短会把「页面还没加载完」报成「没显示锁定条」。
+    // 对端抢锁后必须在探针窗口内出现锁定条（3 个周期 + 余量），而不是等下一次状态刷新
+    // （空闲且事件流活着时那一档是 2 分钟）。
+    const windowMs = probeMs * 3 + 3_000;
+    const deadline = Date.now() + windowMs;
     let lockedText = "";
-    for (let i = 0; i < 40 && !lockedText; i += 1) {
-      await new Promise((r) => setTimeout(r, 700));
-      const status = await evalResult("document.querySelector('[role=\"status\"][aria-label=\"另一个 Pidance 实例正在使用此会话\"]') ? document.body.innerText : ''");
-      if (typeof status === "string" && status.includes("另一个 Pidance 实例正在使用此会话")) lockedText = status;
+    while (Date.now() < deadline && !lockedText) {
+      const text = await evalResult(`${LOCK_BANNER} ? document.body.innerText : ''`);
+      if (typeof text === "string" && text.includes("另一个 Pidance 实例正在使用此会话")) lockedText = text;
+      if (!lockedText) await new Promise((r) => setTimeout(r, 500));
     }
     if (!lockedText) {
       const state = await fetch(`${URL_BASE}/api/sessions/${encodeURIComponent(createdId)}/state`, { headers: AUTH_HEADER })
         .then((r) => r.json())
         .catch(() => null);
       const leaseExists = fs.existsSync(leasePath);
-      assert.fail(`对端持锁时未显示锁定条（lease=${leaseExists} live=${state?.live} lockedByOther=${state?.lockedByOther}）`);
+      assert.fail(
+        `对端持锁后 ${windowMs}ms（探针周期 ${probeMs}ms）内未显示锁定条`
+        + `（lease=${leaseExists} live=${state?.live} lockedByOther=${state?.lockedByOther}）`,
+      );
     }
 
-    // 释放（进程退出 + 租约文件删除）：锁定条应在短轮询窗口内消失。
+    // 释放（进程退出 + 租约文件删除）：锁定条应在既有的 1s 短轮询窗口内消失。
     sleeper.kill("SIGKILL");
     sleeper = null;
     fs.rmSync(leasePath, { force: true });
     leasePath = null;
+    const releaseDeadline = Date.now() + 8_000;
     let released = false;
-    for (let i = 0; i < 15 && !released; i += 1) {
-      await new Promise((r) => setTimeout(r, 800));
+    while (Date.now() < releaseDeadline && !released) {
       const text = await evalResult("document.body.innerText");
       released = typeof text === "string" && !text.includes("另一个 Pidance 实例正在使用此会话");
+      if (!released) await new Promise((r) => setTimeout(r, 500));
     }
     assert.ok(released, "租约释放后锁定条未消失");
   } finally {
@@ -582,7 +621,6 @@ test("A12：对端 writer 租约 → 锁定条出现并在释放后消失", { ti
     }
   }
 });
-
 test("用例11：添加空项目 → 侧栏显示并可新建会话（项目独立于会话）", async () => {
   await beginCase("case11");
   const dir = `/tmp/pidance-e2e-${Date.now()}`;
