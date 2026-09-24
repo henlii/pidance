@@ -16,6 +16,7 @@
  */
 
 import { resolve } from "node:path";
+import { invalidateLoadedExtensionsCache, loadExtensionsForCwd } from "./loaded-extensions";
 
 export interface ExtensionProviderEntry {
   id: string;
@@ -106,21 +107,15 @@ export function mapExtensionProviders(raw: RawExtensionProviderRegistrations): E
 
 type ExtensionLoader = () => Promise<RawExtensionProviderRegistrations>;
 
-/** 默认加载器：SDK 的默认 resource loader 加载当前 cwd 的扩展。 */
+/**
+ * 默认加载器：共用 `lib/loaded-extensions.ts` 的加载结果（不重复加载扩展），
+ * 只把 runtime 里的 provider 注册记录拆出来。
+ */
 function createSdkLoader(cwd: string, agentDir: string | undefined): ExtensionLoader {
   return async () => {
-    const mod = (await import("@earendil-works/pi-coding-agent")) as unknown as {
-      DefaultResourceLoader?: new (options: { cwd: string; agentDir?: string }) => {
-        reload: (options?: unknown) => Promise<void>;
-        getExtensions: () => { runtime?: unknown };
-      };
-    };
-    if (!mod.DefaultResourceLoader) throw new Error("DefaultResourceLoader is not available");
-    const loader = new mod.DefaultResourceLoader(
-      agentDir ? { cwd, agentDir } : { cwd },
-    );
-    await loader.reload();
-    const runtime = asRecord(loader.getExtensions()?.runtime) ?? {};
+    const loaded = await loadExtensionsForCwd({ cwd, agentDir });
+    if (!loaded.ok) throw new Error(loaded.error);
+    const runtime = loaded.value.runtime;
     const configRegistrations = Array.isArray(runtime.pendingProviderRegistrations)
       ? (runtime.pendingProviderRegistrations as RawExtensionProviderRegistrations["configRegistrations"])
       : [];
@@ -159,10 +154,16 @@ function cacheState(): ExtensionProvidersCacheState {
 /** 失效入口（模型/认证配置变更、插件安装卸载、测试复位时调用）。 */
 export function invalidateExtensionProvidersCache(): void {
   const state = globalThis.__piPidanceExtensionProvidersCache;
-  if (!state) return;
+  if (!state) {
+    // 即使本模块还没建缓存，也要把共享的扩展加载缓存失效掉（别处可能已在用）。
+    invalidateLoadedExtensionsCache();
+    return;
+  }
   state.entries.clear();
   state.inFlight.clear();
   state.generation += 1;
+  // 共享加载缓存必须先失效，否则下一次“重新加载”只会拿到旧的扩展结果。
+  invalidateLoadedExtensionsCache();
 }
 
 export interface ListExtensionProvidersOptions {

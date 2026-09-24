@@ -672,7 +672,7 @@ function buildShallowTreeFromEntries(
  */
 export function buildSessionNavigationSnapshot(
   sm: SessionManagerReadView,
-  options: { deferThinking?: boolean; deferToolResultImages?: boolean } = {},
+  options: SessionReaderProjectionOptions = {},
 ): {
   entries: SessionEntry[];
   leafId: string | null;
@@ -944,10 +944,63 @@ function getSessionContextSettingsLocal(path: SessionEntry[]): {
   }
   return { thinkingLevel, model: model ?? lastAssistantModel };
 }
+/**
+ * 自定义 entry 的渲染行解析器（由调用方注入）。
+ *
+ * 拿到 entry 本身 → 返回渲染行；返回 null 表示不可渲染 → 该项不显示。
+ * 注入而不是在 reader 里加载扩展：reader 保持纯同步、不读盘、可单测，
+ * 扩展加载与缓存由服务层负责（见 lib/extension-entry-renderers.ts）。
+ */
+export type EntryLinesResolver = (entry: unknown) => string[] | null;
+
+/** 会话投影选项（纯同步：不加载扩展、不做 IO）。 */
+export interface SessionReaderProjectionOptions {
+  deferThinking?: boolean;
+  deferToolResultImages?: boolean;
+  /**
+   * 插件用 `registerEntryRenderer` 注册的自定义 entry 渲染器。
+   * 缺省时未知 customType 的 entry 不投影（与历史行为一致）。
+   */
+  entryLines?: EntryLinesResolver;
+}
+
+/** Pidance 自有 customType：有本地投影，不交给插件渲染器。 */
+export function isPidanceOwnCustomType(customType: unknown): boolean {
+  return (
+    customType === PIDANCE_BINARY_CUSTOM_TYPE ||
+    customType === PIDANCE_COMMAND_CUSTOM_TYPE ||
+    customType === PIDANCE_ACTIVITY_CUSTOM_TYPE
+  );
+}
+
+/**
+ * 未知 customType 的 entry → 插件渲染行。
+ * 任何异常/非法输出都归为「不渲染」（不显示），绝不让会话读取失败。
+ */
+function entryCustomLines(
+  entry: SessionEntry,
+  options: SessionReaderProjectionOptions,
+): string[] | null {
+  const customType = (entry as { customType?: unknown }).customType;
+  if (typeof customType !== "string" || customType === "" || isPidanceOwnCustomType(customType)) {
+    return null;
+  }
+  const resolve = options.entryLines;
+  if (!resolve) return null;
+  let lines: string[] | null;
+  try {
+    lines = resolve(entry);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(lines) || lines.length === 0) return null;
+  return lines.every((line) => typeof line === "string") ? lines : null;
+}
+
 export function buildSessionContext(
   entries: SessionEntry[],
   leafId?: string | null,
-  options: { deferThinking?: boolean; deferToolResultImages?: boolean } = {},
+  options: SessionReaderProjectionOptions = {},
 ): SessionContext {
   const path = buildSessionPathLocal(entries, leafId);
   const settings = getSessionContextSettingsLocal(path);
@@ -1111,7 +1164,7 @@ function omitHeavyToolResultDetails(message: AgentMessage): AgentMessage {
 // Returns null for entries that do not map to chat history (metadata, non-message types).
 function entryToUiMessage(
   entry: SessionEntry,
-  options: { deferThinking?: boolean; deferToolResultImages?: boolean },
+  options: SessionReaderProjectionOptions,
 ): AgentMessage | null {
   // Supported message roles: user, assistant, toolResult, bashExecution.
   // bashExecution messages enter the case "message" branch (entry.type === "message").
@@ -1176,7 +1229,9 @@ function entryToUiMessage(
       };
     case "custom": {
       // type:"custom" 不进入 LLM；仅投影合法 pidance.activity 到 UI timeline。
-      // 其它 customType（om / workspace-history 等）保持侧栏投影，不进聊天气泡。
+      // 插件用 registerEntryRenderer 注册的自定义 entry（supervisor reply、watchdog
+      // warning 等）没有自有内容可回退，只能由插件渲染器出内容：拿到行才投影，
+      // 拿不到就不显示（不能把插件私有载荷当文本糊到界面上）。
       // 非法/未知 version 安全跳过。压缩语义跟随 piBuildContextEntries 可见集：
       // 被压缩掉的普通消息前的 activity 不复活。
       if (entry.customType === PIDANCE_BINARY_CUSTOM_TYPE) {
@@ -1196,10 +1251,23 @@ function entryToUiMessage(
           timestamp: parseEntryTimestamp(entry.timestamp),
         };
       }
-      if (entry.customType !== PIDANCE_ACTIVITY_CUSTOM_TYPE) return null;
-      const activity = parseActivityData(entry.data);
-      if (!activity) return null;
-      return activityToUiMessage(activity, parseEntryTimestamp(entry.timestamp));
+      if (entry.customType === PIDANCE_ACTIVITY_CUSTOM_TYPE) {
+        const activity = parseActivityData(entry.data);
+        if (!activity) return null;
+        return activityToUiMessage(activity, parseEntryTimestamp(entry.timestamp));
+      }
+      const entryLines = entryCustomLines(entry, options);
+      if (!entryLines) return null;
+      return {
+        role: "custom",
+        customType: entry.customType,
+        // 内容全在 renderedLines 里：entry 没有 content 字段，给空串让前端只渲染
+        // 渲染行（标题走通用的 customType 美化，前端已有逻辑）。
+        content: "",
+        display: true,
+        renderedLines: entryLines,
+        timestamp: parseEntryTimestamp(entry.timestamp),
+      };
     }
     default:
       return null;
