@@ -2176,7 +2176,7 @@ function ReferenceFileButton({ filePath, onReferenceFile }: { filePath: string; 
   return (
     <button
       type="button"
-      className="file-row-action-btn"
+      className="file-row-action-btn message-file-action-btn"
       title={label}
       aria-label={label}
       onClick={() => onReferenceFile(filePath)}
@@ -2229,10 +2229,13 @@ function TurnWrittenFilesCard({ files, isStreaming, onOpenFile, onReferenceFile 
           {files.map((filePath) => {
             const name = getFileName(filePath);
             return (
-              /* 长路径保留完整文件名（title 给全路径），截断只发生在视觉层 */
-              <span key={filePath} style={{ display: "inline-flex", alignItems: "center", gap: 2, maxWidth: "100%" }}>
+              /* 长路径保留完整文件名（title 给全路径），截断只发生在视觉层。
+                 minWidth:0 让「打开」芯片可以真的收缩：卡片是 overflow:hidden，
+                 不给收缩下限时长文件名会把右侧的「引用」按钮挤出可视区（窄屏点不到）。 */
+              <span key={filePath} style={{ display: "inline-flex", alignItems: "center", gap: 2, maxWidth: "100%", minWidth: 0 }}>
                 <button
                   type="button"
+                  className="message-file-open-btn"
                   title={filePath}
                   aria-label={t("message_openWrittenFile", { name })}
                   onClick={() => onOpenFile?.(filePath)}
@@ -2240,6 +2243,8 @@ function TurnWrittenFilesCard({ files, isStreaming, onOpenFile, onReferenceFile 
                     display: "inline-flex",
                     alignItems: "center",
                     gap: 4,
+                    flex: "1 1 auto",
+                    minWidth: 0,
                     maxWidth: "100%",
                     padding: "2px 8px",
                     borderRadius: 6,
@@ -2252,7 +2257,7 @@ function TurnWrittenFilesCard({ files, isStreaming, onOpenFile, onReferenceFile 
                   }}
                 >
                   <FilePlus size={12} strokeWidth={1.8} />
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
+                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
                 </button>
                 {onReferenceFile ? <ReferenceFileButton filePath={filePath} onReferenceFile={onReferenceFile} /> : null}
               </span>

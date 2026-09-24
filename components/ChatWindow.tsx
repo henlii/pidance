@@ -332,6 +332,12 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   );
 
   const writesDisabled = isReadOnly || lockedByOther;
+  /**
+   * 输入框有没有真的挂载。「引用到输入框」的按钮活在消息卡里，而输入框在三种状态下会被
+   * 换掉（扩展弹窗独占输入区 / 只读会话 / 被别的 writer 占用）—— 那时回调拿到的是空 ref，
+   * 点下去没有任何反应。这种情况不下发回调，卡片里的引用按钮随之消失，不留死按钮。
+   */
+  const canReferenceIntoComposer = !extensionDialog && !(isReadOnly && session) && !lockedByOther;
   const sessionBusy = agentRunning || bashRunning || isCompacting;
   const liveSlot = streamState.isStreaming && streamState.streamingMessage
     ? { message: streamState.streamingMessage, isActive: true }
@@ -896,7 +902,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
                     modelNames={modelNames}
                     cwd={messageCwd}
                     onOpenFile={onOpenFile}
-                    onReferenceFile={onReferenceFile}
+                    onReferenceFile={canReferenceIntoComposer ? onReferenceFile : undefined}
                     writtenFiles={writtenFiles}
                     isStreaming={isLive}
                     toolsActive={sessionBusy}

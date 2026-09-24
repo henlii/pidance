@@ -617,6 +617,23 @@ test("源码契约：思考块展开正文不再限高/内部滚动，工具块�
   assert.ok(tool.includes("streamBlockMaxHeight"), "工具块仍须限高");
 });
 
+test("源码契约：本轮写入文件卡的引用按钮不会被长文件名挤出可视区", () => {
+  // 为何是源码契约：卡片是 overflow:hidden，而「打开」芯片与「引用」按钮是同一行里的 flex
+  // 兄弟；不给收缩下限（minWidth:0）时长文件名会让芯片占满整条，右侧的引用按钮被裁掉、
+  // 窄屏点不到。真实观感由父会话的无头验收覆盖（390 宽 + 长文件名）。
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  const card = source.slice(source.indexOf("function TurnWrittenFilesCard("), source.indexOf("function FileContextList("));
+  assert.match(card, /gap: 2, maxWidth: "100%", minWidth: 0 \}/, "外层行缺少 minWidth:0，芯片不会收缩");
+  assert.match(card, /flex: "1 1 auto"/, "打开芯片没有可收缩的 flex 基线");
+  assert.match(card, /style=\{\{ minWidth: 0, overflow: "hidden"/, "文件名 span 缺少 minWidth:0");
+  assert.match(card, /message-file-open-btn/, "打开芯片没有触屏热区类");
+  const ref = source.slice(source.indexOf("function ReferenceFileButton("), source.indexOf("function TurnWrittenFilesCard("));
+  assert.match(ref, /file-row-action-btn message-file-action-btn/, "引用按钮没有触屏热区类");
+  // 热区按**指针类型**放大：平板是宽视口 + 触摸，只按 (max-width:640px) 放大会在那儿留下 24px 热区
+  const css = readFileSync(fileURLToPath(new URL("../app/globals.css", import.meta.url)), "utf8");
+  assert.match(css, /@media \(pointer: coarse\) \{[\s\S]*?\.message-file-action-btn \{[\s\S]*?min-width: 40px;/, "触屏下引用按钮热区没有放大");
+});
+
 function assistantOnlyMessage(content) {
   return { role: "assistant", model: "m", provider: "p", content };
 }

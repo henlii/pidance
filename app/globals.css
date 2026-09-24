@@ -2254,6 +2254,24 @@ span.linenumber {
   }
 }
 
+/* 消息卡（本轮写入的文件 / 已修改文件）里的动作按钮：桌面紧凑、触屏放大。
+   按**指针类型**而不是视口宽度放大 —— 平板是宽视口 + 触摸，只按宽度会在那儿留下 24px 热区。 */
+.message-file-action-btn {
+  min-width: 28px;
+  min-height: 28px;
+}
+.message-file-open-btn {
+  min-height: 28px;
+}
+@media (pointer: coarse) {
+  .message-file-action-btn {
+    min-width: 40px;
+    min-height: 40px;
+  }
+  .message-file-open-btn {
+    min-height: 40px;
+  }
+}
 /* 三点菜单打开时触发按钮保持可见（覆盖行 hover 渐进显露的隐藏态） */
 .sidebar-row .sidebar-icon-btn--hover.sidebar-icon-btn--active {
   opacity: 1;

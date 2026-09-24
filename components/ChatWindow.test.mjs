@@ -122,7 +122,22 @@ test("引用到输入框的接线：AppShell 处理器 → ChatWindow → Messag
   const chat = readFileSync(fileURLToPath(new URL("./ChatWindow.tsx", import.meta.url)), "utf8");
   assert.match(chat, /onReferenceFile\?: \(filePath: string\) => void;/, "ChatWindow 没有声明 onReferenceFile");
   assert.match(chat, /onOpenFile, onReferenceFile, entryJumpRequest/, "ChatWindow 没有解构 onReferenceFile");
-  assert.match(chat, /onReferenceFile=\{onReferenceFile\}/, "ChatWindow 没把 onReferenceFile 传给 MessageView");
+  assert.match(chat, /onReferenceFile=\{canReferenceIntoComposer \? onReferenceFile : undefined\}/, "ChatWindow 没把 onReferenceFile 传给 MessageView（或没经过挂载门禁）");
+  // 输入框会被三种状态换掉（扩展弹窗 / 只读会话 / 被别的 writer 占用）。那时回调拿到的是空
+  // ref，点下去没任何反应——所以门禁必须与输入框的渲染分支同步，不留死按钮。
+  assert.match(
+    chat,
+    /const canReferenceIntoComposer = !extensionDialog && !\(isReadOnly && session\) && !lockedByOther;/,
+    "引用回调缺少「输入框已挂载」门禁",
+  );
+  assert.ok(
+    chat.indexOf("const canReferenceIntoComposer") < chat.indexOf("const chatInputElement"),
+    "门禁必须在渲染前算好",
+  );
+  const inputBranch = chat.slice(chat.indexOf("const chatInputElement"), chat.indexOf("const aboveEditorWidgets"));
+  for (const condition of ["extensionDialog ?", "isReadOnly && session ?", "lockedByOther ?"]) {
+    assert.ok(inputBranch.includes(condition), `输入框渲染分支与门禁不同步：分支里没有 ${condition}`);
+  }
 
   const shell = readFileSync(fileURLToPath(new URL("./AppShell.tsx", import.meta.url)), "utf8");
   const at = shell.indexOf("const handleReferenceFile = useCallback(");
