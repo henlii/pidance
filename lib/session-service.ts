@@ -20,7 +20,12 @@ import { type ExportFormat } from "./session-export";
 import { buildSessionExport, type SessionExportPayload } from "./session-html-export";
 import { parseContextLimitParam, sliceContextBefore, sliceContextTail, DEFAULT_SESSION_HISTORY_PAGE, DEFAULT_SESSION_TAIL_LIMIT } from "./session-context-window";
 import { getThinkingText, isThinkingLikeType } from "./thinking-content";
-import { clearLeafSidecar, writeLeafSidecar } from "./session-leaf-sidecar";
+import { clearLeafSidecar } from "./session-leaf-sidecar";
+import {
+  applyTreeNavigation,
+  planBranchFromAssistant,
+  planSelectLeafExact,
+} from "./session-tree-navigation";
 import { invalidateSessionReadCache } from "./session-read-manager-cache";
 import { resolveEntryLinesProvider } from "./extension-entry-renderers";
 import { resolveToolMetaProvider } from "./tool-display-meta";
@@ -34,6 +39,7 @@ import {
   type LiveAgentSession,
   type NavigationActions,
   type NavigationWriterHandoff,
+  type TreeNavigationCallOptions,
   type PendingExtensionUi,
 } from "./rpc-manager";
 import {
@@ -427,19 +433,19 @@ export type SessionService = {
   selectLeafExact(
     sessionId: string,
     entryId: string,
-    handoff?: NavigationWriterHandoff,
+    options?: TreeNavigationCallOptions,
   ): Promise<{ cancelled: boolean }>;
   /** assistant 轮末分支：computeTurnEnd 后 navigateTree */
   branchFromAssistant(
     sessionId: string,
     assistantEntryId: string,
-    handoff?: NavigationWriterHandoff,
+    options?: TreeNavigationCallOptions,
   ): Promise<{ cancelled: boolean }>;
   /** through-entry 线性新会话（assistant 锚点先 resolve 到 turnEnd） */
   createSessionFromLeaf(
     sessionId: string,
     entryId: string,
-    handoff?: NavigationWriterHandoff,
+    options?: TreeNavigationCallOptions,
   ): Promise<{ cancelled: boolean; newSessionId: string }>;
 };
 
@@ -1449,13 +1455,28 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       return deps.subscribeRunningSessions(listener);
     },
 
-    async selectLeafExact(sessionId, entryId, handoff) {
+    async selectLeafExact(sessionId, entryId, options) {
       if (typeof entryId !== "string" || entryId.trim() === "") {
         throw new Error("entryId is required");
       }
       const trimmedId = entryId.trim();
+      // live 路径（Host 还活着）：用它自己的 writer 写。事件（session_before_tree /
+      // session_tree）由 Host 在本调用前后派发，用同一份 plan* 判定，两条路径不会分叉。
+      const liveWriter = options?.liveWriter;
+      if (liveWriter) {
+        try {
+          applyTreeNavigation({
+            sessionManager: liveWriter.sessionManager,
+            sessionFile: liveWriter.sessionFile,
+            plan: planSelectLeafExact(liveWriter.sessionManager, trimmedId),
+          });
+          return { cancelled: false };
+        } finally {
+          deps.invalidateSessionListCache();
+        }
+      }
 
-      // 磁盘 branch 前：任何仍存活的 live（含外部 RPC）必须先 destroy，保证单写者。
+      // 离线路径：磁盘 branch 前任何仍存活的 live（含外部 RPC）必须先 destroy，保证单写者。
       // 外部 RPC 正常路径会在 send 内 quiesce 后 isAlive=false；此处是直连/竞态防护。
       const liveBefore = deps.getRpcSession(sessionId) as
         | { isAlive?: () => boolean; inner?: { isBashRunning?: boolean } }
@@ -1465,26 +1486,17 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       }
       // 由发起命令的 Host 提供 writer 交接：它自己不能等自己结束。
       const writeOffline = <T>(action: () => Promise<T>) =>
-        withOfflineWriter(sessionId, action, handoff);
+        withOfflineWriter(sessionId, action, options?.handoff);
       return writeOffline(async () => {
         const filePath = await deps.resolveSessionPath(sessionId);
         if (!filePath) throw new Error("Session not found");
         const sessionManager = deps.openSessionView(filePath);
-        const oldLeafId = sessionManager.getLeafId();
-        // 目标 = 当前 leaf：无导航语义，不写 sidecar（避免固化无变化值）
-        if (trimmedId === oldLeafId) return { cancelled: false };
-        // 目标 = 文件末尾（外部 pi 默认 leaf）：清除过期 sidecar。
-        // 只跳过写入会残留旧分支指针，下次磁盘 open 恢复旧 leaf，
-        // 导航到最新分支的意图丢失（UI 弹回旧分支）。
-        if (trimmedId === sessionManager.getLastEntryId()) {
-          clearLeafSidecar(filePath);
-          return { cancelled: false };
-        }
-        if (!sessionManager.getEntry(trimmedId)) throw new Error(`Entry ${trimmedId} not found`);
         try {
-          sessionManager.branch(trimmedId);
-          // Pi branch 仅改内存 leaf；非末尾须写 sidecar 供重启恢复
-          writeLeafSidecar(filePath, trimmedId);
+          applyTreeNavigation({
+            sessionManager,
+            sessionFile: filePath,
+            plan: planSelectLeafExact(sessionManager, trimmedId),
+          });
           return { cancelled: false };
         } finally {
           deps.invalidateSessionListCache();
@@ -1492,13 +1504,27 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       });
     },
 
-    async branchFromAssistant(sessionId, assistantEntryId, handoff) {
+    async branchFromAssistant(sessionId, assistantEntryId, options) {
       if (typeof assistantEntryId !== "string" || assistantEntryId.trim() === "") {
         throw new Error("assistantEntryId is required");
       }
       const trimmedId = assistantEntryId.trim();
+      // live 路径同 selectLeafExact：用 Host 自己的 writer，事件由 Host 前后派发。
+      const liveWriter = options?.liveWriter;
+      if (liveWriter) {
+        try {
+          applyTreeNavigation({
+            sessionManager: liveWriter.sessionManager,
+            sessionFile: liveWriter.sessionFile,
+            plan: planBranchFromAssistant(liveWriter.sessionManager, trimmedId),
+          });
+          return { cancelled: false };
+        } finally {
+          deps.invalidateSessionListCache();
+        }
+      }
 
-      // 磁盘 branch 前：存活 live 先 destroy（与 selectLeafExact 同一单写者护栏）
+      // 离线路径：磁盘 branch 前存活 live 先 destroy（与 selectLeafExact 同一单写者护栏）
       const liveBefore = deps.getRpcSession(sessionId) as
         | { isAlive?: () => boolean; inner?: { isBashRunning?: boolean } }
         | undefined;
@@ -1507,30 +1533,17 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       }
       // 由发起命令的 Host 提供 writer 交接：它自己不能等自己结束。
       const writeOffline = <T>(action: () => Promise<T>) =>
-        withOfflineWriter(sessionId, action, handoff);
+        withOfflineWriter(sessionId, action, options?.handoff);
       return writeOffline(async () => {
         const filePath = await deps.resolveSessionPath(sessionId);
         if (!filePath) throw new Error("Session not found");
         const sessionManager = deps.openSessionView(filePath);
-        const leafId = sessionManager.getLeafId();
-        if (!leafId) throw new Error("Session has no leaf");
-        const path = sessionManager.getBranch(leafId);
-        const targetEntry = sessionManager.getEntry(trimmedId);
-        if (!targetEntry) throw new Error("Entry not found");
-        if (
-          targetEntry.type !== "message" ||
-          (targetEntry as { message?: { role?: string } }).message?.role !== "assistant"
-        ) {
-          throw new Error("Only assistant messages can be branched from");
-        }
-        const turnEnd = computeTurnEnd(path as never, trimmedId);
         try {
-          sessionManager.branch(turnEnd);
-          if (turnEnd === sessionManager.getLastEntryId()) {
-            clearLeafSidecar(filePath);
-          } else {
-            writeLeafSidecar(filePath, turnEnd);
-          }
+          applyTreeNavigation({
+            sessionManager,
+            sessionFile: filePath,
+            plan: planBranchFromAssistant(sessionManager, trimmedId),
+          });
           return { cancelled: false };
         } finally {
           deps.invalidateSessionListCache();
@@ -1538,7 +1551,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       });
     },
 
-    async createSessionFromLeaf(sessionId, entryId, handoff) {
+    async createSessionFromLeaf(sessionId, entryId, options) {
       if (typeof entryId !== "string" || entryId.trim() === "") {
         throw new Error("entryId is required");
       }
@@ -1562,7 +1575,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
 
       // 由发起命令的 Host 提供 writer 交接：它自己不能等自己结束。
       const writeOffline = <T>(action: () => Promise<T>) =>
-        withOfflineWriter(sessionId, action, handoff);
+        withOfflineWriter(sessionId, action, options?.handoff);
       return writeOffline(async () => {
         // 统一磁盘 Pi SessionManager；lease 覆盖整个 fork 读/写窗口。
         const filePath =
@@ -1612,12 +1625,12 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
   // startRpcSession 注入 wrapper（rpc-manager 不再 import 本模块）。
   // 动作在 wrapper.send 时执行，彼时 service 已完整初始化，无 TDZ 风险。
   const navigationActions: NavigationActions = {
-    selectLeafExact: (sessionId, entryId, handoff) =>
-      service.selectLeafExact(sessionId, entryId, handoff),
-    branchFromAssistant: (sessionId, assistantEntryId, handoff) =>
-      service.branchFromAssistant(sessionId, assistantEntryId, handoff),
-    createSessionFromLeaf: (sessionId, entryId, handoff) =>
-      service.createSessionFromLeaf(sessionId, entryId, handoff),
+    selectLeafExact: (sessionId, entryId, options) =>
+      service.selectLeafExact(sessionId, entryId, options),
+    branchFromAssistant: (sessionId, assistantEntryId, options) =>
+      service.branchFromAssistant(sessionId, assistantEntryId, options),
+    createSessionFromLeaf: (sessionId, entryId, options) =>
+      service.createSessionFromLeaf(sessionId, entryId, options),
   };
 
   return service;

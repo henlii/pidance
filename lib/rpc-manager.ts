@@ -8,6 +8,8 @@ export {
   parseSetBranchLabelCommand,
   type NavigationActions,
   type NavigationWriterHandoff,
+  type TreeNavigationCallOptions,
+  type TreeNavigationSessionWriter,
   type AgentEvent,
   type LiveAgentSession,
   type PendingExtensionUi,

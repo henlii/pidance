@@ -9,6 +9,7 @@ import { getPidancePref, readPidancePrefs, updatePidancePref, type PidancePrefs 
 import { hasQueuedFollowUp } from "./session-queue";
 import { startSdkSessionHost, type SdkSessionHost } from "./sdk-session-host";
 import { getRunningStartedAt as getLocalRunningStartedAt } from "./running-state";
+import type { TreeNavigationSessionManager } from "./session-tree-navigation";
 import {
   acquireRunningLease,
   heartbeatRunningLease,
@@ -96,21 +97,40 @@ export function parseSetBranchLabelCommand(command: Record<string, unknown>): {
  */
 export type NavigationWriterHandoff = () => Promise<void>;
 
+/** 树导航命令里 Service 写 leaf/sidecar 用的 writer（Host 的 live 会话）。 */
+export type TreeNavigationSessionWriter = {
+  sessionManager: TreeNavigationSessionManager;
+  /** sidecar 写在这个文件旁。 */
+  sessionFile: string;
+};
+
+export type TreeNavigationCallOptions = {
+  /** 交出 writer：离线路径先用它释放 Host 的 writer，再开磁盘视图写。 */
+  handoff: NavigationWriterHandoff;
+  /**
+   * Host 自己的 live writer。给了就用它写（不交接、不再开磁盘视图）——这是必须的：
+   * （只有就地改 leaf 的两个命令会传它；`createSessionFromLeaf` 写的是新文件。）
+   * `session_before_tree` / `session_tree` 只能由本会话的 extension runner 派发，
+   * 而交接会 dispose Host，SDK 在 `AgentSession.dispose()` 里 invalidate 那个 runner。
+   */
+  liveWriter?: TreeNavigationSessionWriter;
+};
+
 export type NavigationActions = {
   selectLeafExact(
     sessionId: string,
     entryId: string,
-    handoff: NavigationWriterHandoff,
+    options: TreeNavigationCallOptions,
   ): Promise<{ cancelled: boolean }>;
   branchFromAssistant(
     sessionId: string,
     assistantEntryId: string,
-    handoff: NavigationWriterHandoff,
+    options: TreeNavigationCallOptions,
   ): Promise<{ cancelled: boolean }>;
   createSessionFromLeaf(
     sessionId: string,
     entryId: string,
-    handoff: NavigationWriterHandoff,
+    options: TreeNavigationCallOptions,
   ): Promise<{ cancelled: boolean; newSessionId: string }>;
 };
 
