@@ -12,6 +12,9 @@
  * 触发发布审计红线。故把 dark.json 复制为 Pidance 自有副本
  * `lib/pi-themes/dark.json`（来源 pi-coding-agent 0.81.1），经 JSON import
  * 打包进产物（无绝对路径），再按 Theme 构造签名解析 vars/colors 构造。
+ *
+ * 同一份主题还要装进 **SDK 的全局主题槽位**：SDK 的主题助手（renderDiff 等）读的是
+ * globalThis 上按 Symbol.for 挂的单例，不是传进去的主题 —— 不装就没有 diff（issue #69）。
  */
 
 import darkThemeJson from "./pi-themes/dark.json" with { type: "json" };
@@ -259,6 +262,144 @@ function createThemeFromJson(themeJson: ThemeJson): Theme {
   return new Theme(fgColors, bgColors, "truecolor", { name: themeJson.name });
 }
 
+// ---------------------------------------------------------------------------
+// SDK 全局主题槽位 + 渲染桥告警出口（issue #69）
+// ---------------------------------------------------------------------------
+
+/**
+ * SDK 的主题助手（`renderDiff` / `getMarkdownTheme` / `getSelectListTheme` …）读的不是
+ * 传给它们的主题，而是 SDK 自己在 `globalThis` 上按 `Symbol.for` 挂的**全局单例** ——
+ * 取不到就抛 `Theme not initialized. Call n() first.`。内置 edit 渲染器的 diff 正是画在
+ * 这条路径上：我们只建了自己的主题（`loadPiTheme`）、从没写过那个槽位，于是它一抛错就被
+ * 渲染桥吞掉，调用卡永远只剩头部。
+ *
+ * SDK 只公开了 `initTheme(name)`（自建实例、颜色模式按终端能力推断），没有公开
+ * `setThemeInstance`；但它内部的 `setGlobalTheme` 就是往下面这两个 Symbol 键上写。
+ * 这里按**同一约定**写入我们自己的实例，保证头部与 diff 用同一个主题、同一种颜色模式。
+ * 键名一旦被 SDK 改掉，自检会报一次可见告警（见 `verifySdkGlobalTheme`）。
+ */
+const SDK_THEME_KEY = Symbol.for("@earendil-works/pi-coding-agent:theme");
+const SDK_THEME_KEY_LEGACY = Symbol.for("@mariozechner/pi-coding-agent:theme");
+
+/** 告警文案：说明**影响**，而不只是「失败了」。 */
+const SDK_THEME_WARNING =
+  "Extension renderers that rely on the SDK theme helpers will not draw their themed content "
+  + "(for example the built-in edit tool's diff): Pidance could not hand its theme to the shared "
+  + "pi theme slot.";
+
+/** SDK 主题助手在槽位缺失 / 未初始化时抛错的特征串。 */
+const SDK_THEME_UNINITIALIZED_PATTERN = /Theme not initialized/i;
+
+let sdkThemeInstalled = false;
+let sdkThemeVerified: boolean | null = null;
+const reportedBridgeWarnings = new Set<string>();
+const pendingBridgeWarnings: string[] = [];
+let bridgeWarningSink: ((message: string) => void) | null = null;
+
+/**
+ * 宿主接入告警出口（emit 一条 warning 通知）。接入前产生的告警先缓冲、接入时补发 ——
+ * 主题是在宿主构造期装的，若不做缓冲，那条告警会赶在出口就位之前产生而丢掉。
+ */
+export function setRenderBridgeWarningSink(
+  sink: ((message: string) => void) | null,
+): void {
+  bridgeWarningSink = sink;
+  if (!sink) return;
+  for (const message of pendingBridgeWarnings.splice(0)) sink(message);
+}
+
+/** 测试用：清掉「已报过」与缓冲（不动全局主题槽位）。 */
+export function resetRenderBridgeWarningsForTests(): void {
+  reportedBridgeWarnings.clear();
+  pendingBridgeWarnings.length = 0;
+  bridgeWarningSink = null;
+}
+
+/**
+ * 报一次**宿主配置类**问题（每种原因只报一次）：console.warn + 宿主告警出口。
+ * 插件渲染器自身的错误不走这里 —— 那类按既有口径静默回退（见 issue #71/#72）。
+ */
+function reportBridgeWarning(reason: string, message: string): void {
+  if (reportedBridgeWarnings.has(reason)) return;
+  reportedBridgeWarnings.add(reason);
+  console.warn(`[pidance] ${message}`);
+  if (!bridgeWarningSink) {
+    pendingBridgeWarnings.push(message);
+    return;
+  }
+  try {
+    bridgeWarningSink(message);
+  } catch (error) {
+    // 告警出口自己抛错不能反过来打断渲染：降级成诊断日志。
+    console.warn("[pidance] render bridge warning sink failed:", error);
+  }
+}
+
+/**
+ * 槽位缺失导致的渲染失败要**可见**：识别 SDK 主题助手的特征错并报一次；
+ * 其它异常（插件渲染器自己的 bug）保持静默回退，不刷告警。
+ */
+function reportIfSdkThemeError(error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!SDK_THEME_UNINITIALIZED_PATTERN.test(message)) return;
+  reportBridgeWarning("sdk-theme-uninitialized", `${SDK_THEME_WARNING} (${message})`);
+}
+
+let sdkThemeProbe: (() => void) | null = null;
+
+/**
+ * 注入「SDK 主题助手」探针：宿主静态 import SDK 后接一个会读全局主题的调用
+ * （例如 `renderDiff("+ a\n- b\n")`）。**渲染桥自己不 import SDK** —— 保持纯逻辑、
+ * 可单测，也守住仓库的 SDK import 边界（只有 allowlist 里的 server adapter 能静态 import）。
+ */
+export function setSdkThemeProbe(probe: (() => void) | null): void {
+  sdkThemeProbe = probe;
+}
+
+/**
+ * 自检：跑一次注入的探针，确认我们写入的槽位真的能被 SDK 的主题助手读到
+ * （键名被 SDK 改掉、或槽位被清掉时会抛错）。结果缓存，进程内只跑一次。
+ * - `true`：可用；
+ * - `false`：不可用，并已报一次可见告警；
+ * - `null`：宿主还没接探针，无法判定（调用方稍后再试）。
+ */
+export function verifySdkGlobalTheme(): boolean | null {
+  if (sdkThemeVerified !== null) return sdkThemeVerified;
+  if (!sdkThemeProbe) return null;
+  try {
+    sdkThemeProbe();
+    sdkThemeVerified = true;
+    return true;
+  } catch (error) {
+    sdkThemeVerified = false;
+    reportBridgeWarning(
+      "sdk-theme-verify",
+      `${SDK_THEME_WARNING} (self-check failed: ${error instanceof Error ? error.message : String(error)})`,
+    );
+    return false;
+  }
+}
+
+/**
+ * 幂等地把主题装进 SDK 的全局槽位。写入抛错（例如 globalThis 被冻结）→ 报一次告警并放弃。
+ * 可用性由宿主的 `verifySdkGlobalTheme()` 在接好探针后确认（见上）。
+ */
+function ensureSdkGlobalTheme(theme: Theme): void {
+  if (sdkThemeInstalled) return;
+  sdkThemeInstalled = true;
+  try {
+    const slots = globalThis as unknown as Record<symbol, unknown>;
+    slots[SDK_THEME_KEY] = theme;
+    slots[SDK_THEME_KEY_LEGACY] = theme;
+  } catch (error) {
+    reportBridgeWarning(
+      "sdk-theme-install",
+      `${SDK_THEME_WARNING} (install failed: ${error instanceof Error ? error.message : String(error)})`,
+    );
+    return;
+  }
+}
+
 // 模块级缓存：undefined = 尚未加载；null = 加载失败（安全回退，不再重试）。
 let cachedPiTheme: Theme | null | undefined;
 
@@ -269,7 +410,11 @@ let cachedPiTheme: Theme | null | undefined;
 export function loadPiTheme(): Theme | null {
   if (cachedPiTheme !== undefined) return cachedPiTheme;
   try {
-    cachedPiTheme = createThemeFromJson(darkThemeJson);
+    const theme = createThemeFromJson(darkThemeJson);
+    cachedPiTheme = theme;
+    // SDK 的主题助手读的是它的全局槽位（见上）：装一次，否则插件渲染器里依赖
+    // 主题助手的部分（内置 edit 的 diff 等）会静默不显示。可用性由宿主自检。
+    ensureSdkGlobalTheme(theme);
   } catch {
     cachedPiTheme = null;
   }
@@ -307,7 +452,8 @@ function renderToLines(component: unknown, width: number = RENDER_WIDTH): string
     const lines = (c as RenderableComponent).render(width);
     if (!isValidRenderOutput(lines)) return null;
     return lines;
-  } catch {
+  } catch (error) {
+    reportIfSdkThemeError(error);
     return null;
   }
 }
@@ -334,7 +480,8 @@ export function renderToolResultLines(
     const component = renderer(result, options, theme, context);
     if (component && typeof component === "object") onComponent?.(component);
     return renderToLines(component, width);
-  } catch {
+  } catch (error) {
+    reportIfSdkThemeError(error);
     return null;
   }
 }
@@ -358,7 +505,8 @@ export function renderToolCallLines(
     const component = renderer(args, theme, context);
     if (component && typeof component === "object") onComponent?.(component);
     return renderToLines(component, width);
-  } catch {
+  } catch (error) {
+    reportIfSdkThemeError(error);
     return null;
   }
 }
@@ -384,7 +532,8 @@ export function renderWidgetFactoryLines(
   try {
     const component = (factory as (tui: unknown, th: Theme) => unknown)(undefined, theme);
     return renderToLines(component, width);
-  } catch {
+  } catch (error) {
+    reportIfSdkThemeError(error);
     return null;
   }
 }
@@ -444,7 +593,8 @@ export function renderCustomMessageLines(
       ) => unknown
     )(message, { expanded: true }, theme);
     return renderToLines(component, width);
-  } catch {
+  } catch (error) {
+    reportIfSdkThemeError(error);
     return null;
   }
 }
@@ -478,7 +628,8 @@ export function renderCustomEntryLines(
       ) => unknown
     )(entry, { expanded: true }, theme);
     return renderToLines(component, width);
-  } catch {
+  } catch (error) {
+    reportIfSdkThemeError(error);
     return null;
   }
 }
