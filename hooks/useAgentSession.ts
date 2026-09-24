@@ -638,25 +638,44 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [patchExtensionUiState]);
 
   /**
-   * 应用 host 状态里的扩展 UI 投影：status / widget / 待答阻塞请求 / 活动 custom 面板。
+   * 本次页面加载里**已经交给通知队列**的通知 id（水合与 SSE 两条路都记）。
    *
-   * 这几项在浏览器侧**只有 SSE 事件，没有重放**。页面在后台（浏览器冻结/断流，
-   * 见 registry 的 shouldAutoReconnect）或断网期间漏掉 `extension_ui_request`，
-   * 回到前台后智能体明明在等回答，界面却什么都不显示，只能刷新会话才看得到。
-   * 所以凡是从服务端拿到状态的地方（热状态、切会话、reconcile、切回前台）
-   * 都用这一份投影补齐；空闲（队列为空）时不清本地队列，避免竞态抹掉刚到的请求。
+   * 为什么必须记：能力提示在 host 存活期间一直留在状态快照里（"这个宿主不具备某
+   * 能力"是持续事实），而水合会反复发生（reconcile、prompt 收尾、切回前台、run 结束）。
+   * 用户点掉提示后条目就从队列里删了，下一次水合会当成"还没显示过"再弹回来——等于
+   * 关不掉。按 id 记住"本页已经交过"，之后的水合一律跳过；整页刷新时 ref 随组件重建
+   * 清空，提示重新出现一次（这才是"提示"的本意）。
+   *
+   * 为什么不按会话分键：id 由宿主/插件用 uuid 生成，跨会话不会撞；而水合路径与 SSE
+   * 路径对"当前是哪个会话"的判断可能差一拍（切换的同 tick），分键反而会让同一条 id
+   * 记到不同键上、又被弹回来。ref 挂在 useAgentSession 上（ChatWindow 只在插件重载时
+   * 重挂载），所以切走再切回同一会话不会重弹。
    */
+  const handedNoticeIdsRef = useRef<Set<string>>(new Set());
+  /**
+   * 认领一次"交给队列"：true = 本页第一次交（调用方应真的入队）；false = 本页已经交过
+   * （水合路径据此跳过，否则用户关掉之后下一次水合又会把它加回来）。
+   */
+  const claimNoticeHandoff = useCallback((id: string): boolean => {
+    if (handedNoticeIdsRef.current.has(id)) return false;
+    handedNoticeIdsRef.current.add(id);
+    return true;
+  }, []);
+
   /**
    * 应用状态里的能力提示（"Web 端不支持/只部分支持某能力"）。
    *
    * host 启动、扩展加载、注册监听器都发生在浏览器订阅之前，那条一次性 SSE 提示
    * 直接丢掉，后加载/刷新的页面永远看不到（实测：服务端日志 5 次、页面 DOM 0 次）。
-   * 与 statuses/widgets/阻塞队列同一条路子：拿到状态就补一遍，按 id 去重由
-   * 通知队列负责（同一条在订阅前后各到一次时只显示一条）。
+   * 与 statuses/widgets/阻塞队列同一条路子：拿到状态就补一遍。
+   *
+   * 补之前先认领（claimNoticeHandoff）：快照会反复回来，不认领的话用户点掉之后下一次
+   * 水合又会把它加回来（关不掉）。
    */
   const applyCapabilityNotices = useCallback((state?: AgentStateResponse | null) => {
     if (!state) return;
     for (const notice of pickCapabilityNotices(state.extensionCapabilityNotices)) {
+      if (!claimNoticeHandoff(notice.id)) continue;
       // 显式带上状态自己的会话 id：水合期间"当前会话"可能还滞后一个渲染，
       // 省略就会把通知放进上一个会话的队列（那条提示于是永远不显示）。
       addNotice({
@@ -666,8 +685,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         sessionId: state.sessionId ?? null,
       });
     }
-  }, [addNotice]);
+  }, [addNotice, claimNoticeHandoff]);
 
+  /**
+   * 应用 host 状态里的扩展 UI 投影：status / widget / 待答阻塞请求 / 活动 custom 面板。
+   *
+   * 这几项在浏览器侧**只有 SSE 事件，没有重放**。页面在后台（浏览器冻结/断流，
+   * 见 registry 的 shouldAutoReconnect）或断网期间漏掉 `extension_ui_request`，
+   * 回到前台后智能体明明在等回答，界面却什么都不显示，只能刷新会话才看得到。
+   * 所以凡是从服务端拿到状态的地方（热状态、切会话、reconcile、切回前台）
+   * 都用这一份投影补齐；空闲（队列为空）时不清本地队列，避免竞态抹掉刚到的请求。
+   */
   const applyExtensionUiProjection = useCallback((state?: AgentStateResponse | null) => {
     if (!state) return;
     if (state.extensionStatuses !== undefined) {
@@ -1742,6 +1770,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     commitExtensionUiState(result.state);
     for (const effect of result.effects) {
       if (effect.type === "notice") {
+        // SSE 路径同样要认领：页面**已经订阅**时宿主才加载扩展（新建会话、换 cwd）的话，
+        // 提示是走这条事件到达的；不认领的话用户点掉后仍会被下一次水合弹回来。
+        // 插件自己的 notify 也走这条分支——它的 id 每次都是新 uuid
+        // （web-extension-ui 的 notify 用 randomUUID），所以记下来只会让"同一条 id 再
+        // 出现"被跳过，不影响正常通知。
+        claimNoticeHandoff(effect.id);
         addNotice({ id: effect.id, message: effect.message, type: effect.noticeType, activityRecord: effect.activityRecord });
         if (effect.activityRecord) {
           // 服务端已确认写盘，直接并入独立活动投影供 M4 历史面板读取。这里不能调用
@@ -1766,7 +1800,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         opts.chatInputRef?.current?.insertText(effect.text);
       }
     }
-  }, [addNotice, addLiveActivity, commitExtensionUiState, opts.chatInputRef, extensionUiStateRef]);
+  }, [addNotice, addLiveActivity, claimNoticeHandoff, commitExtensionUiState, opts.chatInputRef, extensionUiStateRef]);
 
   /**
    * 用 host 下发的本 run 吞吐读数兜底（冷挂载/刷新看不到 step 开始）。

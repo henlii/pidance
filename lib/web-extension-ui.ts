@@ -17,6 +17,24 @@ import {
 import type { ExtensionUiCustomLayout } from "./types";
 
 /**
+ * 能力提示快照的上限。
+ *
+ * 取舍：宿主能力提示的种类是**枚举**（现在公开面一共 8 种：setHiddenThinkingLabel、
+ * setFooter、setHeader、addAutocompleteProvider、setEditorComponent、getAllThemes、
+ * getTheme、onTerminalInput），远小于这个 16 条上限，所以正常永远截不到。
+ * 保留上限只是防止将来有人拿新 feature 名反复调用（把 API 当循环用）让状态快照无界增长。
+ * 截断保留**最新**的：最旧的、可能还没被用户看见的那条会先丢——在 8 种枚举的现实下
+ * 不会发生；真发生了也只丢"旧提示"，不会让状态无界。改成无上限是错的（状态会被插件撑着）。
+ */
+export const MAX_CAPABILITY_NOTICES = 16;
+
+/** 追加一条能力提示并按上限截断（保留最新）。导出只为单测覆盖上限行为。 */
+export function appendCapabilityNotice<T>(list: T[], item: T, max = MAX_CAPABILITY_NOTICES): void {
+  list.push(item);
+  if (list.length > max) list.splice(0, list.length - max);
+}
+
+/**
  * `ctx.ui.custom(factory, options)` 的 overlay 选项 → Web 面板布局。
  *
  * 非 overlay（未声明或 `overlay: false`）返回 null，面板走既有的全屏模态渲染 ——
@@ -293,13 +311,8 @@ export function createWebExtensionUIAdapter(
    * 只重放能力提示：插件自己调的 notify 是一次性通知，重放会让它每次开页面都重弹。
    */
   const capabilityNotices: { id: string; message: string; notifyType: "warning" }[] = [];
-  /** 上限：每会话能力提示种类天然有限，这里只是防插件把 API 当循环用。 */
-  const MAX_CAPABILITY_NOTICES = 16;
   const recordCapabilityNotice = (id: string, message: string) => {
-    capabilityNotices.push({ id, message, notifyType: "warning" });
-    if (capabilityNotices.length > MAX_CAPABILITY_NOTICES) {
-      capabilityNotices.splice(0, capabilityNotices.length - MAX_CAPABILITY_NOTICES);
-    }
+    appendCapabilityNotice(capabilityNotices, { id, message, notifyType: "warning" as const });
   };
 
   /** 插件的全局按键监听（ctx.ui.onTerminalInput）。 */
