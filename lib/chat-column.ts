@@ -5,6 +5,7 @@
  * 输入区 820）。左右边距由两侧的 18px 竖条（MessageNavRail / ChatMinimap）充当，
  * 它们是 DOM 里的真实占位元素，因此会话列不再额外加左右内边距。
  */
+import type { CSSProperties } from "react";
 
 /**
  * 会话内容区宽度的**兜底**上限（px）。真实宽度见下面的「宽度模型」：由比例算出、
@@ -100,3 +101,16 @@ export const CHAT_MINIMAP_WIDTH = CHAT_GUTTER;
  */
 export const CHAT_BLOCK_MAX_HEIGHT = "min(320px, 45vh)";
 export const CHAT_BLOCK_MAX_HEIGHT_MOBILE = "min(240px, 32vh)";
+
+/**
+ * 思考块**展开态**正文样式：不限高、不内部滚动，按内容自然展开（用户 2026-09-24 决定）。
+ *
+ * 代价（有意接受）：超长思考会把输入区推得更远。工具输出与扩展 widget 继续受限高保护 ——
+ * 它们的长度由工具/插件决定，不是用户主动展开要看的正文。
+ */
+export const THINKING_BODY_STYLE: CSSProperties = {
+  padding: "0 10px 8px",
+  fontSize: 12,
+  lineHeight: 1.6,
+  whiteSpace: "pre-wrap",
+};
