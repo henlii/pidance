@@ -17,6 +17,7 @@ import {
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useAnchoredOverlay } from "@/hooks/useAnchoredOverlay";
+import { useExtensionWidgetKeys } from "@/hooks/useExtensionWidgetKeys";
 import { useI18n } from "@/lib/i18n";
 import {
   attachmentBinaryBlocks,
@@ -137,6 +138,13 @@ interface Props {
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
+  /** 当前会话 id（插件 widget 的按键路由与焦点上报需要）。 */
+  sessionId?: string | null;
+  /**
+   * 插件 widget 的按键窄口子是否可用：没有 custom 面板、该会话存在 widget、
+   * 且有插件注册了全局按键监听时才为 true。
+   */
+  extensionWidgetKeysEnabled?: boolean;
 }
 
 /** token 数友好格式化：1000000 → 1M，256000 → 256K。 */
@@ -368,11 +376,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   footerCollapsed, onFooterToggle,
   draftKey,
   cwd,
+  sessionId,
+  extensionWidgetKeysEnabled = false,
 }: Props, ref) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   /** 桌面流式期 Enter 默认动作（followUp/steer）；手机端回车仅换行。 */
   const [streamingEnterDefault, setStreamingEnterDefault] = useState<StreamingEnterAction>("followUp");
+  /** 输入框（主编辑器）是否聚焦：插件靠它判断 `tui.focusedComponent`。 */
+  const [composerFocused, setComposerFocused] = useState(false);
   // 队列行（含在途 claimed 与结果未知 unknown）；旧 Host 不回 followUpRows 时回落正文。
   const queuedRows: QueuedRow[] = queuedMessages?.followUpRows?.length
     ? queuedMessages.followUpRows
@@ -396,6 +408,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     };
   }, []);
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
+  // 插件 widget 的按键交互与焦点上报：只在没有 custom 面板、且该会话存在 widget 时开。
+  // 普通打字不走这条路（一次请求都不发），细节见 hooks/useExtensionWidgetKeys.ts。
+  useExtensionWidgetKeys({
+    sessionId: sessionId ?? null,
+    enabled: extensionWidgetKeysEnabled,
+    composerEmpty: value.length === 0,
+    composerFocused,
+  });
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const [queueExpanded, setQueueExpanded] = useState(true);
@@ -2366,6 +2386,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               updateAtQuery(el.value, el.selectionStart);
             }}
             onInput={handleInput}
+            onFocus={() => setComposerFocused(true)}
+            onBlur={() => setComposerFocused(false)}
             onPaste={handlePaste}
             placeholder={
               isStreaming && (onSteer || onFollowUp)

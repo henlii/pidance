@@ -2839,7 +2839,22 @@ export class SdkSessionHost {
         // 面板被插件收起时的白名单按键：交给插件注册的全局监听器
         // （ctx.ui.onTerminalInput；如 rpiv-ask-user 的折叠键用来重新展开面板）。
         const data = typeof command.data === "string" ? command.data : "";
+        // 焦点与按键在**同一条命令**里落地：拆成两条请求会乱序（焦点还没到、按键
+        // 先被插件处理），表现为冷启动/焦点过期后第一次 ↓ 不激活。
+        if (command.assertFocus === true) {
+          this.extensionUi?.setEditorFocus(true, asString(command.clientId) ?? "default");
+        }
         return this.extensionUi?.dispatchTerminalInput(data) ?? { consumed: false };
+      }
+
+      case "editor_focus": {
+        // 客户端输入框的焦点状态。插件读 `tui.focusedComponent` 判断「主编辑器有没有
+        // 焦点」（pi-subagents 的 fleet widget 靠它决定方向键能不能进选择态），
+        // 这个探针只有真的有焦点时才给。
+        const focused = command.focused === true;
+        // clientId 用于多标签聚合：任一标签聚焦即聚焦（后台标签的失焦不能清掉前台）。
+        const clientId = asString(command.clientId) ?? "default";
+        return { focused, changed: this.extensionUi?.setEditorFocus(focused, clientId) ?? false };
       }
 
       case "extension_ui_mouse": {
