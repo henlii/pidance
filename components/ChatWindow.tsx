@@ -212,9 +212,13 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   });
 
   // 插件组件按可用尺寸排版与裁切：视口变化时让服务端重新渲染，而不是交给 CSS 硬断行
-  // （硬断行会把方框/表格/选中条拆散，见 lib/render-width.ts）。列数与行数同源上报。
+  // （硬断行会把方框/表格/选中条拆散，见 lib/render-width.ts）。列数与行数同源上报，
+  // 并且跟着当前显示的会话走。
+  // 会话 id 取 `session?.id` 优先（与本文件其它调用点同口径）：它是当前**显示**的会话。
+  // 这个值也是 effect 的依赖——换会话时它必须真的变，否则 effect 不重跑，
+  // 新会话的 host 就不会收到尺寸（columns/rows 会停在默认值，插件按默认值裁切）。
   useRenderSize({
-    sessionId: sessionIdRef.current,
+    sessionId: session?.id ?? sessionIdRef.current,
     containerRef: scrollContainerRef,
     enabled: !isReadOnly,
   });

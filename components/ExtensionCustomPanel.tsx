@@ -13,16 +13,20 @@ import { ExtensionPanelChrome } from "./ExtensionPanelChrome";
 /**
  * DOM 点击坐标 → 面板内的字符行列（pi-tui 的 TuiMouseEvent 用字符坐标）。
  * 行按实际行高算；列按等宽字符宽算（同 measureCharWidth）。滚动位置一并计入。
+ *
+ * `measureCharWidth` 量不到时（元素尚未布局）返回 null，调用方**不转发这次点击**：
+ * 字符宽编不出来就换不出正确的格位，宁可这一次点击不生效，也不要给插件送去错坐标。
  */
 function toPanelMouseEvent(
   event: React.MouseEvent<HTMLPreElement>,
-): Record<string, unknown> {
+): Record<string, unknown> | null {
   const el = event.currentTarget;
   const rect = el.getBoundingClientRect();
   const styles = window.getComputedStyle(el);
   const fontSize = Number.parseFloat(styles.fontSize) || 12;
   const lineHeight = Number.parseFloat(styles.lineHeight) || fontSize * 1.5;
   const charWidth = measureCharWidth(el);
+  if (charWidth === null) return null;
   const x = Math.max(0, Math.floor((event.clientX - rect.left + el.scrollLeft) / charWidth));
   const y = Math.max(0, Math.floor((event.clientY - rect.top + el.scrollTop) / lineHeight));
   return {
@@ -162,8 +166,10 @@ export function ExtensionCustomPanel({
         <pre
           className="extension-panel-ansi"
           onClick={(event) => {
-            // 组件树里的 MouseRegion / widget 折叠靠它；没有 onMouse 就不转发
-            onMouse?.(request, toPanelMouseEvent(event));
+            // 组件树里的 MouseRegion / widget 折叠靠它；没有 onMouse 就不转发，
+            // 字符宽量不出时（见 toPanelMouseEvent）也不转发。
+            const mouse = toPanelMouseEvent(event);
+            if (mouse) onMouse?.(request, mouse);
           }}
         >
           {(displayLines.length ? displayLines : [""]).map((line, index, allLines) => (
