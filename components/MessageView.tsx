@@ -19,6 +19,7 @@ import { PIDANCE_BINARY_CUSTOM_TYPE, parseBinaryMessageData } from "@/lib/messag
 import { getBranchSummaryFileMetadata } from "@/lib/branch-bookmarks";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isUnexplainedUpstreamRejection } from "@/lib/provider-error";
+import { humanizeExtensionIdentifier } from "@/lib/extension-labels";
 import { isActiveStreamBlock, isEmptyThinkingBlock } from "@/lib/message-display";
 import { getThinkingText, projectDisplayBlocks } from "@/lib/thinking-content";
 import { parseAnsiLine } from "@/lib/ansi";
@@ -2188,12 +2189,11 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
   const images = getMessageImages(message.content);
   const hasDetails = message.details !== undefined;
   const detailsText = hasDetails ? safeJson(message.details) : "";
-  // pi-subagents 的自定义消息（subagent-notify / subagent-incremental-child-notify）内部类型名
-  // 对用户没有意义，给一个友好名字；其余扩展消息仍显示自己的 customType。
-  const isSubagentNotice = typeof message.customType === "string" && message.customType.startsWith("subagent-");
-  const title = isSubagentNotice
-    ? t("message_subagentNotice")
-    : (message.customType || t("message_extensionDefaultType"));
+  // 扩展自定义消息的类型名是机器标识（subagent-notify 等）：走共享的通用美化，
+  // 不为个别插件硬编码友好名（AGENTS.md「产品原则」第 3 条）。
+  const title = message.customType
+    ? humanizeExtensionIdentifier(message.customType)
+    : t("message_extensionDefaultType");
   const time = formatTime(message.timestamp);
   const renderedLines = getRenderableAnsiLines(message.renderedLines);
 

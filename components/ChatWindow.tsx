@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import type { AgentMessage, BashExecutionMessage, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import type { BranchActions } from "@/lib/branch-bookmarks";
 import { parseAnsiLine } from "@/lib/ansi";
+import { humanizeExtensionIdentifier } from "@/lib/extension-labels";
 import { composeChatPlan, type ChatRenderItem } from "@/lib/chat-compositor";
 import type { TurnMetrics } from "@/lib/browser-session-runtime-registry";
 import { MessageView } from "./MessageView";
@@ -1099,17 +1100,9 @@ function ExtensionStatusBar({ statuses }: { statuses: Array<{ key: string; text:
 /**
  * widget key（kebab/snake）→ 可读标题：`subagent-async` → `Subagent Async`。
  *
- * 通用规则：所有插件共用，**不为个别插件写特例**（产品原则见 AGENTS.md）。
+ * 走共享的通用规则（lib/extension-labels.ts），**不为个别插件写特例**。
  * 已知机器载荷（能解析出结构化信息的）仍用它们自己的友好名，见下面的 heading。
  */
-function widgetKeyTitle(key: string): string {
-  return key
-    .split(/[-_]/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
 function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: string[] }> }) {
   // 扩展可能发「机器载荷」widget（pi-subagents 的 subagent-async 在 rpc 模式下就是一整行
   // PI_SUBAGENT_ASYNC_JSON:{…}）。这类载荷要按数据渲染，绝不能当文本显示原样 JSON。
@@ -1157,7 +1150,7 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
           ? (heading.singleLabel
             ? t("subagent_widgetSingle", { name: heading.singleLabel })
             : t("subagent_widgetTitle"))
-          : widgetKeyTitle(widget.key);
+          : humanizeExtensionIdentifier(widget.key);
         const subtitle = heading
           ? [
             t("subagent_widgetBackground"),

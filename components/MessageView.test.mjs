@@ -132,7 +132,7 @@ test("pidance.activity：非法 details 安全回退通用 custom view", () => {
 
     // 不出现专用卡片 landmark；回退到通用 custom view（header 显示 customType）
     assert.ok(!html.includes("<section"), JSON.stringify(details));
-    assert.ok(html.includes(">pidance.activity</span>"), JSON.stringify(details));
+    assert.ok(html.includes(">Pidance Activity</span>"), JSON.stringify(details));
     assert.ok(html.includes('aria-label="Show details"'), JSON.stringify(details));
   }
 });
@@ -148,7 +148,7 @@ test("其它 customType 不误识别为 activity 卡片", () => {
   const html = renderMessage(message);
 
   assert.ok(!html.includes("<section"));
-  assert.ok(html.includes(">extension_debug</span>"));
+  assert.ok(html.includes(">Extension Debug</span>"));
 });
 
 test("custom 渲染桥：合法 ANSI 行优先，隐藏原始内容、详情与复制区", () => {
@@ -161,7 +161,7 @@ test("custom 渲染桥：合法 ANSI 行优先，隐藏原始内容、详情与�
     renderedLines: ["\u001b[33m⚠ 插件控制提示\u001b[0m", "第二行"],
   });
 
-  assert.ok(html.includes(">extension_notice</span>"));
+  assert.ok(html.includes(">Extension Notice</span>"));
   assert.ok(html.includes("⚠ 插件控制提示"));
   assert.ok(html.includes("第二行"));
   assert.ok(!html.includes("原始文本"));
@@ -233,7 +233,7 @@ test("扩展自定义消息默认收起：正文不整段渲染，只给一行�
     details: {},
   });
 
-  assert.ok(html.includes(">some-extension.record</span>"), "标题行仍显示自定义类型");
+  assert.ok(html.includes(">Some Extension Record</span>"), "标题行显示美化后的自定义类型（通用规则，不为个别插件开特例）");
   // 收起态：走预览按钮（一行），不整段渲染 markdown 正文
   assert.ok(!html.includes("markdown-custom-message"), "非智能体直接输出的块默认不整段渲染");
   assert.ok(html.includes("extension record body"), "收起态给一行预览，便于判断要不要展开");

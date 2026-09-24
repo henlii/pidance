@@ -522,7 +522,6 @@ export const en = {
   extension_confirm: 'Confirm',
   extension_submit: 'Submit',
   extension_panelExpand: 'Expand',
-  message_subagentNotice: 'Subagent notice',
   extension_panelCollapse: 'Collapse',
   extension_other: 'Other',
   extension_selectAnOption: 'Select an option',
