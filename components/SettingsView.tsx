@@ -842,7 +842,7 @@ export function SettingsView({ cwd, sessionId, onClose, onModelsChanged, onAuthS
       case "appearance":
         return <AppearancePage onClose={onClose} />;
       case "models":
-        return <ModelsConfig embedded onClose={onModelsChanged ?? onClose} onAuthStateChange={onAuthStateChange} />;
+        return <ModelsConfig embedded onClose={onModelsChanged ?? onClose} onAuthStateChange={onAuthStateChange} cwd={cwd ?? undefined} />;
       case "defaults":
         return <AgentDefaultsConfig cwd={cwd} onClose={onClose} />;
       case "prompts":

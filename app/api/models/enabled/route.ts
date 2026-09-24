@@ -19,7 +19,7 @@ import {
   readEnabledModelsState,
   toggleEnabledModel,
 } from "@/lib/enabled-models-store";
-import { isModelEnabled, loadAvailableModels, modelRefOf } from "@/lib/models-available";
+import { effectiveEnabledRefs, loadAvailableModels, modelRefOf } from "@/lib/models-available";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +28,8 @@ function errorStatus(code: EnabledModelsError["code"]): number {
     case "bad-request":
       return 400;
     case "unreadable":
+    // 形状无法安全做文本手术：拒写（不整份重写），按同一类 422 告知调用方
+    case "unsupported-shape":
       return 422;
     case "project-override":
     case "last-model":
@@ -42,35 +44,56 @@ function cwdFrom(request: Request): string {
   return resolve(requested && requested.trim() !== "" ? requested : process.cwd());
 }
 
-export async function GET(req: Request) {
-  const cwd = cwdFrom(req);
-  try {
-    const state = readEnabledModelsState({
-      projectSettingsPath: projectSettingsPathFor(cwd) ?? undefined,
-    });
-    const data = await loadAvailableModels();
-    return NextResponse.json(
-      {
-        enabledModels: state.enabledModels,
-        projectOverride: state.projectOverride,
-        unreadable: state.unreadable,
-        models: data.modelList.map((m) => ({
-          ref: modelRefOf(m),
+type ModelsLoader = typeof loadAvailableModels;
+
+/**
+ * GET 处理器（可注入目录加载器，只为可测：安全空态是真实错误路径，不能只靠「空目录」间接覆盖）。
+ */
+export function createEnabledModelsGET(load: ModelsLoader = loadAvailableModels) {
+  return async function GET(req: Request) {
+    const cwd = cwdFrom(req);
+    let state: ReturnType<typeof readEnabledModelsState> | null = null;
+    try {
+      state = readEnabledModelsState({
+        projectSettingsPath: projectSettingsPathFor(cwd) ?? undefined,
+      });
+    } catch {
+      state = null;
+    }
+
+    // 可用目录是**只读投影**：读不出来就给安全空态（空列表 + 空标记），
+    // 不升 500 —— 升 500 会把整个设置页拆掉，用户还得不到可执行的信息。
+    let entries: Array<{ ref: string; id: string; name: string; provider: string; enabled: boolean }> = [];
+    try {
+      const data = await load();
+      const enabled = effectiveEnabledRefs(data.modelList, state?.enabledModels ?? null);
+      entries = data.modelList.map((m) => {
+        const ref = modelRefOf(m);
+        return {
+          ref,
           id: m.id,
           name: m.name,
           provider: m.provider,
-          enabled: isModelEnabled(m, state.enabledModels),
-        })),
+          enabled: enabled === null ? true : enabled.has(ref),
+        };
+      });
+    } catch {
+      entries = [];
+    }
+
+    return NextResponse.json(
+      {
+        enabledModels: state?.enabledModels ?? null,
+        projectOverride: state?.projectOverride === true,
+        unreadable: state?.unreadable === true,
+        models: entries,
       },
       { headers: { "Cache-Control": "no-store" } },
     );
-  } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : String(error) },
-      { status: 500 },
-    );
-  }
+  };
 }
+
+export const GET = createEnabledModelsGET();
 
 export async function POST(req: Request) {
   const cwd = cwdFrom(req);

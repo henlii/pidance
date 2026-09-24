@@ -33,7 +33,9 @@ export type EnabledModelsErrorCode =
   | "bad-request"
   | "unreadable"
   | "project-override"
-  | "last-model";
+  | "last-model"
+  /** 文件形状无法安全做文本手术（顶层不是对象等）——拒写，不整份重写。 */
+  | "unsupported-shape";
 
 export class EnabledModelsError extends Error {
   readonly code: EnabledModelsErrorCode;
@@ -110,9 +112,33 @@ export function projectSettingsPathFor(cwd: string | null | undefined): string |
   return getProjectSettingsPath(cwd);
 }
 
-function matchesRef(entry: string, ref: string): boolean {
+/**
+ * 目录里的裸 id → 唯一引用；多个 provider 用同一个 id 时返回 null（说不清是哪一个）。
+ */
+function uniqueRefForBareId(bare: string, allRefs: readonly string[]): string | null {
+  const hits = allRefs
+    .map(stripThinkingSuffix)
+    .filter((entry) => entry !== "" && (entry.split("/").pop() ?? entry) === bare);
+  const unique = [...new Set(hits)];
+  return unique.length === 1 ? unique[0]! : null;
+}
+
+/** 目标引用归一：`provider/model` 直接用；裸 id 只在目录里唯一时才认。 */
+function canonicalTarget(target: string, allRefs: readonly string[]): string {
+  if (allRefs.some((entry) => stripThinkingSuffix(entry) === target)) return target;
+  const bare = target.split("/").pop() ?? "";
+  return (bare ? uniqueRefForBareId(bare, allRefs) : null) ?? target;
+}
+
+/**
+ * 条目是否指向目标模型（重叠语义）：裸 id 只要 id 相同就算重叠 —— 它可能同时指向别的 provider 的同名模型，
+ * 所以调用方在删它时必须把其它同名模型显式补回来（见 disable 分支）。
+ */
+function overlapsTarget(entry: string, target: string): boolean {
   const a = stripThinkingSuffix(entry);
-  return a === ref || a === ref.split("/").pop();
+  if (a === target) return true;
+  const bare = target.split("/").pop() ?? "";
+  return bare !== "" && a === bare;
 }
 
 /**
@@ -129,11 +155,13 @@ export function computeNextEnabledModels(
   enabled: boolean,
   allRefs: readonly string[],
 ): string[] | null {
-  const target = stripThinkingSuffix(ref.trim());
+  const target = canonicalTarget(stripThinkingSuffix(ref.trim()), allRefs);
   if (!target) throw new EnabledModelsError("bad-request", "model reference is empty");
 
   const currentList = current && current.length > 0 ? current : null;
-  const has = (list: readonly string[]) => list.some((entry) => matchesRef(entry, target));
+  // 重叠语义：裸 id 覆盖到的模型也算「已经是这个状态」，否则开关会看起来没反应
+  // （面板说关了、实际还在）。
+  const has = (list: readonly string[]) => list.some((entry) => overlapsTarget(entry, target));
 
   if (enabled) {
     // 未过滤时已经是「全开」，无需写盘（写进去反而会收窄成只有一个）。
@@ -145,7 +173,7 @@ export function computeNextEnabledModels(
   if (!currentList) {
     const base = allRefs.filter((entry) => entry.trim() !== "");
     if (base.length === 0) return null;
-    const remaining = base.filter((entry) => !matchesRef(entry, target));
+    const remaining = base.filter((entry) => !overlapsTarget(entry, target));
     // 目标不在可用集里（例如已删模型）：不动
     if (remaining.length === base.length) return null;
     // 空数组 = 不过滤，无法表达「全关」，明确拒绝而不是静默变成全开
@@ -156,7 +184,27 @@ export function computeNextEnabledModels(
   }
 
   if (!has(currentList)) return currentList;
-  const remaining = currentList.filter((entry) => !matchesRef(entry, target));
+
+  // 逐条决定：命中目标的那条去掉。
+  // 如果命中的是一条**裸 id**（可能同时指向同 id 的其它 provider 模型），
+  // 就要把那些模型显式补回来 —— 否则「只关这一个」会把它们一起关掉。
+  const remaining: string[] = [];
+  for (const entry of currentList) {
+    if (!overlapsTarget(entry, target)) {
+      remaining.push(entry);
+      continue;
+    }
+    const normalized = stripThinkingSuffix(entry);
+    if (!normalized.includes("/")) {
+      for (const other of allRefs) {
+        const otherRef = stripThinkingSuffix(other);
+        if (otherRef === target || !otherRef) continue;
+        if ((otherRef.split("/").pop() ?? otherRef) === normalized && !remaining.includes(otherRef)) {
+          remaining.push(otherRef);
+        }
+      }
+    }
+  }
   if (remaining.length === 0) {
     throw new EnabledModelsError("last-model", "cannot disable the last enabled model");
   }
@@ -398,14 +446,12 @@ export function writeEnabledModels(
     return;
   }
 
-  // 手术失败（形状罕见）：退回整份序列化 —— 值不丢，但排版会被规范化。
-  const data: SettingsObject = { ...read.data };
-  if (next === null) {
-    delete data[ENABLED_MODELS_KEY];
-  } else {
-    data[ENABLED_MODELS_KEY] = [...next];
-  }
-  saveSettingsFile(settingsPath, data);
+  // 手术失败（形状罕见，如顶层不是对象）：**拒写**。这里曾经退回「整份 JSON 序列化重写」
+  // ——那会把用户 settings.json 的排版和其它运行时写的键一起规范化，代价比一个小开关大得多。
+  throw new EnabledModelsError(
+    "unsupported-shape",
+    "settings.json has a shape this editor cannot patch safely; refusing to rewrite it",
+  );
 }
 
 export interface ToggleResult {

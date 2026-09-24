@@ -136,6 +136,13 @@ const CACHE_TTL_MS = 30_000;
 interface ExtensionProvidersCacheState {
   entries: Map<string, { value: ExtensionProvidersResult; expiresAt: number }>;
   inFlight: Map<string, Promise<ExtensionProvidersResult>>;
+  /**
+   * 失效代数：失效时 +1。
+   *
+   * 正在飞的加载回来时如果代数已经变了，就不能再写回 entries —— 否则一次失效
+   * （装/卸插件、模型配置变更）会被上一个旧加载的结果覆盖，缓存看起来「没失效」。
+   */
+  generation: number;
 }
 
 declare global {
@@ -144,7 +151,7 @@ declare global {
 
 function cacheState(): ExtensionProvidersCacheState {
   if (!globalThis.__piPidanceExtensionProvidersCache) {
-    globalThis.__piPidanceExtensionProvidersCache = { entries: new Map(), inFlight: new Map() };
+    globalThis.__piPidanceExtensionProvidersCache = { entries: new Map(), inFlight: new Map(), generation: 0 };
   }
   return globalThis.__piPidanceExtensionProvidersCache;
 }
@@ -155,6 +162,7 @@ export function invalidateExtensionProvidersCache(): void {
   if (!state) return;
   state.entries.clear();
   state.inFlight.clear();
+  state.generation += 1;
 }
 
 export interface ListExtensionProvidersOptions {
@@ -182,6 +190,7 @@ export async function listExtensionProviders(
   }
 
   const loader = (options.loaderFactory ?? createSdkLoader)(cwd, options.agentDir);
+  const generationAtStart = state.generation;
   const loading = Promise.resolve()
     .then(loader)
     .then((raw) => ({ providers: mapExtensionProviders(raw) }) as ExtensionProvidersResult)
@@ -190,7 +199,8 @@ export async function listExtensionProviders(
       error: error instanceof Error ? error.message : String(error),
     }) as ExtensionProvidersResult)
     .then((value) => {
-      if (!options.bypassCache) {
+      // 失效期间起飞的结果不再写回（见 generation 注释）。
+      if (!options.bypassCache && state.generation === generationAtStart) {
         state.entries.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
       }
       return value;

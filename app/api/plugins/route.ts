@@ -9,6 +9,8 @@ import {
   updatePluginPackage,
 } from "@/lib/plugin-install";
 import type { PluginScope, PluginsResponse } from "@/lib/api-types";
+import { invalidateExtensionProvidersCache } from "@/lib/extension-providers";
+import { invalidateModelsCache } from "@/lib/models-cache";
 
 export const dynamic = "force-dynamic";
 
@@ -89,6 +91,11 @@ export async function POST(req: Request) {
     } else {
       return NextResponse.json({ error: `Unsupported action: ${body.action}` }, { status: 400 });
     }
+
+    // 插件的增删改启停都会影响「扩展注册的 provider」与模型目录：
+    // 不失效就会继续拿旧清单（用户刚装完看不到新 provider）。
+    invalidateExtensionProvidersCache();
+    invalidateModelsCache();
 
     return NextResponse.json(readPlugins(body.cwd));
   } catch (error) {

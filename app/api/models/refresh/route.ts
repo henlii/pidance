@@ -26,7 +26,11 @@ export function createRefreshHandler(refresh: RefreshFn = refreshModelCatalog) {
     } catch (error) {
       if (error instanceof ModelCatalogRefreshError) {
         return NextResponse.json(
-          { error: error.message, code: error.code },
+          {
+            error: error.message,
+            code: error.code,
+            ...(error.providers ? { providers: error.providers } : {}),
+          },
           { status: error.code === "unavailable" ? 503 : 502 },
         );
       }

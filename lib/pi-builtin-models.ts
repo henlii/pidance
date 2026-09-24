@@ -12,7 +12,8 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { CatalogModel } from "./models-catalog";
+import { projectCatalogModel, type CatalogModel } from "./models-catalog";
+import { mergeCatalogWithOverlay, readModelsStoreOverlay, resetModelsStoreOverlayCacheForTests } from "./model-store-catalog";
 
 type BuiltinProvider = {
   id: string;
@@ -32,14 +33,13 @@ type BuiltinModel = {
 type BuiltinProvidersModule = {
   builtinProviders?: () => readonly BuiltinProvider[];
   getBuiltinProviders?: () => readonly BuiltinProvider[];
+  /** 内置目录的生成时间（与 pi 的新鲜度比对用）。 */
+  getBuiltinModelDataGeneratedAt?: () => number;
 };
 
 let cached: CatalogModel[] | null = null;
+let cachedGeneratedAt: number | undefined;
 let loadPromise: Promise<CatalogModel[]> | null = null;
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /** 从 pi-coding-agent 安装树向上查找 pi-ai providers/all.js */
 export function resolvePiAiProvidersAllPath(startDir = process.cwd()): string | null {
@@ -59,30 +59,6 @@ export function resolvePiAiProvidersAllPath(startDir = process.cwd()): string | 
   return null;
 }
 
-function toCatalogModel(m: BuiltinModel, providerId: string): CatalogModel | null {
-  const id = typeof m.id === "string" ? m.id : "";
-  if (!id) return null;
-  const name = typeof m.name === "string" && m.name ? m.name : id;
-  const provider =
-    typeof m.provider === "string" && m.provider ? m.provider : providerId;
-  const thinkingLevelMap = isPlainObject(m.thinkingLevelMap)
-    ? (m.thinkingLevelMap as Record<string, string | null>)
-    : undefined;
-  return {
-    id,
-    name,
-    provider,
-    reasoning: m.reasoning === true,
-    ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
-    ...(typeof m.contextWindow === "number" && Number.isFinite(m.contextWindow)
-      ? { contextWindow: m.contextWindow }
-      : {}),
-    ...(typeof m.maxTokens === "number" && Number.isFinite(m.maxTokens)
-      ? { maxTokens: m.maxTokens }
-      : {}),
-  };
-}
-
 function projectBuiltinCatalog(mod: BuiltinProvidersModule): CatalogModel[] {
   const providers =
     (typeof mod.builtinProviders === "function" ? mod.builtinProviders() : null) ??
@@ -93,15 +69,29 @@ function projectBuiltinCatalog(mod: BuiltinProvidersModule): CatalogModel[] {
     if (!p || typeof p.id !== "string" || !p.id) continue;
     const models = typeof p.getModels === "function" ? p.getModels() : [];
     for (const m of models ?? []) {
-      const entry = toCatalogModel(m, p.id);
+      const entry = projectCatalogModel(m, p.id);
       if (entry) out.push(entry);
     }
   }
   return out;
 }
 
-/** 加载并缓存内置模型目录；失败返回空数组（不拖垮 /api/models）。 */
-export async function listBuiltinCatalogModels(): Promise<CatalogModel[]> {
+/**
+ * 加载内置模型目录（静态内置 + 远端刷新覆盖）。失败返回空数组（不拖垮 /api/models）。
+ *
+ * 静态部分按进程缓存；远端覆盖每次重读（按文件 mtime+size 缓存），
+ * 所以「刷新目录」写完 models-store.json 后下一次请求就能看到新模型。
+ */
+export async function listBuiltinCatalogModels(options: { modelsPath?: string } = {}): Promise<CatalogModel[]> {
+  const builtins = await loadStaticBuiltinCatalogModels();
+  const overlay = readModelsStoreOverlay({
+    modelsPath: options.modelsPath,
+    localGeneratedAt: cachedGeneratedAt,
+  });
+  return mergeCatalogWithOverlay(builtins, overlay);
+}
+
+async function loadStaticBuiltinCatalogModels(): Promise<CatalogModel[]> {
   if (cached) return cached;
   if (loadPromise) return loadPromise;
 
@@ -129,9 +119,14 @@ export async function listBuiltinCatalogModels(): Promise<CatalogModel[]> {
         mod = await importRuntime(url);
       }
       cached = projectBuiltinCatalog(mod);
+      cachedGeneratedAt =
+        typeof mod.getBuiltinModelDataGeneratedAt === "function"
+          ? mod.getBuiltinModelDataGeneratedAt()
+          : undefined;
       return cached;
     } catch {
       cached = [];
+      cachedGeneratedAt = undefined;
       return cached;
     } finally {
       loadPromise = null;
@@ -144,5 +139,7 @@ export async function listBuiltinCatalogModels(): Promise<CatalogModel[]> {
 /** 测试用：重置缓存 */
 export function resetBuiltinCatalogModelsCacheForTests(): void {
   cached = null;
+  cachedGeneratedAt = undefined;
   loadPromise = null;
+  resetModelsStoreOverlayCacheForTests();
 }

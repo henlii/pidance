@@ -32,9 +32,11 @@ interface EnabledModelsPayload {
   models: EnabledModelEntry[];
 }
 
-export function EnabledModelsPanel({ onModelsChanged }: { onModelsChanged?: () => void }) {
+export function EnabledModelsPanel({ onModelsChanged, cwd }: { onModelsChanged?: () => void; cwd?: string }) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
+  // 服务端靠 cwd 解析项目级 settings.json（只读判定）与项目扩展；不带就是服务端 process.cwd()。
+  const cwdQuery = cwd && cwd.trim() !== "" ? `?cwd=${encodeURIComponent(cwd)}` : "";
   const [payload, setPayload] = useState<EnabledModelsPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [pendingRef, setPendingRef] = useState<string | null>(null);
@@ -44,7 +46,7 @@ export function EnabledModelsPanel({ onModelsChanged }: { onModelsChanged?: () =
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch("/api/models/enabled", { cache: "no-store" });
+      const res = await fetch(`/api/models/enabled${cwdQuery}`, { cache: "no-store" });
       const data = (await res.json().catch(() => ({}))) as EnabledModelsPayload & { error?: string };
       if (!res.ok) {
         setLoadError(typeof data.error === "string" && data.error ? data.error : `HTTP ${res.status}`);
@@ -64,7 +66,7 @@ export function EnabledModelsPanel({ onModelsChanged }: { onModelsChanged?: () =
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [cwdQuery]);
 
   useEffect(() => {
     void load();
@@ -77,7 +79,7 @@ export function EnabledModelsPanel({ onModelsChanged }: { onModelsChanged?: () =
       setPendingRef(entry.ref);
       setMessage(null);
       try {
-        const res = await fetch("/api/models/enabled", {
+        const res = await fetch(`/api/models/enabled${cwdQuery}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ref: entry.ref, enabled }),
@@ -103,7 +105,7 @@ export function EnabledModelsPanel({ onModelsChanged }: { onModelsChanged?: () =
         setPendingRef(null);
       }
     },
-    [load, onModelsChanged, t],
+    [cwdQuery, load, onModelsChanged, t],
   );
 
   const refresh = useCallback(async () => {
@@ -160,7 +162,8 @@ export function EnabledModelsPanel({ onModelsChanged }: { onModelsChanged?: () =
             color: refreshing ? "var(--text-dim)" : "var(--text)",
             fontSize: 12,
             cursor: refreshing ? "default" : "pointer",
-            minHeight: 32,
+            // 触摸目标：窄屏（手机）上按钮必须够大，桌面保持紧凑
+            minHeight: isMobile ? 44 : 36,
           }}
         >
           {refreshing ? <LoaderCircle size={13} className="animate-spin" aria-hidden /> : <RefreshCw size={13} />}

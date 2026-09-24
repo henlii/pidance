@@ -110,7 +110,7 @@ export async function loadAvailableModels(options: AvailableModelsPaths = {}): P
     }
   }
 
-  const builtins = await listBuiltinCatalogModels();
+  const builtins = await listBuiltinCatalogModels({ modelsPath });
   const catalog = mergeCatalogModels(custom, builtins, authConfigured);
   const base = buildModelsDataFromCatalog(catalog, {
     settingsPath,
@@ -177,6 +177,25 @@ export function applyEnabledModelsFilter(
 /** 供测试与调用方复用：把 catalog 模型列表转成可用引用集合。 */
 export function modelRefsOf(entries: readonly { id: string; provider: string }[]): string[] {
   return entries.map(modelRefOf);
+}
+
+/**
+ * 面板用的「生效后的启用集合」。
+ *
+ * 过滤口径是「enabledModels 非空但一个都没命中 → 退回不过滤」（见
+ * `filterByExactEnabledModels`：宁可多显示，也不要把模型选择器整栏卸掉）。面板必须用同一口径，
+ * 否则白名单过期时面板显示「全关」、而选择器里全都能用 —— 两处互相矛盾。
+ *
+ * 返回 null 表示「不过滤」（全部可见）。
+ */
+export function effectiveEnabledRefs(
+  models: readonly { id: string; provider: string }[],
+  enabledModels: string[] | undefined | null,
+): Set<string> | null {
+  if (!enabledModels || enabledModels.length === 0) return null;
+  const visible = models.filter((m) => isModelEnabled(m, enabledModels));
+  if (visible.length === 0) return null;
+  return new Set(visible.map(modelRefOf));
 }
 
 export type { CatalogModel };
