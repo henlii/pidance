@@ -22,8 +22,12 @@ const MAX_TITLE_LENGTH = 80;
 const USER_CHARS = 800;
 const ASSISTANT_CHARS = 300;
 const LAST_ASSISTANT_CHARS = 600;
-/** 全部消息合计预算：没有它请求仍会随会话变长线性膨胀（实测 120 轮 ≈ 74k token）。 */
+/** 全部消息合计预算：没有它请求仍会随会话变长线性膨胀（实测 120 轮 ≈ 74k token）。
+ * 这是**会话摘要**的预算；末条折进的 TITLE_PROMPT 另算，调用方要把它从总预算里扣掉
+ * （见 generateSessionTitleFromMessages），这样报出去的口径仍是「一次命名请求 ≤ 6000」。 */
 const TRANSCRIPT_CHARS = 6000;
+/** 末条 user 与 TITLE_PROMPT 之间的分隔符（两处共用，便于把它的长度算进预算）。 */
+const TITLE_PROMPT_SEPARATOR = "\n\n";
 /** 留给会话开头的份额：会话常在最前面交代目标，之后漂进琐事。 */
 const TRANSCRIPT_HEAD_CHARS = Math.round(TRANSCRIPT_CHARS * 0.4);
 const ELISION = "[…]";
@@ -94,7 +98,7 @@ export function appendTitleRequestToTrailingUser(
 
   const content =
     typeof lastMessage.content === "string"
-      ? `${lastMessage.content}\n\n${TITLE_PROMPT}`
+      ? `${lastMessage.content}${TITLE_PROMPT_SEPARATOR}${TITLE_PROMPT}`
       : [
           ...(Array.isArray(lastMessage.content) ? lastMessage.content : []),
           { type: "text" as const, text: TITLE_PROMPT },
@@ -117,17 +121,18 @@ function titleTextLength(message: TitleRequestMessage): number {
  * 若干条，中间丢掉的部分在头部末尾标一个省略号。会话目标常在最前面，只花在新消息上
  * 会把会话命名成最后一件琐事。
  */
-function boundByBudget(messages: TitleRequestMessage[]): TitleRequestMessage[] {
+function boundByBudget(messages: TitleRequestMessage[], budgetChars = TRANSCRIPT_CHARS): TitleRequestMessage[] {
   const total = messages.reduce((sum, message) => sum + titleTextLength(message), 0);
-  if (total <= TRANSCRIPT_CHARS || messages.length < 2) return messages;
+  if (total <= budgetChars || messages.length < 2) return messages;
 
   // 省略号本身也要占额度
   let used = ELISION.length + 2;
+  const headBudget = Math.round(budgetChars * (TRANSCRIPT_HEAD_CHARS / TRANSCRIPT_CHARS));
   const head: TitleRequestMessage[] = [];
   let next = 0;
   for (; next < messages.length; next++) {
     const size = used + titleTextLength(messages[next]);
-    if (head.length > 0 && size > TRANSCRIPT_HEAD_CHARS) break;
+    if (head.length > 0 && size > headBudget) break;
     head.push(messages[next]);
     used = size;
   }
@@ -135,7 +140,7 @@ function boundByBudget(messages: TitleRequestMessage[]): TitleRequestMessage[] {
   const tail: TitleRequestMessage[] = [];
   for (let i = messages.length - 1; i >= next; i--) {
     const size = used + titleTextLength(messages[i]);
-    if (size > TRANSCRIPT_CHARS) break;
+    if (size > budgetChars) break;
     tail.unshift(messages[i]);
     used = size;
   }
@@ -157,6 +162,7 @@ function boundByBudget(messages: TitleRequestMessage[]): TitleRequestMessage[] {
  */
 export function boundTitleMessages(
   messages: Array<{ role: string; content: unknown }>,
+  budgetChars: number = TRANSCRIPT_CHARS,
 ): TitleRequestMessage[] {
   let lastAssistantIndex = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -178,7 +184,7 @@ export function boundTitleMessages(
         : ASSISTANT_CHARS;
     clipped.push({ role: message.role, content: clip(text, max) });
   });
-  return boundByBudget(clipped);
+  return boundByBudget(clipped, budgetChars);
 }
 
 function stripWrappingQuotes(value: string): string {
@@ -278,8 +284,13 @@ export async function generateSessionTitleFromMessages(options: {
     throw new Error("The session has no user messages to name");
   }
 
-  // 取有界摘要（跳过 toolResult/custom 等；空文本 assistant 跳过）
-  const recent: TitleRequestMessage[] = boundTitleMessages(messages);
+  // 取有界摘要（跳过 toolResult/custom 等；空文本 assistant 跳过）。
+  // 末条 user 会把 TITLE_PROMPT 折进去（或补一条）：把那部分的长度也从预算里扣掉，
+  // 否则「一次命名请求 ≤ 6000 字符」不成立。
+  // 与上游有意不同：我们不经过 Agent 发送（直接 POST chat/completions），所以既不需要
+  // 上游那套「单 user turn / no tools」的转写，也没有 cacheRetention 可设。
+  const promptOverhead = Array.from(TITLE_PROMPT).length + TITLE_PROMPT_SEPARATOR.length;
+  const recent: TitleRequestMessage[] = boundTitleMessages(messages, Math.max(1, TRANSCRIPT_CHARS - promptOverhead));
 
   // 末尾折叠标题请求；末条非 user 时追加一条标题请求
   const prepared = appendTitleRequestToTrailingUser(recent);

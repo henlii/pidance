@@ -786,6 +786,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
           verifiedChildren,
           parentRoot,
           invalidateSessionPathCache,
+          invalidateSessionReadCache,
         );
 
         // 5. 删除成功后才清队列/hold/未读时钟。

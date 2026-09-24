@@ -1,5 +1,5 @@
-import { closeSync, type Dirent, existsSync, openSync, readdirSync, readSync, statSync } from "fs";
-import { readdir } from "fs/promises";
+import { closeSync, type Dirent, existsSync, openSync, readdirSync, readSync, realpathSync, statSync } from "fs";
+import { readdir, realpath } from "fs/promises";
 import {
   isAbsolute,
   join as joinPath,
@@ -398,6 +398,10 @@ function resolvePathWithinDefaultSessions(
  * 文件名只是候选提示，仍读有界 header 校验 id；布局未知、候选损坏或同一 id
  * 有多个候选时返回 null，退回目录扫描的权威口径（不做负缓存）。
  * 深链首次打开、重启、多标签冷启动本来要等 2-7s 全扫。
+ *
+ * 边界：`resolvePathWithinDefaultSessions` 只做词法归一，挡不住符号链接。根外文件
+ * 一旦被写进 path cache，之后的读写都会跟着走，所以候选还要按 realpath 复核；
+ * 根外候选一律按「布局不可信」处理，交回目录扫描。
  */
 async function findSessionPathById(sessionId: string): Promise<string | null> {
   if (!SESSION_ID_PATTERN.test(sessionId)) return null;
@@ -408,11 +412,13 @@ async function findSessionPathById(sessionId: string): Promise<string | null> {
   } catch {
     return null;
   }
+  const realRoot = await realpath(sessionsDir).catch(() => sessionsDir);
 
   const suffix = `_${sessionId}.jsonl`;
   let match: string | undefined;
   for (const projectDir of projectDirs) {
-    if (!projectDir.isDirectory() && !projectDir.isSymbolicLink()) continue;
+    // 与权威目录扫描同口径：符号链接目录不算项目目录（scanSessionFiles 只取 isDirectory）。
+    if (!projectDir.isDirectory()) continue;
     const projectPath = resolvePathWithinDefaultSessions(joinPath(sessionsDir, projectDir.name), sessionsDir);
     if (!projectPath) continue;
 
@@ -427,6 +433,9 @@ async function findSessionPathById(sessionId: string): Promise<string | null> {
       if (!file.endsWith(suffix)) continue;
       const candidate = resolvePathWithinDefaultSessions(joinPath(projectPath, file), sessionsDir);
       if (!candidate) continue;
+      const real = await realpath(candidate).catch(() => null);
+      if (!real) continue;
+      if (!resolvePathWithinDefaultSessions(real, realRoot)) return null;
       try {
         if (readSessionHeader(candidate)?.id !== sessionId) continue;
       } catch {
@@ -441,11 +450,17 @@ async function findSessionPathById(sessionId: string): Promise<string | null> {
   return match ?? null;
 }
 
-/** 已知文件路径 → id：必须在 sessions 根内且 header 可信。 */
+/** 已知文件路径 → id：realpath 后仍须在 sessions 根内，且 header 可信。 */
 function findSessionIdByPath(filePath: string): string | undefined {
   if (!filePath.endsWith(".jsonl")) return undefined;
-  const candidate = resolvePathWithinDefaultSessions(filePath);
+  const sessionsDir = resolvePath(defaultSessionsDir());
+  const candidate = resolvePathWithinDefaultSessions(filePath, sessionsDir);
   if (!candidate) return undefined;
+  try {
+    if (!resolvePathWithinDefaultSessions(realpathSync(candidate), realpathSync(sessionsDir))) return undefined;
+  } catch {
+    return undefined;
+  }
   try {
     const sessionId = readSessionHeader(candidate)?.id;
     if (!sessionId) return undefined;

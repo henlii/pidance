@@ -19,7 +19,7 @@
  * 变化由指纹自动失效）。
  */
 import { statSync } from "node:fs";
-import { leafSidecarPath } from "./session-leaf-sidecar";
+import { readLeafSidecar } from "./session-leaf-sidecar";
 import { openSessionView, type DiskSessionReadView } from "./pi-session-io";
 
 /** 缓存上界；导出供测试缩到能在磁盘上造出来的尺寸。 */
@@ -48,27 +48,28 @@ function getCache(): Map<string, SessionReadCacheEntry> {
 }
 
 /**
- * 指纹：正文 size/mtime + leaf sidecar size/mtime。
+ * 指纹：正文 size/mtime/ctime + leaf sidecar 的 **leaf id 本身**。
+ *
+ * sidecar 不能用它自己的 size/mtime：导航只改 leafId 一个字段，重写往往保持同样的
+ * 字节数，而在同一毫秒内改两次时时间戳也相同 —— 那样会拿着旧 leaf 复用视图。
+ * 正文仍按 size/mtime/ctime：追加改变 size，整体重写改变 mtime/ctime；
  * 文件不可 stat（不存在/不可读）时返回 null，调用方按未缓存路径处理。
  */
 function fingerprintOf(filePath: string): { fingerprint: string; bytes: number } | null {
   let size: number;
   let mtimeMs: number;
+  let ctimeMs: number;
   try {
     const st = statSync(filePath);
     size = st.size;
     mtimeMs = st.mtimeMs;
+    ctimeMs = st.ctimeMs;
   } catch {
     return null;
   }
-  let sidecar = "-";
-  try {
-    const sc = statSync(leafSidecarPath(filePath));
-    sidecar = `${sc.size}:${sc.mtimeMs}`;
-  } catch {
-    // 无 sidecar：指纹里保持 "-"，sidecar 出现/消失都会改变指纹
-  }
-  return { fingerprint: `${size}:${mtimeMs}:${sidecar}`, bytes: size };
+  // 无 sidecar / 损坏：指纹里保持 "-"，sidecar 出现/消失/换 leaf 都会改变指纹
+  const sidecar = readLeafSidecar(filePath) ?? "-";
+  return { fingerprint: `${size}:${mtimeMs}:${ctimeMs}:${sidecar}`, bytes: size };
 }
 
 function totalBytes(cache: Map<string, SessionReadCacheEntry>): number {

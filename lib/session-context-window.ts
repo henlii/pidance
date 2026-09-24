@@ -73,7 +73,8 @@ export function rawWindowSpanCap(budget: number): number {
 
 /**
  * 从 endExclusive 往前数 budget 条可见消息，返回窗口起点下标（含上界截断）。
- * 可见消息不足 budget 条时回到 0。
+ * 可见消息不足 budget 条时回到 0；原始跨度上界先命中时停在边界 —— 此时窗口里
+ * 可能一条可见消息都没有（见 ensureVisibleStart）。
  */
 function visibleWindowStart(
   messages: readonly { role?: string }[],
@@ -104,6 +105,63 @@ function visibleWindowEnd(
     end++;
   }
   return Math.min(end, startInclusive + rawWindowSpanCap(budget));
+}
+
+/** 窗口 [from, to) 内是否存在会独立成行的可见消息。 */
+function hasVisibleRow(
+  messages: readonly { role?: string }[],
+  from: number,
+  to: number,
+): boolean {
+  for (let i = from; i < to; i++) {
+    const message = messages[i];
+    if (message && countsTowardWindow(message)) return true;
+  }
+  return false;
+}
+
+/**
+ * 原始跨度上界可能正好切进一段纯 toolResult：这一页没有任何「会渲染成独立一行」的消息
+ * （`MessageView` 对单条的 toolResult 返回 null，它们只挂在所属 assistant 的工具卡里），
+ * 而 `hasMoreBefore` 仍为 true —— 用户点「加载更早」看不到任何东西。
+ *
+ * 因此：窗内已经有可见消息时不动作（上界仍是硬顶）；窗内一条都没有时，把起点退到
+ * 最近的一条可见消息（通常是这批工具调用的所属 assistant）。退让量等于那段工具流的
+ * 长度：这是唯一能把「可读」和「有界」同时满足的选法 —— 没有所属 assistant 的工具记录
+ * 在 UI 上根本不渲染。
+ */
+function ensureVisibleStart(
+  messages: readonly { role?: string }[],
+  start: number,
+  endExclusive: number,
+): number {
+  if (hasVisibleRow(messages, start, endExclusive)) return start;
+
+  let next = start;
+  while (next > 0) {
+    next--;
+    const message = messages[next];
+    if (message && countsTowardWindow(message)) return next;
+  }
+  return 0;
+}
+
+/**
+ * 向后找下一条可见消息，返回「包含它」的终点下标（同 ensureVisibleStart，方向相反）。
+ * 后面再没有可见消息时返回原终点，由调用方决定怎么收尾。
+ */
+function ensureVisibleEnd(
+  messages: readonly { role?: string }[],
+  start: number,
+  endExclusive: number,
+): number {
+  if (hasVisibleRow(messages, start, endExclusive)) return endExclusive;
+
+  for (let next = endExclusive; next < messages.length; next++) {
+    const message = messages[next];
+    if (message && countsTowardWindow(message)) return next + 1;
+  }
+  return endExclusive;
 }
 
 /**
@@ -154,9 +212,14 @@ export function sliceContextTail(
   const totalMessageCount = context.messages.length;
   const n = clampLimit(limit, DEFAULT_SESSION_TAIL_LIMIT);
   const visibleStart = visibleWindowStart(context.messages as { role?: string }[], totalMessageCount, n);
-  // 起点对齐到最近的提问；上界仍以原始跨度为硬顶（宁可切断一轮）。
+  // 起点对齐到最近的提问；上界仍以原始跨度为硬顶（宁可切断一轮），但整个窗口都是
+  // toolResult 时（UI 一条也不渲染）要退到所属 assistant，否则这一页是空的。
   const aligned = alignToTurnStart(context.messages as { role?: string }[], visibleStart, n);
-  const start = Math.max(aligned, totalMessageCount - rawWindowSpanCap(n));
+  const start = ensureVisibleStart(
+    context.messages as { role?: string }[],
+    Math.max(aligned, totalMessageCount - rawWindowSpanCap(n)),
+    totalMessageCount,
+  );
   return {
     messages: context.messages.slice(start),
     entryIds: context.entryIds.slice(start),
@@ -190,10 +253,20 @@ export function sliceContextAround(
   if (idx < 0) return null;
   const n = clampLimit(limit, DEFAULT_SESSION_HISTORY_PAGE);
   const half = Math.max(1, Math.floor(n / 2));
-  const start = alignToTurnStart(context.messages as { role?: string }[], Math.max(0, idx - half), half);
+  const messages = context.messages as { role?: string }[];
+  const alignedStart = Math.max(0, alignToTurnStart(messages, Math.max(0, idx - half), half));
   // toEnd：窗口从 anchor 前一小段一直取到最新（跳转历史时把「之后」整段一并带上，
   // 运行中会话的尾部流式输出才不会被切掉）。
-  const end = options.toEnd ? totalMessageCount : Math.min(totalMessageCount, start + n);
+  const rawEnd = options.toEnd ? totalMessageCount : Math.min(totalMessageCount, alignedStart + n);
+  // 锚点落在一段工具流里时（如搜到某条 toolResult）整页可能没有可见行：先往锚点之前
+  // 退到所属 assistant（工具记录归属它前面的 assistant），退不动再往后找出下一条可见消息。
+  let start = alignedStart;
+  let end = rawEnd;
+  if (!hasVisibleRow(messages, start, end)) {
+    const backward = ensureVisibleStart(messages, start, end);
+    if (backward !== start) start = backward;
+    else end = ensureVisibleEnd(messages, start, end);
+  }
   return {
     messages: context.messages.slice(start, end),
     entryIds: context.entryIds.slice(start, end),
@@ -229,7 +302,12 @@ export function sliceContextAfter(
     };
   }
   const n = clampLimit(limit, DEFAULT_SESSION_HISTORY_PAGE);
-  const end = visibleWindowEnd(context.messages as { role?: string }[], idx + 1, n);
+  const messages = context.messages as { role?: string }[];
+  const rawEnd = visibleWindowEnd(messages, idx + 1, n);
+  // 不含 after 本身，所以只能往前进。后面确实没有可见行了就把剩余记录一次交完、
+  // 结束「还有更新」：空窗口不会推进游标，客户端会反复请求同一段。
+  const forward = ensureVisibleEnd(messages, idx + 1, rawEnd);
+  const end = forward === rawEnd && !hasVisibleRow(messages, idx + 1, rawEnd) ? totalMessageCount : forward;
   return {
     messages: context.messages.slice(idx + 1, end),
     entryIds: context.entryIds.slice(idx + 1, end),
@@ -268,7 +346,11 @@ export function sliceContextBefore(
   const n = clampLimit(limit, DEFAULT_SESSION_HISTORY_PAGE);
   const visibleStart = visibleWindowStart(context.messages as { role?: string }[], idx, n);
   const aligned = alignToTurnStart(context.messages as { role?: string }[], visibleStart, n);
-  const start = Math.max(aligned, idx - rawWindowSpanCap(n));
+  const start = ensureVisibleStart(
+    context.messages as { role?: string }[],
+    Math.max(aligned, idx - rawWindowSpanCap(n)),
+    idx,
+  );
   return {
     messages: context.messages.slice(start, idx),
     entryIds: context.entryIds.slice(start, idx),
