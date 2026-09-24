@@ -36,7 +36,7 @@ import {
   planWorkspaceFileTabReset,
   shouldResetFileTabsOnCwdChange,
 } from "@/lib/workspace-file-tabs";
-import { buildAtMentionText, buildFileAtMentionsText } from "@/lib/file-fuzzy";
+import { buildAtMentionText, buildFileAtMentionsText, buildFileReferenceText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import { createSessionNavigationStore } from "@/lib/session-navigation-store";
 import { createSessionCatalogStore, linkStartingMarksToRegistry } from "@/lib/session-catalog-store";
@@ -600,6 +600,16 @@ function AppShellInner() {
   const identity = useProjectIdentity();
   const { setIdentity, getIdentitySnapshot } = useProjectActions();
   const activeCwd = identity.cwd;
+
+  /**
+   * 消息卡上的「引用到输入框」：与文件浏览器的 @ 按钮**同一个入口**（`insertText`）。
+   * 卡片里给的是绝对路径（如 apply_patch 的 appliedFiles），先按当前项目根转成相对路径——
+   * @ 引用要的是相对路径，agent 的 read 工具才解析得对；不在项目内的路径原样插入。
+   * 插入行为（不覆盖草稿、留一个空格、焦点回输入框）由输入框的 insertText 保证，此处不重复实现。
+   */
+  const handleReferenceFile = useCallback((filePath: string) => {
+    chatInputRef.current?.insertText(buildFileReferenceText(filePath, activeCwd ?? undefined));
+  }, [activeCwd]);
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
   const [sessionRestoreStatus, setSessionRestoreStatus] = useState<"ready" | "loading" | "not-found" | "error">(
@@ -1573,6 +1583,7 @@ function AppShellInner() {
                 onContextUsageChange={handleContextUsageChange}
                 onTurnMetricsChange={handleTurnMetricsChange}
                 onOpenFile={handleOpenLinkedFile}
+                onReferenceFile={handleReferenceFile}
                 entryJumpRequest={entryJumpRequest}
                 onEntryJumpHandled={handleEntryJumpHandled}
                 footerCollapsed={footerCollapsed}

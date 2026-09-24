@@ -2,6 +2,8 @@
 // behavior: @ triggers at line start or after whitespace, entries are ranked
 // with the TUI's scoreEntry ladder, and completions insert "@relative/path ".
 
+import { getRelativeFilePath } from "./file-paths";
+
 export interface AtQueryMatch {
   /** Index of the "@" character in the text */
   start: number;
@@ -177,4 +179,15 @@ export function buildAtMentionText(entryPath: string, isDir: boolean): string {
 
 export function buildFileAtMentionsText(entryPaths: string[]): string {
   return entryPaths.map((entryPath) => buildAtMentionText(entryPath, false)).join("");
+}
+
+/**
+ * 消息卡上的「引用到输入框」文本：把**绝对**路径按当前 cwd 转成相对路径再组成 @ 引用。
+ *
+ * 单独抽出来是因为这条规则有两面：@ 引用必须是相对路径（agent 的 read 工具按 cwd 解析），
+ * 而卡片拿到的路径可能是绝对路径（apply_patch 的 appliedFiles）。不在 cwd 下的路径原样保留——
+ * 宁可给一个绝对路径，也不要硬套一个错的相对路径。
+ */
+export function buildFileReferenceText(filePath: string, cwd?: string): string {
+  return buildAtMentionText(getRelativeFilePath(filePath, cwd), false);
 }
