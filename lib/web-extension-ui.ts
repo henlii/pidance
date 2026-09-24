@@ -130,6 +130,40 @@ type DialogOpts = {
   timeout?: number;
 };
 
+/**
+ * 主题副本加载失败时的存根（issue #72）。
+ *
+ * 只有在 `loadPiTheme()` 返回 null（`lib/pi-themes/dark.json` 解析失败）时才会用到：
+ * 那种情况下真 Theme 的成员全都不可用，插件拿到什么都画不出颜色。这里给一层
+ * 「原样返回文本」的实现，让插件仍然跑得下去。
+ *
+ * **刻意不做成 Proxy**：之前对所有属性一律返回可调用透传，会把 `sourcePath` 这类
+ * 数据字段也变成函数（`if (theme.sourcePath)` 恒真）。数据字段就是数据字段——
+ * 缺失即 `undefined`，与终端里的语义一致。
+ */
+export function createFallbackThemeStub(): Record<string, unknown> {
+  const passthrough = (text: unknown) => String(text ?? "");
+  const color = (_name: unknown, text?: unknown) => (text === undefined ? "" : String(text));
+  return {
+    name: undefined,
+    sourcePath: undefined,
+    sourceInfo: undefined,
+    fg: color,
+    bg: color,
+    bold: passthrough,
+    dim: passthrough,
+    italic: passthrough,
+    underline: passthrough,
+    inverse: passthrough,
+    strikethrough: passthrough,
+    getFgAnsi: () => "",
+    getBgAnsi: () => "",
+    getColorMode: () => "truecolor" as const,
+    getThinkingBorderColor: () => passthrough,
+    getBashModeBorderColor: () => passthrough,
+  };
+}
+
 function createDialogPromise<T>(
   pending: Map<string, PendingExtensionRequest>,
   pendingSnapshot: Map<string, Record<string, unknown>>,
@@ -701,44 +735,22 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
       return undefined;
     },
     get theme() {
-      // 扩展拿到的 theme。Web 端不做终端上色（文本原样返回）。
+      // 扩展拿到的 theme：直接给**真 Theme**，与 widget / custom / entry 的渲染路径
+      // 是同一个实例（`lib/tui-render-bridge.ts` 的 `loadPiTheme()` 模块级缓存）。
       //
-      // 两层：
-      // 1. 真 Theme 的成员按**正确类型**给出：name 是字符串、getColorMode() 返回
-      //    "truecolor"、getThinkingBorderColor() 返回函数。此前用 Proxy 对**所有**
-      //    属性一律返回透传函数，于是 theme.name 是函数、getThinkingBorderColor("high")
-      //    返回字符串 "high"，插件一调用就 TypeError（再被渲染桥的 try/catch 吞成
-      //    「回退原文」）。
-      // 2. 未知成员回落到可调用的透传函数，而不是 undefined：「兼容优先」比严格更
-      //    重要 —— 插件会把主题对象透传给它自己的渲染辅助，返回 undefined 会让它们
-      //    从「没颜色但文本还在」退化成直接抛错。
-      //    （插件源码里常见的 theme.description / theme.selectedText / theme.border
-      //    多是 pi-tui 各组件自己的主题对象（SelectListTheme 等），与本对象无关。）
-      const passthrough = (text: unknown) => String(text ?? "");
-      const color = (_name: unknown, text?: unknown) => (text === undefined ? "" : String(text));
-      const known = {
-        name: "pidance",
-        fg: color,
-        bg: color,
-        bold: passthrough,
-        dim: passthrough,
-        italic: passthrough,
-        underline: passthrough,
-        inverse: passthrough,
-        strikethrough: passthrough,
-        getFgAnsi: () => "",
-        getBgAnsi: () => "",
-        getColorMode: () => "truecolor" as const,
-        getThinkingBorderColor: () => passthrough,
-        getBashModeBorderColor: () => passthrough,
-      };
-      return new Proxy(known, {
-        get(target, prop) {
-          if (prop in target) return (target as Record<string | symbol, unknown>)[prop];
-          if (prop === "then") return undefined;
-          return passthrough;
-        },
-      }) as never;
+      // 为什么不再用 Proxy 包一层（issue #72）：
+      // - 之前对所有属性一律返回可调用透传，于是 `theme.sourcePath` / `theme.sourceInfo`
+      //   这类**数据字段**也变成函数（`if (theme.sourcePath)` 恒真），插件据此判断
+      //   「主题从哪加载」时会被误导。
+      // - 真 Theme 的成员本来就齐（name / sourcePath + fg/bg/bold/… + getThinkingBorderColor…），
+      //   缺失成员按 `undefined` 处理才是终端语义。
+      //
+      // 行为变化（有意）：真 `Theme.fg` 对**未知颜色名**会抛错，而旧存根不抛。
+      // 插件因此抛错会被渲染桥的 `try/catch` 兜住并回退原文（可见降级），
+      // 状态条与 widget 行本来就解析 ANSI，所以真主题的颜色不会变成转义码。
+      //
+      // 只有主题副本加载失败时才退回存根（见 `createFallbackThemeStub`）。
+      return (loadPiTheme() ?? createFallbackThemeStub()) as never;
     },
     getAllThemes() {
       // 与 setTheme 的明确错误保持一致：不用空数组假装「没有主题可选」
