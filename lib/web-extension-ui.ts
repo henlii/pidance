@@ -109,6 +109,13 @@ export type WebExtensionUIAdapter = {
    */
   dispatchTerminalInput: (data: string) => { consumed: boolean; data?: string };
   /**
+   * 已注册的插件全局按键监听器数量（只读）。
+   *
+   * 宿主的状态投影用它做按键窄口子的门槛；只给数量，不给集合本身——
+   * 监听器只该由 `dispatchTerminalInput` 逐个调用。
+   */
+  readonly terminalInputListenerCount: number;
+  /**
    * 客户端上报主编辑器（Web 输入框）的焦点。返回是否发生了变化。
    *
    * 注入后插件读到的 `tui.focusedComponent` 才有值（鸭子类型探针）；
@@ -767,6 +774,15 @@ export function createWebExtensionUIAdapter(emit: ExtensionUiEmit): WebExtension
     pendingSnapshot,
     get customSnapshot() {
       return customSnapshot;
+    },
+    /**
+     * 已注册的插件全局按键监听器数量（只读）。
+     *
+     * 宿主的状态投影要用它做按键窄口子的门槛。只暴露数量，不暴露集合本身：
+     * 监听器只该由适配器的 `dispatchTerminalInput` 逐个调用。
+     */
+    get terminalInputListenerCount() {
+      return terminalInputListeners.size;
     },
     respond(id, response) {
       const entry = pending.get(id);

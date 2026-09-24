@@ -213,6 +213,12 @@ type AgentStateResponse = {
   lockedByOther?: boolean;
   extensionStatuses?: ExtensionStatusItem[];
   extensionWidgets?: ExtensionWidgetItem[];
+  /**
+   * 插件全局按键监听器数量（按键窄口子的门槛）。
+   *
+   * 缺字段 = 旧 Host：保持本地现状，不要清零（否则会把 SSE 事件刚带来的真值抹掉）。
+   */
+  extensionTerminalInputListenerCount?: number;
   queuedMessages?: {
     steering?: string[];
     followUp?: string[];
@@ -572,6 +578,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [commitExtensionUiState, extensionUiStateRef]);
 
   /**
+   * 应用状态里的插件按键监听器数量（按键窄口子的门槛）。
+   *
+   * 它此前只靠瞬时 `terminalInputListeners` 事件下发，页面在插件注册监听器之后才
+   * 加载/reload 就永远拿不到真值 → `ChatWindow` 的 `extensionWidgetKeysEnabled` 恒为
+   * false → 按键永不路由。实测：子代理在跑、widget 已在页面上，空输入框按 ↓ 不激活。
+   * 缺字段（旧 Host）保持本地现状；切会话/新建的清零仍由
+   * `resetExtensionUiForSession` 负责（那是对的）。
+   */
+  const applyExtensionListenerCount = useCallback((state?: AgentStateResponse | null) => {
+    if (state?.extensionTerminalInputListenerCount === undefined) return;
+    patchExtensionUiState({ terminalInputListenerCount: state.extensionTerminalInputListenerCount });
+  }, [patchExtensionUiState]);
+
+  /**
    * 应用 host 状态里的扩展 UI 投影：status / widget / 待答阻塞请求 / 活动 custom 面板。
    *
    * 这几项在浏览器侧**只有 SSE 事件，没有重放**。页面在后台（浏览器冻结/断流，
@@ -588,6 +608,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (state.extensionWidgets !== undefined) {
       patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
     }
+    applyExtensionListenerCount(state);
     const queue = pickBlockingExtensionRequests(state.pendingExtensionRequests);
     const current = extensionUiStateRef.current.blockingQueue ?? [];
     // 队列相同（同 id 同顺序）就不重写：状态会反复回到，没必要逐 tick 重渲染。
@@ -604,7 +625,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       patchExtensionUiState({ blockingQueue: [], dialog: null });
     }
     applyActiveCustomUi(state.activeCustomUi);
-  }, [applyActiveCustomUi, extensionUiStateRef, patchExtensionUiState]);
+  }, [applyActiveCustomUi, applyExtensionListenerCount, extensionUiStateRef, patchExtensionUiState]);
 
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [], followUpRows: [], followUpRevision: null });
   // 每会话本地 follow-up 队列：Host 是唯一 owner，浏览器只持「权威条目 + 一个
@@ -1658,12 +1679,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (state.isCompacting !== undefined) setIsCompacting(state.isCompacting);
     if (state.extensionStatuses !== undefined) patchExtensionUiState({ statuses: state.extensionStatuses ?? [] });
     if (state.extensionWidgets !== undefined) patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
+    applyExtensionListenerCount(state);
     if (state.queuedMessages !== undefined) {
       applyProjectedQueues(sid, state.queuedMessages);
     }
     // 活动 custom 面板：刷新/重连后从状态恢复内容与输入入口（#34）。
     applyActiveCustomUi(state.activeCustomUi);
-  }, [applyProjectedQueues, applyActiveCustomUi, applyRemoteThinking, patchExtensionUiState, seedTurnMetricsFromState, setLastKnownModel]);
+  }, [applyActiveCustomUi, applyExtensionListenerCount, applyProjectedQueues, applyRemoteThinking, patchExtensionUiState, seedTurnMetricsFromState, setLastKnownModel]);
 
   /**
    * 统一 agent run 结束路径（P2）：agent_end / prompt_done / reconcile idle 三路合一。

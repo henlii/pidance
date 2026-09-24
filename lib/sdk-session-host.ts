@@ -2242,6 +2242,11 @@ export class SdkSessionHost {
       pendingExtensionRequests: Array.from(
         this.extensionUi?.pendingSnapshot.values() ?? [],
       ),
+      // 按键窄口子的门槛值必须能水合：它此前只靠瞬时 `terminalInputListeners`
+      // 事件下发，页面在插件注册监听器之后才加载/reload 就永远拿不到真值，门槛恒为 0，
+      // 按键永不路由（实测：子代理在跑、widget 已在页面上，空输入框按 ↓ 不激活）。
+      // 事件仍照发做增量更新，快照只是让后加载的页面拿到当前真值。
+      extensionTerminalInputListenerCount: this.extensionUi?.terminalInputListenerCount ?? 0,
       // 活动 custom 面板快照：普通阻塞请求走 pendingExtensionRequests，
       // 但 custom 没有快照的话，刷新/切回后面板内容与输入入口都会丢。
       activeCustomUi: this.extensionUi?.customSnapshot ?? null,
