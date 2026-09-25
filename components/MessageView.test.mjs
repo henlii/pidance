@@ -284,9 +284,59 @@ test("思考块：用户展开后渲染完整内容", () => {
   const setExpandedCalls = block.match(/setExpanded\(/g) ?? [];
   assert.equal(setExpandedCalls.length, 1, "只允许用户点击触发的 setExpanded");
   assert.ok(block.includes("onToggle={() => void toggle()}"));
-  assert.match(block, /summary=\{expanded \? null : collapsedText\}/);
+  // 折叠行口径：插件标签优先（issue #96），未设置时仍走统一的 collapsedText
+  assert.match(block, /summary=\{expanded \? null : \(labelText \?\? collapsedText\)\}/);
   assert.ok(block.includes("{bodyText}"), "展开态正文从标题下一行开始");
   assert.ok(block.includes("formatBlockLabel"), "思考标签为 思考·");
+});
+
+test("思考块：插件标签替代折叠行摘要，未设置时行为不变（issue #96）", () => {
+  const html = renderMessage(thinkingMessage("第一行推理\n末行推理"), {
+    hiddenThinkingLabel: "检索记忆…",
+  });
+  assert.ok(html.includes('aria-expanded="false"'), "标签不改变折叠态");
+  assert.ok(html.includes("检索记忆…"), "折叠行用插件标签");
+  // TUI 语义：思考收起时那一行只画标签，不画正文（展开才画）。
+  assert.ok(!html.includes("第一行推理"), "收起时不渲染正文首行");
+
+  const plain = renderMessage(thinkingMessage("第一行推理\n末行推理"));
+  assert.ok(plain.includes("第一行推理"), "未设置标签时仍是内容首行");
+  assert.ok(!plain.includes("检索记忆…"));
+});
+
+test("思考块：插件标签过长时截断，全文在 title 里", () => {
+  const long = "检索".repeat(50);
+  const html = renderMessage(thinkingMessage("内容"), { hiddenThinkingLabel: long });
+
+  assert.ok(html.includes(`title="${long}"`), "全文进 title，悬停可见");
+  // 折叠行可见文本要短于全文（title 里本来就有全文，所以不能整页 includes 判）
+  const at = html.indexOf(`title="${long}"`);
+  const after = html.slice(html.indexOf(">", at) + 1);
+  const shown = after.slice(0, after.indexOf("<"));
+  assert.ok(shown.length < long.length, `折叠行不放整段（可见 ${shown.length} 字）`);
+  assert.ok(shown.includes("…"), "截断处有省略号");
+  assert.ok(shown.startsWith("检索") && shown.endsWith("检索"), "中部截断保留首尾");
+});
+
+test("思考块：截断切点不劈开代理对（emoji 不会被切成半个字符）", () => {
+  const label = "🔥".repeat(100);
+  const html = renderMessage(thinkingMessage("内容"), { hiddenThinkingLabel: label });
+  const at = html.indexOf(`title="${label}"`);
+  const after = html.slice(html.indexOf(">", at) + 1);
+  const shown = after.slice(0, after.indexOf("<"));
+
+  assert.equal(Array.from(shown).length, 60, `截断到 60 个码点（实际 ${Array.from(shown).length}）`);
+  assert.ok(
+    Array.from(shown).every((char) => char === "🔥" || char === "…"),
+    "每个字符都是完整码点，没有半个代理对",
+  );
+  assert.equal((shown.match(/…/g) ?? []).length, 1);
+});
+
+test("思考块：标签没被截断时不挂摘要 title（免得盖住展开提示）", () => {
+  const html = renderMessage(thinkingMessage("内容"), { hiddenThinkingLabel: "检索记忆…" });
+  assert.ok(html.includes("检索记忆…"), "短标签照常显示在折叠行");
+  assert.ok(!html.includes('title="检索记忆…"'), "没截断就不该挂摘要 title");
 });
 
 test("实时工具：运行中保持折叠，折叠摘要显示快照输出的最后一行", () => {

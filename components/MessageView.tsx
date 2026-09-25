@@ -147,6 +147,24 @@ function MessageMediaGallery({
 }
 
 const MAX_THINKING_CACHE_ENTRIES = 100;
+/** 插件标签的显示上限：折叠行只有一行宽，超长截断并把全文放进 title。 */
+const THINKING_LABEL_MAX_CHARS = 60;
+
+/**
+ * 从中间截断（保留首尾）：插件标签常常把关键信息放在两端（"… (12/34)"）。
+ * 单行 CSS 已经会省略，这里截断只是为了 title 里也不塞一整段进去。
+ *
+ * 按**码点**切而不是按码元切：否则切点落在代理对中间时会把 emoji 劈成半个字符，
+ * 显示成一个替换字符。
+ */
+function truncateMid(text: string, max: number): string {
+  const chars = Array.from(text);
+  if (chars.length <= max) return text;
+  const head = Math.ceil((max - 1) / 2);
+  const tail = max - 1 - head;
+  return `${chars.slice(0, head).join("")}…${chars.slice(chars.length - tail).join("")}`;
+}
+
 const thinkingContentCache = new Map<string, Promise<string>>();
 
 function loadThinkingContent(sessionId: string, entryId: string, blockIndex: number): Promise<string> {
@@ -263,6 +281,13 @@ interface Props {
   contextUsage?: ContextUsage | null;
   /** 手动压缩上下文；只读/忙碌时由调用方不下发（handleCompact 内部另有 guard）。 */
   onCompactContext?: () => void;
+  /**
+   * 插件自定义的折叠思考标签（ctx.ui.setHiddenThinkingLabel）。
+   *
+   * 只在**折叠态**替代思考块的摘要行（TUI 里收起时那一行画的就是它）；
+   * 展开态照旧显示真实思考内容。未设置即 undefined。
+   */
+  hiddenThinkingLabel?: string;
 }
 
 function formatTime(ts?: number): string | null {
@@ -299,12 +324,12 @@ function sameWrittenFiles(prev?: string[], next?: string[]): boolean {
   return prev.length === next.length && prev.every((value, index) => value === next[index]);
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, toolExecutionSnapshots, modelNames, cwd, onOpenFile, onReferenceFile, writtenFiles, entryId, onBranchHere, onNewSessionFromHere, onBranchFromAssistant, onNewSessionFromAnswer, forking, showTimestamp, prevTimestamp, sessionId, toolsActive, contextUsage, onCompactContext }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, toolExecutionSnapshots, modelNames, cwd, onOpenFile, onReferenceFile, writtenFiles, entryId, onBranchHere, onNewSessionFromHere, onBranchFromAssistant, onNewSessionFromAnswer, forking, showTimestamp, prevTimestamp, sessionId, toolsActive, contextUsage, onCompactContext, hiddenThinkingLabel }: Props) {
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onBranchHere={onBranchHere} onNewSessionFromHere={onNewSessionFromHere} forking={forking} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} toolExecutionSnapshots={toolExecutionSnapshots} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onReferenceFile={onReferenceFile} writtenFiles={writtenFiles} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} onBranchFromAssistant={onBranchFromAssistant} onNewSessionFromAnswer={onNewSessionFromAnswer} toolsActive={toolsActive} contextUsage={contextUsage} onCompactContext={onCompactContext} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} toolExecutionSnapshots={toolExecutionSnapshots} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onReferenceFile={onReferenceFile} writtenFiles={writtenFiles} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} onBranchFromAssistant={onBranchFromAssistant} onNewSessionFromAnswer={onNewSessionFromAnswer} toolsActive={toolsActive} contextUsage={contextUsage} onCompactContext={onCompactContext} hiddenThinkingLabel={hiddenThinkingLabel} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -356,7 +381,8 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.forking === next.forking
     && prev.showTimestamp === next.showTimestamp
     && prev.prevTimestamp === next.prevTimestamp
-    && prev.sessionId === next.sessionId;
+    && prev.sessionId === next.sessionId
+    && prev.hiddenThinkingLabel === next.hiddenThinkingLabel;
 });
 
 function UserMessageView({ message, cwd, onOpenFile, entryId, onBranchHere, onNewSessionFromHere, forking }: {
@@ -542,6 +568,7 @@ function AssistantMessageView({
   toolsActive,
   contextUsage,
   onCompactContext,
+  hiddenThinkingLabel,
 }: {
   message: AssistantMessage;
   isStreaming?: boolean;
@@ -561,7 +588,10 @@ function AssistantMessageView({
   onBranchFromAssistant?: (entryId: string) => void;
   onNewSessionFromAnswer?: (entryId: string) => void;
   contextUsage?: ContextUsage | null;
+  /** 手动压缩上下文；只读/忙碌时由调用方不下发（handleCompact 内部另有 guard）。 */
   onCompactContext?: () => void;
+  /** 插件自定义的折叠思考标签（见 MessageView 的说明）。 */
+  hiddenThinkingLabel?: string;
 }) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
@@ -744,7 +774,7 @@ function AssistantMessageView({
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {blockItems.map(({ block, originalIndex }, blockOffset) => (
-          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block as AssistantContentBlock} toolResults={toolResults} toolExecutionMap={toolExecutionMap} isStreaming={isStreaming} activeStreamBlock={isActiveStreamBlock(isStreaming, blockOffset, blockItems.length)} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} onReferenceFile={onReferenceFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} toolsActive={toolsActive} startedAt={message.timestamp} />
+          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block as AssistantContentBlock} toolResults={toolResults} toolExecutionMap={toolExecutionMap} isStreaming={isStreaming} activeStreamBlock={isActiveStreamBlock(isStreaming, blockOffset, blockItems.length)} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} onReferenceFile={onReferenceFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} toolsActive={toolsActive} startedAt={message.timestamp} hiddenThinkingLabel={hiddenThinkingLabel} />
         ))}
       </div>
 
@@ -921,12 +951,12 @@ function AssistantMessageView({
   );
 }
 
-function BlockView({ block, toolResults, toolExecutionMap, isStreaming, activeStreamBlock, streamingDuration, toolCallDurations, cwd, onOpenFile, onReferenceFile, sessionId, entryId, blockIndex, toolsActive, startedAt }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; toolExecutionMap?: Map<string, ToolExecutionSnapshot>; isStreaming?: boolean; activeStreamBlock?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; onReferenceFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; toolsActive?: boolean; startedAt?: number }) {
+function BlockView({ block, toolResults, toolExecutionMap, isStreaming, activeStreamBlock, streamingDuration, toolCallDurations, cwd, onOpenFile, onReferenceFile, sessionId, entryId, blockIndex, toolsActive, startedAt, hiddenThinkingLabel }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; toolExecutionMap?: Map<string, ToolExecutionSnapshot>; isStreaming?: boolean; activeStreamBlock?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; onReferenceFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; toolsActive?: boolean; startedAt?: number; hiddenThinkingLabel?: string }) {
   if (block.type === "text") {
     return <TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} />;
   }
   if (block.type === "thinking") {
-    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} isStreaming={Boolean(activeStreamBlock)} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} />;
+    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} isStreaming={Boolean(activeStreamBlock)} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} hiddenThinkingLabel={hiddenThinkingLabel} />;
   }
   if (block.type === "image") {
     const resolved = resolveImageContent(block as ImageContent);
@@ -1065,12 +1095,19 @@ const COLLAPSED_LINE_STYLE = {
  * 结构上左侧是撑满剩余宽度的按钮（标签 + 摘要），右侧耗时是独立元素 ——
  * 这样整行（除耗时外）都可点，光标停在行内任意处都是手型。
  */
-function BlockHeaderRow({ label, expanded, onToggle, summary, meta, showCommandLabel, running = false, toggleTitle }: {
+function BlockHeaderRow({ label, expanded, onToggle, summary, summaryTitle, meta, showCommandLabel, running = false, toggleTitle }: {
   label: string;
   expanded: boolean;
   onToggle: () => void;
   /** 折叠态那一行的内容摘要（展开态传 null，由分区自己渲染内容） */
   summary: string | null;
+  /**
+   * 摘要被截断时的全文（悬停可见）。
+   *
+   * 放在摘要 span 上而不是整行按钮上：整行按钮的 title 已经是「展开/折叠过程」的
+   * 操作提示，覆盖它会让用户看不到怎么展开。
+   */
+  summaryTitle?: string | null;
   /** 行右侧的耗时 */
   meta?: string | null;
   /** 渲染「命令」小字：只有工具块的命令分区需要，思考块不要 */
@@ -1108,14 +1145,18 @@ function BlockHeaderRow({ label, expanded, onToggle, summary, meta, showCommandL
       }}
     >
       <span style={BLOCK_LABEL_STYLE}>{label}</span>
-      {summary !== null && <span style={COLLAPSED_LINE_STYLE}>{summary}</span>}
+      {summary !== null && (
+        <span style={COLLAPSED_LINE_STYLE} title={summaryTitle ?? undefined}>
+          {summary}
+        </span>
+      )}
       {showCommandLabel && <span style={{ color: "var(--text-dim)", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em", flexShrink: 0 }}>{t("message_toolCommand")}</span>}
       {meta && <span style={{ ...BLOCK_META_STYLE, marginLeft: "auto" }}>{meta}</span>}
     </button>
   );
 }
 
-function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, blockIndex }: {
+function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, blockIndex, hiddenThinkingLabel }: {
   block: ThinkingContent;
   duration?: number;
   /** 本思考块仍在输出（流式中）：折叠态需要滚动显示最后一行 */
@@ -1123,6 +1164,7 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
   sessionId?: string;
   entryId?: string;
   blockIndex: number;
+  hiddenThinkingLabel?: string;
 }) {
   const { t } = useI18n();
   // 折叠/展开完全由用户决定：不随流式自动展开，也不随流式结束自动收回。
@@ -1146,6 +1188,20 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
   const collapsedText = loading
     ? t("message_thinkingLoading")
     : collapsedSummaryLine(bodyText, { streaming: isStreaming });
+
+  /**
+   * 插件自定义标签（ctx.ui.setHiddenThinkingLabel）：**折叠态**用它替代摘要行。
+   *
+   * 对齐 TUI：思考收起时那一行画的就是这个标签（默认 "Thinking..."），展开才画正文。
+   * 所以这里不是"加在标题上"，而是占掉折叠行的位置；展开态的内容不受影响。
+   * 文案原样显示（这是插件文案，不是我们的 i18n 文案），过长截断并把全文放进 title ——
+   * 但**只有真被截断时**才挂 title：摘要行占满剩余宽度，没截断还给 tooltip 会盖住
+   * 卡片头右侧的「展开过程」提示。
+   */
+  const labelText =
+    typeof hiddenThinkingLabel === "string" && hiddenThinkingLabel !== ""
+      ? truncateMid(hiddenThinkingLabel, THINKING_LABEL_MAX_CHARS)
+      : null;
 
   /**
    * 历史 deferred 思考内容：**进入视口才加载**（提前一屏）。
@@ -1214,7 +1270,8 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
         label={formatBlockLabel(t("chat_blockThinking"))}
         expanded={expanded}
         onToggle={() => void toggle()}
-        summary={expanded ? null : collapsedText}
+        summary={expanded ? null : (labelText ?? collapsedText)}
+        summaryTitle={expanded || labelText === null || labelText === hiddenThinkingLabel ? null : hiddenThinkingLabel}
         meta={duration === undefined ? null : formatElapsedDuration(duration * 1000)}
       />
       {expanded && (

@@ -317,6 +317,13 @@ export type ExtensionUiRequest =
   | {
       type: "extension_ui_request";
       id: string;
+      method: "setHiddenThinkingLabel";
+      /** 收起的思考块那一行的文案；null = 恢复我们自己的默认文案。 */
+      label: string | null;
+    }
+  | {
+      type: "extension_ui_request";
+      id: string;
       method: "setTitle";
       title: string;
     }

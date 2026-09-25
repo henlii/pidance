@@ -25,6 +25,11 @@ export interface ExtensionUiState {
   /** 扩展自定义的运行指示动画帧（setWorkingIndicator）；frames 为空数组 = 隐藏指示器。 */
   workingIndicator: { frames: string[]; intervalMs: number } | null;
   /**
+   * 插件自定义的折叠思考标签（setHiddenThinkingLabel）：折叠态思考块那一行的文案。
+   * null = 用我们自己的 i18n 文案（未设置 / 被插件恢复默认）。
+   */
+  hiddenThinkingLabel: string | null;
+  /**
    * 扩展请求的全局工具展开态（`setToolsExpanded`）。
    *
    * null = 扩展从未请求过（客户端保持每块的用户选择）；布尔值 = 最近一次请求的值。
@@ -52,6 +57,7 @@ export function createEmptyExtensionUiState(  partial?: Partial<Pick<ExtensionUi
     workingMessage: null,
     workingVisible: true,
     workingIndicator: null,
+    hiddenThinkingLabel: null,
     toolsExpanded: null,
     toolsExpandedRevision: 0,
     blockingQueue: [],
@@ -222,6 +228,8 @@ export function resetExtensionUiForSession(state: ExtensionUiState): ExtensionUi
     workingMessage: null,
     workingVisible: true,
     workingIndicator: null,
+    // 标签也归内容类字段：新会话的标签由它自己的水合填回，不继承上一个会话的。
+    hiddenThinkingLabel: null,
     // 切会话要把「扩展请求的展开态」清掉：新会话不该继承上一个会话的请求。
     toolsExpanded: null,
     toolsExpandedRevision: 0,
@@ -289,6 +297,10 @@ export function applyExtensionUiRequest(
         : { state, effects: [] };
     case "terminalInputListeners":
       return { state: { ...state, terminalInputListenerCount: request.count }, effects: [] };
+    case "setHiddenThinkingLabel":
+      return state.hiddenThinkingLabel === request.label
+        ? { state, effects: [] }
+        : { state: { ...state, hiddenThinkingLabel: request.label }, effects: [] };
     case "setWorkingMessage":
       return state.workingMessage === request.message
         ? { state, effects: [] }
