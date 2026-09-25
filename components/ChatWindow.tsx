@@ -734,6 +734,20 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
         />
       )}
 
+      {/* 插件页头（ctx.ui.setHeader）：TUI 里常驻在转写区之上、不随内容滚动。
+          放在 isEmptyNew 三元**之外**：新建会话的欢迎页同样是「转写区」，页头不该在那一刻消失。 */}
+      {extensionHeader && extensionHeader.length > 0 ? (
+        <div
+          style={{
+            flexShrink: 0,
+            padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px`,
+          }}
+        >
+          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS, margin: "0 auto" }}>
+            <ExtensionSlot lines={extensionHeader} kind="header" />
+          </div>
+        </div>
+      ) : null}
       {isEmptyNew ? (
         <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8">
           <div className="w-full max-w-[760px]">
@@ -770,7 +784,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
         </div>
       ) : (
       <>
-      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+      {/* flex-col 是必须的：这个容器同时装着插件页头与转写区（滚动区），
+          默认的 row 会把页头排成转写区的**左兄弟** —— 390px 上它按内容撑宽（whiteSpace: pre），
+          转写区被挤到右边，限高只管住了这一列的高度。TUI 里页头在转写区**之上**。 */}
+      <div className="relative flex min-h-0 flex-col flex-1 overflow-hidden">
         <div
           style={{
             position: "absolute",
@@ -813,19 +830,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
             />
           </div>
         )}
-        {/* 插件页头（ctx.ui.setHeader）：TUI 里在转写区之上、常驻不滚动，Web 同位置。 */}
-        {extensionHeader && extensionHeader.length > 0 ? (
-          <div
-            style={{
-              flexShrink: 0,
-              padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px`,
-            }}
-          >
-            <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS, margin: "0 auto" }}>
-              <ExtensionSlot lines={extensionHeader} kind="header" />
-            </div>
-          </div>
-        ) : null}
         <div
           ref={scrollContainerRef}
           data-chat-scroller="true"
@@ -1102,8 +1106,11 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
                   <ExtensionWidgets widgets={belowEditorWidgets} />
                   {/* 插件页脚（ctx.ui.setFooter）在我们自己的状态条之上。
                       与 TUI 的一处**有意分叉**：TUI 是「替换」整个内置页脚，而 Web 的
-                      状态 chip 是独立机制、且页脚数据（git/状态）我们没有等价物 ——
-                      真替换会把插件用 setStatus 放上去的信息整块吞掉（兼容高于观感）。 */}
+                      状态 chip 是独立机制 —— 真替换会把插件用 setStatus 放上去的信息
+                      整块吞掉（兼容高于观感）。字段缺失的部分按 SDK 的四个成员如实给值，
+                      见 lib/web-extension-ui.ts 的 footerData。
+                      footerCollapsed（用户收起整个页脚区）时插件页脚与状态条一起收起：
+                      它们同属那一块，单独留着插件页脚会把「收起」变成半收起。 */}
                   {extensionFooter && extensionFooter.length > 0 ? (
                     <ExtensionSlot lines={extensionFooter} kind="footer" />
                   ) : null}

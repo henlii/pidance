@@ -500,8 +500,15 @@ export function resetPiThemeForTests(): void {
  * 非数组 / 空数组 / 混入非字符串元素 / 超行数 / 超单行长度 / 超总字符 → false。
  * 与前端校验语义一致：混合数组不再过滤后当成功，一律判非法。
  */
-function isValidRenderOutput(lines: unknown): lines is string[] {
-  if (!Array.isArray(lines) || lines.length === 0) return false;
+function isValidRenderOutput(
+  lines: unknown,
+  options?: { allowEmpty?: boolean },
+): lines is string[] {
+  if (!Array.isArray(lines)) return false;
+  // 空数组默认非法（P2-8：与前端校验语义一致，超限/非法一律回退原文）。
+  // 但**页头/页脚槽位**要区分「组件这一帧就是空的」与「渲染失败」：前者只是暂时没有
+  // 内容（插件让页脚自己藏起来），后者要隐藏 + 提示一次。所以让调用方显式选择。
+  if (lines.length === 0) return options?.allowEmpty === true;
   if (!lines.every((line) => typeof line === "string")) return false;
   if (lines.length > RENDER_MAX_LINES) return false;
   let total = 0;
@@ -518,13 +525,17 @@ function isValidRenderOutput(lines: unknown): lines is string[] {
  * 返回非对象 / 无 render 方法 / render 抛错 / 输出非法或超限 → null（安全回退，
  * 超限返回 null 走原始回退，不做截断——截断会掩盖渲染器 bug）。
  */
-function renderToLines(component: unknown, width: number = RENDER_WIDTH): string[] | null {
+function renderToLines(
+  component: unknown,
+  width: number = RENDER_WIDTH,
+  options?: { allowEmpty?: boolean },
+): string[] | null {
   if (!component || typeof component !== "object") return null;
   const c = component as { render?: unknown };
   if (typeof c.render !== "function") return null;
   try {
     const lines = (c as RenderableComponent).render(width);
-    if (!isValidRenderOutput(lines)) return null;
+    if (!isValidRenderOutput(lines, options)) return null;
     return lines;
   } catch (error) {
     reportIfSdkThemeError(error);
@@ -625,8 +636,9 @@ export function renderWidgetFactoryLines(
 export function renderComponentLines(
   component: unknown,
   width: number = RENDER_WIDTH,
+  options?: { allowEmpty?: boolean },
 ): string[] | null {
-  return renderToLines(component, width);
+  return renderToLines(component, width, options);
 }
 
 /**
@@ -639,8 +651,9 @@ export function renderComponentLines(
 export function renderWidgetComponentLines(
   component: unknown,
   width: number = RENDER_WIDTH,
+  options?: { allowEmpty?: boolean },
 ): string[] | null {
-  return renderComponentLines(component, width);
+  return renderComponentLines(component, width, options);
 }
 
 /**
