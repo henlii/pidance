@@ -85,6 +85,55 @@ export function pickBlockingExtensionRequests(events: unknown): ExtensionUiBlock
 }
 
 /**
+ * 已结算 id 的记忆上限。
+ *
+ * 只需要盖住「在途的状态响应比结算事件晚到」这个窗口，不需要无限长：id 是一次性的
+ * UUID，不会复用；超过上限就丢最旧的。
+ */
+export const MAX_SETTLED_REQUEST_IDS = 64;
+
+/**
+ * 从 `extension_ui_settled` 事件里取 id；形状不对（含空 id）返回 null。
+ */
+export function parseExtensionUiSettledId(event: unknown): string | null {
+  const candidate = event as { type?: unknown; id?: unknown } | null;
+  if (!candidate || candidate.type !== "extension_ui_settled") return null;
+  if (typeof candidate.id !== "string" || !candidate.id) return null;
+  return candidate.id;
+}
+
+/**
+ * 记住一个已结算的请求 id（有界）。已存在则提到末尾（让它在淘汰顺序里最后被丢）。
+ */
+export function rememberSettledRequestId(
+  settled: readonly string[],
+  id: string,
+): string[] {
+  const next = settled.filter((item) => item !== id);
+  next.push(id);
+  return next.length > MAX_SETTLED_REQUEST_IDS
+    ? next.slice(next.length - MAX_SETTLED_REQUEST_IDS)
+    : next;
+}
+
+/**
+ * 把已结算的请求从投影队列里滤掉。
+ *
+ * 为什么必须滤：状态响应可能与结算**并发**——那个响应是在宿主结算之前序列化的，
+ * 里面仍有这个 id，落地后会把已经结束的面板装回来（挂到下一次投影，运行中还要 15s）。
+ * 没有要滤的项时返回**原数组引用**，调用方可以据此零成本判重。
+ */
+export function filterSettledBlockingRequests<T extends { id: string }>(
+  queue: T[],
+  settled: readonly string[],
+): T[] {
+  if (settled.length === 0 || queue.length === 0) return queue;
+  const settledSet = new Set(settled);
+  const kept = queue.filter((item) => !settledSet.has(item.id));
+  return kept.length === queue.length ? queue : kept;
+}
+
+/**
  * 从 host 状态里挑出**宿主自己的能力提示**（"Web 端不支持/只部分支持某能力"）。
  *
  * 与 pickBlockingExtensionRequests 同一个理由：这些提示走一次性 SSE 事件，而 host

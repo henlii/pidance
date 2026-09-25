@@ -527,6 +527,7 @@ export const en = {
   wh_moreFiles: '+{count} more',
   // extension
   extension_expired: 'Expired',
+  extension_expiresIn: '{seconds}s left',
   extension_waitingEnded: 'Waiting ended',
   extension_responseSent: 'Response sent',
   extension_extension: 'Extension',

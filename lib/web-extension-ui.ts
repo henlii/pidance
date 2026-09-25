@@ -94,6 +94,16 @@ export type PendingExtensionRequest = {
   reject: (error: Error) => void;
 };
 
+/**
+ * 阻塞请求是怎么结束的（`extension_ui_settled` 的 reason）。
+ *
+ * - `responded`：浏览器回的响应（多标签下别的标签也据此收起面板）；
+ * - `timeout` / `abort`：宿主按取消结算（select/input → undefined，confirm → false）；
+ * - `disposed`：适配器释放（会话宿主销毁）；
+ * - `failed`：响应解析失败。
+ */
+export type ExtensionUiSettleReason = "responded" | "timeout" | "abort" | "disposed" | "failed";
+
 type CustomUiSession = {
   handleInput: (data: string) => void;
   handleMouse: (event: Record<string, unknown>) => void;
@@ -164,6 +174,26 @@ type DialogOpts = {
 };
 
 /**
+ * 宿主能接受的 timeout 上限（毫秒）。
+ *
+ * 取 32 位有符号整数上限：Node 对更大的延迟会把它当成 1ms **立刻触发**，而按同一个
+ * 数字算出的 `expiresAt` 却是很远的未来 —— 面板上的倒计时还在走，宿主已经按取消结算了。
+ */
+export const MAX_DIALOG_TIMEOUT_MS = 2_147_483_647;
+
+/**
+ * 收口宿主给的 timeout。
+ *
+ * - 非有限值 / 非数字 / ≤ 0 → 不设超时（与 TUI 一致：`timeout > 0` 才计时；
+ *   负数在这里是 truthy，直接透传会 arm 一个立刻触发的定时器）；
+ * - 超过上限 → 截到上限，**定时器与 expiresAt 用同一个收口后的值**。
+ */
+export function normalizeDialogTimeout(timeout: unknown): number | null {
+  if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) return null;
+  return Math.min(Math.floor(timeout), MAX_DIALOG_TIMEOUT_MS);
+}
+
+/**
  * 主题副本加载失败时的存根（issue #72）。
  *
  * 只有在 `loadPiTheme()` 返回 null（`lib/pi-themes/dark.json` 解析失败）时才会用到：
@@ -211,6 +241,19 @@ function createDialogPromise<T>(
     let settled = false;
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
+    /**
+     * 结算后立刻告诉浏览器「这个 id 结束了」。
+     *
+     * 阻塞面板的消失**只由服务端驱动**：客户端按自己的时钟关会和宿主分叉（手机与
+     * 会话宿主不是同一块钟），而等下一次状态投影在运行中要 15s、空闲且流还活着最长
+     * 120s —— 面板会挂着不走（倒计时到 0 还在，插件早已按取消继续了）。
+     * 每条结算都发（含「浏览器自己回的那条响应」）：多标签下响应只从一个标签发出，
+     * 别的标签的面板同样要立刻消失，而不是等下一次投影。
+     */
+    const emitSettled = (reason: ExtensionUiSettleReason) => {
+      emit({ type: "extension_ui_settled", id, reason });
+    };
+
     const cleanup = () => {
       pending.delete(id);
       pendingSnapshot.delete(id);
@@ -218,28 +261,38 @@ function createDialogPromise<T>(
       opts?.signal?.removeEventListener("abort", onAbort);
     };
 
-    const finish = (value: T) => {
+    const finish = (value: T, reason: ExtensionUiSettleReason) => {
       if (settled) return;
       settled = true;
       cleanup();
+      // 先告诉浏览器，再 resolve：插件可能紧接着再发一条请求，顺序反了会让旧面板
+      // 挂在新请求之上。
+      emitSettled(reason);
       resolve(value);
     };
 
-    const onAbort = () => finish(defaultValue);
+    const onAbort = () => finish(defaultValue, "abort");
 
     opts?.signal?.addEventListener("abort", onAbort, { once: true });
-    if (opts?.timeout) {
-      timeoutId = setTimeout(() => finish(defaultValue), opts.timeout);
+    // 超时 = 取消（SDK 语义）：到点按 defaultValue 结算（select/input → undefined，
+    // confirm → false）。绝对过期时刻与这个定时器**同一个来源**（都用收口后的
+    // timeoutMs），客户端只按 expiresAt 每次重算剩余秒数，不下发「剩余毫秒」让它
+    // 自己递减：页面挂起或后台节流之后递减值会漂移，重算则始终与宿主一致。
+    const timeoutMs = normalizeDialogTimeout(opts?.timeout);
+    const expiresAt = timeoutMs === null ? null : Date.now() + timeoutMs;
+    if (timeoutMs !== null) {
+      timeoutId = setTimeout(() => finish(defaultValue, "timeout"), timeoutMs);
     }
 
     pending.set(id, {
       resolve: (response) => {
         try {
-          finish(parse(response));
+          finish(parse(response), "responded");
         } catch (error) {
           if (settled) return;
           settled = true;
           cleanup();
+          emitSettled("failed");
           reject(error instanceof Error ? error : new Error(String(error)));
         }
       },
@@ -247,11 +300,17 @@ function createDialogPromise<T>(
         if (settled) return;
         settled = true;
         cleanup();
+        emitSettled("disposed");
         reject(error);
       },
     });
 
-    const event = { type: "extension_ui_request", id, ...request };
+    const event = {
+      type: "extension_ui_request",
+      id,
+      ...request,
+      ...(expiresAt === null ? {} : { expiresAt }),
+    };
     pendingSnapshot.set(id, event);
     emit(event);
   });
@@ -541,7 +600,7 @@ export function createWebExtensionUIAdapter(
         emit,
         opts,
         undefined,
-        { method: "select", title, options, timeout: opts?.timeout },
+        { method: "select", title, options },
         (r) =>
           "cancelled" in r && r.cancelled
             ? undefined
@@ -556,7 +615,7 @@ export function createWebExtensionUIAdapter(
         emit,
         opts,
         false,
-        { method: "confirm", title, message, timeout: opts?.timeout },
+        { method: "confirm", title, message },
         (r) =>
           "cancelled" in r && r.cancelled
             ? false
@@ -571,7 +630,7 @@ export function createWebExtensionUIAdapter(
         emit,
         opts,
         undefined,
-        { method: "input", title, placeholder, timeout: opts?.timeout },
+        { method: "input", title, placeholder },
         (r) =>
           "cancelled" in r && r.cancelled
             ? undefined

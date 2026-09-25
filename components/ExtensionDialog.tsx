@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { ExtensionUiDialogRequest } from "@/lib/extension-ui-bridge";
 import { useI18n } from "@/lib/i18n";
 import { MarkdownBody } from "./MarkdownBody";
@@ -17,10 +17,20 @@ export interface ExtensionDialogProps {
   onRespond: (response: ExtensionDialogResponse) => void;
 }
 
-function requestHasExpired(request: ExtensionUiDialogRequest): boolean {
-  return typeof request.expiresAt === "number"
-    && Number.isFinite(request.expiresAt)
-    && request.expiresAt <= Date.now();
+/**
+ * 距离过期还剩多少秒（向上取整，最小 0）；没有绝对过期时刻时返回 null。
+ *
+ * 每次都用 `expiresAt - now` **重算**而不是自己递减：页面挂起、后台节流之后
+ * 递减值会漂移，重算则与宿主（真正结算超时的那一侧）始终一致。
+ */
+export function dialogRemainingSeconds(expiresAt: unknown, now: number): number | null {
+  if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt)) return null;
+  return Math.max(0, Math.ceil((expiresAt - now) / 1000));
+}
+
+function requestHasExpired(request: ExtensionUiDialogRequest, now: number): boolean {
+  const remaining = dialogRemainingSeconds(request.expiresAt, now);
+  return remaining !== null && remaining <= 0;
 }
 
 const inputStyle: CSSProperties = {
@@ -56,13 +66,50 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
   });
   const editorValue = editorDraft.requestId === request.id ? editorDraft.value : "";
   const value = draft.requestId === request.id ? draft.value : "";
-  const expired = requestHasExpired(request);
+  /**
+   * 用来算剩余秒数的「现在」。倒计时必须自己走：只靠状态轮询的话，到点后
+   * 按钮最长会继续可点一个轮询周期（宿主已经按取消结算了）。
+   */
+  const [now, setNow] = useState(() => Date.now());
+  const expiresAt = typeof request.expiresAt === "number" && Number.isFinite(request.expiresAt)
+    ? request.expiresAt
+    : null;
+  useEffect(() => {
+    if (expiresAt === null) return;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const stop = () => {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+    const tick = () => {
+      // 隐藏标签页不重渲（多端约定：后台不轮询/不重渲），可见时由 visibilitychange 补一次。
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      const at = Date.now();
+      setNow(at);
+      if (at >= expiresAt) stop();
+    };
+    tick();
+    timer = setInterval(tick, 1000);
+    const onVisibility = () => {
+      if (typeof document === "undefined" || document.visibilityState !== "hidden") tick();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [expiresAt, request.id]);
+  const remainingSeconds = dialogRemainingSeconds(expiresAt, now);
+  // 没有绝对过期时刻（宿主没给 timeout）→ 永不过期，行为与从前一致。
+  const expired = remainingSeconds !== null && remainingSeconds <= 0;
   const responded = respondedRequestId === request.id;
   const inert = disabled || expired || responded;
   const boundRequestId = request.id;
 
   const respondOnce = (response: ExtensionDialogResponse) => {
-    if (disabled || respondedRequestRef.current === boundRequestId || requestHasExpired(request)) {
+    if (disabled || respondedRequestRef.current === boundRequestId || requestHasExpired(request, Date.now())) {
       return;
     }
     respondedRequestRef.current = boundRequestId;
@@ -75,12 +122,22 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
   };
 
   const selectOptions = request.method === "select" ? request.options : [];
+  /**
+   * 倒计时与状态文案共用底栏右侧（两者都是 margin-left: auto），一次只显示一个。
+   *
+   * 有倒计时就显示倒计时 —— **包括本端不能回答的只读/被对端持有写权的情况**：
+   * 那时更需要知道宿主什么时候会把它收走（调用方就是按这个传 disabled 的）。
+   * 到点后再由状态文案说明为什么点不动。
+   */
+  const countdown = !responded && remainingSeconds !== null && remainingSeconds > 0
+    ? t("extension_expiresIn", { seconds: String(remainingSeconds) })
+    : null;
   const statusMessage = expired
     ? t("extension_expired")
-    : disabled
-      ? t("extension_waitingEnded")
-      : responded
-        ? t("extension_responseSent")
+    : responded
+      ? t("extension_responseSent")
+      : disabled && countdown === null
+        ? t("extension_waitingEnded")
         : null;
 
   const cancelButton = (
@@ -139,6 +196,10 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
         footer={(
           <>
             {footer}
+            {countdown ? (
+              // aria-live="off"：每秒变化不该被读屏播报（到点的「已过期」才是要播报的状态）。
+              <span className="extension-panel-hint" aria-live="off" suppressHydrationWarning>{countdown}</span>
+            ) : null}
             {statusMessage ? (
               <span className="extension-panel-status" role="status" aria-live="polite">{statusMessage}</span>
             ) : null}

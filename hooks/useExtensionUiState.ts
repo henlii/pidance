@@ -4,6 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import {
   clearExtensionUiRequest,
   createEmptyExtensionUiState,
+  rememberSettledRequestId,
   type ExtensionUiDialogRequest,
   type ExtensionUiCustomRequest,
   type ExtensionUiState,
@@ -40,6 +41,14 @@ export function useExtensionUiState() {
     statuses: extensionStatuses,
     widgets: extensionWidgets,
   }));
+  /**
+   * 已经被**宿主**结算过的阻塞请求 id（有界 FIFO，见 rememberSettledRequestId）。
+   *
+   * 两个用途：收到 `extension_ui_settled` 时把面板收起；以及**挡住比结算事件晚到的
+   * 状态快照**把它装回来（那个快照是在结算之前序列化的，里面还有这个 id）。
+   * 用 ref 不用 state：它不参与渲染，改它不该触发重渲。
+   */
+  const settledRequestIdsRef = useRef<string[]>([]);
 
   const commitExtensionUiState = useCallback((next: ExtensionUiState) => {
     extensionUiStateRef.current = next;
@@ -69,6 +78,19 @@ export function useExtensionUiState() {
     commitExtensionUiState(nextState);
   }, [commitExtensionUiState]);
 
+  /**
+   * 记住一个已结算的请求 id。宿主已结算的面板**不该**再被迟到的状态快照装回来；
+   * 调用方（SSE 分支）紧接着调 dismissExtensionUiRequest 收起当前面板。
+   */
+  const markExtensionUiRequestSettled = useCallback((requestId: string) => {
+    settledRequestIdsRef.current = rememberSettledRequestId(settledRequestIdsRef.current, requestId);
+  }, []);
+
+  /** 切会话时丢掉上一会话的结算记录（它的请求 id 不会再出现在新会话的快照里）。 */
+  const clearSettledExtensionUiRequests = useCallback(() => {
+    settledRequestIdsRef.current = [];
+  }, []);
+
   return {
     extensionDialog,
     extensionCustomUi,
@@ -84,5 +106,8 @@ export function useExtensionUiState() {
     patchExtensionUiState,
     extensionToolsExpandedRequest,
     dismissExtensionUiRequest,
+    settledRequestIdsRef,
+    markExtensionUiRequestSettled,
+    clearSettledExtensionUiRequests,
   };
 }
