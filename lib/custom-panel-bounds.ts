@@ -65,14 +65,19 @@ export function customPanelBoundsFromRects(input: {
  *   恢复可见时前端会重挂观察者，那一次自然会补报。
  * - 量不出（next 为 null）→ 不上报（见文件头：不报编出来的值）。
  * - 与上次**上报值**完全相同 → 不上报（ResizeObserver 会为无关变化反复回调）。
+ * - **换了请求 id** → 一定报一次：同一个组件实例会被复用给下一个 custom 请求，而新面板的几何
+ *   往往与旧面板一模一样（同宽同锚点），只比几何会把新请求整条跳过，服务端于是永远没有这个 id
+ *   的几何，插件读 `getBounds()` 拿到 undefined。
  */
 export function shouldReportCustomPanelBounds(
   previous: CustomPanelBounds | null,
   next: CustomPanelBounds | null,
   visible: boolean,
+  requestIds?: { previous: string | null; next: string },
 ): boolean {
   if (!visible) return false;
   if (next === null) return false;
+  if (requestIds && requestIds.previous !== requestIds.next) return true;
   if (previous === null) return true;
   return (
     previous.row !== next.row ||

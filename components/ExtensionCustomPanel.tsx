@@ -79,6 +79,14 @@ export function ExtensionCustomPanel({
   /** 上次**上报过**的几何：同值不重发（ResizeObserver 会为无关变化反复回调）。 */
   const lastBoundsRef = useRef<CustomPanelBounds | null>(null);
   /**
+   * 上面那份几何属于哪个请求 id。
+   *
+   * 为什么必须分开记：同一个组件实例会被复用给**下一个** custom 请求（插件关一个再开一个），
+   * 而新面板的几何往往与旧面板一模一样（同宽、同锚点）。只比几何的话「没变化」会把新请求
+   * 整条跳过，服务端于是永远没有这个 id 的几何，插件读 `getBounds()` 拿到 undefined。
+   */
+  const lastBoundsIdRef = useRef<string | null>(null);
+  /**
    * 观察者与滚动监听只挂一次，靠 ref 读最新的 request —— 插件每重渲一帧就换一个
    * request 对象，直接进依赖数组会让观察者每帧重建。
    */
@@ -128,8 +136,10 @@ export function ExtensionCustomPanel({
           })
         : null;
       const visible = document.visibilityState === "visible";
-      if (!shouldReportCustomPanelBounds(lastBoundsRef.current, bounds, visible)) return;
+      const requestIds = { previous: lastBoundsIdRef.current, next: request.id };
+      if (!shouldReportCustomPanelBounds(lastBoundsRef.current, bounds, visible, requestIds)) return;
       lastBoundsRef.current = bounds;
+      lastBoundsIdRef.current = request.id;
       if (bounds) onBounds(requestRef.current, bounds);
     };
     report();
