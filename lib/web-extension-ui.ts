@@ -25,11 +25,11 @@ import type { ExtensionUiCustomLayout } from "./types";
 /**
  * 能力提示快照的上限。
  *
- * 取舍：宿主能力提示的种类是**枚举**（现在公开面一共 5 种：setFooter、setHeader、
- * addAutocompleteProvider、setEditorComponent、onTerminalInput），
+ * 取舍：宿主能力提示的种类是**枚举**（现在公开面一共 3 种：addAutocompleteProvider、
+ * setEditorComponent、onTerminalInput），
  * 远小于这个 16 条上限，所以正常永远截不到。
  * 保留上限只是防止将来有人拿新 feature 名反复调用（把 API 当循环用）让状态快照无界增长。
- * 截断保留**最新**的：最旧的、可能还没被用户看见的那条会先丢——在 5 种枚举的现实下
+ * 截断保留**最新**的：最旧的、可能还没被用户看见的那条会先丢——在 3 种枚举的现实下
  * 不会发生；真发生了也只丢"旧提示"，不会让状态无界。改成无上限是错的（状态会被插件撑着）。
  */
 export const MAX_CAPABILITY_NOTICES = 16;
@@ -165,6 +165,15 @@ export type WebExtensionUIAdapter = {
    */
   readonly hiddenThinkingLabel: string | null;
   /**
+   * 页头 / 页脚槽位当前渲染的行（只读拷贝）；null = 没有插件槽位。
+   *
+   * 与 widget 同理：插件通常在扩展加载时设一次就不再调用，而那一刻浏览器常常
+   * 还没订阅（与 hiddenThinkingLabel / capabilityNoticeSnapshot 同一类一次性事件），
+   * 所以宿主的 get_state 投影必须能把它水合回去。
+   */
+  readonly headerLines: string[] | null;
+  readonly footerLines: string[] | null;
+  /**
    * 宿主自己发出的能力提示快照（只读）。
    *
    * 宿主的状态投影用它重放给后加载的页面；只重放宿主的能力提示，
@@ -178,6 +187,11 @@ export type WebExtensionUIAdapter = {
    * 不注入就永远 undefined，插件的「编辑器有焦点」分支永远不成立。
    */
   setEditorFocus: (focused: boolean, clientId?: string) => boolean;
+  /**
+   * 忘掉「这种槽位已经提示过失败」的记录（宿主在插件 reload 前调用）。
+   * 重载后是新组件，再失败应该能重新提示一次。
+   */
+  resetSlotFailures: () => void;
   dispose: () => void;
 };
 
@@ -412,6 +426,7 @@ export function createWebExtensionUIAdapter(
   const unsubscribeThemeChange = onPiThemeChange(() => {
     for (const entry of [...widgetFactories.values()]) entry.requestRender();
     for (const render of [...customRenderers]) render();
+    for (const kind of SLOT_KINDS) slots[kind]?.requestRender();
   });
 
   /** 每个能力只提示一次：插件可能反复调用同一条 API（注册监听器、重复设组件）。 */
@@ -471,9 +486,11 @@ export function createWebExtensionUIAdapter(
     if (focused) editorFocusClients.set(clientId, Date.now() + EDITOR_FOCUS_TTL_MS);
     else editorFocusClients.delete(clientId);
     if (wasFocused === isEditorFocused()) return false;
-    // 焦点会改变插件组件的形态：让挂了工厂的 widget 与 custom 面板重渲一帧。
+    // 焦点会改变插件组件的形态：让挂了工厂的 widget、custom 面板**与页头/页脚槽位**
+    // 重渲一帧（读 tui.focusedComponent 的页头会随失焦停留旧帧）。
     for (const entry of [...widgetFactories.values()]) entry.requestRender();
     for (const render of [...customRenderers]) render();
+    for (const entry of Object.values(slots)) entry?.requestRender();
     return true;
   };
 
@@ -684,6 +701,187 @@ export function createWebExtensionUIAdapter(
     publish();
   };
 
+  /**
+   * 页头 / 页脚槽位（`ctx.ui.setHeader` / `setFooter`）。
+   *
+   * 与 widget 共用同一条管线（工厂只调一次、组件常驻、`requestRender` 按 microtask 合并、
+   * 产出走渲染桥 → 行），差别只有四点：
+   *
+   * 1. **一个槽位只放一个组件**：替换时先 `dispose()` 旧的（对齐 SDK —— TUI 的
+   *    `setExtensionFooter` 就是先 `customFooter?.dispose()`）。插件的定时器/监听器
+   *    挂在组件上，漏掉 dispose 会跟着会话跑。
+   * 2. `undefined` 是**恢复内置**而不是「清一个 key」：我们这边对应显示自己的状态条
+   *    （页脚）/ 什么都不显示（页头）。
+   * 3. 工厂抛错或渲染不出行 → 槽位隐藏 + **每种槽位只提示一次**，且**不把异常文本贴进界面**
+   *    （与「插件渲染器失败就隐藏」同一口径）。
+   * 4. 页脚工厂的第三个参数（footer 数据）我们**不传**：SDK 的 `ReadonlyFooterDataProvider`
+   *    是 git 分支 + 扩展状态 + 可用 provider 数 + 分支变化订阅四件套，Web 侧没有等价物
+   *    （git watcher 与 provider 计数都不在会话适配器里）。塞一个只有部分成员的对象比不传更糟：
+   *    插件会按类型调用缺失的成员然后抛错。不传 = 插件若真依赖它就会走到上面的「失败 → 隐藏 +
+   *    一次提示」，是**可见降级**而不是静默假数据。
+   */
+  const SLOT_KINDS = ["header", "footer"] as const;
+  type SlotKind = (typeof SLOT_KINDS)[number];
+
+  interface SlotEntry {
+    /** 最近一次成功渲染的行；null = 当前没有可显示的内容（隐藏）。 */
+    lines: string[] | null;
+    dispose?: () => void;
+    requestRender: () => void;
+    /** 组件的 `setExpanded`（TUI 的 isExpandable 页头用它跟随工具展开态）。 */
+    setExpanded?: (expanded: boolean) => void;
+  }
+
+  const slots: Record<SlotKind, SlotEntry | null> = { header: null, footer: null };
+  const slotFailuresReported = new Set<SlotKind>();
+
+  /**
+   * 页脚工厂的第三个参数（SDK 的 `ReadonlyFooterDataProvider` 正好是这四个成员，
+   * 见 footer-data-provider.d.ts:63）。
+   *
+   * **不能传 undefined**：官方示例（examples/extensions/custom-footer.ts）在工厂里
+   * **无条件**调用 `footerData.onBranchChange(...)`，传 undefined 会让整个页脚工厂抛错、
+   * 槽位被我们隐藏 —— 连不依赖 git 的行也一起没。缺成员的假对象确实更糟，但这不是假对象：
+   * 每个成员都有真值或诚实的空值。
+   *
+   * 两个诚实的空值（都不是「假装有数据」）：
+   * - `getGitBranch` 恒 `null`：Pidance 目前没有 git 分支来源（宿主自己的状态条也不显示分支），
+   *   而 SDK 的实现是带文件观察器的 provider（本模块不 import SDK，也不该起观察器）。
+   *   插件拿到 `null` 会按「不在仓库里」渲染。
+   * - `getAvailableProviderCount` 恒 `0`：模型目录是**异步**加载的，适配器没有同步计数来源。
+   *   真接上需要新的异步通道 + 变化通知，属于新能力。
+   */
+  const footerData = {
+    getGitBranch: () => null,
+    getExtensionStatuses: () => statuses,
+    getAvailableProviderCount: () => 0,
+    onBranchChange: () => () => {},
+  };
+
+  const emitSlot = (kind: SlotKind, lines: string[] | null) => {
+    emit({
+      type: "extension_ui_request",
+      id: randomUUID(),
+      method: kind === "footer" ? "setFooter" : "setHeader",
+      lines,
+    });
+  };
+
+  /** 每种槽位只提示一次：插件可能在循环里反复挂同一个坏组件。 */
+  const notifySlotFailure = (kind: SlotKind) => {
+    if (slotFailuresReported.has(kind)) return;
+    slotFailuresReported.add(kind);
+    console.warn(`[pidance] extension UI ${kind} component could not be rendered`);
+    const id = randomUUID();
+    const message = `Extension UI "${kind}" component could not be rendered; the slot stays hidden.`;
+    // 进能力快照（与 notifyUnsupported 同一处理）：页头通常在 session_start 就挂上，
+    // 那一刻浏览器还没订阅 SSE，只 emit 的话这条警告会永久丢掉。
+    recordCapabilityNotice(id, message);
+    emit({
+      type: "extension_ui_request",
+      id,
+      method: "notify",
+      message,
+      notifyType: "warning",
+    });
+  };
+
+  const clearSlot = (kind: SlotKind) => {
+    const current = slots[kind];
+    if (!current) return;
+    slots[kind] = null;
+    try {
+      current.dispose?.();
+    } catch (error) {
+      console.error(`[pidance] extension ${kind} dispose failed:`, error);
+    }
+    emitSlot(kind, null);
+  };
+
+  const mountSlot = (kind: SlotKind, factory: unknown) => {
+    // 替换语义：旧的先 dispose 再挂新的（与 SDK 一致）。
+    clearSlot(kind);
+    if (typeof factory !== "function") return;
+    // 主题没建起来（宿主还没注入 Theme 类 / 副本坏了）就不挂：渲染出来的行没有颜色，
+    // 与 widget 挂载同一口径。
+    if (!loadPiTheme()) return;
+
+    const entry: SlotEntry = { lines: null, requestRender: () => {} };
+    let scheduled = false;
+    let component: unknown;
+
+    const publish = () => {
+      scheduled = false;
+      // 已被替换或清除：丢弃这一帧，别把旧槽位写回去。
+      if (slots[kind] !== entry) return;
+      // allowEmpty：这一帧渲染出 0 行（插件让页脚自己藏起来）与**渲染失败**是两件事，
+      // 前者只是没有内容，后者要隐藏 + 提示一次（见 isValidRenderOutput 的注释）。
+      const lines = renderWidgetComponentLines(component, renderWidth, { allowEmpty: true });
+      if (lines === null) {
+        // 渲染失败：把槽位隐藏（不显示上一次的旧内容），但**保留** entry —— 下一帧
+        // 渲染成功就能自己回来（与 widget「保留旧行」不同：槽位是替身，显示过期内容
+        // 比空着更容易误导）。
+        // null 的含义写清楚：没有 render 方法 / render 抛错 / 输出不是字符串数组或超限。
+        console.error(
+          `[pidance] extension ${kind} render failed (no render method, threw, or output invalid/over the caps)`,
+        );
+        entry.lines = null;
+        emitSlot(kind, null);
+        notifySlotFailure(kind);
+        return;
+      }
+      if (lines.length === 0) {
+        // 空帧：隐藏槽位但**不**提示（这是插件的正常状态），保留 entry 等下一帧。
+        entry.lines = null;
+        emitSlot(kind, null);
+        return;
+      }
+      entry.lines = lines;
+      emitSlot(kind, lines);
+    };
+
+    const tui = createHeadlessCustomUiTui(
+      () => {
+        if (scheduled || slots[kind] !== entry) return;
+        scheduled = true;
+        queueMicrotask(publish);
+      },
+      () => renderWidth,
+      () => renderRows,
+      { isEditorFocused, onUnsupported: notifyUnsupported },
+    );
+    entry.requestRender = tui.requestRender;
+
+    try {
+      component = kind === "footer"
+        ? (factory as (tui: unknown, theme: unknown, footerData: unknown) => unknown)(tui, liveThemeView, footerData)
+        : (factory as (tui: unknown, theme: unknown) => unknown)(tui, liveThemeView);
+    } catch (error) {
+      console.error(`[pidance] extension ${kind} factory failed:`, error);
+      clearSlot(kind);
+      notifySlotFailure(kind);
+      return;
+    }
+
+    const disposable = component as { dispose?: unknown; setExpanded?: unknown } | null;
+    entry.dispose =
+      typeof disposable?.dispose === "function"
+        ? () => (component as { dispose: () => void }).dispose()
+        : undefined;
+    // TUI 对 isExpandable 的页头会同步工具展开态（interactive-mode.js:1914-1918）。
+    if (kind === "header" && typeof disposable?.setExpanded === "function") {
+      const expandable = component as { setExpanded: (expanded: boolean) => void };
+      entry.setExpanded = (expanded) => expandable.setExpanded(expanded);
+      try {
+        entry.setExpanded(toolsExpanded);
+      } catch (error) {
+        console.error("[pidance] extension header setExpanded failed:", error);
+      }
+    }
+    slots[kind] = entry;
+    publish();
+  };
+
   const uiContext: ExtensionUIContext = {
     select: (title, options, opts) =>
       createDialogPromise(
@@ -853,13 +1051,11 @@ export function createWebExtensionUIAdapter(
       }
     },
     setFooter(factory) {
-      // undefined = 恢复默认；Web 端的 footer 是自有的，本就没有可恢复的替换
-      if (factory === undefined) return;
-      notifyUnsupported("setFooter");
+      // undefined = 恢复内置页脚（我们自己的状态条）；函数 = 用插件组件替换。
+      mountSlot("footer", factory);
     },
     setHeader(factory) {
-      if (factory === undefined) return;
-      notifyUnsupported("setHeader");
+      mountSlot("header", factory);
     },
     setTitle(title) {
       emit({
@@ -1119,6 +1315,16 @@ export function createWebExtensionUIAdapter(
     },
     setToolsExpanded(expanded) {
       toolsExpanded = Boolean(expanded);
+      // isExpandable 的页头读的是这个状态（TUI 同）：先交给组件再重渲一帧。
+      const headerEntry = slots.header;
+      if (headerEntry?.setExpanded) {
+        try {
+          headerEntry.setExpanded(toolsExpanded);
+        } catch (error) {
+          console.error("[pidance] extension header setExpanded failed:", error);
+        }
+        headerEntry.requestRender();
+      }
       emit({
         type: "extension_ui_request",
         id: randomUUID(),
@@ -1134,6 +1340,29 @@ export function createWebExtensionUIAdapter(
     statuses,
     widgets,
     pendingSnapshot,
+    /**
+     * 页头 / 页脚槽位当前渲染的行（只读拷贝）；null = 没有插件槽位。
+     *
+     * 宿主的 get_state 投影用它水合：插件通常在加载时设一次就不再调用，
+     * 页面稍后加载只能靠快照补回来（与 widget / 能力提示同一个坑）。
+     */
+    get headerLines(): string[] | null {
+      const entry = slots.header;
+      return entry?.lines ? [...entry.lines] : null;
+    },
+    get footerLines(): string[] | null {
+      const entry = slots.footer;
+      return entry?.lines ? [...entry.lines] : null;
+    },
+    /**
+     * 忘掉「这种槽位已经提示过失败」的记录。
+     *
+     * 宿主在插件 reload 前调用：重载后拿到的是**新组件**，如果它还是渲染失败，
+     * 应该能再提示一次（不重置的话用户只会看到第一次，之后静默）。
+     */
+    resetSlotFailures() {
+      slotFailuresReported.clear();
+    },
     get customSnapshot() {
       return customSnapshot;
     },
@@ -1193,6 +1422,7 @@ export function createWebExtensionUIAdapter(
       // 两个维度一起生效：插件是在同一次 render 里读它们做布局与裁切的。
       for (const render of [...customRenderers]) render();
       for (const entry of [...widgetFactories.values()]) entry.requestRender();
+      for (const kind of SLOT_KINDS) slots[kind]?.requestRender();
       return true;
     },
     dispatchTerminalInput(data) {
@@ -1230,6 +1460,7 @@ export function createWebExtensionUIAdapter(
       customSnapshot = null;
       terminalInputListeners.clear();
       for (const key of [...widgetFactories.keys()]) unmountWidgetFactory(key);
+      for (const kind of SLOT_KINDS) clearSlot(kind);
       statuses.clear();
       widgets.clear();
     },

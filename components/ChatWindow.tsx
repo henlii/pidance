@@ -21,7 +21,7 @@ import {
   loadedUserOutlineSeeds,
   outlineForSession,
 } from "@/lib/session-outline";
-import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE, CHAT_COLUMN_MAX_WIDTH_CSS, CHAT_GUTTER } from "@/lib/chat-column";
+import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE, CHAT_COLUMN_MAX_WIDTH_CSS, CHAT_GUTTER, EXTENSION_SLOT_MAX_HEIGHT, EXTENSION_SLOT_MAX_HEIGHT_MOBILE } from "@/lib/chat-column";
 
 /**
  * 输入区/面板/底栏的左右内边距：与消息列逐像素对齐。
@@ -179,7 +179,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, defaultThinkingLevel,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, sendExtensionCustomInput, sendExtensionCustomMouse,
+    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionHeader, extensionFooter, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, sendExtensionCustomInput, sendExtensionCustomMouse,
     todos,
     isAutoModelSelection,
     agentPhase, toolExecutionSnapshots,
@@ -772,6 +772,20 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
         />
       )}
 
+      {/* 插件页头（ctx.ui.setHeader）：TUI 里常驻在转写区之上、不随内容滚动。
+          放在 isEmptyNew 三元**之外**：新建会话的欢迎页同样是「转写区」，页头不该在那一刻消失。 */}
+      {extensionHeader && extensionHeader.length > 0 ? (
+        <div
+          style={{
+            flexShrink: 0,
+            padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px`,
+          }}
+        >
+          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS, margin: "0 auto" }}>
+            <ExtensionSlot lines={extensionHeader} kind="header" />
+          </div>
+        </div>
+      ) : null}
       {isEmptyNew ? (
         <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8">
           <div className="w-full max-w-[760px]">
@@ -808,7 +822,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
         </div>
       ) : (
       <>
-      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+      {/* flex-col 是必须的：这个容器同时装着插件页头与转写区（滚动区），
+          默认的 row 会把页头排成转写区的**左兄弟** —— 390px 上它按内容撑宽（whiteSpace: pre），
+          转写区被挤到右边，限高只管住了这一列的高度。TUI 里页头在转写区**之上**。 */}
+      <div className="relative flex min-h-0 flex-col flex-1 overflow-hidden">
         <div
           style={{
             position: "absolute",
@@ -1125,6 +1142,16 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
               {!footerCollapsed && (
                 <>
                   <ExtensionWidgets widgets={belowEditorWidgets} />
+                  {/* 插件页脚（ctx.ui.setFooter）在我们自己的状态条之上。
+                      与 TUI 的一处**有意分叉**：TUI 是「替换」整个内置页脚，而 Web 的
+                      状态 chip 是独立机制 —— 真替换会把插件用 setStatus 放上去的信息
+                      整块吞掉（兼容高于观感）。字段缺失的部分按 SDK 的四个成员如实给值，
+                      见 lib/web-extension-ui.ts 的 footerData。
+                      footerCollapsed（用户收起整个页脚区）时插件页脚与状态条一起收起：
+                      它们同属那一块，单独留着插件页脚会把「收起」变成半收起。 */}
+                  {extensionFooter && extensionFooter.length > 0 ? (
+                    <ExtensionSlot lines={extensionFooter} kind="footer" />
+                  ) : null}
                   <ExtensionStatusBar statuses={extensionStatuses} />
                 </>
               )}
@@ -1215,6 +1242,47 @@ function ReadOnlySessionBar({ session, isMobile }: { session: SessionInfo; isMob
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * 插件页头 / 页脚槽位（ctx.ui.setHeader / setFooter）。
+ *
+ * 行是服务端渲染桥产出的 ANSI 行（与 widget 同一条管线：插件组件 headless 渲染 → 行），
+ * 这里只负责「按槽位限高 + 内部滚动 + 解析 ANSI」。
+ *
+ * 为什么不做 widget 那种卡片外壳：外壳自带标题与折叠，是**我们**给 widget 的内容加的框；
+ * 而页头页脚是插件自绘的一整块界面（TUI 里它替换的就是内置页脚本身），再套一层标题栏
+ * 会多出一行我们编的文案。限高仍然要有，否则超长内容会把输入区顶出可视区。
+ */
+function ExtensionSlot({ lines, kind }: { lines: string[]; kind: "header" | "footer" }) {
+  const isMobile = useIsMobile();
+  if (lines.length === 0) return null;
+  return (
+    <pre
+      data-extension-slot={kind}
+      style={{
+        margin: 0,
+        marginBottom: kind === "footer" ? 8 : 6,
+        padding: "4px 2px",
+        color: "var(--text-muted)",
+        fontSize: 12,
+        lineHeight: 1.5,
+        whiteSpace: "pre",
+        fontFamily: "var(--font-mono)",
+        maxHeight: isMobile ? EXTENSION_SLOT_MAX_HEIGHT_MOBILE : EXTENSION_SLOT_MAX_HEIGHT,
+        overflow: "auto",
+        overscrollBehavior: "auto",
+        touchAction: "pan-y",
+      }}
+    >
+      {lines.map((line, index, all) => (
+        <Fragment key={index}>
+          {renderAnsiLine(line, `slot-${kind}-line-${index}`)}
+          {index < all.length - 1 ? "\n" : null}
+        </Fragment>
+      ))}
+    </pre>
   );
 }
 

@@ -1630,10 +1630,16 @@ export class SdkSessionHost {
           return result;
         },
         reload: async () => {
-          // TUI 的 handleReloadCommand 先 resetExtensionUI()（其中包含 setHiddenThinkingLabel()），
-          // 插件重载后从干净状态重新注册。这里至少要把插件设过的折叠行标签清掉：重载后插件
-          // 不一定再设一次，留着的旧标签会一直盖着思考块折叠行的正文摘要。
+          // TUI 的 handleReloadCommand 先 resetExtensionUI()（`interactive-mode.js:1821-1834`），
+          // 插件重载后从干净状态重新注册。要对齐的三处：
+          // - 折叠行标签：重载后插件不一定再设一次，留着的旧标签会一直盖着思考正文摘要；
+          // - 页头/页脚槽位：适配器不会在 reload 时被 dispose（那条路走 rebindSession），
+          //   不清的话旧组件与它的定时器还活着，界面继续画旧页脚；
+          // - 槽位失败记忆：重载后是新组件，再失败应该能重新提示一次。
           this.extensionUi?.uiContext.setHiddenThinkingLabel();
+          this.extensionUi?.uiContext.setFooter(undefined);
+          this.extensionUi?.uiContext.setHeader(undefined);
+          this.extensionUi?.resetSlotFailures();
           await session.reload();
         },
       },
@@ -2543,6 +2549,10 @@ export class SdkSessionHost {
           };
         },
       ),
+      // 插件页头 / 页脚槽位（setHeader / setFooter）：与 widget 同一类「设一次就不动」的
+      // 状态，页面后加载只能靠快照补回来（否则刷新后插件页头页脚消失）。
+      extensionHeader: this.extensionUi?.headerLines ?? null,
+      extensionFooter: this.extensionUi?.footerLines ?? null,
       pendingExtensionRequests: Array.from(
         this.extensionUi?.pendingSnapshot.values() ?? [],
       ),

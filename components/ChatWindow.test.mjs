@@ -215,3 +215,82 @@ test("#100 审查修复：面板的卸载不由客户端时钟驱动，改由宿
   const dialog = readFileSync(fileURLToPath(new URL("./ExtensionDialog.tsx", import.meta.url)), "utf8");
   assert.match(dialog, /const inert = disabled \|\| expired \|\| responded;/, "到点后按钮必须不可用");
 });
+
+/**
+ * 求 `index` 处**由内向外所有带 className 的祖先 div** 的类名链（按 <div>/</div> 配对扫描）。
+ *
+ * 为什么需要链而不是「直接父元素」：槽位自己的包装 div 只有 style、没有 className，
+ * 而决定「页头排在转写区上方还是左边」的是最近的那个布局容器；同时「页头是不是与转写区
+ * 同一条嵌套链」也要靠链来判断（否则页头被挪到别处、转写区没有页头也看不出来）。
+ * 自闭合标签（<div ... />）不入栈 —— 它们不是容器。
+ */
+function ancestorClassNames(source, index) {
+  const stack = [];
+  const tagPattern = /<div\b|<\/div>/g;
+  let match;
+  while ((match = tagPattern.exec(source)) !== null && match.index < index) {
+    if (match[0] === "</div>") {
+      stack.pop();
+      continue;
+    }
+    const tagEnd = source.indexOf(">", match.index);
+    if (source[tagEnd - 1] === "/") continue;
+    stack.push(match.index);
+  }
+  const chain = [];
+  for (let i = stack.length - 1; i >= 0; i -= 1) {
+    const open = stack[i];
+    const className = /className="([^"]*)"/.exec(source.slice(open, source.indexOf(">", open) + 1))?.[1];
+    if (className) chain.push(className);
+  }
+  return chain;
+}
+test("扩展页头 / 页脚槽位：位置（页头在转写区之前、页脚在状态条之上）与限高内滚", () => {
+  const source = readFileSync(fileURLToPath(new URL("./ChatWindow.tsx", import.meta.url)), "utf8");
+
+  const header = source.indexOf('kind="header"');
+  const scroller = source.indexOf('data-chat-scroller="true"');
+  assert.ok(header !== -1, "没有渲染插件页头槽位");
+  assert.ok(header < scroller, "页头要渲染在转写区之前（TUI 里页头常驻在转写区之上）");
+
+  // 只比下标不够：页头若被放进一个 **row** 容器，就会排到转写区**左侧**
+  // （390px 上它按内容撑宽，转写区被挤到右边 —— 审查就是这么发现的）。
+  // 所以解析出页头的**直接父元素**并断言它是列方向。用启发式（"前一个带 className 的 div"）
+  // 会被中间的自闭合 overlay 之类骗到，这里按标签配对算包围链。
+  const headerChain = ancestorClassNames(source, header);
+  const scrollerChain = ancestorClassNames(source, scroller);
+  assert.ok(headerChain.length > 0, "没找到页头所在的布局容器");
+  assert.match(headerChain[0], /flex/, "布局容器应该是 flex");
+  // ①页头所在的容器必须是**列方向**：容器默认 row 会把页头排到转写区左边
+  //（390px 上它按内容撑宽，转写区被挤到右边 —— 审查发现的原始形态）。
+  assert.match(headerChain[0], /flex-col/, "页头与转写区共用的容器必须是列方向，否则页头会排到转写区左边");
+  // ②页头所在的容器要是转写区所在容器的**祖先**：这样页头才在转写区之上，
+  // 而不是被挪到欢迎页分支或别的分支里（那样转写区就没有页头了）。
+  assert.deepEqual(
+    scrollerChain.slice(-headerChain.length),
+    headerChain,
+    "页头必须在转写区的祖先链上（页头在转写区之上、且常驻）",
+  );
+
+  const footer = source.indexOf('kind="footer"');
+  const statusBar = source.indexOf("<ExtensionStatusBar");
+  assert.ok(footer !== -1, "没有渲染插件页脚槽位");
+  assert.ok(footer < statusBar, "页脚要在我们自己的状态条之上");
+
+  // 槽位组件本体：限高 + 块内滚动（超长页头/页脚不能把输入区顶出可视区）。
+  const slot = source.slice(source.indexOf("function ExtensionSlot("), source.indexOf("function ExtensionStatusBar("));
+  assert.ok(slot.includes('data-extension-slot={kind}'), "槽位要有可断言的标记");
+  assert.match(slot, /EXTENSION_SLOT_MAX_HEIGHT_MOBILE : EXTENSION_SLOT_MAX_HEIGHT/, "限高要复用共享常量");
+  assert.ok(slot.includes('overflow: "auto"'), "槽位缺少块内滚动");
+});
+
+test("扩展页头 / 页脚槽位的限高：移动端约 4 行、桌面约 6 行（12px/1.5 行高）", () => {
+  const source = readFileSync(fileURLToPath(new URL("../lib/chat-column.ts", import.meta.url)), "utf8");
+  const mobile = /EXTENSION_SLOT_MAX_HEIGHT_MOBILE = "min\((\d+)px/.exec(source);
+  const desktop = /export const EXTENSION_SLOT_MAX_HEIGHT = "min\((\d+)px/.exec(source);
+  assert.ok(mobile && desktop, "限高常量必须存在（槽位不限高会顶掉输入区）");
+  const lineHeight = 12 * 1.5;
+  // 4 行 ≈ 72px + 上下 8px 内边距；6 行 ≈ 108px + 16px。
+  assert.ok(Number(mobile[1]) >= 4 * lineHeight && Number(mobile[1]) <= 4 * lineHeight + 24, `移动端限高应约 4 行（实际 ${mobile[1]}px）`);
+  assert.ok(Number(desktop[1]) >= 6 * lineHeight && Number(desktop[1]) <= 6 * lineHeight + 24, `桌面限高应约 6 行（实际 ${desktop[1]}px）`);
+});

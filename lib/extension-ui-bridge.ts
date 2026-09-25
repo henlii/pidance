@@ -16,6 +16,13 @@ export interface ExtensionUiState {
   customUi: ExtensionUiCustomRequest | null;
   statuses: ExtensionStatusItem[];
   widgets: ExtensionWidgetItem[];
+  /**
+   * 插件页头槽位的渲染行（`setHeader`）；null = 没有插件页头（不显示这一块）。
+   * 空数组与 null 等价：槽位是**替换**语义（见 lib/types.ts 的 setHeader/setFooter 注释）。
+   */
+  header: string[] | null;
+  /** 插件页脚槽位的渲染行（`setFooter`）；null = 用我们自己的状态条。 */
+  footer: string[] | null;
   /** 注册了全局按键监听的插件监听器数量（>0 时前端才需要把按键拿去问）。 */
   terminalInputListenerCount: number;
   /** 扩展定制的运行提示：文案（setWorkingMessage）。 */
@@ -53,6 +60,8 @@ export function createEmptyExtensionUiState(  partial?: Partial<Pick<ExtensionUi
     customUi: partial?.customUi ?? null,
     statuses: partial?.statuses ?? [],
     widgets: partial?.widgets ?? [],
+    header: null,
+    footer: null,
     terminalInputListenerCount: partial?.terminalInputListenerCount ?? 0,
     workingMessage: null,
     workingVisible: true,
@@ -262,9 +271,9 @@ export function clearAllExtensionUiBlocking(state: ExtensionUiState): ExtensionU
 /**
  * 切会话 / 新建会话时清掉**上一个会话**的扩展 UI 投影。
  *
- * 内容类字段全清：面板（custom）、状态条、widget、运行提示、按键监听器计数。
+ * 内容类字段全清：面板（custom）、状态条、widget、页头 / 页脚、运行提示、按键监听器计数。
  * 新会话的投影随后由水合（/state 的 extensionStatuses / extensionWidgets /
- * activeCustomUi）填回；没水合到就保持空 —— 宁可空着，也不要把上个会话的面板
+ * extensionHeader / extensionFooter / activeCustomUi）填回；没水合到就保持空 —— 宁可空着，也不要把上个会话的面板
  * 留在新会话里（否则看起来像“面板跟着人跑”）。
  */
 export function resetExtensionUiForSession(state: ExtensionUiState): ExtensionUiState {
@@ -273,6 +282,9 @@ export function resetExtensionUiForSession(state: ExtensionUiState): ExtensionUi
     customUi: null,
     statuses: [],
     widgets: [],
+    // 页头 / 页脚是插件给**这个会话**设的：新会话不继承（它自己的水合会补回来）。
+    header: null,
+    footer: null,
     terminalInputListenerCount: 0,
     workingMessage: null,
     workingVisible: true,
@@ -283,6 +295,18 @@ export function resetExtensionUiForSession(state: ExtensionUiState): ExtensionUi
     toolsExpanded: null,
     toolsExpandedRevision: 0,
   };
+}
+
+/**
+ * 两个槽位投影是否等价。
+ *
+ * 按**内容**比而不是按引用：适配器每次 publish 都新建数组，引用比较永远不命中，
+ * 于是每次重渲（宽度变化、主题切换、requestRender）都会写一次 state，
+ * 连带整棵聊天界面重渲染。
+ */
+export function sameSlotLines(a: string[] | null, b: string[] | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.length === b.length && a.every((line, index) => line === b[index]);
 }
 
 export type ExtensionUiEffect =
@@ -340,6 +364,14 @@ export function applyExtensionUiRequest(
       if (current && current.placement === item.placement && current.lines === item.lines) return { state, effects: [] };
       const widgets = [...state.widgets.filter((existing) => existing.key !== request.widgetKey), item];
       return { state: { ...state, widgets }, effects: [] };
+    }
+    case "setHeader":
+    case "setFooter": {
+      const key = request.method === "setHeader" ? "header" : "footer";
+      // 空数组与 null 都是「没有内容」：TUI 的 setFooter(undefined) 是把内置页脚换回来。
+      const lines = Array.isArray(request.lines) && request.lines.length > 0 ? request.lines : null;
+      if (sameSlotLines(state[key], lines)) return { state, effects: [] };
+      return { state: { ...state, [key]: lines }, effects: [] };
     }
     case "setTitle":
       return request.title

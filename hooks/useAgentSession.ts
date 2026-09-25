@@ -49,6 +49,7 @@ import {
   pickCapabilityNotices,
   projectBlockingHead,
   restoreCustomUi,
+  sameSlotLines,
 } from "@/lib/extension-ui-bridge";
 import type { ExtensionUiBlockingRequest } from "@/lib/extension-ui-bridge";
 import { useExtensionUiState, type ExtensionUiDialogRequest, type ExtensionUiCustomRequest } from "@/hooks/useExtensionUiState";
@@ -223,6 +224,12 @@ type AgentStateResponse = {
   lockedByOther?: boolean;
   extensionStatuses?: ExtensionStatusItem[];
   extensionWidgets?: ExtensionWidgetItem[];
+  /**
+   * 插件页头 / 页脚槽位的渲染行（setHeader / setFooter）。
+   * 缺字段 = 旧 Host：保持本地现状，不要清零（与 widget 同一口径）。
+   */
+  extensionHeader?: string[] | null;
+  extensionFooter?: string[] | null;
   /**
    * 插件全局按键监听器数量（按键窄口子的门槛）。
    *
@@ -618,6 +625,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // extension UI 展示状态（#17 D5c）：5 state + ref + 3 更新回调已抽至 useExtensionUiState。
   const {
     extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets,
+    extensionHeader, extensionFooter,
     extensionTerminalInputListenerCount,
     extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator,
     extensionHiddenThinkingLabel,
@@ -665,6 +673,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     },
     [patchExtensionUiState],
   );
+
+  /**
+   * 水合插件页头 / 页脚槽位（ctx.ui.setHeader / setFooter）。
+   *
+   * 与 widget / 监听器计数同一类：插件在扩展加载时设一次之后很少再调，而那一刻
+   * 浏览器常常还没订阅（SSE 事件直接丢），所以凡是从服务端拿状态的地方都用快照补齐。
+   * 两个字段各自独立判 undefined：旧 Host 只带其中一个时不要把另一个清成 null。
+   */
+  const applyExtensionSlots = useCallback((state?: AgentStateResponse | null) => {
+    if (!state) return;
+    // 与 SSE 那条路同一套口径：空数组 = 没有内容（槽位是替换语义），
+    // 且**内容相同不写**——状态投影在运行中每 1s 回来一次，无条件写会把整棵界面
+    // 每秒重渲一遍（新数组的身份与旧的不同，React 认不出内容没变）。
+    const current = extensionUiStateRef.current;
+    for (const [key, value] of [
+      ["header", state.extensionHeader],
+      ["footer", state.extensionFooter],
+    ] as const) {
+      if (value === undefined) continue;
+      const lines = Array.isArray(value) && value.length > 0 ? value : null;
+      if (sameSlotLines(current[key], lines)) continue;
+      patchExtensionUiState({ [key]: lines });
+    }
+  }, [extensionUiStateRef, patchExtensionUiState]);
 
   /**
    * 本次页面加载里**已经交给通知队列**的通知 id（水合与 SSE 两条路都记）。
@@ -742,6 +774,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     applyExtensionListenerCount(state);
     applyExtensionHiddenThinkingLabel(state);
+    applyExtensionSlots(state);
     applyCapabilityNotices(state);
     const queue = filterSettledBlockingRequests(
       pickBlockingExtensionRequests(state.pendingExtensionRequests),
@@ -762,7 +795,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       patchExtensionUiState({ blockingQueue: [], dialog: null });
     }
     applyActiveCustomUi(state.activeCustomUi);
-  }, [applyActiveCustomUi, applyCapabilityNotices, applyExtensionHiddenThinkingLabel, applyExtensionListenerCount, extensionUiStateRef, patchExtensionUiState, settledRequestIdsRef]);
+  }, [applyActiveCustomUi, applyCapabilityNotices, applyExtensionHiddenThinkingLabel, applyExtensionListenerCount, applyExtensionSlots, extensionUiStateRef, patchExtensionUiState, settledRequestIdsRef]);
 
   /**
    * 宿主结算了一个阻塞请求（`extension_ui_settled`）：收起面板，**不回响应**。
@@ -1210,6 +1243,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           patchExtensionUiState({ widgets: liveState.extensionWidgets ?? [] });
         }
         applyExtensionHiddenThinkingLabel(liveState);
+        applyExtensionSlots(liveState);
         if (liveState.queuedMessages !== undefined) {
           applyProjectedQueues(sid, liveState.queuedMessages);
         }
@@ -1282,7 +1316,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [applyExtensionUiProjection, applyProjectedQueues, applyRemoteThinking, beginLoadRequest, notifyAutoFollowBranchReset, patchExtensionUiState, queueEntryNow]);
+  }, [applyExtensionHiddenThinkingLabel, applyExtensionSlots, applyExtensionUiProjection, applyProjectedQueues, applyRemoteThinking, beginLoadRequest, notifyAutoFollowBranchReset, patchExtensionUiState, queueEntryNow]);
 
   /**
    * 重试当前会话的内容加载（#91）：加载超时/失败后聊天区给出的可点入口。
@@ -1913,6 +1947,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (state.extensionWidgets !== undefined) patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
     applyExtensionListenerCount(state);
     applyExtensionHiddenThinkingLabel(state);
+    applyExtensionSlots(state);
     // 能力提示：宿主在浏览器订阅之前发出的那条（host 启动时的扩展加载）靠快照补回来。
     applyCapabilityNotices(state);
     if (state.queuedMessages !== undefined) {
@@ -1920,7 +1955,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     // 活动 custom 面板：刷新/重连后从状态恢复内容与输入入口（#34）。
     applyActiveCustomUi(state.activeCustomUi);
-  }, [applyActiveCustomUi, applyExtensionHiddenThinkingLabel, applyExtensionListenerCount, applyProjectedQueues, applyRemoteThinking, patchExtensionUiState, seedTurnMetricsFromState, setLastKnownModel]);
+  }, [applyActiveCustomUi, applyExtensionHiddenThinkingLabel, applyExtensionListenerCount, applyExtensionSlots, applyProjectedQueues, applyRemoteThinking, patchExtensionUiState, seedTurnMetricsFromState, setLastKnownModel]);
 
   /**
    * 统一 agent run 结束路径（P2）：agent_end / prompt_done / reconcile idle 三路合一。
@@ -3909,6 +3944,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               patchExtensionUiState({ widgets: agentState.state.extensionWidgets ?? [] });
             }
             if (stillCurrent) applyExtensionHiddenThinkingLabel(agentState.state);
+            if (stillCurrent) applyExtensionSlots(agentState.state);
             if (agentState.state.queuedMessages !== undefined) {
               applyProjectedQueues(session.id, agentState.state.queuedMessages);
             }
@@ -3932,7 +3968,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         runtimeSubscriptionRef.current = null;
       }
     };
-  }, [session?.id, session?.readOnly, newSessionIntentId, isNew, notifyAutoFollowBranchReset, applyExtensionUiProjection]);
+  }, [session?.id, session?.readOnly, newSessionIntentId, isNew, notifyAutoFollowBranchReset, applyExtensionSlots, applyExtensionUiProjection]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);
@@ -3995,7 +4031,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     liveNoticeActivities,
     dismissNotice,
     toggleNoticePin,
-    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel: extensionHiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse,
+    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionHeader, extensionFooter, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel: extensionHiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse,
     todos,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,

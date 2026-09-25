@@ -33,6 +33,10 @@ export function useExtensionUiState() {
   const [extensionWorkingIndicator, setExtensionWorkingIndicator] = useState<{ frames: string[]; intervalMs: number } | null>(null);
   /** 插件自定义的折叠思考标签（setHiddenThinkingLabel）；null = 用我们的默认文案。 */
   const [extensionHiddenThinkingLabel, setExtensionHiddenThinkingLabel] = useState<string | null>(null);
+  /** 插件页头槽位（setHeader）；null = 没有插件页头。 */
+  const [extensionHeader, setExtensionHeader] = useState<string[] | null>(null);
+  /** 插件页脚槽位（setFooter）；null = 用我们自己的状态条。 */
+  const [extensionFooter, setExtensionFooter] = useState<string[] | null>(null);
   /** 扩展请求的全局工具展开态（issue #75）：null = 从未请求过，客户端保持每块自己的折叠。 */
   const [extensionToolsExpandedRequest, setExtensionToolsExpandedRequest] = useState<{ expanded: boolean; revision: number } | null>(null);
 
@@ -61,6 +65,8 @@ export function useExtensionUiState() {
     setExtensionWorkingVisible(next.workingVisible);
     setExtensionWorkingIndicator(next.workingIndicator);
     setExtensionHiddenThinkingLabel(next.hiddenThinkingLabel);
+    setExtensionHeader(next.header);
+    setExtensionFooter(next.footer);
     setExtensionToolsExpandedRequest(next.toolsExpanded === null
       ? null
       : { expanded: next.toolsExpanded, revision: next.toolsExpandedRevision });
@@ -101,6 +107,8 @@ export function useExtensionUiState() {
     extensionWorkingVisible,
     extensionWorkingIndicator,
     extensionHiddenThinkingLabel,
+    extensionHeader,
+    extensionFooter,
     extensionUiStateRef,
     commitExtensionUiState,
     patchExtensionUiState,

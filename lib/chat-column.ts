@@ -103,6 +103,17 @@ export const CHAT_BLOCK_MAX_HEIGHT = "min(320px, 45vh)";
 export const CHAT_BLOCK_MAX_HEIGHT_MOBILE = "min(240px, 32vh)";
 
 /**
+ * 插件页头 / 页脚槽位（ctx.ui.setHeader / setFooter）的限高。
+ *
+ * 按槽位自己的字号折算行高（12px × 1.5 = 18px/行）再加 8px 上下内边距：
+ * 移动端 ≈ 4 行（72 + 16 = 88px）、桌面 ≈ 6 行（108 + 16 = 124px）。
+ * 插件给的组件可以任意高，不限高就会把输入区顶出可视区（widget 的既有教训），
+ * 所以超出部分在槽位内部滚动 —— 与 widget / 思考块同一个口径。
+ */
+export const EXTENSION_SLOT_MAX_HEIGHT = "min(124px, 26vh)";
+export const EXTENSION_SLOT_MAX_HEIGHT_MOBILE = "min(88px, 20vh)";
+
+/**
  * 思考块**展开态**正文样式：不限高、不内部滚动，按内容自然展开（用户 2026-09-24 决定）。
  *
  * 代价（有意接受）：超长思考会把输入区推得更远。工具输出与扩展 widget 继续受限高保护 ——
