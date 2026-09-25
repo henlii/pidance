@@ -157,8 +157,9 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
    有意不搬的：终端键位提示（`↓/← to inspect`）——Web 里换成面板自身折叠，子会话导航在顶栏谱系下拉。
    解析失败时**不显示原始载荷**（宁可空着，也不把 JSON 糊到界面上）。
    子代理全部结束后 pi-subagents 会 `setWidget(key, undefined)`，面板消失。
-6. **`onTerminalInput`（插件全局按键）有两条窄道**：pi-tui 的 `addInputListener` 是全局同步的，Web 没有等价层，**也不做「每个键都往返」**。现在只有两种情形会把按键 POST 给 `terminal_input`（服务端按 pi-tui 语义逐个调监听器：先 `consume` 再 `data` 改写，见 `dispatchTerminalInput`）：
+6. **`onTerminalInput`（插件全局按键）有三条窄道**：pi-tui 的 `addInputListener` 是全局同步的，Web 没有等价层，**也不做「每个键都往返」**。现在有三种情形会把按键 POST 给 `terminal_input`（服务端按 pi-tui 语义逐个调监听器：先 `consume` 再 `data` 改写，见 `dispatchTerminalInput`）：
    - **面板收起**（`hidden` 且注册了监听器）：前端把白名单键（Escape / F1–F12 / Ctrl·Alt + 非保留字符，见 `lib/extension-panel-keys.ts` 的 `shouldRouteKeyToExtensionListener`）拿去问插件。rpiv-ask-user 的折叠键靠它把面板重新展开。
+   - **插件界面显示中**（`hooks/useExtensionTerminalInput.ts` 的窗口 ③，issue #102）：可见的 custom 面板（含 overlay）或扩展对话框在屏幕上时，按键归插件的全局监听器 —— 此前这种情形下只有面板自己的 keytrap 能收到按键，焦点一旦不在面板里（用户点了别处，或对话框这种没有 keytrap 的界面）插件就完全收不到。排除项：Cmd(Meta) 组合、浏览器保留的 Ctrl 组合（含 Ctrl+Space）、壳自己的 Ctrl+K（命令面板，依据 TUI 的 app 保留键位规则）、**Tab**（无障碍焦点遍历，键盘用户只能靠它走到面板里的按钮）、输入法合成中与 `compositionend` 后的 80ms 宽限，以及**事件目标已经有 DOM 归属者**的按键（输入框本身、面板 keytrap、按钮/链接/菜单项等）——最后这条同时保证了「输入框聚焦时维持现状」。面板/对话框关掉后由 `ChatWindow` 在同一提交里把焦点还给输入框。
    - **插件 widget 的选择态**（`hooks/useExtensionWidgetKeys.ts`）：没有 custom 面板、该会话存在 widget、且有监听器时，输入框**为空且聚焦**的前提下——未入选择态只送 `↓`/`←`（插件的激活键，且**不拦截**，空输入框里这两个键本来没可见行为）；插件消费了就进入选择态，此后只路由导航键（方向键 / `j` / `k` / `Enter` / `Esc`，这些会 `preventDefault`）；任何其它键立刻退出选择态并把按键原样留给输入框。普通打字一次请求都不发。选择态是**本地推断**（看插件有没有消费上一次按键），所以有三道复位：`Esc`/`Enter` 被消费也**无条件清零**（它们是插件的离开/提交键，继续记着会把之后的 `j`/`k`/回车吞掉）、任何非导航键清零、超过 10 秒没有路由过按键即视为已离开。切后台、失焦、换会话同样复位。输入法合成中（含 `keyCode === 229` 与 `compositionend` 之后的 80ms 宽限）一律不参与，避免合成提交那一下被当成导航键拦截。
 
    代价与限制：选择态下 `j`/`k` 是导航而非字母，所以只能在「空输入框 + 已激活」时拦；插件在 Web 端的 `Esc` 取消长任务仍然没接（只接了 widget 选择态里的 `Esc`）。

@@ -17,9 +17,38 @@ export function shouldCaptureCustomPanelKey(
 }
 
 /** 浏览器自身保留的 Ctrl 组合：不问插件，直接交给浏览器。 */
-const BROWSER_RESERVED_CTRL_KEYS = new Set([
+export const BROWSER_RESERVED_CTRL_KEYS: ReadonlySet<string> = new Set([
   "a", "c", "v", "x", "z", "y", "p", "s", "f", "n", "t", "w", "r", "l", "o",
 ]);
+
+/**
+ * 壳自己的全局 Ctrl 组合：和浏览器保留键一样，不让给插件。
+ *
+ * 依据是 TUI 的同类规则 —— `RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS` 里的 app 键位
+ * （app.interrupt / app.message.copy / tui.input.submit …）扩展拿不走。Pidance 自己的全局
+ * 键位只有 Ctrl/Cmd+K（命令面板，见 components/AppShell.tsx）：它不属于浏览器，但属于壳。
+ * Escape **不在**其中：插件界面显示时 Esc 归插件（关面板/退出选择态），中止运行另有停止按钮。
+ */
+export const SHELL_RESERVED_CTRL_KEYS: ReadonlySet<string> = new Set(["k"]);
+
+/** 这个 Ctrl 组合是不是壳自己的（目前只有命令面板的 Ctrl+K）。 */
+export function isShellReservedCtrlChord(event: { key: string; ctrlKey: boolean }): boolean {
+  if (!event.ctrlKey) return false;
+  return SHELL_RESERVED_CTRL_KEYS.has(event.key.toLowerCase());
+}
+
+/**
+ * 这个 Ctrl 组合是不是浏览器/输入法自己的（含 Ctrl+Space 的输入法切换）。
+ *
+ * 两处判定共用同一张表：窗口 ①（面板收起时的白名单，见 L20 起）与窗口 ③
+ * （插件界面显示中的所有按键，见 `resolveExtensionSurfaceKeyAction`）。
+ * 表本身只应该有一份 —— 缩窄或复制它都会让某条路径开始吞浏览器快捷键。
+ */
+export function isBrowserReservedCtrlChord(event: { key: string; ctrlKey: boolean }): boolean {
+  if (!event.ctrlKey) return false;
+  if (event.key === " ") return true;
+  return BROWSER_RESERVED_CTRL_KEYS.has(event.key.toLowerCase());
+}
 
 /**
  * 插件把 custom 面板收起后，哪些按键要拿去问它的全局监听器
@@ -42,9 +71,8 @@ export function shouldRouteKeyToExtensionListener(event: {
   if (event.altKey) return event.key.length === 1;
   if (!event.ctrlKey) return false;
   if (event.key.length !== 1) return false;
-  // Ctrl+空格 是输入法切换，也留给浏览器
-  if (event.key === " ") return false;
-  return !BROWSER_RESERVED_CTRL_KEYS.has(event.key.toLowerCase());
+  // 单字符 Ctrl 组合里，浏览器/输入法自己占用的、以及壳自己的那些，一律不问插件。
+  return !isBrowserReservedCtrlChord(event) && !isShellReservedCtrlChord(event);
 }
 
 /**
@@ -213,3 +241,118 @@ export function isImeComposing(
   return now < compositionGraceUntil;
 }
 
+
+/**
+ * 插件界面**正在显示**时（可见的 custom 面板 / overlay / 扩展对话框），某个按键该不该
+ * 交给插件的全局监听器（`ctx.ui.onTerminalInput`）。这是窗口 ③。
+ *
+ * ## 为什么需要窗口 ③
+ *
+ * pi-tui 的 `addInputListener` 是全局的：插件的面板/overlay 摆在屏幕上时，它照样能收到
+ * 每个按键（面板组件自己再处理一份）。Web 上没有同步键盘层，此前只开了两条窄道：
+ * 面板收起时的白名单键（窗口 ①）与 widget 选择态（窗口 ②）。于是面板/overlay/对话框
+ * 显示期间，只要焦点不在面板自己的 keytrap 里（用户点了别处、或面板根本没有可聚焦元素，
+ * 比如对话框），按键就没有归属者 —— 插件完全收不到，交互静默消失。
+ *
+ * ## 优先级表（同一按键只会被一个窗口处理）
+ *
+ * 1. **事件目标已经有人管**（输入框本身、面板的 keytrap、任何可编辑/可交互元素）→ 归 DOM，
+ *    窗口 ③ 不抢。这一条同时覆盖了「输入框聚焦时维持现状」：输入框聚焦时 keydown 的目标
+ *    就是那个 textarea。
+ * 2. **输入框聚焦** → 窗口 ②（`useExtensionWidgetKeys`）与输入框自己处理；此时
+ *    `extensionWidgetKeysEnabled` 要求「没有 custom 面板」，而窗口 ③ 要求「插件界面显示中」，
+ *    两者按构造互斥。
+ * 3. **面板被插件收起**（`hidden`，此时不是「显示中」）→ 窗口 ① 的白名单键。
+ * 4. **插件界面显示中** → 窗口 ③：除下面这些之外都交给插件 —— 浏览器/系统保留的
+ *    Cmd(Meta) 组合、浏览器保留的 Ctrl 组合（含 Ctrl+Space）、Tab/Shift+Tab（无障碍焦点遍历，
+ *    必须留给浏览器，否则键盘用户再也走不出面板）、输入法合成中或刚结束的宽限期内。
+ *
+ * ## 有意不加 `assertFocus`
+ *
+ * 窗口 ② 的 `terminal_input` 带 `assertFocus`，因为它成立的前提就是输入框真的聚焦。
+ * 窗口 ③ 恰恰相反：输入框**没有**焦点。此时断言「编辑器有焦点」会骗插件 ——
+ * 插件读到的 `tui.focusedComponent` 会变成「主编辑器聚焦」，于是像 pi-subagents 那种
+ * 靠「编辑器聚焦 + 输入框为空」才允许激活的界面，会在用户其实正在跟别的面板/对话框
+ * 交互时被激活。（把「插件界面自己拥有键盘」表达成 focusedComponent 是 A4 那条线的事。）
+ */
+export type ExtensionSurfaceKeyAction = "route" | "ignore";
+
+export interface ExtensionSurfaceKeyInput {
+  key: string;
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+  /** 输入法合成中，或 `compositionend` 之后的宽限期内。 */
+  composing: boolean;
+  /** 事件目标已经有 DOM 归属者（见 `isDomOwnedKeyTarget`）。 */
+  domOwned: boolean;
+  /** 这个键已经被窗口 ①（面板收起时的白名单）认领，别再发一次。 */
+  claimedByPanelWindow: boolean;
+}
+
+export function resolveExtensionSurfaceKeyAction(
+  input: ExtensionSurfaceKeyInput,
+): ExtensionSurfaceKeyAction {
+  if (input.composing) return "ignore";
+  // 优先级 1：DOM 已经有归属者（输入框 / 面板 keytrap / 按钮 / 链接 / 菜单项…）
+  if (input.domOwned) return "ignore";
+  // 优先级 3 与 4 的边界：白名单键归窗口 ①，这里不重复发送
+  if (input.claimedByPanelWindow) return "ignore";
+  // Cmd/Ctrl+… 在 macOS 上大量是系统级组合，Meta 一律不碰
+  if (input.metaKey) return "ignore";
+  // Tab 是无障碍的焦点遍历：面板/对话框里的按钮只能靠它到达
+  if (input.key === "Tab") return "ignore";
+  if (isBrowserReservedCtrlChord(input)) return "ignore";
+  // 壳自己的键位（Ctrl+K 命令面板）也不让渡 —— 与 TUI 里 app 键位扩展拿不走一致。
+  if (isShellReservedCtrlChord(input)) return "ignore";
+  return "route";
+}
+
+/**
+ * 事件目标是不是「已经有 DOM 归属者」的元素。
+ *
+ * 面板显示期间我们只想接管**没有归属**的按键；DOM 里已经有交互元素时（输入框、面板的
+ * keytrap textarea、按钮、链接、菜单项……）按键归它，抢过来会造成一次按键两个消费者
+ * （例如对话框按钮的 Enter 既触发点击、又被当成插件的确认键）。
+ *
+ * 用注入的鸭子类型参数（只要 `closest`）而不是直接依赖 DOM 节点：这个模块的单测不开 DOM。
+ */
+export const DOM_OWNED_KEY_TARGET_SELECTOR = [
+  "input",
+  "textarea",
+  "select",
+  "button",
+  "a[href]",
+  "summary",
+  "[contenteditable]",
+  '[role="button"]',
+  '[role="link"]',
+  '[role="menuitem"]',
+  '[role="option"]',
+  '[role="tab"]',
+  '[role="checkbox"]',
+  '[role="switch"]',
+  '[role="radio"]',
+  '[role="slider"]',
+  '[role="textbox"]',
+  '[role="combobox"]',
+  '[role="listbox"]',
+  '[role="menu"]',
+  // 壳自己的模态（components/ui/ViewportDialog.tsx）：它开着的时候键盘归它（Escape 关面板、
+  // 方向键在列表里走），插件按键路由要让位。用专属标记而不是 aria-modal —— 插件面板外壳
+  // （components/ExtensionPanelChrome.tsx）也有 aria-modal，那才是窗口 ③ 的主场景。
+  '[data-pidance-modal="true"]',
+].join(", ");
+
+export function isDomOwnedKeyTarget(
+  target: { closest?: (selector: string) => unknown } | null | undefined,
+): boolean {
+  if (!target || typeof target.closest !== "function") return false;
+  try {
+    return target.closest(DOM_OWNED_KEY_TARGET_SELECTOR) !== null;
+  } catch {
+    // 拿不准就不抢（宁可少路由，也不要把按键从真正的归属者手里夺走）
+    return true;
+  }
+}

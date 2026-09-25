@@ -95,6 +95,8 @@ export interface AttachedImageMedia {
 }
 
 export interface ChatInputHandle {
+  /** 把焦点交回输入框（插件面板/对话框关掉后，键盘要有归属者）。 */
+  focus: () => void;
   insertText: (text: string) => void;
   insertIfEmpty: (text: string) => void;
   /** 把 text（可选带图片）放到当前草稿之前（队列取回语义）。 */

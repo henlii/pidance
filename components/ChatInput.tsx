@@ -684,6 +684,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   useImperativeHandle(ref, () => ({
+    // 焦点交回输入框：插件面板/对话框关闭后由 ChatWindow 调用（见那边的 layout effect）。
+    focus() {
+      textareaRef.current?.focus();
+    },
     insertIfEmpty: insertIfEmptyLocal,
     prependText: prependDraftText,
     reloadDraft: reloadDraftLocal,

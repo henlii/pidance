@@ -98,6 +98,34 @@ test("#83 修复轮：按键路由的四处收口（clientId / 同命令刷新�
   );
 });
 
+test("#102：插件界面显示中时按键归插件，关闭后焦点还给输入框", () => {
+  const source = readFileSync(fileURLToPath(new URL("./ChatWindow.tsx", import.meta.url)), "utf8");
+
+  // 窗口 ③ 的启用条件：可见的面板（hidden 的不算，那条是窗口 ①）或扩展对话框。
+  assert.ok(source.includes("const extensionSurfaceActive = Boolean(extensionDialog)"), "未按对话框判定插件界面");
+  assert.ok(
+    source.includes("Boolean(extensionCustomUi && !extensionCustomUi.hidden)"),
+    "hidden 的面板不该算「显示中」（那是窗口 ① 的地盘）",
+  );
+  const hookCall = source.slice(source.indexOf("useExtensionTerminalInput({"), source.indexOf("const extensionSurfaceWasActiveRef"));
+  assert.ok(hookCall.includes("hiddenPanelRouting:"), "窗口 ① 参数丢了");
+  assert.ok(hookCall.includes("surfaceRouting:"), "窗口 ③ 参数丢了");
+  assert.ok(hookCall.includes("extensionTerminalInputListenerCount > 0"), "没有监听器时不该发请求");
+  assert.ok(hookCall.includes("!isReadOnly"), "只读会话没有可写宿主，不该往返");
+
+  // 与窗口 ② 互斥：widget 选择态要求「没有 custom 面板」，窗口 ③ 要求「插件界面显示中」。
+  const widgetGate = source.slice(source.indexOf("extensionWidgetKeysEnabled={"), source.indexOf("blocked={Boolean(extensionDialog)}"));
+  assert.ok(widgetGate.includes("!extensionCustomUi"), "窗口 ② 的门槛必须排除有面板的情形");
+
+  // 关掉后把焦点还给输入框（否则用户要先点一下输入框才能继续打字）。
+  assert.ok(source.includes("chatInputRef?.current?.focus()"), "插件界面关闭后未把焦点还给输入框");
+  const effect = source.slice(source.indexOf("const extensionSurfaceWasActiveRef"), source.indexOf("chatInputRef?.current?.focus()"));
+  assert.ok(effect.includes("useLayoutEffect("), "焦点归还应在同一次提交里完成（layout effect）");
+  assert.match(effect, /if \(was && !active\b[^)]*\)/, "只在「从有到无」的那一次归还焦点");
+  // 面板里原有的焦点会随卸载落到 body；用户已经在别处打字时不要抢（见源码里的注释）。
+  assert.ok(effect.includes("canTakeFocus"), "归还焦点前要确认焦点没人接管");
+});
+
 test("本轮写入的文件：只在收尾 assistant 消息下汇总一次，并透传给 MessageView", () => {
   const source = readFileSync(fileURLToPath(new URL("./ChatWindow.tsx", import.meta.url)), "utf8");
   const renderer = source.slice(source.indexOf("const renderMessage = (item: ChatRenderItem)"), source.indexOf("const view = ("));
@@ -116,6 +144,17 @@ test("本轮写入的文件：只在收尾 assistant 消息下汇总一次，并
   assert.match(renderer, /cwd: messageCwd/, "相对路径没有按会话 cwd 解析");
   assert.match(renderer, /NO_WRITTEN_FILES/, "没有写入时未复用稳定空数组（会打破 memo）");
   assert.match(source, /writtenFiles=\{writtenFiles\}/, "没有把聚合结果透给 MessageView");
+});
+
+test("#102：ChatInputHandle.focus 存在且真的聚焦输入框（漏一环焦点归还就是空操作）", () => {
+  const types = readFileSync(fileURLToPath(new URL("../lib/types.ts", import.meta.url)), "utf8");
+  assert.ok(/\bfocus: \(\) => void;/.test(types), "ChatInputHandle 没有 focus()");
+  const input = readFileSync(fileURLToPath(new URL("./ChatInput.tsx", import.meta.url)), "utf8");
+  assert.ok(input.includes("textareaRef.current?.focus();"), "ChatInput 的 focus() 没有聚焦输入框");
+  assert.ok(
+    input.slice(input.indexOf("useImperativeHandle")).includes("focus() {"),
+    "focus() 没挂在 useImperativeHandle 上",
+  );
 });
 
 test("引用到输入框的接线：AppShell 处理器 → ChatWindow → MessageView（漏一环整条链静默失效）", () => {
