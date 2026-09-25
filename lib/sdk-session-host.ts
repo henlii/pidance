@@ -3209,6 +3209,15 @@ export class SdkSessionHost {
         return { focused, changed: this.extensionUi?.setEditorFocus(focused, clientId) ?? false };
       }
 
+      case "custom_panel_bounds": {
+        // custom 面板的几何（字符单元格坐标）：面板的 getBounds() 是同步接口，
+        // 只能由客户端量出来上报（见 lib/custom-panel-bounds.ts 的口径）。
+        // 形状校验在适配器里（normalizeCustomBounds）：坏报文不改已有值。
+        const id = asString(command.id);
+        if (id) this.extensionUi?.setCustomBounds(id, command.bounds);
+        return null;
+      }
+
       case "extension_ui_mouse": {
         // 面板内的鼠标事件（当前用于 pi-subagents 的 widget：点标题行折叠）
         const id = asString(command.id);

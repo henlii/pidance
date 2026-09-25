@@ -95,8 +95,6 @@ export interface AttachedImageMedia {
 }
 
 export interface ChatInputHandle {
-  /** 把焦点交回输入框（插件面板/对话框关掉后，键盘要有归属者）。 */
-  focus: () => void;
   insertText: (text: string) => void;
   insertIfEmpty: (text: string) => void;
   /** 把 text（可选带图片）放到当前草稿之前（队列取回语义）。 */
@@ -116,6 +114,14 @@ export interface ChatInputHandle {
   restoreDraft: (text: string, images?: AttachedImage[], ownerKey?: string) => void;
   /** 从当前 draftKey 的草稿重建输入框内容（队列取回等外部改动后刷新）。 */
   reloadDraft: () => void;
+  /**
+   * 把 DOM 焦点交给输入框。
+   *
+   * 两个调用方：插件面板 / 扩展对话框关掉后键盘要有归属者（见 ChatWindow 的 layout effect），
+   * 以及扩展把焦点从面板交回来（overlay 句柄的 `unfocus()`，见 `CustomPanelFocus`）。
+   * Web 上唯一能程序化聚焦的另一个面就是它。
+   */
+  focus: () => void;
 }
 
 export interface ThinkingContent {
@@ -365,7 +371,35 @@ export type ExtensionUiRequest =
       hidden?: boolean;
       /** 插件声明了 overlay 时的定位/尺寸；缺省表示按全屏模态面板渲染。 */
       layout?: ExtensionUiCustomLayout;
+      /**
+       * 键盘焦点态（overlay 句柄的 focus/unfocus）。缺省 = `panel`（照旧自动聚焦面板）。
+       * 客户端只在**状态变化**时移动 DOM 焦点，否则插件每次重渲都会把焦点从用户手里抢回去。
+       */
+      focus?: CustomPanelFocus;
     };
+
+/**
+ * custom 面板的键盘焦点三态（pi-tui `OverlayHandle` 的焦点语义在 Web 上的投影）。
+ *
+ * - `panel`：面板持有焦点（可见且未声明 nonCapturing 时的默认态），按键归面板 keytrap；
+ * - `editor`：交回主输入框 —— `unfocus()` 的缺省落点，也是 nonCapturing 面板的初始态
+ *   （终端里焦点本来就还在输入框）；
+ * - `none`：明确谁也不聚焦（`unfocus({ target: null })`）。
+ */
+export type CustomPanelFocus = "panel" | "editor" | "none";
+
+/**
+ * custom 面板的几何（pi-tui `OverlayBounds` 在 Web 上的投影）。
+ *
+ * 由**客户端**量出来上报（见 lib/custom-panel-bounds.ts）：终端里 overlay 的 bounds 是
+ * 字符画布上的矩形，Web 没有字符画布，只能按字符宽/行高把 DOM 矩形换算成单元格坐标。
+ */
+export interface CustomPanelBounds {
+  row: number;
+  col: number;
+  width: number;
+  height: number;
+}
 
 /**
  * 插件 overlay 面板的定位/尺寸（pi-tui `OverlayOptions` 在 Web 上的投影）。
