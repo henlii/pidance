@@ -367,9 +367,17 @@ export function applyExtensionUiRequest(
         key: request.widgetKey,
         lines: request.widgetLines,
         placement: request.widgetPlacement ?? "aboveEditor",
+        interactive: request.widgetInteractive === true,
       } as ExtensionWidgetItem;
       const current = index === -1 ? null : state.widgets[index];
-      if (current && current.placement === item.placement && current.lines === item.lines) return { state, effects: [] };
+      // 交互性也要比：同一份行内容从「不可点」变成「可点」时必须更新状态，
+      // 否则前端永远读不到新的 interactive（第一次渲染就可能与后挂的组件错开）。
+      if (
+        current
+        && current.placement === item.placement
+        && current.lines === item.lines
+        && current.interactive === item.interactive
+      ) return { state, effects: [] };
       const widgets = [...state.widgets.filter((existing) => existing.key !== request.widgetKey), item];
       return { state: { ...state, widgets }, effects: [] };
     }

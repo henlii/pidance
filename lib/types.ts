@@ -283,6 +283,11 @@ export type ExtensionUiRequest =
       widgetKey: string;
       widgetLines?: string[];
       widgetPlacement?: "aboveEditor" | "belowEditor";
+      /**
+       * widget 的内容是**组件**（工厂形式）且该组件实现了 `handleMouse` 时为 true。
+       * 前端只对这种 widget 挂点击处理：没实现就不该为每次点击付一次往返。
+       */
+      widgetInteractive?: boolean;
     }
   | {
       type: "extension_ui_request";
@@ -451,6 +456,11 @@ export interface ExtensionWidgetItem {
   key: string;
   lines: string[];
   placement: "aboveEditor" | "belowEditor";
+  /**
+   * 该 widget 的组件实现了 `handleMouse`（Web 侧据此决定点击要不要转发给插件）。
+   * 字符串数组 widget 与未实现 handleMouse 的组件一律 false/缺省。
+   */
+  interactive?: boolean;
 }
 
 /**

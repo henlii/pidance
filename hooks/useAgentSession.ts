@@ -1825,9 +1825,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   /**
    * 上报 custom 面板的几何（字符单元格坐标）。
    *
-   * 面板的 \`getBounds()\` 是同步接口，服务端只能把客户端量出来的值存下（口径见
+   * 面板的 `getBounds()` 是同步接口，服务端只能把客户端量出来的值存下（口径见
    * lib/custom-panel-bounds.ts）。这是**尽力而为**：失败不提示 —— 面板照样能用，
-   * 只是插件读 \`getBounds()\` 会拿到 undefined（诚实降级，不是假装成功）。
+   * 只是插件读 `getBounds()` 会拿到 undefined（诚实降级，不是假装成功）。
    */
   const sendExtensionCustomBounds = useCallback(async (
     request: ExtensionUiCustomRequest,
@@ -1848,6 +1848,32 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       console.error("Failed to send extension custom UI bounds:", e);
     }
   }, [capabilities.canSendSessionCommands, extensionUiStateRef]);
+
+  /**
+   * widget 组件内的鼠标事件（issue #103）：`ExtensionWidgets` 只在 widget 声明
+   * `interactive`（组件实现了 handleMouse）时才挂点击，所以这里不做能力二次判断，
+   * 只做「这个页面现在能不能对会话发命令」的门禁。
+   *
+   * 与 custom 面板不同，没有「请求 id 变了就丢弃」的判定：widget 由 key 标识、
+   * 常驻会话生命周期，点击发出去时它要么还在（命中）要么已被卸载（服务端返回 false）。
+   */
+  const sendExtensionWidgetMouse = useCallback(async (
+    key: string,
+    event: Record<string, unknown>,
+  ) => {
+    if (!capabilities.canSendSessionCommands) return;
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    try {
+      await sendAgentCommand(sid, {
+        type: "extension_ui_widget_mouse",
+        key,
+        event,
+      });
+    } catch (e) {
+      console.error("Failed to send extension widget mouse event:", e);
+    }
+  }, [capabilities.canSendSessionCommands]);
 
   // ── P3a：分支 / 新会话命令迁出至 useSessionCommands（纯逻辑见该文件）─────
   // 显式注入依赖；branchBusyRef / branchBusy / setBranchBusy 仍是同一门禁，
@@ -4063,7 +4089,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     liveNoticeActivities,
     dismissNotice,
     toggleNoticePin,
-    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionHeader, extensionFooter, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel: extensionHiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse, sendExtensionCustomBounds,
+    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionHeader, extensionFooter, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel: extensionHiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse, sendExtensionCustomBounds, sendExtensionWidgetMouse,
     todos,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,

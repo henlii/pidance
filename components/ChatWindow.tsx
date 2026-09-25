@@ -4,6 +4,23 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import type { AgentMessage, BashExecutionMessage, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import type { BranchActions } from "@/lib/branch-bookmarks";
 import { parseAnsiLine } from "@/lib/ansi";
+import {
+  buildWidgetClickEvent,
+  consumeTapClick,
+  INITIAL_WIDGET_TOUCH_STATE,
+  isScrollGesture,
+  markLongPressFired,
+  mouseButtonName,
+  shouldFireLongPress,
+  touchCancel,
+  touchEnd,
+  touchMove,
+  touchStart,
+  widgetCellFromMetrics,
+  WIDGET_LONG_PRESS_MS,
+  type WidgetTouchState,
+} from "@/lib/extension-widget-mouse";
+import { measureCharWidth, measureLineHeight } from "@/lib/render-width";
 import { copyText } from "@/lib/clipboard";
 import { humanizeExtensionIdentifier } from "@/lib/extension-labels";
 import { composeChatPlan, type ChatRenderItem } from "@/lib/chat-compositor";
@@ -179,7 +196,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, defaultThinkingLevel,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionHeader, extensionFooter, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, sendExtensionCustomInput, sendExtensionCustomMouse, sendExtensionCustomBounds,
+    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionHeader, extensionFooter, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, sendExtensionCustomInput, sendExtensionCustomMouse, sendExtensionCustomBounds, sendExtensionWidgetMouse,
     todos,
     isAutoModelSelection,
     agentPhase, toolExecutionSnapshots,
@@ -1110,7 +1127,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
           }}
         >
           <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS, margin: "0 auto" }}>
-            <ExtensionWidgets widgets={aboveEditorWidgets} />
+            <ExtensionWidgets widgets={aboveEditorWidgets} onWidgetMouse={sendExtensionWidgetMouse} />
           </div>
         </div>
         {todoPanelElement}
@@ -1142,8 +1159,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
             <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS, margin: "0 auto" }}>
               {!footerCollapsed && (
                 <>
-                  <ExtensionWidgets widgets={belowEditorWidgets} />
-                  {/* 插件页脚（ctx.ui.setFooter）在我们自己的状态条之上。
+                  <ExtensionWidgets widgets={belowEditorWidgets} onWidgetMouse={sendExtensionWidgetMouse} />                  {/* 插件页脚（ctx.ui.setFooter）在我们自己的状态条之上。
                       与 TUI 的一处**有意分叉**：TUI 是「替换」整个内置页脚，而 Web 的
                       状态 chip 是独立机制 —— 真替换会把插件用 setStatus 放上去的信息
                       整块吞掉（兼容高于观感）。字段缺失的部分按 SDK 的四个成员如实给值，
@@ -1152,8 +1168,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
                       它们同属那一块，单独留着插件页脚会把「收起」变成半收起。 */}
                   {extensionFooter && extensionFooter.length > 0 ? (
                     <ExtensionSlot lines={extensionFooter} kind="footer" />
-                  ) : null}
-                  <ExtensionStatusBar statuses={extensionStatuses} />
+                  ) : null}                  <ExtensionStatusBar statuses={extensionStatuses} />
                 </>
               )}
             </div>
@@ -1323,7 +1338,173 @@ function ExtensionStatusBar({ statuses }: { statuses: Array<{ key: string; text:
  * 走共享的通用规则（lib/extension-labels.ts），**不为个别插件写特例**。
  * 已知机器载荷（能解析出结构化信息的）仍用它们自己的友好名，见下面的 heading。
  */
-function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: string[] }> }) {
+/**
+ * widget 正文区的点击 → 插件组件的 `handleMouse`（issue #103）。
+ *
+ * 坐标按**正文区**（这个 pre）自己的字体度量换算：服务端就是按上报的列宽渲染这些行的，
+ * 1 列 = 1 个字符 = `measureCharWidth` 那么多像素。量不出（未布局）就**不转发**这一次
+ * 点击 —— 字符宽编不出来就换不出正确格位，宁可这一次点击不生效。
+ *
+ * 只转 click：不转 move / drag / wheel。滚动**不拦**（往返回来再 preventDefault 已经
+ * 来不及，拦了会把滚动卡住）。
+ */
+function ExtensionWidgetBody({
+  widgetKey,
+  lines,
+  bodyMaxHeight,
+  onWidgetMouse,
+}: {
+  widgetKey: string;
+  lines: string[];
+  bodyMaxHeight: number | string;
+  onWidgetMouse?: (key: string, event: Record<string, unknown>) => void;
+}) {
+  // 触摸：tap 走浏览器合成的 click；长按自己计时并映射成右键，且吃掉随后那次 click。
+  const touchRef = useRef<WidgetTouchState>(INITIAL_WIDGET_TOUCH_STATE);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pressOriginRef = useRef<{ x: number; y: number } | null>(null);
+
+  const clearLongPressTimer = useCallback(() => {
+    if (longPressTimerRef.current !== null) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }, []);
+  useEffect(() => clearLongPressTimer, [clearLongPressTimer]);
+
+  /**
+   * DOM 事件 + 元素度量 → 单元格坐标。同一个 pre 既做换算也做展示，
+   * 所以量与画用的是同一套字体上下文。
+   */
+  const pointFromElement = useCallback((
+    el: HTMLElement,
+    clientX: number,
+    clientY: number,
+  ) => {
+    const rect = el.getBoundingClientRect();
+    const styles = window.getComputedStyle(el);
+    const padLeft = Number.parseFloat(styles.paddingLeft) || 0;
+    const padTop = Number.parseFloat(styles.paddingTop) || 0;
+    const padRight = Number.parseFloat(styles.paddingRight) || 0;
+    const padBottom = Number.parseFloat(styles.paddingBottom) || 0;
+    return widgetCellFromMetrics({
+      offsetX: clientX - rect.left - padLeft + el.scrollLeft,
+      offsetY: clientY - rect.top - padTop + el.scrollTop,
+      charWidth: measureCharWidth(el),
+      lineHeight: measureLineHeight(el),
+      bodyWidth: el.clientWidth - padLeft - padRight,
+      bodyHeight: el.clientHeight - padTop - padBottom,
+    });
+  }, []);
+
+  const sendClick = useCallback((
+    el: HTMLElement,
+    clientX: number,
+    clientY: number,
+    modifiers: { button: "left" | "middle" | "right"; clickCount: number; shift: boolean; alt: boolean; ctrl: boolean },
+  ) => {
+    if (!onWidgetMouse) return;
+    const point = pointFromElement(el, clientX, clientY);
+    if (!point) return;
+    onWidgetMouse(widgetKey, buildWidgetClickEvent(point, modifiers));
+  }, [onWidgetMouse, pointFromElement, widgetKey]);
+
+  return (
+    <pre
+      onClick={(event) => {
+        const result = consumeTapClick(touchRef.current);
+        touchRef.current = result.state;
+        // 长按已经作为右键派发过：这次补发的 click 必须吃掉。
+        if (!result.send) {
+          event.preventDefault();
+          return;
+        }
+        sendClick(event.currentTarget, event.clientX, event.clientY, {
+          button: mouseButtonName(event.button),
+          clickCount: event.detail,
+          shift: event.shiftKey,
+          alt: event.altKey,
+          ctrl: event.ctrlKey,
+        });
+      }}
+      onTouchStart={(event) => {
+        const touch = event.touches[0];
+        if (!touch) return;
+        touchRef.current = touchStart();
+        pressOriginRef.current = { x: touch.clientX, y: touch.clientY };
+        clearLongPressTimer();
+        const el = event.currentTarget;
+        longPressTimerRef.current = setTimeout(() => {
+          longPressTimerRef.current = null;
+          if (!shouldFireLongPress(touchRef.current, WIDGET_LONG_PRESS_MS)) return;
+          touchRef.current = markLongPressFired(touchRef.current);
+          const origin = pressOriginRef.current;
+          if (!origin) return;
+          sendClick(el, origin.x, origin.y, {
+            button: "right",
+            clickCount: 1,
+            shift: false,
+            alt: false,
+            ctrl: false,
+          });
+        }, WIDGET_LONG_PRESS_MS);
+      }}
+      onTouchMove={(event) => {
+        const touch = event.touches[0];
+        const origin = pressOriginRef.current;
+        if (!touch || !origin) return;
+        const dx = touch.clientX - origin.x;
+        const dy = touch.clientY - origin.y;
+        // 滑动 = 滚动：长按作废，并记下「这次手势的 click 不能转发」——
+        // 正文区是内滚容器（touch-action: pan-y），手机上滑一下再松手很常见，
+        // 浏览器若补一次 click，插件会把它当成「点了第 0 行」（fleet 的整块切换会误触）。
+        if (isScrollGesture(dx, dy)) {
+          touchRef.current = touchMove(touchRef.current, dx, dy);
+          clearLongPressTimer();
+        }
+      }}
+      onTouchEnd={() => {
+        clearLongPressTimer();
+        touchRef.current = touchEnd(touchRef.current);
+        pressOriginRef.current = null;
+      }}
+      onTouchCancel={() => {
+        clearLongPressTimer();
+        // 系统长按菜单 / 文本选择 / 手势导航都会以 cancel 结束触摸，之后浏览器仍可能补一次
+        // click。**不能**当成「什么都没发生」：清空状态会让那次 click 被当成真 tap 转发出去
+        // （长按已经作为右键派发过，再补一次左键就是用户没做的操作）。
+        touchRef.current = touchCancel(touchRef.current);
+        pressOriginRef.current = null;
+      }}
+      style={{
+        margin: 0,
+        padding: "8px 9px",
+        color: "var(--text-muted)",
+        fontSize: 12,
+        lineHeight: 1.5,
+        whiteSpace: "pre",
+        fontFamily: "var(--font-mono)",
+        maxHeight: bodyMaxHeight,
+        overflow: "auto",
+        overscrollBehavior: "auto",
+        touchAction: "pan-y",
+        cursor: onWidgetMouse ? "pointer" : undefined,
+      }}
+    >
+      {(Array.isArray(lines) ? lines : []).map((line, index, lines) => (
+        <Fragment key={index}>
+          {renderAnsiLine(line, `widget-${widgetKey}-line-${index}`)}
+          {index < lines.length - 1 ? "\n" : null}
+        </Fragment>
+      ))}
+    </pre>
+  );
+}
+
+function ExtensionWidgets({ widgets, onWidgetMouse }: {
+  widgets: Array<{ key: string; lines: string[]; interactive?: boolean }>;
+  onWidgetMouse?: (key: string, event: Record<string, unknown>) => void;
+}) {
   // 扩展可能发「机器载荷」widget（pi-subagents 的 subagent-async 在 rpc 模式下就是一整行
   // PI_SUBAGENT_ASYNC_JSON:{…}）。这类载荷要按数据渲染，绝不能当文本显示原样 JSON。
   const parsed = widgets.map((widget) => {
@@ -1437,14 +1618,16 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
               snapshot ? (
                 <SubagentAsyncWidget snapshot={snapshot} />
               ) : (
-                <pre style={{ margin: 0, padding: "8px 9px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre", fontFamily: "var(--font-mono)", maxHeight: bodyMaxHeight, overflow: "auto", overscrollBehavior: "auto", touchAction: "pan-y" }}>
-                  {(Array.isArray(widget.lines) ? widget.lines : []).map((line, index, lines) => (
-                    <Fragment key={index}>
-                      {renderAnsiLine(line, `widget-${widget.key}-line-${index}`)}
-                      {index < lines.length - 1 ? "\n" : null}
-                    </Fragment>
-                  ))}
-                </pre>
+                // 只有插件组件真的实现了 handleMouse 才转鼠标（服务端下发的
+                // interactive）；否则不挂处理器，一次点击都不发。
+                // 机器载荷分支（snapshot）是本端自绘的 React 组件，坐标对应不上
+                // 插件组件的渲染区，所以不转。
+                <ExtensionWidgetBody
+                  widgetKey={widget.key}
+                  lines={widget.lines}
+                  bodyMaxHeight={bodyMaxHeight}
+                  onWidgetMouse={widget.interactive === true ? onWidgetMouse : undefined}
+                />
               )
             )}
           </div>
