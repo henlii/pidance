@@ -226,6 +226,13 @@ type AgentStateResponse = {
    * 缺字段 = 旧 Host：保持本地现状，不要清零（否则会把 SSE 事件刚带来的真值抹掉）。
    */
   extensionTerminalInputListenerCount?: number;
+  /**
+   * 插件自定义的折叠思考标签。
+   *
+   * 缺字段 = 旧 Host：保持本地现状（不要清成 null），否则会把 SSE 事件刚带来的
+   * 标签抹掉。null = 宿主明确表示"没有标签"。
+   */
+  hiddenThinkingLabel?: string | null;
   queuedMessages?: {
     steering?: string[];
     followUp?: string[];
@@ -610,6 +617,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets,
     extensionTerminalInputListenerCount,
     extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator,
+    extensionHiddenThinkingLabel,
     extensionToolsExpandedRequest,
     extensionUiStateRef, commitExtensionUiState, patchExtensionUiState, dismissExtensionUiRequest,
   } = useExtensionUiState();
@@ -638,6 +646,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (state?.extensionTerminalInputListenerCount === undefined) return;
     patchExtensionUiState({ terminalInputListenerCount: state.extensionTerminalInputListenerCount });
   }, [patchExtensionUiState]);
+
+  /**
+   * 水合插件自定义的折叠思考标签。
+   *
+   * 与监听器计数同一类：插件在扩展加载时设一次，之后就很少再调，而那一刻浏览器
+   * 常常还没订阅（SSE 事件直接丢）。所以凡是从服务端拿状态的地方都用快照补齐；
+   * 字段缺失（旧 Host）时保持本地现状，不要清成 null。
+   */
+  const applyExtensionHiddenThinkingLabel = useCallback(
+    (state?: AgentStateResponse | null) => {
+      if (state?.hiddenThinkingLabel === undefined) return;
+      patchExtensionUiState({ hiddenThinkingLabel: state.hiddenThinkingLabel });
+    },
+    [patchExtensionUiState],
+  );
 
   /**
    * 本次页面加载里**已经交给通知队列**的通知 id（水合与 SSE 两条路都记）。
@@ -714,6 +737,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
     }
     applyExtensionListenerCount(state);
+    applyExtensionHiddenThinkingLabel(state);
     applyCapabilityNotices(state);
     const queue = pickBlockingExtensionRequests(state.pendingExtensionRequests);
     const current = extensionUiStateRef.current.blockingQueue ?? [];
@@ -731,7 +755,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       patchExtensionUiState({ blockingQueue: [], dialog: null });
     }
     applyActiveCustomUi(state.activeCustomUi);
-  }, [applyActiveCustomUi, applyCapabilityNotices, applyExtensionListenerCount, extensionUiStateRef, patchExtensionUiState]);
+  }, [applyActiveCustomUi, applyCapabilityNotices, applyExtensionHiddenThinkingLabel, applyExtensionListenerCount, extensionUiStateRef, patchExtensionUiState]);
 
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [], followUpRows: [], followUpRevision: null });
   // 每会话本地 follow-up 队列：Host 是唯一 owner，浏览器只持「权威条目 + 一个
@@ -1164,6 +1188,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (liveState.extensionWidgets !== undefined) {
           patchExtensionUiState({ widgets: liveState.extensionWidgets ?? [] });
         }
+        applyExtensionHiddenThinkingLabel(liveState);
         if (liveState.queuedMessages !== undefined) {
           applyProjectedQueues(sid, liveState.queuedMessages);
         }
@@ -1862,6 +1887,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (state.extensionStatuses !== undefined) patchExtensionUiState({ statuses: state.extensionStatuses ?? [] });
     if (state.extensionWidgets !== undefined) patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
     applyExtensionListenerCount(state);
+    applyExtensionHiddenThinkingLabel(state);
     // 能力提示：宿主在浏览器订阅之前发出的那条（host 启动时的扩展加载）靠快照补回来。
     applyCapabilityNotices(state);
     if (state.queuedMessages !== undefined) {
@@ -1869,7 +1895,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     // 活动 custom 面板：刷新/重连后从状态恢复内容与输入入口（#34）。
     applyActiveCustomUi(state.activeCustomUi);
-  }, [applyActiveCustomUi, applyExtensionListenerCount, applyProjectedQueues, applyRemoteThinking, patchExtensionUiState, seedTurnMetricsFromState, setLastKnownModel]);
+  }, [applyActiveCustomUi, applyExtensionHiddenThinkingLabel, applyExtensionListenerCount, applyProjectedQueues, applyRemoteThinking, patchExtensionUiState, seedTurnMetricsFromState, setLastKnownModel]);
 
   /**
    * 统一 agent run 结束路径（P2）：agent_end / prompt_done / reconcile idle 三路合一。
@@ -3853,6 +3879,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             if (stillCurrent && agentState.state.extensionWidgets !== undefined) {
               patchExtensionUiState({ widgets: agentState.state.extensionWidgets ?? [] });
             }
+            if (stillCurrent) applyExtensionHiddenThinkingLabel(agentState.state);
             if (agentState.state.queuedMessages !== undefined) {
               applyProjectedQueues(session.id, agentState.state.queuedMessages);
             }
@@ -3939,7 +3966,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     liveNoticeActivities,
     dismissNotice,
     toggleNoticePin,
-    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse,
+    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel: extensionHiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse,
     todos,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,

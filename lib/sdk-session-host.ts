@@ -2517,6 +2517,9 @@ export class SdkSessionHost {
       // 按键永不路由（实测：子代理在跑、widget 已在页面上，空输入框按 ↓ 不激活）。
       // 事件仍照发做增量更新，快照只是让后加载的页面拿到当前真值。
       extensionTerminalInputListenerCount: this.extensionUi?.terminalInputListenerCount ?? 0,
+      // 插件自定义的折叠思考标签：与监听器计数同理 —— 插件设一次、页面后加载就丢，
+      // 所以必须进水合快照（SSE 事件仍照发，做增量更新）。
+      hiddenThinkingLabel: this.extensionUi?.hiddenThinkingLabel ?? null,
       // 活动 custom 面板快照：普通阻塞请求走 pendingExtensionRequests，
       // 但 custom 没有快照的话，刷新/切回后面板内容与输入入口都会丢。
       activeCustomUi: this.extensionUi?.customSnapshot ?? null,

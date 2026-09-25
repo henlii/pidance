@@ -178,7 +178,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, defaultThinkingLevel,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse,
+    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse,
     todos,
     isAutoModelSelection,
     agentPhase, toolExecutionSnapshots,
@@ -937,6 +937,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
                     contextUsage={sessionContextUsage}
                     onCompactContext={!isLive && !sessionBusy && !writesDisabled ? handleCompact : undefined}
+                    hiddenThinkingLabel={hiddenThinkingLabel ?? undefined}
                   />
                 );
                 const anchorId = isLive || !entryIds[idx] ? undefined : `${item.keyPrefix}:${entryIds[idx]}`;

@@ -19,11 +19,11 @@ import type { ExtensionUiCustomLayout } from "./types";
 /**
  * 能力提示快照的上限。
  *
- * 取舍：宿主能力提示的种类是**枚举**（现在公开面一共 8 种：setHiddenThinkingLabel、
- * setFooter、setHeader、addAutocompleteProvider、setEditorComponent、getAllThemes、
- * getTheme、onTerminalInput），远小于这个 16 条上限，所以正常永远截不到。
+ * 取舍：宿主能力提示的种类是**枚举**（现在公开面一共 7 种：setFooter、setHeader、
+ * addAutocompleteProvider、setEditorComponent、getAllThemes、getTheme、onTerminalInput），
+ * 远小于这个 16 条上限，所以正常永远截不到。
  * 保留上限只是防止将来有人拿新 feature 名反复调用（把 API 当循环用）让状态快照无界增长。
- * 截断保留**最新**的：最旧的、可能还没被用户看见的那条会先丢——在 8 种枚举的现实下
+ * 截断保留**最新**的：最旧的、可能还没被用户看见的那条会先丢——在 7 种枚举的现实下
  * 不会发生；真发生了也只丢"旧提示"，不会让状态无界。改成无上限是错的（状态会被插件撑着）。
  */
 export const MAX_CAPABILITY_NOTICES = 16;
@@ -133,6 +133,14 @@ export type WebExtensionUIAdapter = {
    * 监听器只该由 `dispatchTerminalInput` 逐个调用。
    */
   readonly terminalInputListenerCount: number;
+  /**
+   * 插件自定义的「收起的思考块」标签（只读）。
+   *
+   * null = 未设置（客户端用我们自己的 i18n 文案）。宿主的**状态投影**要用它：
+   * 插件一般在扩展加载时设一次，而那一刻浏览器常常还没订阅（与
+   * terminalInputListenerCount / capabilityNoticeSnapshot 同一类一次性事件）。
+   */
+  readonly hiddenThinkingLabel: string | null;
   /**
    * 宿主自己发出的能力提示快照（只读）。
    *
@@ -284,6 +292,17 @@ export function createWebExtensionUIAdapter(
    * 但它必须能被 `getEditorComponent()` 读回去，否则「包裹上一个编辑器」的插件写法断链。
    */
   let editorComponentFactory: unknown;
+
+  /**
+   * 插件自定义的「收起的思考块」标签（ctx.ui.setHiddenThinkingLabel）。
+   *
+   * TUI 语义：思考收起时那一行只画这个标签（默认 "Thinking..."），展开才画正文。
+   * Web 上折叠态那一行正是同一位置，所以标签替代折叠行摘要；展开态照旧显示真实
+   * 思考内容 —— 标签不会让内容消失，只是收起时不显示。
+   *
+   * 适配器一会话一个，所以「切会话要重置」由构造方式保证，不需要额外清账。
+   */
+  let hiddenThinkingLabel: string | null = null;
 
   /**
    * 当前渲染尺寸：前端按可用宽高上报，插件组件按它排版与裁切（见 setRenderSize）。
@@ -636,8 +655,17 @@ export function createWebExtensionUIAdapter(
       });
     },
     setHiddenThinkingLabel(label) {
-      if (label === undefined) return;
-      notifyUnsupported("setHiddenThinkingLabel");
+      // 对齐 TUI 的 `label ?? 默认值`；空串我们一并当恢复默认 —— 空标签只会让
+      // 折叠行空着，等于把插件原本的意图变成"看不见"。
+      const next = typeof label === "string" && label.trim() !== "" ? label : null;
+      if (next === hiddenThinkingLabel) return;
+      hiddenThinkingLabel = next;
+      emit({
+        type: "extension_ui_request",
+        id: randomUUID(),
+        method: "setHiddenThinkingLabel",
+        label: next,
+      });
     },
     setWidget(key: string, content: unknown, options?: { placement?: string }) {
       // 组件工厂形式：实例常驻 + requestRender 热更新（见 mountWidgetFactory）。
@@ -952,6 +980,15 @@ export function createWebExtensionUIAdapter(
      */
     get terminalInputListenerCount() {
       return terminalInputListeners.size;
+    },
+    /**
+     * 插件设置的折叠思考标签（只读）。
+     *
+     * 宿主的 get_state 投影用它水合：插件通常在加载时设一次就不再调用，
+     * 页面稍后加载就只能靠快照补回来（与能力提示同一个坑）。
+     */
+    get hiddenThinkingLabel() {
+      return hiddenThinkingLabel;
     },
     /**
      * 已发出的能力提示快照（只读，拷贝）。
