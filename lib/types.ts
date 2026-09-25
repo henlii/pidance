@@ -358,6 +358,23 @@ export type ExtensionUiResponse =
   | { type: "extension_ui_response"; id: string; confirmed: boolean }
   | { type: "extension_ui_response"; id: string; cancelled: true };
 
+/**
+ * 宿主（不是浏览器）结束了一个阻塞请求：`extension_ui_settled`。
+ *
+ * 为什么需要这条：面板的消失只能由服务端驱动 —— 客户端拿自己的时钟关会和宿主
+ * 分叉（手机与宿主不是同一块钟），而等下一次状态投影在运行中要 15s、空闲且流还
+ * 活着最长 120s。没有它就会出现「倒计时到 0、面板还挂着，插件却已经按取消继续了」。
+ *
+ * 收到后客户端只做一件事：把这个 id 从本地待处理队列里移除，**不发**
+ * extension_ui_response（宿主已经结算过了）。`responded` 也会发一次：多标签下
+ * 响应只从一个标签发出，其余标签同样要立刻收起那个面板。
+ */
+export type ExtensionUiSettledEvent = {
+  type: "extension_ui_settled";
+  id: string;
+  reason: "responded" | "timeout" | "abort" | "disposed" | "failed";
+};
+
 export interface ExtensionStatusItem {
   key: string;
   text: string;

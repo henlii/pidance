@@ -214,8 +214,33 @@ test("#100 SSR：已过期时给「已过期」状态并禁用按钮（客户端
   });
   assert.ok(html.includes(">已过期<") || html.includes(">Expired<"), "缺少已过期状态");
   assert.ok(html.includes("disabled"), "过期后按钮必须禁用（宿主已按取消结算）");
-  // 过期时不再显示倒计时数字
-  assert.doesNotMatch(html, /剩余\s*\d+\s*秒/, "过期后不该再显示倒计时");
+  // 过期时不再显示倒计时数字。两种语言都要断言：SSR 默认语言是 en（lib/i18n.tsx），
+  // 只排除中文的话这条断言在默认路径上恒真（审查发现）。
+  assert.doesNotMatch(html, /剩余\s*\d+\s*秒/, "过期后不该再显示倒计时（中文）");
+  assert.doesNotMatch(html, /\d+\s*s left/, "过期后不该再显示倒计时（英文，SSR 默认语言）");
+});
+
+// 审查修复：本端不能回答（只读 / 会话被对端写持有）时过去完全看不到倒计时，
+// 而那时用户最需要知道宿主什么时候把它收走。底栏右侧只放一个元素。
+test("#100 SSR 审查修复：disabled（本端不能回答）时也显示剩余秒数", () => {
+  const html = renderCard({
+    request: request("select", { options: ["一"], expiresAt: Date.now() + 60_000 }),
+    disabled: true,
+    onRespond: () => {},
+  });
+  assert.match(html, /剩余\s*\d+\s*秒|\d+s left/, "本端不能回答时也要能看到宿主何时收回面板");
+  assert.doesNotMatch(html, /等待结束|Waiting ended/, "有倒计时时不再叠加状态文案（两者都是 margin-left:auto）");
+  assert.ok(html.includes("disabled"), "按钮仍然禁用");
+});
+
+test("#100 SSR 审查修复：disabled 且没有倒计时 → 仍是「等待结束」", () => {
+  const html = renderCard({
+    request: request("select", { options: ["一"] }),
+    disabled: true,
+    onRespond: () => {},
+  });
+  assert.match(html, /等待结束|Waiting ended/, "没有超时的阻塞面板仍要说明为什么点不动");
+  assert.doesNotMatch(html, /剩余|s left/, "没有 expiresAt 就不该有倒计时");
 });
 
 test("#100 SSR：没有 expiresAt（宿主没给 timeout）时完全不显示倒计时", () => {

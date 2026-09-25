@@ -122,19 +122,23 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
   };
 
   const selectOptions = request.method === "select" ? request.options : [];
-  const statusMessage = expired
-    ? t("extension_expired")
-    : disabled
-      ? t("extension_waitingEnded")
-      : responded
-        ? t("extension_responseSent")
-        : null;
-
-  // 宿主已判定这次交互结束（disabled）时不再显示倒计时：那时它已经无意义，
-  // 而且底栏的 hint 与状态文案都是 margin-left:auto，两个一起出现会把右对齐拆开。
-  const countdown = !disabled && remainingSeconds !== null && remainingSeconds > 0
+  /**
+   * 倒计时与状态文案共用底栏右侧（两者都是 margin-left: auto），一次只显示一个。
+   *
+   * 有倒计时就显示倒计时 —— **包括本端不能回答的只读/被对端持有写权的情况**：
+   * 那时更需要知道宿主什么时候会把它收走（调用方就是按这个传 disabled 的）。
+   * 到点后再由状态文案说明为什么点不动。
+   */
+  const countdown = !responded && remainingSeconds !== null && remainingSeconds > 0
     ? t("extension_expiresIn", { seconds: String(remainingSeconds) })
     : null;
+  const statusMessage = expired
+    ? t("extension_expired")
+    : responded
+      ? t("extension_responseSent")
+      : disabled && countdown === null
+        ? t("extension_waitingEnded")
+        : null;
 
   const cancelButton = (
     <button

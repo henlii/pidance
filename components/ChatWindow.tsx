@@ -178,7 +178,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, defaultThinkingLevel,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse,
+    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, extensionToolsExpandedRequest, respondToExtensionUi, sendExtensionCustomInput, sendExtensionCustomMouse,
     todos,
     isAutoModelSelection,
     agentPhase, toolExecutionSnapshots,
@@ -395,31 +395,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     setTodosCollapsed(true);
   }, [todoCollapseScope]);
 
-  // 阻塞弹窗（dialog）expiresAt 到达：按 id 从 FIFO 清理并推进；不发送
-  // extension_ui_response（服务端 timeout 自结算）。
-
-  // 阻塞弹窗（dialog）expiresAt 到达：按 id 从 FIFO 清理并推进；不发送
-  // extension_ui_response（服务端 timeout 自结算）。
-  useEffect(() => {
-    const requestId = extensionDialog?.id;
-    const expiresAt = extensionDialog?.expiresAt;
-    if (!requestId || typeof expiresAt !== "number" || !Number.isFinite(expiresAt)) return;
-
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const scheduleExpiry = () => {
-      const remaining = expiresAt - Date.now();
-      if (remaining <= 0) {
-        dismissExtensionUiRequest(requestId);
-        return;
-      }
-      timer = setTimeout(scheduleExpiry, Math.min(remaining, 2_147_483_647));
-    };
-    scheduleExpiry();
-
-    return () => {
-      if (timer !== undefined) clearTimeout(timer);
-    };
-  }, [extensionDialog?.id, extensionDialog?.expiresAt, dismissExtensionUiRequest]);
+  // 阻塞面板（dialog）的卸载**不由本地时钟驱动**：客户端与宿主不是同一块钟（手机），
+  // 自己算到期会提前收掉面板或让已结算的按钮还能点。收起只认服务端：宿主结算时推
+  // extension_ui_settled，客户端据此移除（见 useAgentSession 的该分支与
+  // applyExtensionUiProjection）；倒计时到 0 本身只禁用按钮（ExtensionDialog）。
 
   // Register the abort handler for the global Esc shortcut
   useEffect(() => {

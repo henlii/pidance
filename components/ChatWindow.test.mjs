@@ -153,3 +153,22 @@ test("引用到输入框的接线：AppShell 处理器 → ChatWindow → Messag
   );
   assert.match(shell, /onReferenceFile=\{handleReferenceFile\}/, "AppShell 没把处理器交给 ChatWindow");
 });
+
+test("#100 审查修复：面板的卸载不由客户端时钟驱动，改由宿主结算事件驱动", () => {
+  const source = readFileSync(fileURLToPath(new URL("./ChatWindow.tsx", import.meta.url)), "utf8");
+  // 之前有一段按本地 expiresAt 调用 dismissExtensionUiRequest 的 effect：它在
+  // expiresAt 从未被填时是死代码，填上以后就成了「客户端自己关面板」——与手机/宿主
+  // 时钟不一致时会提前消失、每次投影闪一下，或反过来让已结算的按钮仍可点。
+  assert.ok(
+    !source.includes("dismissExtensionUiRequest"),
+    "ChatWindow 不该再自己收起面板（宿主结算时推 extension_ui_settled）",
+  );
+  assert.doesNotMatch(
+    source,
+    /expiresAt\s*-\s*Date\.now\(\)/,
+    "不该再按本地时钟算对话框到期（客户端与宿主不是同一块钟）",
+  );
+  // 倒计时到 0 只禁用按钮：组件里仍由 expired → inert 负责。
+  const dialog = readFileSync(fileURLToPath(new URL("./ExtensionDialog.tsx", import.meta.url)), "utf8");
+  assert.match(dialog, /const inert = disabled \|\| expired \|\| responded;/, "到点后按钮必须不可用");
+});

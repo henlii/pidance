@@ -40,6 +40,8 @@ import { pendingSessionId } from "@/lib/new-session-intent";
 import type { ContextUsage, SessionStatsInfo } from "@/lib/pi-types";
 import {
   applyExtensionUiRequest,
+  filterSettledBlockingRequests,
+  parseExtensionUiSettledId,
   resetExtensionUiForSession,
   clearExtensionUiRequest,
   pickBlockingExtensionRequests,
@@ -612,6 +614,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator,
     extensionToolsExpandedRequest,
     extensionUiStateRef, commitExtensionUiState, patchExtensionUiState, dismissExtensionUiRequest,
+    settledRequestIdsRef, markExtensionUiRequestSettled, clearSettledExtensionUiRequests,
   } = useExtensionUiState();
   /**
    * 从状态恢复活动 custom 面板（Issue #34）：custom 只有事件、没有重放，
@@ -715,7 +718,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     applyExtensionListenerCount(state);
     applyCapabilityNotices(state);
-    const queue = pickBlockingExtensionRequests(state.pendingExtensionRequests);
+    const queue = filterSettledBlockingRequests(
+      pickBlockingExtensionRequests(state.pendingExtensionRequests),
+      settledRequestIdsRef.current,
+    );
     const current = extensionUiStateRef.current.blockingQueue ?? [];
     // 队列相同（同 id 同顺序）就不重写：状态会反复回到，没必要逐 tick 重渲染。
     const sameQueue = queue.length === current.length
@@ -731,7 +737,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       patchExtensionUiState({ blockingQueue: [], dialog: null });
     }
     applyActiveCustomUi(state.activeCustomUi);
-  }, [applyActiveCustomUi, applyCapabilityNotices, applyExtensionListenerCount, extensionUiStateRef, patchExtensionUiState]);
+  }, [applyActiveCustomUi, applyCapabilityNotices, applyExtensionListenerCount, extensionUiStateRef, patchExtensionUiState, settledRequestIdsRef]);
+
+  /**
+   * 宿主结算了一个阻塞请求（`extension_ui_settled`）：收起面板，**不回响应**。
+   *
+   * 面板的消失只能由服务端驱动：客户端按自己的时钟关会和宿主分叉（手机与宿主不是
+   * 同一块钟），而等下一次状态投影在运行中要 15s、空闲最长 120s。同时把这个 id 记下来，
+   * 挡住比这条事件晚到的状态快照把它装回来。
+   */
+  const applyExtensionUiSettled = useCallback((event: unknown) => {
+    const settledId = parseExtensionUiSettledId(event);
+    if (!settledId) return;
+    markExtensionUiRequestSettled(settledId);
+    dismissExtensionUiRequest(settledId);
+  }, [dismissExtensionUiRequest, markExtensionUiRequestSettled]);
 
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [], followUpRows: [], followUpRevision: null });
   // 每会话本地 follow-up 队列：Host 是唯一 owner，浏览器只持「权威条目 + 一个
@@ -2396,8 +2416,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "extension_ui_request":
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
+      case "extension_ui_settled":
+        applyExtensionUiSettled(event);
+        break;
     }
-  }, [addNotice, adoptQueueEvent, commitToolExecutions, finishAgentRun, handleExtensionUiRequest, loadSession, queueEntryNow, t]);
+  }, [addNotice, adoptQueueEvent, applyExtensionUiSettled, commitToolExecutions, finishAgentRun, handleExtensionUiRequest, loadSession, queueEntryNow, t]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[], binaryBlocks?: BinaryMessageInput[]): Promise<boolean> => {
@@ -3641,8 +3664,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // 只清 blocking 是不够的：面板与运行提示会“跟着人跑”到新会话里。
   useEffect(() => {
     commitExtensionUiState(resetExtensionUiForSession(extensionUiStateRef.current));
+    clearSettledExtensionUiRequests();
     clearLiveActivities();
-  }, [session?.id, newSessionCwd, commitExtensionUiState, extensionUiStateRef, clearLiveActivities]);
+  }, [session?.id, newSessionCwd, commitExtensionUiState, extensionUiStateRef, clearSettledExtensionUiRequests, clearLiveActivities]);
 
   // 切离会话：不主动销毁 live host —— 正常 run 在 agent_settled 后已立即 dispose；
   // 只有「起过但从未跑过 run」的 startup host 才靠 idle 定时器回收（默认 30s；有订阅者时不排）。
