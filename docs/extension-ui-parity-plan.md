@@ -247,8 +247,11 @@
 5. 新 TS/TSX 用 CRLF；面向用户文案 i18n 双语；颜色只用 `app/globals.css` 变量。
 6. 验证脚本不得写进真实 `~/.pi/agent`（用独立 `PI_CODING_AGENT_DIR`）。
 
-## G. 本方案尚未确证的点（实现时先做探针）
+## G. 探针结果
 
-- `getShortcuts` 的冲突语义（谁覆盖谁）—— oracle 说后注册者胜，我没有代码证据。
-- SDK 主题 JSON 与 `Theme` 构造的字段完整性（vendoring light.json 后逐键核对，并入既有主题一致性测试）。
-- Kitty 图片序列在真实插件输出里的形态（是否只有 `a=T`；iTerm2 分支是否会出现）。
+- **`getShortcuts` 冲突语义：已确证**（原先只是 oracle 的说法）。规则：键名小写后入表；命中
+  `RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS`（18 项，如 `app.interrupt`/`app.message.copy`/`tui.input.submit`）
+  → 插件注册被**跳过**并记诊断；命中非保留内置键 → **插件胜**并记诊断；两插件同键 → **后注册者胜**；
+  诊断收在 `getShortcutDiagnostics()`。依据 `dist/core/extensions/runner.js`，细节见 issue #105 的评论。
+- **`light.json` 字段完整性**：待 A2 落地时逐键核对（并入既有主题一致性测试）。
+- **Kitty 序列在真实插件输出里的形态**：待 B4 落地时探针（是否只有 `a=T`，iTerm2 分支是否出现）。
