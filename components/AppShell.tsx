@@ -38,6 +38,7 @@ import {
 } from "@/lib/workspace-file-tabs";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileReferenceText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
+import { forgetRememberedTabSessionId, rememberTabSessionFromQuery, rememberTabSessionId } from "@/lib/tab-session-memory";
 import { createSessionNavigationStore } from "@/lib/session-navigation-store";
 import { createSessionCatalogStore, linkStartingMarksToRegistry } from "@/lib/session-catalog-store";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
@@ -596,7 +597,12 @@ function AppShellInner() {
     if (mentions) chatInputRef.current?.insertText(mentions);
   }, []);
 
-  const initialSessionId = initialNavigation.sessionId;
+  const initialSessionId = initialNavigation.sessionId ?? initialNavigation.rememberedSessionId;
+  /**
+   * 目标来自「本标签上次在看」而不是地址栏。这种目标可能已被删除/换分支，
+   * 所以找不到时清掉记忆按裸地址走，而不是停在「会话未找到」。
+   */
+  const initialRestoreIsSoft = initialNavigation.sessionId === null && initialNavigation.rememberedSessionId !== null;
   const identity = useProjectIdentity();
   const { setIdentity, getIdentitySnapshot } = useProjectActions();
   const activeCwd = identity.cwd;
@@ -642,6 +648,9 @@ function AppShellInner() {
     } catch {
       /* URL 同步失败不影响会话切换 */
     }
+    // 「本标签在看哪个会话」跟着 URL 一起走：切会话/新建/清空都经过这里，
+    // 所以记忆只有一个写入点，不会和各调用点漂移（issue #81 第 5 项）。
+    rememberTabSessionFromQuery(query);
   }, []);
 
   useEffect(() => {
@@ -970,12 +979,21 @@ function AppShellInner() {
       setSessionRestoreError(result.error);
     } else if (result && result.found === false) {
       navigationStoreRef.current.completeUrlRestore({ found: false });
-      setSessionRestoreStatus("not-found");
+      if (initialRestoreIsSoft) {
+        // 只是「上次在看」的提示：会话删了或被 rebase 掉了很正常。清掉记忆、
+        // 按裸地址走（交给侧栏自动选会话），别把人留在死屏上。
+        forgetRememberedTabSessionId();
+        setSessionRestoreStatus("ready");
+      } else {
+        setSessionRestoreStatus("not-found");
+      }
     } else {
+      // 深链打开的会话也记进本标签记忆：之后以裸地址回到本标签仍能回到它。
+      if (initialNavigation.sessionId) rememberTabSessionId(initialNavigation.sessionId);
       setSessionRestoreStatus("ready");
     }
     setInitialSessionRestored(true);
-  }, []);
+  }, [initialNavigation.sessionId, initialRestoreIsSoft]);
 
   // navigation store 订阅：初始 URL restore 开始
   useEffect(() => {
