@@ -684,6 +684,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   useImperativeHandle(ref, () => ({
+    focus() {
+      textareaRef.current?.focus();
+    },
     insertIfEmpty: insertIfEmptyLocal,
     prependText: prependDraftText,
     reloadDraft: reloadDraftLocal,

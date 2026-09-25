@@ -178,7 +178,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, defaultThinkingLevel,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, sendExtensionCustomInput, sendExtensionCustomMouse,
+    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, sendExtensionCustomInput, sendExtensionCustomMouse, sendExtensionCustomBounds,
     todos,
     isAutoModelSelection,
     agentPhase, toolExecutionSnapshots,
@@ -731,6 +731,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
           request={extensionCustomUi}
           onInput={sendExtensionCustomInput}
           onMouse={sendExtensionCustomMouse}
+          onBounds={sendExtensionCustomBounds}
         />
       )}
 

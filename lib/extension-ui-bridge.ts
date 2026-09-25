@@ -289,6 +289,14 @@ export type ExtensionUiEffect =
   | { type: "notice"; id: string; message: string; noticeType: ExtensionUiNoticeType; activityRecord: boolean }
   | { type: "setTitle"; title: string }
   | { type: "setThemeMode"; mode: "light" | "dark" }
+  /**
+   * 交回主输入框焦点（overlay 句柄的 `unfocus()`）。
+   *
+   * 为什么只有「交回编辑器」需要副作用：另外两态（`panel` / `none`）由面板组件
+   * 自己读 `request.focus` 处理（它就在 DOM 上，能直接 blur/focus 自己的 keytrap），
+   * 而输入框的句柄只有 useAgentSession 拿得到。
+   */
+  | { type: "focusEditor" }
   | { type: "insertText"; text: string };
 
 export function applyExtensionUiRequest(
@@ -397,7 +405,13 @@ export function applyExtensionUiRequest(
         const lines = Array.isArray(request.lines)
           ? request.lines.filter((line): line is string => typeof line === "string")
           : [];
-        return { state: { ...state, customUi: { ...request, lines } }, effects: [] };
+        // 焦点只在**状态变化**时下发副作用：插件每次重渲都会发一帧 custom，
+        // 若每帧都发效果，用户点到输入框后会被立刻抢回面板。
+        const effects: ExtensionUiEffect[] =
+          request.focus === "editor" && state.customUi?.focus !== "editor"
+            ? [{ type: "focusEditor" }]
+            : [];
+        return { state: { ...state, customUi: { ...request, lines } }, effects };
       }
     default:
       return { state, effects: [] };

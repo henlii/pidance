@@ -12,6 +12,7 @@ import type {
   AttachedImage,
   BinaryMessageInput,
   ChatInputHandle,
+  CustomPanelBounds,
 } from "@/lib/types";
 import { capabilityFeatureOf, hasSeenCapabilityFeature, rememberCapabilityFeature } from "@/lib/capability-notice-seen";
 import { copyText } from "@/lib/clipboard";
@@ -1787,6 +1788,33 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [capabilities.canSendSessionCommands, extensionUiStateRef]);
 
+  /**
+   * 上报 custom 面板的几何（字符单元格坐标）。
+   *
+   * 面板的 \`getBounds()\` 是同步接口，服务端只能把客户端量出来的值存下（口径见
+   * lib/custom-panel-bounds.ts）。这是**尽力而为**：失败不提示 —— 面板照样能用，
+   * 只是插件读 \`getBounds()\` 会拿到 undefined（诚实降级，不是假装成功）。
+   */
+  const sendExtensionCustomBounds = useCallback(async (
+    request: ExtensionUiCustomRequest,
+    bounds: CustomPanelBounds,
+  ) => {
+    if (!capabilities.canSendSessionCommands) return;
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    // 关闭或切换到下一次 custom 请求后，旧几何不能再写入代理会话。
+    if (extensionUiStateRef.current.customUi?.id !== request.id) return;
+    try {
+      await sendAgentCommand(sid, {
+        type: "custom_panel_bounds",
+        id: request.id,
+        bounds,
+      });
+    } catch (e) {
+      console.error("Failed to send extension custom UI bounds:", e);
+    }
+  }, [capabilities.canSendSessionCommands, extensionUiStateRef]);
+
   // ── P3a：分支 / 新会话命令迁出至 useSessionCommands（纯逻辑见该文件）─────
   // 显式注入依赖；branchBusyRef / branchBusy / setBranchBusy 仍是同一门禁，
   // state 所有权保留在本 hook（handleSend / executeBash / dispatchWorkspaceHistoryPrompt 共用）。
@@ -1861,6 +1889,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // 插件 `ctx.ui.setTheme` 切到内置 dark/light → 壳的明暗跟着切（皮肤不变）。
         // 复用用户自己切主题的那条通路：写 localStorage + 服务端偏好 + 通知订阅者。
         applyExternallyRequestedTheme(effect.mode);
+      } else if (effect.type === "focusEditor") {
+        // 插件把焦点从面板交回来（overlay 句柄的 unfocus）：Web 上唯一能程序化聚焦的
+        // 另一面就是输入框。面板自己的 keytrap 由组件按 request.focus 让出。
+        opts.chatInputRef?.current?.focus();
       } else {
         opts.chatInputRef?.current?.insertText(effect.text);
       }
@@ -3995,7 +4027,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     liveNoticeActivities,
     dismissNotice,
     toggleNoticePin,
-    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel: extensionHiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse,
+    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel: extensionHiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse, sendExtensionCustomBounds,
     todos,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,

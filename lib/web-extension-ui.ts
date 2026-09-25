@@ -20,7 +20,7 @@ import {
   RENDER_WIDTH,
   renderWidgetComponentLines,
 } from "./tui-render-bridge";
-import type { ExtensionUiCustomLayout } from "./types";
+import type { CustomPanelBounds, CustomPanelFocus, ExtensionUiCustomLayout } from "./types";
 
 /**
  * 能力提示快照的上限。
@@ -56,6 +56,24 @@ export function appendCapabilityNotice<T>(list: T[], item: T, max = MAX_CAPABILI
  * `overlayOptions` 为函数形式（可随终端尺寸变化重新求值）时不求值：Web 只在打开
  * 时取一次，求值时机与 pi-tui 每帧重算不同，宁可不给尺寸也不给错的。
  */
+/**
+ * 插件是否声明了 `nonCapturing`（pi-tui：这类 overlay 不抢焦点）。
+ *
+ * 与 normalizeCustomOverlayLayout 同一处解析 overlayOptions，但影响的是**焦点**而不是布局，
+ * 所以单独一个函数：并进 ExtensionUiCustomLayout 会把两个不同的问题捆在一起。
+ */
+function isNonCapturingOverlay(options: unknown): boolean {
+  if (!options || typeof options !== "object") return false;
+  const opts = options as { overlay?: unknown; overlayOptions?: unknown };
+  if (opts.overlay !== true) return false;
+  const layout = opts.overlayOptions;
+  return (
+    typeof layout === "object" &&
+    layout !== null &&
+    (layout as { nonCapturing?: unknown }).nonCapturing === true
+  );
+}
+
 function normalizeCustomOverlayLayout(options: unknown): ExtensionUiCustomLayout | null {
   if (!options || typeof options !== "object") return null;
   const opts = options as { overlay?: unknown; overlayOptions?: unknown };
@@ -121,6 +139,8 @@ type CustomUiSession = {
   handleInput: (data: string) => void;
   handleMouse: (event: Record<string, unknown>) => void;
   done: (result?: unknown) => void;
+  /** 客户端上报的面板几何（字符单元格）；见 lib/custom-panel-bounds.ts。 */
+  setBounds: (bounds: CustomPanelBounds) => boolean;
 };
 
 export type WebExtensionUIAdapter = {
@@ -137,11 +157,18 @@ export type WebExtensionUIAdapter = {
    * 刷新/切回来时服务端仍在等输入，浏览器却拿不到内容与输入入口。
    * 这里保存最后可重放的投影，由 get_state 下发恢复。
    */
-  customSnapshot: { id: string; lines: string[]; layout?: ExtensionUiCustomLayout; hidden?: boolean } | null;
+  customSnapshot: { id: string; lines: string[]; layout?: ExtensionUiCustomLayout; hidden?: boolean; focus?: CustomPanelFocus } | null;
   respond: (id: string, response: Record<string, unknown>) => boolean;
   inputCustom: (id: string, data: string) => boolean;
   /** 面板内的鼠标事件（pi-subagents 的 widget 靠它点标题行折叠）。 */
   inputCustomMouse: (id: string, event: Record<string, unknown>) => boolean;
+  /**
+   * 客户端上报 custom 面板的几何（字符单元格坐标）。
+   *
+   * 面板的 `getBounds()` 是**同步**接口，插件随时可能读，所以这里存下来而不是回调；
+   * 非法报文（见 normalizeCustomBounds）不动已有值 —— 别人的布局不该被一个坏报文清掉。
+   */
+  setCustomBounds: (id: string, bounds: unknown) => boolean;
   /** 按新的可用尺寸重排已挂载的插件界面（custom 面板 + widget 工厂）。 */
   setRenderSize: (size: { width: number; rows: number }) => boolean;
   /**
@@ -193,6 +220,32 @@ type DialogOpts = {
  * 数字算出的 `expiresAt` 却是很远的未来 —— 面板上的倒计时还在走，宿主已经按取消结算了。
  */
 export const MAX_DIALOG_TIMEOUT_MS = 2_147_483_647;
+
+/**
+ * 收口客户端上报的面板几何。
+ *
+ * 只接受**有限整数**且宽高 ≥ 1 的 `{row, col, width, height}`，其余返回 null。
+ * 坐标允许为负（面板可以部分在滚动区之外，pi-tui 的 bounds 同样允许），但给一个量级上限：
+ * 这份数据被插件用来算命中区域，一个坏报文不该把它撑成天文数字。
+ */
+export function normalizeCustomBounds(value: unknown): CustomPanelBounds | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const num = (key: string): number | null => {
+    const candidate = raw[key];
+    return typeof candidate === "number" && Number.isFinite(candidate) ? Math.round(candidate) : null;
+  };
+  const row = num("row");
+  const col = num("col");
+  const width = num("width");
+  const height = num("height");
+  if (row === null || col === null || width === null || height === null) return null;
+  if (width <= 0 || height <= 0) return null;
+  const MAX_COORDINATE = 10_000;
+  if (Math.abs(row) > MAX_COORDINATE || Math.abs(col) > MAX_COORDINATE) return null;
+  if (width > MAX_COORDINATE || height > MAX_COORDINATE) return null;
+  return { row, col, width, height };
+}
 
 /**
  * 收口宿主给的 timeout。
@@ -356,8 +409,9 @@ export function createWebExtensionUIAdapter(
   const statuses = new Map<string, string>();
   const widgets = new Map<string, unknown>();
   const customSessions = new Map<string, CustomUiSession>();
-  let customSnapshot: { id: string; lines: string[]; layout?: ExtensionUiCustomLayout; hidden?: boolean } | null =
-    null;
+  let customSnapshot:
+    | { id: string; lines: string[]; layout?: ExtensionUiCustomLayout; hidden?: boolean; focus?: CustomPanelFocus }
+    | null = null;
 
   /** 扩展请求的全局工具展开态（pi-subagents 跑子代理前会 setToolsExpanded(false)）。 */
   let toolsExpanded = false;
@@ -871,6 +925,9 @@ export function createWebExtensionUIAdapter(
       // options 决定面板是浮层（按插件给的尺寸/锚点）还是全屏模态。
       const id = randomUUID();
       const layout = normalizeCustomOverlayLayout(options);
+      // 初始焦点态对齐 pi-tui 的 showOverlay：可见且没声明 nonCapturing 就聚焦 overlay；
+      // 声明了 nonCapturing 时焦点留在主编辑器（终端里就是留在输入框）。
+      const nonCapturing = isNonCapturingOverlay(options);
       return new Promise((resolve) => {
         let doneCalled = false;
         let component: { render?: (width: number) => unknown; handleInput?: (data: string) => void } | undefined;
@@ -892,6 +949,12 @@ export function createWebExtensionUIAdapter(
         // 最后一次渲染的行：hidden 切换时要把完整状态重发一遍（前端按事件整体替换）
         let lastLines: string[] = [];
         let hidden = false;
+        /** 焦点三态（见 CustomPanelFocus）：默认面板持有。 */
+        let focusState: CustomPanelFocus = nonCapturing ? "editor" : "panel";
+        /** 客户端上报的几何；null = 还没上报过（此时 getBounds 返回 undefined）。 */
+        let bounds: CustomPanelBounds | null = null;
+        /** pi-tui 的 `isFocused`：可见 + 未被摘除 + 焦点确实在面板上。 */
+        const currentlyFocused = () => !removed && !hidden && focusState === "panel";
         // hide() 之后面板被永久移除（pi-tui 语义）：后续渲染一律不再下发，
         // 否则插件一次 invalidate 就把「已摘掉」的面板又画回来。
         let removed = false;
@@ -902,6 +965,7 @@ export function createWebExtensionUIAdapter(
             id,
             method: "custom",
             lines: lastLines,
+            focus: focusState,
             ...(hidden ? { hidden } : {}),
             ...(layout ? { layout } : {}),
           });
@@ -910,6 +974,7 @@ export function createWebExtensionUIAdapter(
           customSnapshot = {
             id,
             lines: [...lastLines],
+            focus: focusState,
             ...(hidden ? { hidden } : {}),
             ...(layout ? { layout } : {}),
           };
@@ -968,10 +1033,35 @@ export function createWebExtensionUIAdapter(
             setHidden(value);
           },
           isHidden: () => hidden,
-          focus() {},
-          unfocus() {},
-          isFocused: () => !removed && !hidden,
-          getBounds: () => undefined,
+          /**
+           * 把键盘焦点交给面板 —— 对齐 pi-tui：**不可见/已摘除时什么都不做**
+           * （那时 focus 只是 no-op，而不是把藏在后面的面板叫醒）。
+           * Web 上「提到最前」没有第二层，实际效果是前端把 DOM 焦点移回面板 keytrap。
+           */
+          focus() {
+            if (removed || hidden) return;
+            if (focusState === "panel") return;
+            focusState = "panel";
+            emitCustom();
+          },
+          /**
+           * 释放焦点 —— 对齐 pi-tui：**当前没聚焦就直接返回**（不去扰动用户已经移走的焦点）。
+           *
+           * 落点三态：`{ target: null }` → 谁也不聚焦；未给 options → 交回主编辑器
+           * （终端里是「打开 overlay 之前的焦点」，Web 上就是输入框）；给了具体组件 →
+           * Web 无法聚焦任意组件，按「交回编辑器」处理（唯一另一个可聚焦面）。
+           */
+          unfocus(options?: { target?: unknown }) {
+            if (!currentlyFocused()) return;
+            focusState = options && options.target === null ? "none" : "editor";
+            emitCustom();
+          },
+          isFocused: () => currentlyFocused(),
+          /**
+           * 最后一次上报的几何（同步读，pi-tui 同）：面板不可见 / 已摘除 / 还没上报过 → undefined。
+           * 返回**副本**：插件改写它不会污染内部状态。
+           */
+          getBounds: () => (removed || hidden || bounds === null ? undefined : { ...bounds }),
         };
         const handleInput = (data: string) => {
           if (data === "\x03") {
@@ -991,7 +1081,25 @@ export function createWebExtensionUIAdapter(
             console.error("[pidance] custom UI mouse failed:", error);
           }
         };
-        customSessions.set(id, { handleInput, handleMouse, done });
+        /**
+         * 存客户端上报的几何；返回是否变化（同值不重发，避免观察者回调刷屏）。
+         * 面板已经结束/被摘除时不再收：那时的坐标没有意义。
+         */
+        const setBounds = (next: CustomPanelBounds): boolean => {
+          if (removed || doneCalled) return false;
+          if (
+            bounds &&
+            bounds.row === next.row &&
+            bounds.col === next.col &&
+            bounds.width === next.width &&
+            bounds.height === next.height
+          ) {
+            return false;
+          }
+          bounds = next;
+          return true;
+        };
+        customSessions.set(id, { handleInput, handleMouse, done, setBounds });
         const tui = createHeadlessCustomUiTui(() => {
           emitLines();
         }, () => renderWidth, () => renderRows, { isEditorFocused, onUnsupported: notifyUnsupported });
@@ -1177,6 +1285,11 @@ export function createWebExtensionUIAdapter(
       if (!session) return false;
       session.handleMouse(event);
       return true;
+    },
+    setCustomBounds(id, value) {
+      const bounds = normalizeCustomBounds(value);
+      if (!bounds) return false;
+      return customSessions.get(id)?.setBounds(bounds) ?? false;
     },
     setRenderSize(size) {
       const width = Math.round(size.width);
