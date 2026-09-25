@@ -21,7 +21,7 @@ import {
   loadedUserOutlineSeeds,
   outlineForSession,
 } from "@/lib/session-outline";
-import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE, CHAT_COLUMN_MAX_WIDTH_CSS, CHAT_GUTTER } from "@/lib/chat-column";
+import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE, CHAT_COLUMN_MAX_WIDTH_CSS, CHAT_GUTTER, EXTENSION_SLOT_MAX_HEIGHT, EXTENSION_SLOT_MAX_HEIGHT_MOBILE } from "@/lib/chat-column";
 
 /**
  * 输入区/面板/底栏的左右内边距：与消息列逐像素对齐。
@@ -178,7 +178,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, defaultThinkingLevel,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, sendExtensionCustomInput, sendExtensionCustomMouse,
+    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionHeader, extensionFooter, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, sendExtensionCustomInput, sendExtensionCustomMouse,
     todos,
     isAutoModelSelection,
     agentPhase, toolExecutionSnapshots,
@@ -813,6 +813,19 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
             />
           </div>
         )}
+        {/* 插件页头（ctx.ui.setHeader）：TUI 里在转写区之上、常驻不滚动，Web 同位置。 */}
+        {extensionHeader && extensionHeader.length > 0 ? (
+          <div
+            style={{
+              flexShrink: 0,
+              padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px`,
+            }}
+          >
+            <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS, margin: "0 auto" }}>
+              <ExtensionSlot lines={extensionHeader} kind="header" />
+            </div>
+          </div>
+        ) : null}
         <div
           ref={scrollContainerRef}
           data-chat-scroller="true"
@@ -1087,6 +1100,13 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
               {!footerCollapsed && (
                 <>
                   <ExtensionWidgets widgets={belowEditorWidgets} />
+                  {/* 插件页脚（ctx.ui.setFooter）在我们自己的状态条之上。
+                      与 TUI 的一处**有意分叉**：TUI 是「替换」整个内置页脚，而 Web 的
+                      状态 chip 是独立机制、且页脚数据（git/状态）我们没有等价物 ——
+                      真替换会把插件用 setStatus 放上去的信息整块吞掉（兼容高于观感）。 */}
+                  {extensionFooter && extensionFooter.length > 0 ? (
+                    <ExtensionSlot lines={extensionFooter} kind="footer" />
+                  ) : null}
                   <ExtensionStatusBar statuses={extensionStatuses} />
                 </>
               )}
@@ -1177,6 +1197,47 @@ function ReadOnlySessionBar({ session, isMobile }: { session: SessionInfo; isMob
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * 插件页头 / 页脚槽位（ctx.ui.setHeader / setFooter）。
+ *
+ * 行是服务端渲染桥产出的 ANSI 行（与 widget 同一条管线：插件组件 headless 渲染 → 行），
+ * 这里只负责「按槽位限高 + 内部滚动 + 解析 ANSI」。
+ *
+ * 为什么不做 widget 那种卡片外壳：外壳自带标题与折叠，是**我们**给 widget 的内容加的框；
+ * 而页头页脚是插件自绘的一整块界面（TUI 里它替换的就是内置页脚本身），再套一层标题栏
+ * 会多出一行我们编的文案。限高仍然要有，否则超长内容会把输入区顶出可视区。
+ */
+function ExtensionSlot({ lines, kind }: { lines: string[]; kind: "header" | "footer" }) {
+  const isMobile = useIsMobile();
+  if (lines.length === 0) return null;
+  return (
+    <pre
+      data-extension-slot={kind}
+      style={{
+        margin: 0,
+        marginBottom: kind === "footer" ? 8 : 6,
+        padding: "4px 2px",
+        color: "var(--text-muted)",
+        fontSize: 12,
+        lineHeight: 1.5,
+        whiteSpace: "pre",
+        fontFamily: "var(--font-mono)",
+        maxHeight: isMobile ? EXTENSION_SLOT_MAX_HEIGHT_MOBILE : EXTENSION_SLOT_MAX_HEIGHT,
+        overflow: "auto",
+        overscrollBehavior: "auto",
+        touchAction: "pan-y",
+      }}
+    >
+      {lines.map((line, index, all) => (
+        <Fragment key={index}>
+          {renderAnsiLine(line, `slot-${kind}-line-${index}`)}
+          {index < all.length - 1 ? "\n" : null}
+        </Fragment>
+      ))}
+    </pre>
   );
 }
 

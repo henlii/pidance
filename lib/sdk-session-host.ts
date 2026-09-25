@@ -2543,6 +2543,10 @@ export class SdkSessionHost {
           };
         },
       ),
+      // 插件页头 / 页脚槽位（setHeader / setFooter）：与 widget 同一类「设一次就不动」的
+      // 状态，页面后加载只能靠快照补回来（否则刷新后插件页头页脚消失）。
+      extensionHeader: this.extensionUi?.headerLines ?? null,
+      extensionFooter: this.extensionUi?.footerLines ?? null,
       pendingExtensionRequests: Array.from(
         this.extensionUi?.pendingSnapshot.values() ?? [],
       ),

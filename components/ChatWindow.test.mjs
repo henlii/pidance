@@ -172,3 +172,34 @@ test("#100 审查修复：面板的卸载不由客户端时钟驱动，改由宿
   const dialog = readFileSync(fileURLToPath(new URL("./ExtensionDialog.tsx", import.meta.url)), "utf8");
   assert.match(dialog, /const inert = disabled \|\| expired \|\| responded;/, "到点后按钮必须不可用");
 });
+
+test("扩展页头 / 页脚槽位：位置（页头在转写区之前、页脚在状态条之上）与限高内滚", () => {
+  const source = readFileSync(fileURLToPath(new URL("./ChatWindow.tsx", import.meta.url)), "utf8");
+
+  const header = source.indexOf('kind="header"');
+  const scroller = source.indexOf('data-chat-scroller="true"');
+  assert.ok(header !== -1, "没有渲染插件页头槽位");
+  assert.ok(header < scroller, "页头要渲染在转写区之前（TUI 里页头常驻在转写区之上）");
+
+  const footer = source.indexOf('kind="footer"');
+  const statusBar = source.indexOf("<ExtensionStatusBar");
+  assert.ok(footer !== -1, "没有渲染插件页脚槽位");
+  assert.ok(footer < statusBar, "页脚要在我们自己的状态条之上");
+
+  // 槽位组件本体：限高 + 块内滚动（超长页头/页脚不能把输入区顶出可视区）。
+  const slot = source.slice(source.indexOf("function ExtensionSlot("), source.indexOf("function ExtensionStatusBar("));
+  assert.ok(slot.includes('data-extension-slot={kind}'), "槽位要有可断言的标记");
+  assert.match(slot, /EXTENSION_SLOT_MAX_HEIGHT_MOBILE : EXTENSION_SLOT_MAX_HEIGHT/, "限高要复用共享常量");
+  assert.ok(slot.includes('overflow: "auto"'), "槽位缺少块内滚动");
+});
+
+test("扩展页头 / 页脚槽位的限高：移动端约 4 行、桌面约 6 行（12px/1.5 行高）", () => {
+  const source = readFileSync(fileURLToPath(new URL("../lib/chat-column.ts", import.meta.url)), "utf8");
+  const mobile = /EXTENSION_SLOT_MAX_HEIGHT_MOBILE = "min\((\d+)px/.exec(source);
+  const desktop = /export const EXTENSION_SLOT_MAX_HEIGHT = "min\((\d+)px/.exec(source);
+  assert.ok(mobile && desktop, "限高常量必须存在（槽位不限高会顶掉输入区）");
+  const lineHeight = 12 * 1.5;
+  // 4 行 ≈ 72px + 上下 8px 内边距；6 行 ≈ 108px + 16px。
+  assert.ok(Number(mobile[1]) >= 4 * lineHeight && Number(mobile[1]) <= 4 * lineHeight + 24, `移动端限高应约 4 行（实际 ${mobile[1]}px）`);
+  assert.ok(Number(desktop[1]) >= 6 * lineHeight && Number(desktop[1]) <= 6 * lineHeight + 24, `桌面限高应约 6 行（实际 ${desktop[1]}px）`);
+});

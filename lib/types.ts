@@ -279,6 +279,18 @@ export type ExtensionUiRequest =
   | {
       type: "extension_ui_request";
       id: string;
+      method: "setHeader" | "setFooter";
+      /**
+       * 渲染好的行；null = 插件恢复内置（页头消失 / 页脚回到我们自己的状态条）。
+       *
+       * 与 widget 的 `widgetLines` 不同，槽位是**替换**语义：空数组也当「没有内容」处理
+       * （TUI 里 setFooter(undefined) 就是把内置页脚换回来）。
+       */
+      lines: string[] | null;
+    }
+  | {
+      type: "extension_ui_request";
+      id: string;
       method: "setToolsExpanded";
       toolsExpanded: boolean;
     }
