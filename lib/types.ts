@@ -285,6 +285,18 @@ export type ExtensionUiRequest =
   | {
       type: "extension_ui_request";
       id: string;
+      method: "setTheme";
+      /**
+       * 插件切到的主题对应的**壳明暗**。
+       *
+       * 只下发内置 dark/light：壳只有亮/暗两套变量（皮肤 chamber/fusion 不受插件影响），
+       * 用户主题在壳这边没有对应外观，服务端就不发这条命令（见 applyShellTheme）。
+       */
+      mode: "light" | "dark";
+    }
+  | {
+      type: "extension_ui_request";
+      id: string;
       method: "terminalInputListeners";
       /** 当前注册了全局按键监听的监听器数量（0 = 前端无需询问）。 */
       count: number;

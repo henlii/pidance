@@ -150,7 +150,7 @@ export interface ExtensionUiContextLike {
   getEditorComponent(): undefined;
   readonly theme: Theme;
   getAllThemes(): unknown[];
-  getTheme(name: string): undefined;
+  getTheme(name: string): Theme | undefined;
   setTheme(theme: unknown): { success: boolean; error?: string };
   getToolsExpanded(): boolean;
   setToolsExpanded(expanded: boolean): void;

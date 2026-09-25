@@ -37,6 +37,7 @@ import {
   readFollowUpQueuePreference,
 } from "@/lib/queue-merge";
 import { pendingSessionId } from "@/lib/new-session-intent";
+import { applyExternallyRequestedTheme } from "@/hooks/useTheme";
 import type { ContextUsage, SessionStatsInfo } from "@/lib/pi-types";
 import {
   applyExtensionUiRequest,
@@ -1856,6 +1857,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // 交给 lib/window-title 的临时覆盖（AppShell 是窗口标题唯一写者）：
         // 直接写 document.title 会被 AppShell 的兜底 observer 立刻拉回项目名。
         setExtensionWindowTitle(effect.title);
+      } else if (effect.type === "setThemeMode") {
+        // 插件 `ctx.ui.setTheme` 切到内置 dark/light → 壳的明暗跟着切（皮肤不变）。
+        // 复用用户自己切主题的那条通路：写 localStorage + 服务端偏好 + 通知订阅者。
+        applyExternallyRequestedTheme(effect.mode);
       } else {
         opts.chatInputRef?.current?.insertText(effect.text);
       }

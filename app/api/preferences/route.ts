@@ -8,6 +8,7 @@ import {
 import { isSupportedPrefOp, type PidancePrefOp } from "@/lib/pidance-prefs-ops";
 import { getPidancePrefsBus } from "@/lib/pidance-prefs-bus";
 import { syncProjectTrustFromPrefs } from "@/lib/project-trust";
+import { syncPiThemeWithShellPreference } from "@/lib/theme-preference-sync";
 
 export const dynamic = "force-dynamic";
 
@@ -58,6 +59,8 @@ export async function PUT(req: Request) {
         return NextResponse.json({ ok: true, revision: getPidancePrefsBus().revision(), changed: {} });
       }
       syncProjectTrustFromPrefs(before, after);
+      // 用户在设置里改壳的明暗 → 插件主题跟着切（dark/light 是同一个设置，见该模块注释）。
+      syncPiThemeWithShellPreference(after);
       const bus = getPidancePrefsBus();
       const event = bus.publish(changed);
       return NextResponse.json({ ok: true, revision: event.revision, changed });
@@ -89,6 +92,8 @@ export async function PUT(req: Request) {
       return NextResponse.json({ ok: true, revision: bus.revision(), changed: {} });
     }
     syncProjectTrustFromPrefs(before, after);
+    // 同上：壳明暗变了，插件主题也要同源。
+    syncPiThemeWithShellPreference(after);
     const event = bus.publish(changed);
     return NextResponse.json({ ok: true, revision: event.revision, changed });
   } catch (error) {

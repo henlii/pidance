@@ -35,8 +35,19 @@ const jiti = createJiti(import.meta.url, {
   },
 });
 
-const { renderToolCallLines, renderToolResultLines, renderWidgetFactoryLines, renderCustomMessageLines, loadPiTheme } =
-  await jiti.import("../lib/tui-render-bridge.ts");
+const {
+  renderToolCallLines,
+  renderToolResultLines,
+  renderWidgetFactoryLines,
+  renderCustomMessageLines,
+  loadPiTheme,
+  setPiThemeConstructor,
+} = await jiti.import("../lib/tui-render-bridge.ts");
+
+// 主题实例是 SDK 的 Theme 类，由宿主注入（issue #97）—— 本脚本是开发期工具，
+// 直接按 SDK 入口取类；不注入的话 loadPiTheme() 恒为 null（主题加载被关掉）。
+const { Theme: SdkTheme } = await import("@earendil-works/pi-coding-agent");
+setPiThemeConstructor(SdkTheme);
 
 const PI_SUBAGENTS_INDEX = process.env.PI_SUBAGENTS_INDEX ?? require("path").join(
   process.env.HOME,

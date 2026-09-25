@@ -103,6 +103,9 @@ function makeEnv(initialQueue = []) {
     {
       applyActiveCustomUi: () => {},
       applyCapabilityNotices: () => {},
+      // 合并 #96 后，这个回调里多了一句「应用插件折叠行标签」；它只改展示，
+      // 与这里断言的队列过滤无关，所以给个空实现（少了它整段回调会 ReferenceError）。
+      applyExtensionHiddenThinkingLabel: () => {},
       applyExtensionListenerCount: () => {},
       extensionUiStateRef,
       filterSettledBlockingRequests,

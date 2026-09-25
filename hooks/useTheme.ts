@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useSyncExternalStore } from "react";
-import { ensureServerPrefsLoaded, getServerPref, setServerPref } from "@/lib/server-preferences";
+import { ensureServerPrefsLoaded, getServerPref, setServerPref, subscribeServerPrefs } from "@/lib/server-preferences";
 
 export type Theme = "light" | "dark";
 export type ThemeMode = Theme | "system";
@@ -103,13 +103,41 @@ function applyAppearance(mode: ThemeMode, style: ThemeStyle): void {
   notify();
 }
 
+/**
+ * 壳的明暗跟随**服务端偏好**（首次加载 + 之后的每次变化）。
+ *
+ * 为什么不是只读一次：偏好是跨客户端共享的（#66 广播）—— 别的标签、别的设备，
+ * 或者插件 `ctx.ui.setTheme`，都会改它。只在自己页面里改的话，别的标签会一直停在
+ * 旧明暗（插件输出已经是新主题了）。
+ *
+ * 相同就返回：避免重复应用，也避开「写入 → 广播 → 再写入」的回声。
+ */
+function applyRemoteTheme(): void {
+  const remote = getServerPref<{ mode?: unknown; style?: unknown }>("theme");
+  const mode = typeof remote?.mode === "string" ? remote.mode : null;
+  if (!isThemeMode(mode)) return;
+  const remoteStyle = typeof remote?.style === "string" ? remote.style : null;
+  const style = isThemeStyle(remoteStyle) ? remoteStyle : readStyle();
+  if (mode === readMode() && style === readStyle()) return;
+  applyAppearance(mode, style);
+}
+
 if (typeof window !== "undefined") {
-  void ensureServerPrefsLoaded().then(() => {
-    const remote = getServerPref<{ mode?: unknown; style?: unknown }>("theme");
-    const mode = typeof remote?.mode === "string" ? remote.mode : null;
-    const style = typeof remote?.style === "string" ? remote.style : null;
-    if (isThemeMode(mode)) applyAppearance(mode, isThemeStyle(style) ? style : readStyle());
-  });
+  void ensureServerPrefsLoaded().then(applyRemoteTheme);
+  subscribeServerPrefs(applyRemoteTheme);
+}
+
+/**
+ * 外部（插件 `ctx.ui.setTheme`）要求的明暗切换。
+ *
+ * 复用用户自己切主题的那条通路（applyAppearance）：写 localStorage + 服务端偏好
+ * 并通知订阅者 —— 所以壳的皮肤（chamber/fusion）不变，刷新后仍是这个明暗。
+ * 已经是目标明暗时直接返回，避免多余的偏好写入与重渲。
+ */
+export function applyExternallyRequestedTheme(mode: Theme): void {
+  if (typeof window === "undefined") return;
+  if (readMode() === mode) return;
+  applyAppearance(mode, readStyle());
 }
 
 export function useTheme() {

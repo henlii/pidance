@@ -535,6 +535,22 @@ function getActivationSync(): ActivationSyncController | null {
 }
 
 /**
+ * 订阅服务端偏好快照变化（#66 广播 + 本地写入）。
+ *
+ * 与 `useServerPreferences` 共用同一份订阅集合与激活同步单例，供**非 React** 的模块级
+ * 状态使用（例如壳的明暗要跟随别的标签/别的设备改的偏好）。只在变化时通知：
+ * 初始值由调用方自己用 ensureServerPrefsLoaded + getServerPref 读。
+ */
+export function subscribeServerPrefs(listener: () => void): () => void {
+  subscribers.add(listener);
+  const release = getActivationSync()?.retain();
+  return () => {
+    subscribers.delete(listener);
+    release?.();
+  };
+}
+
+/**
  * React 绑定：挂载时加载；visibilitychange/focus 时从服务端刷新
  * （多客户端同步）。返回最新 prefs 快照（变更时触发重渲染）。
  */

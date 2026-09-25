@@ -9,8 +9,14 @@ import {
   createHeadlessCustomUiTui,
   DEFAULT_CUSTOM_UI_ROWS,
 } from "./custom-ui-terminal";
+import { getAgentDir } from "./pi-paths";
+import { getPidancePrefsBus } from "./pidance-prefs-bus";
+import { updatePidancePref } from "./pidance-prefs-file";
+import { listPiThemes, loadPiThemeByName, setPiTheme } from "./pi-theme-registry";
 import {
+  createLivePiTheme,
   loadPiTheme,
+  onPiThemeChange,
   RENDER_WIDTH,
   renderWidgetComponentLines,
 } from "./tui-render-bridge";
@@ -19,14 +25,21 @@ import type { ExtensionUiCustomLayout } from "./types";
 /**
  * 能力提示快照的上限。
  *
- * 取舍：宿主能力提示的种类是**枚举**（现在公开面一共 7 种：setFooter、setHeader、
- * addAutocompleteProvider、setEditorComponent、getAllThemes、getTheme、onTerminalInput），
+ * 取舍：宿主能力提示的种类是**枚举**（现在公开面一共 5 种：setFooter、setHeader、
+ * addAutocompleteProvider、setEditorComponent、onTerminalInput），
  * 远小于这个 16 条上限，所以正常永远截不到。
  * 保留上限只是防止将来有人拿新 feature 名反复调用（把 API 当循环用）让状态快照无界增长。
- * 截断保留**最新**的：最旧的、可能还没被用户看见的那条会先丢——在 7 种枚举的现实下
+ * 截断保留**最新**的：最旧的、可能还没被用户看见的那条会先丢——在 5 种枚举的现实下
  * 不会发生；真发生了也只丢"旧提示"，不会让状态无界。改成无上限是错的（状态会被插件撑着）。
  */
 export const MAX_CAPABILITY_NOTICES = 16;
+
+/**
+ * `setTheme` 失败提示的去重上限。
+ *
+ * 坏主题名是**任意字符串**（不像能力名那样是枚举），所以上限是防插件循环调用把状态撑起来。
+ */
+export const MAX_REJECTED_THEME_ERRORS = 16;
 
 /** 追加一条能力提示并按上限截断（保留最新）。导出只为单测覆盖上限行为。 */
 export function appendCapabilityNotice<T>(list: T[], item: T, max = MAX_CAPABILITY_NOTICES): void {
@@ -324,6 +337,11 @@ export interface WebExtensionUiOptions {
    * 测试也能给一个假读取器。省略即恒返回空串（与注入前一致）。
    */
   readComposerText?: () => string;
+  /**
+   * agent 目录：用户主题目录（`<agentDir>/themes`）与壳的亮/暗偏好都按它解析。
+   * 省略时取默认 agent 目录（与 SDK 的 `getCustomThemesDir` 同源）。
+   */
+  agentDir?: string;
 }
 
 /**
@@ -343,6 +361,9 @@ export function createWebExtensionUIAdapter(
 
   /** 扩展请求的全局工具展开态（pi-subagents 跑子代理前会 setToolsExpanded(false)）。 */
   let toolsExpanded = false;
+
+  /** 用户主题目录与壳的亮/暗偏好都按这个 agent 目录解析。 */
+  const agentDir = options.agentDir ?? getAgentDir();
 
   /**
    * 插件注册的自定义编辑器工厂（`ctx.ui.setEditorComponent`）。
@@ -373,6 +394,25 @@ export function createWebExtensionUIAdapter(
 
   /** custom 面板的重渲入口（setRenderSize 用）：按当前尺寸重渲并下发。 */
   const customRenderers = new Set<() => void>();
+
+  /**
+   * 传给 widget / custom 工厂的主题**视图**：每次取色都解析当前主题。
+   *
+   * 不能把当时的实例闭进工厂：组件实例是常驻的（工厂只调一次，之后靠 requestRender
+   * 重渲），而主题实例的颜色在构造时就定了 —— 闭实例会让「切主题」只在下次挂载才生效。
+   * 主题副本加载失败时退回存根（与 `ui.theme` 同一口径）。
+   */
+  const liveThemeView = createLivePiTheme(createFallbackThemeStub);
+
+  /**
+   * 主题是**进程级**的：任何会话切主题，本适配器已挂的 widget / custom 面板都要重渲一帧，
+   * 否则它们会保留旧主题的颜色（工厂拿到的是视图，重渲才会按新主题取色）。
+   * 工具行的重渲由各 host 自己订阅（见 lib/sdk-session-host.ts）。
+   */
+  const unsubscribeThemeChange = onPiThemeChange(() => {
+    for (const entry of [...widgetFactories.values()]) entry.requestRender();
+    for (const render of [...customRenderers]) render();
+  });
 
   /** 每个能力只提示一次：插件可能反复调用同一条 API（注册监听器、重复设组件）。 */
   const capabilityNoticesSent = new Set<string>();
@@ -461,6 +501,55 @@ export function createWebExtensionUIAdapter(
   };
 
   /**
+   * 插件 `ctx.ui.setTheme` 没成功（名字不存在 / 参数类型不对）：回报失败 + 一次可见提示。
+   *
+   * 为什么不静默：SDK 的 setTheme 遇到坏名字会静默退回 dark，插件与用户都看不出来
+   * 主题被换了；Web 这里保留当前主题，把失败说出来（与 notifyUnsupported 同一口径）。
+   * 按**错误文案**去重（插件可能在循环里反复调同一个名字）。
+   */
+  const rejectedThemeErrors = new Set<string>();
+  const notifyThemeSwitchFailure = (error: string) => {
+    if (rejectedThemeErrors.has(error)) return;
+    // 有界：插件拿不同的坏名字循环调用时，不能把适配器状态撑起来（超了就整批忘掉）。
+    if (rejectedThemeErrors.size >= MAX_REJECTED_THEME_ERRORS) rejectedThemeErrors.clear();
+    rejectedThemeErrors.add(error);
+    console.warn(`[pidance] extension setTheme rejected: ${error}`);
+    emit({
+      type: "extension_ui_request",
+      id: randomUUID(),
+      method: "notify",
+      message: `Extension UI theme was not applied: ${error}`,
+      notifyType: "warning",
+    });
+  };
+
+  /**
+   * 主题切成功后的「壳」那一半：内置 dark/light 同时切壳的明暗（皮肤不变），
+   * 用户主题在壳这边没有对应外观，就不动。
+   *
+   * 服务端先写偏好，客户端**再**收到命令：进程内存里的主题已经是新的了，
+   * 只发命令而不落盘的话，刷新后壳会回到旧明暗，而此时插件输出已经是新主题 —— 两边不一致。
+   */
+  const applyShellTheme = (name: string | undefined) => {
+    if (name !== "dark" && name !== "light") return;
+    try {
+      updatePidancePref("theme.mode", name, agentDir);
+      // 偏好是**跨客户端**共享的：走同一条广播流，正在看别的会话的标签/别的设备
+      // 不会收到本会话的 SSE 命令（而壳的明暗是进程级的）。
+      getPidancePrefsBus().publish({ "theme.mode": name });
+    } catch (error) {
+      // 写偏好失败不影响**本次**切换（内存主题已换、命令照发）：只是刷新后不保留。
+      console.error("[pidance] failed to persist shell theme preference:", error);
+    }
+    emit({
+      type: "extension_ui_request",
+      id: randomUUID(),
+      method: "setTheme",
+      mode: name,
+    });
+  };
+
+  /**
    * 插件用了一个 Web 端**只部分支持**的能力。
    *
    * 与 `notifyUnsupported` 的区别：能力本身在（按键确实会送达），只是覆盖面比 TUI 窄。
@@ -536,11 +625,14 @@ export function createWebExtensionUIAdapter(
     placement: string | undefined,
   ) => {
     unmountWidgetFactory(key);
-    const theme = loadPiTheme();
-    if (!theme) {
+    // 主题还没建起来（宿主还没注入 Theme 类 / 副本坏了）就不挂载：渲染出来的行没有颜色，
+    // 不如不挂（与挂载后渲染失败保留旧行的口径不同：这里连首帧都没有）。
+    if (!loadPiTheme()) {
       clearWidget(key, placement);
       return;
     }
+    // 工厂拿**视图**而不是实例：组件常驻，切主题后的重渲要按当前主题取色。
+    const theme = liveThemeView;
 
     const entry: { dispose?: () => void; requestRender: () => void } = { requestRender: () => {} };
     let component: unknown;
@@ -904,7 +996,8 @@ export function createWebExtensionUIAdapter(
           emitLines();
         }, () => renderWidth, () => renderRows, { isEditorFocused, onUnsupported: notifyUnsupported });
         customRenderers.add(emitLines);
-        const theme = loadPiTheme() ?? uiContext.theme;
+        // 同样是视图：custom 面板也是常驻组件，切主题后靠重渲换色。
+        const theme = liveThemeView;
         // onHandle 在组件建好之后调，对齐 pi-tui 的顺序（先 showOverlay，再给句柄）
         options?.onHandle?.(overlayHandle as never);
         void Promise.resolve()
@@ -997,16 +1090,25 @@ export function createWebExtensionUIAdapter(
       return (loadPiTheme() ?? createFallbackThemeStub()) as never;
     },
     getAllThemes() {
-      // 与 setTheme 的明确错误保持一致：不用空数组假装「没有主题可选」
-      notifyUnsupported("getAllThemes");
-      return [];
+      // 内置 dark/light + 用户主题目录（`<agentDir>/themes/*.json`）。
+      // 内置主题没有再分文件，所以它们的 `path` 缺省（见 lib/pi-theme-registry.ts）。
+      return listPiThemes(agentDir) as never;
     },
-    getTheme() {
-      notifyUnsupported("getTheme");
-      return undefined;
+    getTheme(name: string) {
+      // 只加载不切换（SDK 语义）。未知名 → undefined，不抛错。
+      return loadPiThemeByName(name, agentDir) as never;
     },
-    setTheme() {
-      return { success: false, error: "Theme switching not supported in Web mode" };
+    setTheme(target: unknown) {
+      const result = setPiTheme(target, agentDir);
+      if (!result.success) {
+        notifyThemeSwitchFailure(result.error ?? "unknown error");
+        return { success: false, error: result.error } as never;
+      }
+      // widget / custom / 工具行的重渲由各自的主题订阅完成（本适配器的订阅见
+      // unsubscribeThemeChange，宿主订阅在 lib/sdk-session-host.ts）：这里不再重复触发，
+      // 否则一次切换会渲染两遍。
+      applyShellTheme(result.name);
+      return { success: true } as never;
     },
     getToolsExpanded() {
       return toolsExpanded;
@@ -1109,6 +1211,7 @@ export function createWebExtensionUIAdapter(
     },
     setEditorFocus,
     dispose() {
+      unsubscribeThemeChange();
       editorFocusClients.clear();
       editorComponentFactory = undefined;
       for (const [id, entry] of pending) {

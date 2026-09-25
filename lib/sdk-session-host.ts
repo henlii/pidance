@@ -9,6 +9,7 @@ import {
   createAgentSessionServices,
   renderDiff,
   SessionManager,
+  Theme as SdkTheme,
   collectEntriesForBranchSummary,
   type AgentSession,
   type AgentSessionRuntime,
@@ -16,6 +17,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "./pi-paths";
+import { alignPiThemeWithShellPreferenceOnStartup } from "./theme-preference-sync";
 import { hasActiveSubagentRunForSession, listSubagentRuns } from "./subagent-runs";
 import { hasActiveExternalWork as hasRegisteredExternalWork } from "./session-liveness";
 import { createStreamSnapshotCache, type StreamSnapshot } from "./stream-snapshot";
@@ -138,16 +140,27 @@ import type { BinaryMessageData, BinaryMessageInput } from "./types";
 import {
   loadPiTheme,
   RENDER_WIDTH,
+  onPiThemeChange,
   renderComponentLines,
   renderCustomMessageLines,
   renderToolCallLines,
   renderToolResultLines,
+  setPiThemeConstructor,
   setRenderBridgeWarningSink,
   setSdkThemeProbe,
   verifySdkGlobalTheme,
-  type Theme,
+  type PiTheme,
+  type PiThemeConstructor,
 } from "./tui-render-bridge";
 import { createToolRenderScheduler, pickChangedSlots } from "./tool-render-scheduler";
+
+/**
+ * 把 SDK 的 `Theme` 类交给渲染桥（模块级，保证在任何 host 构造前就位）。
+ *
+ * 渲染桥自己不 import SDK（保持纯逻辑、可单测，也守住 SDK import 边界），
+ * 主题实例必须由这里（allowlist 里的 server adapter）注入 —— 见 issue #97。
+ */
+setPiThemeConstructor(SdkTheme as unknown as PiThemeConstructor);
 
 export type SdkAgentEvent = {
   type: string;
@@ -388,8 +401,13 @@ export class SdkSessionHost {
   private readonly destroyWaitMs: number;
   private readonly agentDir: string;
   private activeToolNames: string[] | undefined;
-  /** 渲染桥主题（模块级缓存）；加载失败为 null → 跳过渲染。 */
-  private readonly renderBridgeTheme: Theme | null = loadPiTheme();
+  /**
+   * 渲染桥主题：取模块级**当前**主题（切主题后要跟着变，所以不能建成构造期快照）；
+   * 加载失败为 null → 跳过渲染。
+   */
+  private get renderBridgeTheme(): PiTheme | null {
+    return loadPiTheme();
+  }
 
   /**
    * 当前渲染尺寸：由前端按可用宽高上报（默认 RENDER_WIDTH / DEFAULT_CUSTOM_UI_ROWS）。
@@ -441,6 +459,13 @@ export class SdkSessionHost {
     this.destroyWaitMs = options.destroyWaitMs ?? 5_000;
     this.agentDir = options.agentDir ?? getAgentDir();
     this.activeToolNames = options.toolNames;
+    // 主题是**进程级**的（与 SDK/TUI 一致）：别处切主题后，本会话已渲染的插件行
+    // 要重算，否则它会留着旧主题的颜色。退订挂在 onDestroy 上，host 回收即摘除。
+    this.onDestroy(onPiThemeChange(() => this.rerenderToolLines()));
+    // 启动对齐（进程内一次）：壳的明暗偏好如果是 dark/light，插件主题也要是同一个 ——
+    // 否则重启后壳按偏好恢复成 light、插件 ANSI 却回到默认 dark（issue #97 审查）。
+    // 放在构造期：此时还没有任何插件渲染过。
+    alignPiThemeWithShellPreferenceOnStartup(this.agentDir);
   }
 
   get sessionId(): string {
@@ -1543,7 +1568,12 @@ export class SdkSessionHost {
       },
       // `ctx.ui.getEditorText()` 回传本会话的输入框草稿：读的是客户端已经同步到
       // 服务端偏好的那份镜像（见 lib/composer-draft-text.ts 的语义边界）。
-      { readComposerText: () => readComposerDraftText(this.realSessionId, this.agentDir) },
+      {
+        readComposerText: () => readComposerDraftText(this.realSessionId, this.agentDir),
+        // 主题：用户主题目录按 agent 目录解析（与 SDK 的 getCustomThemesDir 同源）；
+        // 插件切主题时也要把壳的亮/暗偏好写回同一个 agent 目录。
+        agentDir: this.agentDir,
+      },
     );
     // 渲染桥的**宿主配置类**告警出口（issue #69）：SDK 全局主题槽位装不进去时，插件
     // 渲染器里依赖 SDK 主题助手的部分（内置 edit 的 diff 等）会整段不显示 —— 那要变成
