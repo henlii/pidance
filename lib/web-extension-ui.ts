@@ -220,8 +220,14 @@ function createDialogPromise<T>(
     const onAbort = () => finish(defaultValue);
 
     opts?.signal?.addEventListener("abort", onAbort, { once: true });
-    if (opts?.timeout) {
-      timeoutId = setTimeout(() => finish(defaultValue), opts.timeout);
+    // 超时 = 取消（SDK 语义）：到点按 defaultValue 结算（select/input → undefined，
+    // confirm → false）。绝对过期时刻与这个定时器**同一个来源**，两者不会分叉 ——
+    // 客户端只按 expiresAt 每次重算剩余秒数，不下发「剩余毫秒」让它自己递减：
+    // 页面挂起或后台节流之后递减值会漂移，重算则始终与宿主一致。
+    const timeoutMs = opts?.timeout;
+    const expiresAt = timeoutMs ? Date.now() + timeoutMs : null;
+    if (timeoutMs) {
+      timeoutId = setTimeout(() => finish(defaultValue), timeoutMs);
     }
 
     pending.set(id, {
@@ -243,7 +249,12 @@ function createDialogPromise<T>(
       },
     });
 
-    const event = { type: "extension_ui_request", id, ...request };
+    const event = {
+      type: "extension_ui_request",
+      id,
+      ...request,
+      ...(expiresAt === null ? {} : { expiresAt }),
+    };
     pendingSnapshot.set(id, event);
     emit(event);
   });
@@ -522,7 +533,7 @@ export function createWebExtensionUIAdapter(
         emit,
         opts,
         undefined,
-        { method: "select", title, options, timeout: opts?.timeout },
+        { method: "select", title, options },
         (r) =>
           "cancelled" in r && r.cancelled
             ? undefined
@@ -537,7 +548,7 @@ export function createWebExtensionUIAdapter(
         emit,
         opts,
         false,
-        { method: "confirm", title, message, timeout: opts?.timeout },
+        { method: "confirm", title, message },
         (r) =>
           "cancelled" in r && r.cancelled
             ? false
@@ -552,7 +563,7 @@ export function createWebExtensionUIAdapter(
         emit,
         opts,
         undefined,
-        { method: "input", title, placeholder, timeout: opts?.timeout },
+        { method: "input", title, placeholder },
         (r) =>
           "cancelled" in r && r.cancelled
             ? undefined

@@ -527,6 +527,7 @@ export const zhCN: Record<TranslationKey, string> = {
   wh_moreFiles: '另有 {count} 项',
   // extension
   extension_expired: '已过期',
+  extension_expiresIn: '剩余 {seconds} 秒',
   extension_waitingEnded: '等待结束',
   extension_responseSent: '已发送响应',
   extension_extension: '扩展',
