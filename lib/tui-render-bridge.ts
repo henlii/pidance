@@ -58,6 +58,21 @@ export type PiThemeConstructor = new (
 let ThemeClass: PiThemeConstructor | null = null;
 
 /**
+ * 给文本套一层样式转义，**与 chalk level 3（TUI 的取值）逐字节一致**。
+ *
+ * 为什么不是简单首尾包一层：chalk 对**多行**文本会在每个换行处先关后开
+ * （`"a\nb"` → `\x1b[1ma\x1b[22m\n\x1b[1mb\x1b[22m`）。浏览器侧是**逐行**解析 ANSI 的，
+ * 只包首尾的话第二行起就丢了样式；非 TTY 进程里 chalk 本身又不输出样式（见下），
+ * 所以这里必须自己按 chalk 的规则重开。
+ *
+ * 与 chalk 的已知边界：只有**多行**这一处需要重开；chalk 对文本里已有的 ESC 不会重开
+ * （`bold("a\x1b[31mb")` = `\x1b[1ma\x1b[31mb\x1b[22m`），这里也一致。
+ */
+function wrapTextStyle(open: string, close: string, text: string): string {
+  return `${open}${text.replace(/\r?\n/g, `${close}$&${open}`)}${close}`;
+}
+
+/**
  * 注入 SDK 的 `Theme` 类（宿主静态 import SDK 后传入；渲染桥自己不 import SDK）。
  *
  * 子类只替换五个**文本样式**方法，其余（fg/bg/getFgAnsi/getThinkingBorderColor/…）
@@ -76,19 +91,19 @@ export function setPiThemeConstructor(base: PiThemeConstructor | null): void {
   }
   ThemeClass = class extends base {
     bold(text: string): string {
-      return `\x1b[1m${text}\x1b[22m`;
+      return wrapTextStyle("\x1b[1m", "\x1b[22m", text);
     }
     italic(text: string): string {
-      return `\x1b[3m${text}\x1b[23m`;
+      return wrapTextStyle("\x1b[3m", "\x1b[23m", text);
     }
     underline(text: string): string {
-      return `\x1b[4m${text}\x1b[24m`;
+      return wrapTextStyle("\x1b[4m", "\x1b[24m", text);
     }
     inverse(text: string): string {
-      return `\x1b[7m${text}\x1b[27m`;
+      return wrapTextStyle("\x1b[7m", "\x1b[27m", text);
     }
     strikethrough(text: string): string {
-      return `\x1b[9m${text}\x1b[29m`;
+      return wrapTextStyle("\x1b[9m", "\x1b[29m", text);
     }
   };
 }
@@ -307,20 +322,29 @@ export function setSdkThemeProbe(probe: (() => void) | null): void {
 
 /**
  * 自检：跑一次注入的探针，确认我们写入的槽位真的能被 SDK 的主题助手读到
- * （键名被 SDK 改掉、或槽位被清掉时会抛错）。结果缓存，进程内只跑一次。
- * - `true`：可用；
- * - `false`：不可用，并已报一次可见告警；
- * - `null`：宿主还没接探针，无法判定（调用方稍后再试）。
+ * （键名被 SDK 改掉、或槽位被清掉时会抛错）。
+ *
+ * - `true`：可用（进程内只跑一次成功即缓存）；
+ * - `false`：不可用，并已报一次可见告警（**不缓存** —— 槽位可能是稍后才装上的，
+ *   下次自检要能转好，否则「还没装」会被永久记成「装不进去」）；
+ * - `null`：宿主还没接探针、或主题实例还没建起来（宿主还没注入 `Theme` 类），无法判定。
+ *
+ * **自检前先装槽位**：宿主在 `bindExtensions` 期间就调用这里，而那次调用可能早于
+ * 任何一次渲染（槽位只在 `loadPiTheme` / `setCurrentPiTheme` 里写）。不先装就会把
+ * 「还没装」误判成「装不进去」，并给用户报一条「diff 画不出来」的假告警（issue #97 审查）。
+ * `installSdkGlobalTheme` 是幂等的，重复装同一个实例无害。
  */
 export function verifySdkGlobalTheme(): boolean | null {
-  if (sdkThemeVerified !== null) return sdkThemeVerified;
+  if (sdkThemeVerified === true) return true;
   if (!sdkThemeProbe) return null;
+  const theme = loadPiTheme();
+  if (!theme) return null;
+  installSdkGlobalTheme(theme);
   try {
     sdkThemeProbe();
     sdkThemeVerified = true;
     return true;
   } catch (error) {
-    sdkThemeVerified = false;
     reportBridgeWarning(
       "sdk-theme-verify",
       `${SDK_THEME_WARNING} (self-check failed: ${error instanceof Error ? error.message : String(error)})`,
@@ -345,6 +369,21 @@ function installSdkGlobalTheme(theme: PiTheme): void {
       `${SDK_THEME_WARNING} (install failed: ${error instanceof Error ? error.message : String(error)})`,
     );
   }
+}
+
+/** 测试用：清掉自检结果缓存（不动槽位、不清告警去重），让「自检 → 装槽位 → 再自检」可重跑。 */
+export function resetSdkThemeVerificationForTests(): void {
+  sdkThemeVerified = null;
+}
+
+/**
+ * 测试用：当前的主题变化订阅者数量。
+ *
+ * 订阅者是**常驻资源**（每个 live host / 适配器一个）：宿主回收时没退订就会越攒越多，
+ * 每次切主题都要白跑一遍已死会话的重渲。
+ */
+export function piThemeChangeListenerCountForTests(): number {
+  return themeChangeListeners.size;
 }
 
 /** 内置主题（副本 JSON 打包进产物，无运行时文件路径）。 */
@@ -418,6 +457,36 @@ export function onPiThemeChange(listener: () => void): () => void {
   return () => {
     themeChangeListeners.delete(listener);
   };
+}
+
+/**
+ * 插件组件（widget / custom 面板）拿到的主题：**每次属性访问都解析当前主题**。
+ *
+ * 为什么必须是视图而不是实例：组件实例是**常驻**的（widget 由工厂建一次、之后靠
+ * `requestRender` 重渲），主题实例的颜色在构造时就进了 Map —— 把当时的实例闭进工厂，
+ * 之后切主题只会让组件用旧颜色重画一遍。TUI 传给工厂的也是**会读全局槽位的 Proxy**
+ * （`interactive-mode.js` 的 widget/custom 路径），不是快照。
+ *
+ * 与 issue #72 的旧 Proxy 的区别（那次是 bug）：旧 Proxy 对**所有**属性一律返回可调用
+ * 透传，把 `theme.sourcePath` 这类数据字段也变成函数；这里返回的是真主题上的原值，
+ * 只有函数才绑到当前实例上。
+ */
+export function createLivePiTheme(fallback?: () => unknown): PiTheme {
+  return new Proxy({} as PiTheme, {
+    get(_target, property) {
+      // 主题读不到时用调用方给的回退（适配器传的是存根：老行为是「永远有个主题可读」）——
+      // 没给回退就返回 undefined，由调用方的 try/catch 处理。
+      const theme = (loadPiTheme() ?? fallback?.()) as PiTheme | null | undefined;
+      if (!theme) return undefined;
+      const value = Reflect.get(theme as object, property);
+      // 方法要绑到**当前**实例：直接把方法取出来再调用会让 `this` 丢成 Proxy。
+      return typeof value === "function" ? value.bind(theme) : value;
+    },
+    has(_target, property) {
+      const theme = loadPiTheme();
+      return theme ? Reflect.has(theme as object, property) : false;
+    },
+  });
 }
 
 /** 测试用：清空主题状态（不动 SDK 全局槽位，方便重测首次加载）。 */

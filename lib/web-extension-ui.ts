@@ -14,7 +14,9 @@ import { getPidancePrefsBus } from "./pidance-prefs-bus";
 import { updatePidancePref } from "./pidance-prefs-file";
 import { listPiThemes, loadPiThemeByName, setPiTheme } from "./pi-theme-registry";
 import {
+  createLivePiTheme,
   loadPiTheme,
+  onPiThemeChange,
   RENDER_WIDTH,
   renderWidgetComponentLines,
 } from "./tui-render-bridge";
@@ -315,6 +317,25 @@ export function createWebExtensionUIAdapter(
   /** custom 面板的重渲入口（setRenderSize 用）：按当前尺寸重渲并下发。 */
   const customRenderers = new Set<() => void>();
 
+  /**
+   * 传给 widget / custom 工厂的主题**视图**：每次取色都解析当前主题。
+   *
+   * 不能把当时的实例闭进工厂：组件实例是常驻的（工厂只调一次，之后靠 requestRender
+   * 重渲），而主题实例的颜色在构造时就定了 —— 闭实例会让「切主题」只在下次挂载才生效。
+   * 主题副本加载失败时退回存根（与 `ui.theme` 同一口径）。
+   */
+  const liveThemeView = createLivePiTheme(createFallbackThemeStub);
+
+  /**
+   * 主题是**进程级**的：任何会话切主题，本适配器已挂的 widget / custom 面板都要重渲一帧，
+   * 否则它们会保留旧主题的颜色（工厂拿到的是视图，重渲才会按新主题取色）。
+   * 工具行的重渲由各 host 自己订阅（见 lib/sdk-session-host.ts）。
+   */
+  const unsubscribeThemeChange = onPiThemeChange(() => {
+    for (const entry of [...widgetFactories.values()]) entry.requestRender();
+    for (const render of [...customRenderers]) render();
+  });
+
   /** 每个能力只提示一次：插件可能反复调用同一条 API（注册监听器、重复设组件）。 */
   const capabilityNoticesSent = new Set<string>();
 
@@ -526,11 +547,14 @@ export function createWebExtensionUIAdapter(
     placement: string | undefined,
   ) => {
     unmountWidgetFactory(key);
-    const theme = loadPiTheme();
-    if (!theme) {
+    // 主题还没建起来（宿主还没注入 Theme 类 / 副本坏了）就不挂载：渲染出来的行没有颜色，
+    // 不如不挂（与挂载后渲染失败保留旧行的口径不同：这里连首帧都没有）。
+    if (!loadPiTheme()) {
       clearWidget(key, placement);
       return;
     }
+    // 工厂拿**视图**而不是实例：组件常驻，切主题后的重渲要按当前主题取色。
+    const theme = liveThemeView;
 
     const entry: { dispose?: () => void; requestRender: () => void } = { requestRender: () => {} };
     let component: unknown;
@@ -885,7 +909,8 @@ export function createWebExtensionUIAdapter(
           emitLines();
         }, () => renderWidth, () => renderRows, { isEditorFocused, onUnsupported: notifyUnsupported });
         customRenderers.add(emitLines);
-        const theme = loadPiTheme() ?? uiContext.theme;
+        // 同样是视图：custom 面板也是常驻组件，切主题后靠重渲换色。
+        const theme = liveThemeView;
         // onHandle 在组件建好之后调，对齐 pi-tui 的顺序（先 showOverlay，再给句柄）
         options?.onHandle?.(overlayHandle as never);
         void Promise.resolve()
@@ -992,10 +1017,9 @@ export function createWebExtensionUIAdapter(
         notifyThemeSwitchFailure(result.error ?? "unknown error");
         return { success: false, error: result.error } as never;
       }
-      // 本会话的 widget / custom 面板按新主题重渲（工具行的重渲由各 host 订阅
-      // 渲染桥的主题事件完成，见 lib/sdk-session-host.ts）。
-      for (const entry of [...widgetFactories.values()]) entry.requestRender();
-      for (const render of [...customRenderers]) render();
+      // widget / custom / 工具行的重渲由各自的主题订阅完成（本适配器的订阅见
+      // unsubscribeThemeChange，宿主订阅在 lib/sdk-session-host.ts）：这里不再重复触发，
+      // 否则一次切换会渲染两遍。
       applyShellTheme(result.name);
       return { success: true } as never;
     },
@@ -1091,6 +1115,7 @@ export function createWebExtensionUIAdapter(
     },
     setEditorFocus,
     dispose() {
+      unsubscribeThemeChange();
       editorFocusClients.clear();
       editorComponentFactory = undefined;
       for (const [id, entry] of pending) {

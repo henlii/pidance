@@ -117,8 +117,11 @@ export interface PiThemeSwitchResult {
  * 切换当前主题。
  *
  * - 字符串：按名加载；未知名字 → `{success:false, error}`，**当前主题保持不变**。
- * - 实例：直接切（插件把 `ui.theme` 拿到的实例传回来时走这条 —— 因为 `ui.theme` 就是
- *   SDK `Theme` 的实例，`instanceof` 判定与 SDK 自己的 `setTheme` 分支一致）。
+ * - 实例：直接切（插件把 `ui.theme` 拿到的实例传回来时走这条）。判定是**鸭子类型**
+ *   （有 `fg` 与 `bg` 两个函数），不是 `instanceof` —— 本模块不能 import SDK（SDK 的
+ *   `Theme` 类只在 allowlist 的宿主模块里注入，见 lib/tui-render-bridge.ts），而 SDK 的
+ *   `setTheme` 认的是它自己的类。收成「有取色方法」既能让真实例通过，也不会把随便一个
+ *   带 `fg` 的对象装进全局槽位。
  *
  * 与 TUI 的一处**有意分叉**：SDK 的 `setTheme` 遇到坏名字会静默退回 dark 主题；
  * 这里不换用户的主题、只回报失败并由上层给一次可见提示 —— 静默把主题换成 dark
@@ -134,8 +137,10 @@ export function setPiTheme(
     setCurrentPiTheme(theme);
     return { success: true, name: target };
   }
-  if (target && typeof target === "object" && typeof (target as PiTheme).fg === "function") {
-    const theme = target as PiTheme;
+  const candidate = target as Partial<PiTheme> | null;
+  if (candidate && typeof candidate === "object"
+    && typeof candidate.fg === "function" && typeof candidate.bg === "function") {
+    const theme = candidate as PiTheme;
     setCurrentPiTheme(theme);
     return { success: true, name: theme.name };
   }

@@ -17,6 +17,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "./pi-paths";
+import { alignPiThemeWithShellPreferenceOnStartup } from "./theme-preference-sync";
 import { hasActiveSubagentRunForSession, listSubagentRuns } from "./subagent-runs";
 import { hasActiveExternalWork as hasRegisteredExternalWork } from "./session-liveness";
 import { createStreamSnapshotCache, type StreamSnapshot } from "./stream-snapshot";
@@ -461,6 +462,10 @@ export class SdkSessionHost {
     // 主题是**进程级**的（与 SDK/TUI 一致）：别处切主题后，本会话已渲染的插件行
     // 要重算，否则它会留着旧主题的颜色。退订挂在 onDestroy 上，host 回收即摘除。
     this.onDestroy(onPiThemeChange(() => this.rerenderToolLines()));
+    // 启动对齐（进程内一次）：壳的明暗偏好如果是 dark/light，插件主题也要是同一个 ——
+    // 否则重启后壳按偏好恢复成 light、插件 ANSI 却回到默认 dark（issue #97 审查）。
+    // 放在构造期：此时还没有任何插件渲染过。
+    alignPiThemeWithShellPreferenceOnStartup(this.agentDir);
   }
 
   get sessionId(): string {
