@@ -45,6 +45,9 @@
 - **特殊处理**：插件给的是任意串，**绕过 i18n 原样显示**；限长（60 字符）截断并保留 `title`；切会话重置
   （SDK 的 `resetExtensionUI` 会重置，我们对齐）。
 - **验收**：单测（设置/清除/切会话重置/超长截断）+ 浏览器看收起态正文首行变化。
+- **已落地**（issue #96，2026-09-26）：适配器 per-session 存值 → 状态投影 `hiddenThinkingLabel`（水合 4 条路径）
+  + 既有 `extension_ui_request` 实时下发；折叠行用它、展开仍渲染正文；超过 60 码点中部截断且**仅在被截断时**挂 `title`；
+  切会话与插件 `reload()` 都重置（后者对齐 TUI 的 `handleReloadCommand` → `resetExtensionUI`）。真浏览器验证过 `思考· 检索记忆…`。
 
 ### A2. `getAllThemes()` / `getTheme(name)` / `setTheme(name|Theme)` + `ui.theme`
 
@@ -74,6 +77,13 @@
   - 未知主题名 → 返回 `{success:false,error}`（与 SDK 一致），并给一次可见提示。
 - **验收**：单测（清单/只加载不切换/切换/未知名/缺键回退/全局槽位仍是同一个 Theme 实例）+
   浏览器：切主题后插件输出与壳明暗都变、切回可逆。
+- **已落地**（issue #97，2026-09-26）：删掉手写 Theme，改用 SDK 导出的 `Theme`（**子类**只覆盖 chalk 走的那 5 个文本样式方法 ——
+  非 TTY 进程里 chalk.level=0 会让基类返回纯文本；已与真实 chalk level 3 逐字节对齐，含多行/嵌套）；
+  `getAllThemes`/`getTheme`（只加载不切换）/`setTheme`（返回 `{success,error}`，不抛）+ `ui.theme`；
+  vendoring `light.json`；修 `BG_COLOR_KEYS` 缺 `searchMatchBg`；切主题会重渲**所有适配器**的 widget/custom（工厂拿到的是
+  每次访问都解析当前主题的 Proxy，对齐 TUI 做法），并同步 SDK 全局槽位；dark/light 与壳明暗**双向耦合**（进程启动按偏好对齐 +
+  用户在设置里切明暗时也切插件主题），自定义主题只走插件侧。真浏览器验证：已挂 widget 的 accent 在 `rgb(90,128,128)` ↔ `rgb(138,190,183)` 之间切换可逆，壳同步 light/dark。
+- **残留**（未纳入 #97 范围，另开 issue #109）：已下发的**消息投影行**（`renderedLines`）在切主题后仍是旧色，直到页面重载或重新投影。
 
 ### A3. `setFooter(factory)` / `setHeader(factory)`
 
@@ -105,6 +115,10 @@
 - **实现**：服务端已自结算；把 `deadline` 随请求下发，`ExtensionDialog` 显示剩余秒数；到点与既有结算一致。
 - **特殊处理**：结算权威在服务端（客户端只显示）；倒计时用 `aria-live="off"`。
 - **验收**：单测（到点取消/confirm=false/格式）+ 浏览器看倒计时与超时关闭。
+- **已落地**（issue #100，2026-09-26）：宿主下发**绝对过期时刻** `expiresAt`（与结算定时器同源，`timeout` 先收口：非有限/≤0 不设、超过 32 位上限截断）；
+  结算（含 `responded`/`abort`/`disposed`/`failed`）立刻经既有 SSE 推一条 `extension_ui_settled{id,reason}`，客户端据此**收起面板且不回响应**，
+  并记住已结算 id 挡住迟到的快照；删掉客户端按本地时钟自己关面板的旧死代码（手机与宿主不同钟会提前消失/闪回）。
+  真浏览器验证：对话框按秒倒计时 剩余 6→5→4→3→1 秒，到点面板自行消失，扩展收到 `undefined`（超时=取消）。
 
 ---
 
