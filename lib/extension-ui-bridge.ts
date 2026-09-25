@@ -231,6 +231,7 @@ export function resetExtensionUiForSession(state: ExtensionUiState): ExtensionUi
 export type ExtensionUiEffect =
   | { type: "notice"; id: string; message: string; noticeType: ExtensionUiNoticeType; activityRecord: boolean }
   | { type: "setTitle"; title: string }
+  | { type: "setThemeMode"; mode: "light" | "dark" }
   | { type: "insertText"; text: string };
 
 export function applyExtensionUiRequest(
@@ -298,6 +299,13 @@ export function applyExtensionUiRequest(
       return {
         state: { ...state, toolsExpanded: request.toolsExpanded, toolsExpandedRevision: state.toolsExpandedRevision + 1 },
         effects: [],
+      };
+    case "setTheme":
+      // 插件 `ctx.ui.setTheme` 的内置主题 → 壳的亮/暗。只认这两个值：服务端已经
+      // 只发 dark/light，这里再归一一次，防非法载荷把壳改成未定义状态。
+      return {
+        state,
+        effects: [{ type: "setThemeMode", mode: request.mode === "light" ? "light" : "dark" }],
       };
     case "setWorkingVisible":
       return state.workingVisible === request.visible

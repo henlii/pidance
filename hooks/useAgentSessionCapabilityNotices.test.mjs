@@ -82,6 +82,11 @@ function makeEnv(options = {}) {
     addNotice,
     addLiveActivity: () => {},
     setExtensionWindowTitle: () => {},
+    // 插件的 setTheme 走这条（issue #97）：环境里不给的话，用例一旦构造出
+    // setThemeMode 副作用就会是 ReferenceError 而不是断言失败。
+    applyExternallyRequestedTheme: (mode) => {
+      calls.push({ kind: "setThemeMode", mode });
+    },
     opts: {},
     capabilityFeatureOf,
     hasSeenCapabilityFeature,
@@ -254,4 +259,14 @@ test("SSE 那条通知分支必须认领（否则页面已订阅时发出的提�
   assert.ok(body.length > 0, "Missing handleExtensionUiRequest");
   // 接线断言：真实行为由上面「走 SSE 事件」那条测试覆盖。
   assert.match(body, /claimNoticeHandoff\(effect\.id\)/, "notice 分支必须先认领再入队");
+});
+
+test("插件的 setTheme 事件把壳的明暗交给主题切换（issue #97）", () => {
+  const { handleExtensionUiRequest, calls } = makeEnv();
+  handleExtensionUiRequest({ type: "extension_ui_request", id: "t1", method: "setTheme", mode: "light" });
+  assert.deepEqual(
+    calls.filter((c) => c.kind === "setThemeMode"),
+    [{ kind: "setThemeMode", mode: "light" }],
+    "SSE 到达的 setTheme 必须真的走到壳的主题切换（漏接就是「插件切了主题但界面没变」）",
+  );
 });

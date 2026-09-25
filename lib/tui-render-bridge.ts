@@ -9,151 +9,89 @@
  *
  * Theme 加载（AGENTS.md 红线）：**不得**用 import.meta.url / __dirname / 运行时
  * 文件路径解析 node_modules 内的主题 JSON——webpack 产物会嵌入构建机源码绝对路径，
- * 触发发布审计红线。故把 dark.json 复制为 Pidance 自有副本
- * `lib/pi-themes/dark.json`（来源 pi-coding-agent 0.81.1），经 JSON import
- * 打包进产物（无绝对路径），再按 Theme 构造签名解析 vars/colors 构造。
+ * 触发发布审计红线。故把 SDK 的主题复制为 Pidance 自有副本（`lib/pi-themes/*.json`），
+ * 经 JSON import 打包进产物（无绝对路径），再按 Theme 构造签名解析 vars/colors 构造。
+ *
+ * 主题**实例**是 SDK 的 `Theme` 类：渲染桥自己不 import SDK（保持纯逻辑、可单测，
+ * 也守住 SDK import 边界），由宿主静态 import 后经 `setPiThemeConstructor` 注入 ——
+ * 这样 `ui.theme` / `getTheme()` 返回的是**真 Theme**，插件的 `instanceof Theme`
+ * 判定与 SDK 自己的 `setTheme(Theme 实例)` 分支都能成立（issue #97）。
  *
  * 同一份主题还要装进 **SDK 的全局主题槽位**：SDK 的主题助手（renderDiff 等）读的是
  * globalThis 上按 Symbol.for 挂的单例，不是传进去的主题 —— 不装就没有 diff（issue #69）。
+ * 槽位随主题切换一起改写（见 setCurrentPiTheme）。
  */
 
 import darkThemeJson from "./pi-themes/dark.json" with { type: "json" };
-
-function hexToRgb(hex: string): { r: number; g: number; b: number } {
-  const h = hex.replace("#", "");
-  const full =
-    h.length === 3
-      ? h
-          .split("")
-          .map((c) => c + c)
-          .join("")
-      : h;
-  const n = Number.parseInt(full, 16);
-  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
-}
-
-function fgAnsi(color: string | number, mode: "truecolor" | "256color"): string {
-  if (color === "") return "\x1b[39m";
-  if (typeof color === "number") return `\x1b[38;5;${color}m`;
-  if (typeof color === "string" && color.startsWith("#")) {
-    if (mode === "truecolor") {
-      const { r, g, b } = hexToRgb(color);
-      return `\x1b[38;2;${r};${g};${b}m`;
-    }
-    return `\x1b[38;5;7m`;
-  }
-  throw new Error(`Invalid color value: ${String(color)}`);
-}
-
-function bgAnsi(color: string | number, mode: "truecolor" | "256color"): string {
-  if (color === "") return "\x1b[49m";
-  if (typeof color === "number") return `\x1b[48;5;${color}m`;
-  if (typeof color === "string" && color.startsWith("#")) {
-    if (mode === "truecolor") {
-      const { r, g, b } = hexToRgb(color);
-      return `\x1b[48;2;${r};${g};${b}m`;
-    }
-    return `\x1b[48;5;0m`;
-  }
-  throw new Error(`Invalid color value: ${String(color)}`);
-}
+import lightThemeJson from "./pi-themes/light.json" with { type: "json" };
 
 /**
- * 本地 Theme（不依赖 pi-coding-agent）：fg/bg 输出 ANSI，语义对齐官方 Theme。
+ * 主题实例的最小结构：只声明渲染桥与插件实际用到的成员。
+ * 真实实例是 SDK 的 `Theme`（见 setPiThemeConstructor），子类只改五个文本样式方法。
  */
-export class Theme {
-  readonly name?: string;
-  private readonly fgAnsiMap = new Map<string, string>();
-  private readonly bgAnsiMap = new Map<string, string>();
-  private readonly mode: "truecolor" | "256color";
-
-  constructor(
-    fgColors: Record<string, string | number>,
-    bgColors: Record<string, string | number>,
-    mode: "truecolor" | "256color" = "truecolor",
-    options?: { name?: string },
-  ) {
-    this.mode = mode;
-    this.name = options?.name;
-    const colors = {
-      ...fgColors,
-      thinkingMax: fgColors.thinkingMax ?? fgColors.thinkingXhigh,
-    };
-    for (const [key, value] of Object.entries(colors)) {
-      this.fgAnsiMap.set(key, fgAnsi(value, mode));
-    }
-    for (const [key, value] of Object.entries(bgColors)) {
-      this.bgAnsiMap.set(key, bgAnsi(value, mode));
-    }
-  }
-
-  fg(color: string, text: string): string {
-    const ansi = this.fgAnsiMap.get(color);
-    if (!ansi) throw new Error(`Unknown theme color: ${color}`);
-    return `${ansi}${text}\x1b[39m`;
-  }
-
-  bg(color: string, text: string): string {
-    const ansi = this.bgAnsiMap.get(color);
-    if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
-    return `${ansi}${text}\x1b[49m`;
-  }
-
-  bold(text: string): string {
-    return `\x1b[1m${text}\x1b[22m`;
-  }
-
-  italic(text: string): string {
-    return `\x1b[3m${text}\x1b[23m`;
-  }
-
-  underline(text: string): string {
-    return `\x1b[4m${text}\x1b[24m`;
-  }
-
-  inverse(text: string): string {
-    return `\x1b[7m${text}\x1b[27m`;
-  }
-
-  strikethrough(text: string): string {
-    return `\x1b[9m${text}\x1b[29m`;
-  }
-
-  getFgAnsi(color: string): string {
-    const ansi = this.fgAnsiMap.get(color);
-    if (!ansi) throw new Error(`Unknown theme color: ${color}`);
-    return ansi;
-  }
-
-  getBgAnsi(color: string): string {
-    const ansi = this.bgAnsiMap.get(color);
-    if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
-    return ansi;
-  }
-
-  getColorMode(): "truecolor" | "256color" {
-    return this.mode;
-  }
-
-  getThinkingBorderColor(level: string): (str: string) => string {
-    const map: Record<string, string> = {
-      off: "thinkingOff",
-      minimal: "thinkingMinimal",
-      low: "thinkingLow",
-      medium: "thinkingMedium",
-      high: "thinkingHigh",
-      xhigh: "thinkingXhigh",
-      max: "thinkingMax",
-    };
-    const key = map[level] ?? "thinkingOff";
-    return (str) => this.fg(key, str);
-  }
-
-  getBashModeBorderColor(): (str: string) => string {
-    return (str) => this.fg("bashMode", str);
-  }
+export interface PiTheme {
+  name?: string;
+  sourcePath?: string;
+  sourceInfo?: unknown;
+  fg(color: string, text: string): string;
+  bg(color: string, text: string): string;
+  bold(text: string): string;
+  italic(text: string): string;
+  underline(text: string): string;
+  inverse(text: string): string;
+  strikethrough(text: string): string;
+  getFgAnsi(color: string): string;
+  getBgAnsi(color: string): string;
+  getColorMode(): "truecolor" | "256color";
+  getThinkingBorderColor(level: string): (text: string) => string;
+  getBashModeBorderColor(): (text: string) => string;
 }
 
+/** SDK `Theme` 的构造签名（宿主注入用）。 */
+export type PiThemeConstructor = new (
+  fgColors: Record<string, string | number>,
+  bgColors: Record<string, string | number>,
+  mode: "truecolor" | "256color",
+  options?: { name?: string; sourcePath?: string; sourceInfo?: unknown },
+) => PiTheme;
+
+let ThemeClass: PiThemeConstructor | null = null;
+
+/**
+ * 注入 SDK 的 `Theme` 类（宿主静态 import SDK 后传入；渲染桥自己不 import SDK）。
+ *
+ * 子类只替换五个**文本样式**方法，其余（fg/bg/getFgAnsi/getThinkingBorderColor/…）
+ * 全部沿用 SDK 实现 —— 包括构造器里的颜色回退（scrollbarTrack/scrollbarThumb/
+ * searchMatchBg/searchMatchText/thinkingMax）。
+ *
+ * 为什么必须替换这五个：SDK 的 `Theme.bold/italic/…` 走 chalk，而 chalk 在**非 TTY**
+ * 进程（我们的服务端就是）判定 `level = 0` 并直接返回纯文本 —— 我们真正的渲染出口
+ * 是浏览器（解析 ANSI），这些样式会静默丢掉。这里输出的转义序列与 TUI（chalk level 3）
+ * 逐字节相同。
+ */
+export function setPiThemeConstructor(base: PiThemeConstructor | null): void {
+  if (!base) {
+    ThemeClass = null;
+    return;
+  }
+  ThemeClass = class extends base {
+    bold(text: string): string {
+      return `\x1b[1m${text}\x1b[22m`;
+    }
+    italic(text: string): string {
+      return `\x1b[3m${text}\x1b[23m`;
+    }
+    underline(text: string): string {
+      return `\x1b[4m${text}\x1b[24m`;
+    }
+    inverse(text: string): string {
+      return `\x1b[7m${text}\x1b[27m`;
+    }
+    strikethrough(text: string): string {
+      return `\x1b[9m${text}\x1b[29m`;
+    }
+  };
+}
 /** 固定渲染宽度；前端按 pre-wrap 展示。 */
 export const RENDER_WIDTH = 100;
 
@@ -189,9 +127,10 @@ interface ThemeJson {
   colors: Record<string, string | number>;
 }
 
-/** 背景色语义键（来自 theme.js 的 bgColorKeys）。 */
+/** 背景色语义键（镜像 SDK theme.js 的 bgColorKeys，7 个都要有：漏一个就会被当成前景色）。 */
 const BG_COLOR_KEYS = new Set([
   "selectedBg",
+  "searchMatchBg",
   "userMessageBg",
   "customMessageBg",
   "toolPendingBg",
@@ -243,23 +182,34 @@ function resolveVarRefs(
 }
 
 /**
- * 从主题 JSON 构造 Theme（镜像 theme.js 的 createTheme：fallback + vars 解析 +
- * 背景/前景键分类；颜色模式固定 truecolor）。
+ * 从主题 JSON 构造 Theme 实例（镜像 SDK theme.js 的 createTheme：vars 解析 +
+ * 前景/背景键分类；颜色模式固定 truecolor，颜色回退由 SDK 构造器自己补）。
+ *
+ * 主题 JSON 是**外部数据**（用户主题目录里的文件会走到这里），所以整个解析按未知
+ * 输入对待：形状不对 / vars 引用解析不了 / 构造抛错 → null（调用方忽略该主题）。
  */
-function createThemeFromJson(themeJson: ThemeJson): Theme {
-  const colors = {
-    ...themeJson.colors,
-    thinkingMax: themeJson.colors.thinkingMax ?? themeJson.colors.thinkingXhigh,
-  };
-  const vars = themeJson.vars ?? {};
-  const fgColors: Record<string, string | number> = {};
-  const bgColors: Record<string, string | number> = {};
-  for (const [key, value] of Object.entries(colors)) {
-    const resolved = resolveVarRefs(value, vars);
-    if (BG_COLOR_KEYS.has(key)) bgColors[key] = resolved;
-    else fgColors[key] = resolved;
+export function createPiThemeFromJson(themeJson: unknown, sourcePath?: string): PiTheme | null {
+  if (!ThemeClass) return null;
+  const json = themeJson as ThemeJson | null | undefined;
+  if (!json || typeof json !== "object" || !json.colors || typeof json.colors !== "object") {
+    return null;
   }
-  return new Theme(fgColors, bgColors, "truecolor", { name: themeJson.name });
+  try {
+    const vars = json.vars ?? {};
+    const fgColors: Record<string, string | number> = {};
+    const bgColors: Record<string, string | number> = {};
+    for (const [key, value] of Object.entries(json.colors)) {
+      const resolved = resolveVarRefs(value, vars);
+      if (BG_COLOR_KEYS.has(key)) bgColors[key] = resolved;
+      else fgColors[key] = resolved;
+    }
+    return new ThemeClass(fgColors, bgColors, "truecolor", {
+      name: typeof json.name === "string" ? json.name : undefined,
+      sourcePath,
+    });
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -290,7 +240,6 @@ const SDK_THEME_WARNING =
 /** SDK 主题助手在槽位缺失 / 未初始化时抛错的特征串。 */
 const SDK_THEME_UNINITIALIZED_PATTERN = /Theme not initialized/i;
 
-let sdkThemeInstalled = false;
 let sdkThemeVerified: boolean | null = null;
 const reportedBridgeWarnings = new Set<string>();
 const pendingBridgeWarnings: string[] = [];
@@ -381,12 +330,11 @@ export function verifySdkGlobalTheme(): boolean | null {
 }
 
 /**
- * 幂等地把主题装进 SDK 的全局槽位。写入抛错（例如 globalThis 被冻结）→ 报一次告警并放弃。
+ * 把主题装进 SDK 的全局槽位（幂等：同一个实例重复装无害，切主题时改写为新实例）。
+ * 写入抛错（例如 globalThis 被冻结）→ 报一次告警并放弃。
  * 可用性由宿主的 `verifySdkGlobalTheme()` 在接好探针后确认（见上）。
  */
-function ensureSdkGlobalTheme(theme: Theme): void {
-  if (sdkThemeInstalled) return;
-  sdkThemeInstalled = true;
+function installSdkGlobalTheme(theme: PiTheme): void {
   try {
     const slots = globalThis as unknown as Record<symbol, unknown>;
     slots[SDK_THEME_KEY] = theme;
@@ -396,29 +344,86 @@ function ensureSdkGlobalTheme(theme: Theme): void {
       "sdk-theme-install",
       `${SDK_THEME_WARNING} (install failed: ${error instanceof Error ? error.message : String(error)})`,
     );
-    return;
   }
 }
 
-// 模块级缓存：undefined = 尚未加载；null = 加载失败（安全回退，不再重试）。
-let cachedPiTheme: Theme | null | undefined;
+/** 内置主题（副本 JSON 打包进产物，无运行时文件路径）。 */
+const BUILTIN_THEME_JSON: Record<string, unknown> = {
+  dark: darkThemeJson,
+  light: lightThemeJson,
+};
 
 /**
- * 加载 Pidance 自有副本的 dark 主题；失败返回 null（上层保持 PLAIN_TEXT_THEME 语义，
- * 即不附加渲染行、走原有纯文本展示路径）。
+ * 内置主题清单。
+ *
+ * `path` 一律 undefined：内置主题是**打包进产物的 JSON 副本**，磁盘上没有可读文件，
+ * 给一个不存在的路径比不给更坑（插件会拿它去 readFileSync）。用户主题目录里的主题
+ * 有真路径，由上层（宿主/适配器）补齐。
  */
-export function loadPiTheme(): Theme | null {
-  if (cachedPiTheme !== undefined) return cachedPiTheme;
-  try {
-    const theme = createThemeFromJson(darkThemeJson);
-    cachedPiTheme = theme;
-    // SDK 的主题助手读的是它的全局槽位（见上）：装一次，否则插件渲染器里依赖
-    // 主题助手的部分（内置 edit 的 diff 等）会静默不显示。可用性由宿主自检。
-    ensureSdkGlobalTheme(theme);
-  } catch {
-    cachedPiTheme = null;
+export function listBuiltinPiThemes(): { name: string; path?: string }[] {
+  return Object.keys(BUILTIN_THEME_JSON).map((name) => ({ name }));
+}
+
+/** 内置主题 JSON（按名取；未知名字返回 undefined）。 */
+export function getBuiltinPiThemeJson(name: string): unknown {
+  return BUILTIN_THEME_JSON[name];
+}
+
+// 模块级当前主题：undefined = 尚未加载；null = 加载失败（安全回退，不再重试）。
+let currentTheme: PiTheme | null | undefined;
+
+/** 主题切换订阅者（每个 live host 一个，用于重渲已渲染的插件产出）。 */
+const themeChangeListeners = new Set<() => void>();
+
+/**
+ * 当前主题；首次调用时加载内置 dark（与切换前行为一致）。
+ *
+ * 失败返回 null（上层保持 PLAIN_TEXT_THEME 语义，即不附加渲染行、走原有纯文本展示路径）。
+ */
+export function loadPiTheme(): PiTheme | null {
+  if (currentTheme !== undefined) return currentTheme;
+  // 宿主还没注入 SDK 的 `Theme` 类时**不缓存** null：否则会把「还没接好」误记成
+  // 「主题坏了」，以后永远返回 null（关掉渲染桥）。
+  if (!ThemeClass) return null;
+  const theme = createPiThemeFromJson(BUILTIN_THEME_JSON.dark);
+  currentTheme = theme;
+  // SDK 的主题助手读的是它的全局槽位（见上）：装一次，否则插件渲染器里依赖
+  // 主题助手的部分（内置 edit 的 diff 等）会静默不显示。可用性由宿主自检。
+  if (theme) installSdkGlobalTheme(theme);
+  return currentTheme;
+}
+
+/** 切成另一个主题实例（全局槽位同步改写），并通知订阅者重渲。 */
+export function setCurrentPiTheme(theme: PiTheme): void {
+  currentTheme = theme;
+  installSdkGlobalTheme(theme);
+  for (const listener of [...themeChangeListeners]) {
+    try {
+      listener();
+    } catch (error) {
+      // 订阅者（某个会话的重渲）抛错不能阻断其它会话：降级成诊断日志。
+      console.error("[pidance] theme change listener failed:", error);
+    }
   }
-  return cachedPiTheme;
+}
+
+/**
+ * 订阅主题切换。
+ *
+ * 主题是**进程级**的（与 SDK/TUI 一致），所以一个会话切主题影响所有会话；
+ * 已渲染的插件行要在切后重算，否则它会保留旧主题的颜色。
+ */
+export function onPiThemeChange(listener: () => void): () => void {
+  themeChangeListeners.add(listener);
+  return () => {
+    themeChangeListeners.delete(listener);
+  };
+}
+
+/** 测试用：清空主题状态（不动 SDK 全局槽位，方便重测首次加载）。 */
+export function resetPiThemeForTests(): void {
+  currentTheme = undefined;
+  themeChangeListeners.clear();
 }
 
 /**
@@ -524,13 +529,13 @@ export function renderToolCallLines(
  */
 export function renderWidgetFactoryLines(
   factory: unknown,
-  theme: Theme | null,
+  theme: PiTheme | null,
   width: number = RENDER_WIDTH,
 ): string[] | null {
   if (typeof factory !== "function") return null;
   if (!theme) return null;
   try {
-    const component = (factory as (tui: unknown, th: Theme) => unknown)(undefined, theme);
+    const component = (factory as (tui: unknown, th: PiTheme) => unknown)(undefined, theme);
     return renderToLines(component, width);
   } catch (error) {
     reportIfSdkThemeError(error);
@@ -579,7 +584,7 @@ export function renderWidgetComponentLines(
 export function renderCustomMessageLines(
   renderer: unknown,
   message: unknown,
-  theme: Theme | null,
+  theme: PiTheme | null,
   width: number = RENDER_WIDTH,
 ): string[] | null {
   if (typeof renderer !== "function") return null;
@@ -589,7 +594,7 @@ export function renderCustomMessageLines(
       renderer as (
         msg: unknown,
         options: { expanded: boolean },
-        th: Theme,
+        th: PiTheme,
       ) => unknown
     )(message, { expanded: true }, theme);
     return renderToLines(component, width);
@@ -614,7 +619,7 @@ export function renderCustomMessageLines(
 export function renderCustomEntryLines(
   renderer: unknown,
   entry: unknown,
-  theme: Theme | null,
+  theme: PiTheme | null,
   width: number = RENDER_WIDTH,
 ): string[] | null {
   if (typeof renderer !== "function") return null;
@@ -624,7 +629,7 @@ export function renderCustomEntryLines(
       renderer as (
         e: unknown,
         options: { expanded: boolean },
-        th: Theme,
+        th: PiTheme,
       ) => unknown
     )(entry, { expanded: true }, theme);
     return renderToLines(component, width);
