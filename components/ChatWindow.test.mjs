@@ -27,11 +27,13 @@ test("扩展面板打开时独占输入区：输入栏与底栏都不渲染", ()
 
 test("扩展 widget 内容限高内滚；自定义面板与输入框同宽（共用常量）", () => {
   const source = readFileSync(fileURLToPath(new URL("./ChatWindow.tsx", import.meta.url)), "utf8");
-  const widgets = source.slice(source.indexOf("function ExtensionWidgets("), source.indexOf("const COLLAPSED_WIDGET_KEYS_STORAGE"));
+  // 正文区（含 ANSI 渲染与限高/内滚）自 issue #103 起抽成 ExtensionWidgetBody，
+  // 因为只有它才是「插件组件的渲染区」、点击坐标也以它为原点。
+  const widgets = source.slice(source.indexOf("function ExtensionWidgetBody("), source.indexOf("function ExtensionWidgets("));
   // 内容区限高 + 块内滚动，避免超长 widget 把输入区顶出可视区
   assert.ok(widgets.includes("maxHeight: bodyMaxHeight"), "widget 内容缺少限高");
   assert.ok(widgets.includes("overflow: \"auto\""), "widget 内容缺少块内滚动");
-  assert.match(widgets, /CHAT_BLOCK_MAX_HEIGHT_MOBILE : CHAT_BLOCK_MAX_HEIGHT/, "限高应复用共享常量");
+  assert.match(source, /CHAT_BLOCK_MAX_HEIGHT_MOBILE : CHAT_BLOCK_MAX_HEIGHT/, "限高应复用共享常量");
   const panel = readFileSync(fileURLToPath(new URL("./ExtensionCustomPanel.tsx", import.meta.url)), "utf8");
   const chrome = readFileSync(fileURLToPath(new URL("./ExtensionPanelChrome.tsx", import.meta.url)), "utf8");
   assert.ok(chrome.includes("CHAT_COLUMN_MAX_WIDTH"), "自定义面板未与输入框同宽");
@@ -171,4 +173,56 @@ test("#100 审查修复：面板的卸载不由客户端时钟驱动，改由宿
   // 倒计时到 0 只禁用按钮：组件里仍由 expired → inert 负责。
   const dialog = readFileSync(fileURLToPath(new URL("./ExtensionDialog.tsx", import.meta.url)), "utf8");
   assert.match(dialog, /const inert = disabled \|\| expired \|\| responded;/, "到点后按钮必须不可用");
+});
+
+// ---------------------------------------------------------------------------
+// widget 鼠标路由（issue #103）
+//
+// 两条结构事实必须锁住：
+// 1) 点击只挂在**正文区**（插件的渲染区），卡片头（折叠按钮）永远归我们的外壳；
+// 2) 只有 widget 声明了 interactive（组件真的实现了 handleMouse）才把处理函数传下去，
+//    否则一次点击都不发 —— 避免给未实现鼠标的组件付无谓往返。
+// ---------------------------------------------------------------------------
+
+test("widget 鼠标：只有 interactive 的 widget 才挂点击，卡片头不参与路由", () => {
+  const source = readFileSync(fileURLToPath(new URL("./ChatWindow.tsx", import.meta.url)), "utf8");
+  const body = source.slice(source.indexOf("function ExtensionWidgetBody("), source.indexOf("function ExtensionWidgets("));
+  const widgets = source.slice(source.indexOf("function ExtensionWidgets("), source.indexOf("const COLLAPSED_WIDGET_KEYS_STORAGE"));
+
+  // 1) 正文区按 interactive 决定
+  assert.match(
+    widgets,
+    /onWidgetMouse=\{widget\.interactive === true \? onWidgetMouse : undefined\}/,
+    "正文区未按 interactive 决定是否转发",
+  );
+  // 2) 卡片头（折叠按钮）不带任何鼠标转发：它只做折叠。
+  //    取第一个 <button>…</button> 整块（该切片里的第一个就是折叠头）。
+  const buttonStart = widgets.indexOf("<button");
+  const buttonEnd = widgets.indexOf("</button>", buttonStart) + "</button>".length;
+  const header = widgets.slice(buttonStart, buttonEnd);
+  assert.ok(buttonStart !== -1 && buttonEnd > buttonStart, "没找到卡片头按钮");
+  assert.ok(header.includes("toggleCollapse(widget.key)"), "卡片头应只做折叠");
+  assert.ok(header.includes("aria-expanded"), "卡片头要有 aria-expanded（无障碍不能丢）");
+  assert.ok(!header.includes("onWidgetMouse"), "卡片头不得转发 widget 鼠标事件");
+  // 卡片头只该有折叠用的 onClick：不应出现任何 move/touch 类处理（那些是正文区的事）
+  assert.ok(!/onMouse|onTouch/.test(header), "卡片头不得有 move/touch 类鼠标处理");
+
+  // 3) 正文区自身才是坐标原点：换算读的是同一个元素
+  assert.match(body, /const el = event\.currentTarget/, "换算必须基于被点元素本身");
+  assert.match(body, /measureCharWidth\(el\)/, "字符宽必须量正文区自己（与 render 同源）");
+  assert.match(body, /measureLineHeight\(el\)/, "行高必须量正文区自己");
+  // 4) 量不出不转发（不给插件送错坐标）
+  assert.match(body, /if \(!point\) return;/, "换算失败必须放弃这次点击");
+  // 5) 滚动不拦：不出现 wheel/move 的事后 preventDefault
+  assert.ok(!/onWheel/.test(body), "不得拦滚动");
+  assert.ok(!/onMouseMove/.test(body), "不转 move");
+});
+
+test("widget 鼠标：长按映射右键且吃掉补发的 click", () => {
+  const source = readFileSync(fileURLToPath(new URL("./ChatWindow.tsx", import.meta.url)), "utf8");
+  const body = source.slice(source.indexOf("function ExtensionWidgetBody("), source.indexOf("function ExtensionWidgets("));
+  assert.match(body, /consumeTapClick\(touchRef\.current\)/, "补发的 click 必须经由 consumeTapClick 判定");
+  assert.match(body, /button: "right"/, "长按要映射成右键");
+  assert.match(body, /WIDGET_LONG_PRESS_MS/, "长按计时用共享常量");
+  assert.match(body, /isScrollGesture\(dx, dy\)/, "滑动必须取消长按（滚动优先）");
 });

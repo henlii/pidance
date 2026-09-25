@@ -1670,9 +1670,12 @@ export class SdkSessionHost {
       const lines = event.widgetLines ?? event.content;
       if (lines == null) this.extensionUi?.widgets.delete(key);
       else {
+        // 这条镜像写的是**同一个** widgets 表，字段少了会把适配器刚写进去的
+        // `interactive` 抹掉（前端于是永远点不动实现了 handleMouse 的组件）。
         this.extensionUi?.widgets.set(key, {
           lines,
           placement: event.widgetPlacement,
+          interactive: event.widgetInteractive === true,
         });
       }
     }
@@ -2535,11 +2538,14 @@ export class SdkSessionHost {
         ([key, content]) => {
           // 热 state 投影与 SSE setWidget 事件对齐（{key, lines, placement}）；
           // adapter 内部 Map value 为 {lines, placement}，含未知类型，逐字段窄化。
-          const widget = content as { lines?: unknown; placement?: string } | null;
+          const widget = content as { lines?: unknown; placement?: string; interactive?: unknown } | null;
           return {
             key,
             lines: Array.isArray(widget?.lines) ? (widget.lines as string[]) : [],
             placement: widget?.placement === "belowEditor" ? "belowEditor" : "aboveEditor",
+            // 组件实现了 handleMouse 才为 true：前端据此决定点击要不要转发
+            // （水合路径必须带上，否则刷新后的页面点不动 widget）。
+            interactive: widget?.interactive === true,
           };
         },
       ),
@@ -3200,13 +3206,23 @@ export class SdkSessionHost {
       }
 
       case "extension_ui_mouse": {
-        // 面板内的鼠标事件（当前用于 pi-subagents 的 widget：点标题行折叠）
+        // custom 面板内的鼠标事件（pi-subagents 的面板靠它点标题行折叠）
         const id = asString(command.id);
         const event = command.event;
         if (id && event && typeof event === "object") {
           this.extensionUi?.inputCustomMouse(id, event as Record<string, unknown>);
         }
         return null;
+      }
+
+      case "extension_ui_widget_mouse": {
+        // widget 组件内的鼠标事件（issue #103）。按 **key** 而不是请求 id 找组件：
+        // widget 是常驻实例，生命周期与阻塞请求无关。
+        // 没实现 handleMouse 的 key（字符串数组 widget、或已被卸载）返回 false。
+        const key = asString(command.key);
+        const event = command.event;
+        if (!key || !event || typeof event !== "object") return false;
+        return this.extensionUi?.inputWidgetMouse(key, event as Record<string, unknown>) ?? false;
       }
 
       // 旧名：改名（set_render_width → set_render_size）之前加载的页面仍会发它。

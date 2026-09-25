@@ -140,8 +140,14 @@ export type WebExtensionUIAdapter = {
   customSnapshot: { id: string; lines: string[]; layout?: ExtensionUiCustomLayout; hidden?: boolean } | null;
   respond: (id: string, response: Record<string, unknown>) => boolean;
   inputCustom: (id: string, data: string) => boolean;
-  /** 面板内的鼠标事件（pi-subagents 的 widget 靠它点标题行折叠）。 */
+  /** 面板内的鼠标事件（pi-subagents 的 custom 面板靠它点标题行折叠）。 */
   inputCustomMouse: (id: string, event: Record<string, unknown>) => boolean;
+  /**
+   * widget 组件内的鼠标事件（issue #103）：按 widget key 找到工厂实例，把它实现的
+   * `handleMouse` 叫起来。没有该实例、或该组件的渲染结果不是组件（字符串数组 widget）
+   * 时返回 false —— 前端据此不发无谓请求。
+   */
+  inputWidgetMouse: (key: string, event: Record<string, unknown>) => boolean;
   /** 按新的可用尺寸重排已挂载的插件界面（custom 面板 + widget 工厂）。 */
   setRenderSize: (size: { width: number; rows: number }) => boolean;
   /**
@@ -586,8 +592,15 @@ export function createWebExtensionUIAdapter(
    * 相同的 setWidget 通道。渲染失败保留上一次的行（不推空帧）；替换或卸载时调
    * 组件的 `dispose?.()`。
    */
-  /** 把 requestRender 存进 entry，供宽度变化时统一重推一帧。 */
-  const widgetFactories = new Map<string, { dispose?: () => void; requestRender: () => void }>();
+  /**
+   * 把 requestRender 存进 entry，供宽度变化时统一重推一帧；`handleMouse` 只在
+   * 组件真的实现了它时才存在（前端据 `interactive` 决定要不要把点击送过来）。
+   */
+  const widgetFactories = new Map<string, {
+    dispose?: () => void;
+    requestRender: () => void;
+    handleMouse?: (event: Record<string, unknown>) => void;
+  }>();
 
   const unmountWidgetFactory = (key: string) => {
     const entry = widgetFactories.get(key);
@@ -616,6 +629,7 @@ export function createWebExtensionUIAdapter(
       widgetKey: key,
       widgetLines: undefined,
       widgetPlacement: placement,
+      widgetInteractive: false,
     });
   };
 
@@ -634,9 +648,14 @@ export function createWebExtensionUIAdapter(
     // 工厂拿**视图**而不是实例：组件常驻，切主题后的重渲要按当前主题取色。
     const theme = liveThemeView;
 
-    const entry: { dispose?: () => void; requestRender: () => void } = { requestRender: () => {} };
+    const entry: {
+      dispose?: () => void;
+      requestRender: () => void;
+      handleMouse?: (event: Record<string, unknown>) => void;
+    } = { requestRender: () => {} };
     let component: unknown;
     let scheduled = false;
+    let interactive = false;
 
     const publish = () => {
       scheduled = false;
@@ -644,7 +663,9 @@ export function createWebExtensionUIAdapter(
       if (widgetFactories.get(key) !== entry) return;
       const lines = renderWidgetComponentLines(component, renderWidth);
       if (lines === null) return;
-      widgets.set(key, { lines, placement });
+      // 前端只对 `interactive` 的 widget 挂点击处理：没实现 handleMouse 的组件
+      // 不该为每次点击付一次往返（全局能力提示里也说的是「鼠标只在实现了才送达」）。
+      widgets.set(key, { lines, placement, interactive });
       emit({
         type: "extension_ui_request",
         id: randomUUID(),
@@ -652,6 +673,7 @@ export function createWebExtensionUIAdapter(
         widgetKey: key,
         widgetLines: lines,
         widgetPlacement: placement,
+        widgetInteractive: interactive,
       });
     };
 
@@ -675,11 +697,25 @@ export function createWebExtensionUIAdapter(
       return;
     }
 
-    const disposable = component as { dispose?: unknown } | null;
+    const disposable = component as { dispose?: unknown; handleMouse?: unknown } | null;
     entry.dispose =
       typeof disposable?.dispose === "function"
         ? () => (component as { dispose: () => void }).dispose()
         : undefined;
+    // 组件的 handleMouse 可以随时改（对象字段），所以每次调用时再取一次而不是把
+    // 函数存死；这里只决定「这个 widget 有没有鼠标能力」。
+    interactive = typeof disposable?.handleMouse === "function";
+    if (interactive) {
+      entry.handleMouse = (event) => {
+        const handler = (component as { handleMouse?: (e: Record<string, unknown>) => unknown } | null)?.handleMouse;
+        // 抛错只记日志：一次点击不该把 widget 的重渲管线带崩（与渲染失败同一口径）。
+        try {
+          handler?.call(component, event);
+        } catch (error) {
+          console.error("[pidance] widget handleMouse failed:", error);
+        }
+      };
+    }
     widgetFactories.set(key, entry);
     publish();
   };
@@ -833,9 +869,12 @@ export function createWebExtensionUIAdapter(
       if (content === undefined || Array.isArray(content)) {
         if (content == null) widgets.delete(key);
         else {
+          // 字符串数组 widget 没有组件实例，也就没有 handleMouse：显式标非交互，
+          // 前端不为它挂点击。
           widgets.set(key, {
             lines: content,
             placement: options?.placement,
+            interactive: false,
           });
         }
         emit({
@@ -845,6 +884,7 @@ export function createWebExtensionUIAdapter(
           widgetKey: key,
           widgetLines: content,
           widgetPlacement: options?.placement,
+          widgetInteractive: false,
         });
       }
     },
@@ -1176,6 +1216,12 @@ export function createWebExtensionUIAdapter(
       const session = customSessions.get(id);
       if (!session) return false;
       session.handleMouse(event);
+      return true;
+    },
+    inputWidgetMouse(key, event) {
+      const entry = widgetFactories.get(key);
+      if (!entry?.handleMouse) return false;
+      entry.handleMouse(event);
       return true;
     },
     setRenderSize(size) {
