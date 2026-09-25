@@ -313,10 +313,17 @@ export function ViewportDialog({
         overscrollBehavior: "contain",
       }}
     >
+      {/*
+        壳自己的模态标记：插件按键路由（hooks/useExtensionTerminalInput.ts 的窗口 ③）
+        据此让位 —— 这个模态开着时键盘归它（Escape 关面板、方向键在列表里走）。
+        插件的面板外壳（ExtensionPanelChrome）也用 aria-modal，所以判据必须是这个专属
+        标记，不能拿 role/aria-modal 当区分依据。
+      */}
       <div
         ref={panelRef}
         role="dialog"
         aria-modal="true"
+        data-pidance-modal="true"
         aria-labelledby={titleId}
         aria-describedby={description ? descriptionId : undefined}
         tabIndex={-1}

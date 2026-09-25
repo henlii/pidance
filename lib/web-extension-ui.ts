@@ -749,14 +749,18 @@ export function createWebExtensionUIAdapter(
       // 无从知道是「用户没按」还是「Web 端收不到」，这块交互就静默消失了。
       notifyLimitedSupport(
         "onTerminalInput",
-        "handlers only receive keys in two narrow windows: " +
-          // 窗口 1：widget 选择态（lib/extension-panel-keys.ts 的 resolveExtensionWidgetKeyAction）
+        "handlers only receive keys in a few narrow windows: " +
+          // 窗口 ②：widget 选择态（lib/extension-panel-keys.ts 的 resolveExtensionWidgetKeyAction）
           "(1) with a widget present and the composer focused and empty, Down/Left start a selection, " +
           "after which arrows, j, k, Enter and Escape are routed while the selection lasts; " +
-          // 窗口 2：收起的面板（同文件 shouldRouteKeyToExtensionListener）
+          // 窗口 ①：收起的面板（同文件 shouldRouteKeyToExtensionListener）
           "(2) while a collapsed extension panel exists, Escape, F1-F12, Alt+<char> and Ctrl+<char> " +
-          "(browser-reserved chords and Ctrl+Space excluded) are routed. " +
-          "Ordinary typing never reaches them.",
+          "(browser-reserved chords and Ctrl+Space excluded) are routed; " +
+          // 窗口 ③：插件界面显示中（同文件 resolveExtensionSurfaceKeyAction）
+          "(3) while a plugin panel, overlay or dialog is visible, keys that no focused field or " +
+          "control owns are routed to the handlers as they are (Meta chords, the browser-reserved " +
+          "Ctrl chords, Ctrl+Space, the shell's Ctrl+K and Tab stay with the browser). " +
+          "Ordinary typing in the composer never reaches them.",
       );
       terminalInputListeners.add(handler);
       emitTerminalInputListeners();

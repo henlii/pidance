@@ -43,6 +43,7 @@ import { useAudio } from "@/hooks/useAudio";
 import { useI18n } from "@/lib/i18n";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useExtensionTerminalInput } from "@/hooks/useExtensionTerminalInput";
+import { shouldReturnComposerFocus, type KeyTargetLike } from "@/lib/extension-panel-keys";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useMessageJump, type MessageJumpRailHandle } from "@/hooks/useMessageJump";
 import { useRenderSize } from "@/hooks/useRenderSize";
@@ -204,13 +205,50 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     isMobile,
   });
 
-  // 插件把 custom 面板收起后，白名单按键仍要能到达它的全局监听器
-  // （ctx.ui.onTerminalInput；如 rpiv-ask-user 的折叠键重新展开面板）。
-  // 面板可见时不介入：那时按键归面板自己的 keytrap。
+  /**
+   * 插件界面正在显示：可见的 custom 面板（含 overlay；`hidden` 不算）或扩展对话框。
+   * 这时按键该归插件的全局监听器（窗口 ③，见 hooks/useExtensionTerminalInput.ts）。
+   */
+  const extensionSurfaceActive = Boolean(extensionDialog)
+    || Boolean(extensionCustomUi && !extensionCustomUi.hidden);
+
   useExtensionTerminalInput({
     sessionId: sessionIdRef.current,
-    enabled: Boolean(extensionCustomUi?.hidden) && extensionTerminalInputListenerCount > 0,
+    // 窗口 ①：插件把 custom 面板收起后，白名单按键仍要能到达它的全局监听器
+    // （ctx.ui.onTerminalInput；如 rpiv-ask-user 的折叠键重新展开面板）。
+    hiddenPanelRouting: Boolean(extensionCustomUi?.hidden) && extensionTerminalInputListenerCount > 0,
+    // 窗口 ③：插件界面显示中。面板自己的 keytrap 仍然优先（判定里按「事件目标有没有
+    // DOM 归属者」让位），只读会话没有可写的宿主，不做无谓往返。
+    surfaceRouting: extensionSurfaceActive
+      && extensionTerminalInputListenerCount > 0
+      && !isReadOnly,
   });
+
+  /**
+   * 插件界面关掉后把焦点还给输入框。
+   *
+   * 面板/对话框消失后键盘就没有归属者了（对话框还会把输入框整个换掉再换回来），
+   * 不还回去用户得先点一下输入框才能继续打字；TUI 里编辑器也是直接拿回焦点。
+   * 用 layout effect：与卸载同一次提交内完成，不会先闪一帧「谁都没焦点」。
+   */
+  const extensionSurfaceWasActiveRef = useRef(false);
+  useLayoutEffect(() => {
+    const active = extensionSurfaceActive;
+    const was = extensionSurfaceWasActiveRef.current;
+    extensionSurfaceWasActiveRef.current = active;
+    // 判定抽到纯函数里（lib/extension-panel-keys.ts）：只在「由有变无」且焦点已经没人接管时
+    // 归还 —— 面板里原有的焦点会随卸载落到 body，但用户若已经在别处（侧栏搜索框之类）打字，
+    // 就别把焦点抢走。这样这条规则有行为测试，而不是靠读源码字符串。
+    if (
+      shouldReturnComposerFocus({
+        wasSurfaceActive: was,
+        surfaceActive: active,
+        activeElement: document.activeElement as KeyTargetLike | null,
+      })
+    ) {
+      chatInputRef?.current?.focus();
+    }
+  }, [extensionSurfaceActive, chatInputRef]);
 
   // 插件组件按可用尺寸排版与裁切：视口变化时让服务端重新渲染，而不是交给 CSS 硬断行
   // （硬断行会把方框/表格/选中条拆散，见 lib/render-width.ts）。列数与行数同源上报，
