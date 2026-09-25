@@ -280,6 +280,7 @@ export const zhCN: Record<TranslationKey, string> = {
   notice_collapse: '折叠通知',
   notice_copy: '复制通知',
   notice_copied: '已复制',
+  notice_copyFailed: '复制失败',
   notice_close: '关闭通知',
   notice_pin: '固定通知',
   notice_unpin: '取消固定通知',

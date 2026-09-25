@@ -13,6 +13,7 @@ import type {
   BinaryMessageInput,
   ChatInputHandle,
 } from "@/lib/types";
+import { copyText } from "@/lib/clipboard";
 import { preserveCustomRenderedLines } from "@/lib/custom-rendered-lines";
 import type { SessionActivity } from "@/lib/session-activity";
 import { isDefinitiveRejection, readAgentLiveFlag, sendAgentCommand } from "@/lib/agent-client";
@@ -2928,7 +2929,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const data = await sendAgentCommand<LastAssistantTextResponse>(sid, { type: "get_last_assistant_text" });
           const textToCopy = data?.text ?? "";
           if (!textToCopy) return complete({ handled: true, error: "No assistant message to copy" });
-          await navigator.clipboard.writeText(textToCopy);
+          // 非安全上下文（局域网/Tailscale 的 http）里 navigator.clipboard 不存在，
+          // 直接调会让 /copy 命令抛错；走共享助手（带回退）。
+          await copyText(textToCopy);
           await recordCommandEntry("/copy", "Copied last assistant message");
           await loadSession(sid);
           return complete({ handled: true, message: "Copied last assistant message" });

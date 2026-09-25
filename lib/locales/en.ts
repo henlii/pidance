@@ -280,6 +280,7 @@ export const en = {
   notice_collapse: 'Collapse notification',
   notice_copy: 'Copy notification',
   notice_copied: 'Copied',
+  notice_copyFailed: 'Copy failed',
   notice_close: 'Dismiss notification',
   notice_pin: 'Pin notification',
   notice_unpin: 'Unpin notification',

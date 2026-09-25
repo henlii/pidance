@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import type { AgentMessage, BashExecutionMessage, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import type { BranchActions } from "@/lib/branch-bookmarks";
 import { parseAnsiLine } from "@/lib/ansi";
+import { copyText } from "@/lib/clipboard";
 import { humanizeExtensionIdentifier } from "@/lib/extension-labels";
 import { composeChatPlan, type ChatRenderItem } from "@/lib/chat-compositor";
 import type { TurnMetrics } from "@/lib/browser-session-runtime-registry";
@@ -1439,7 +1440,11 @@ function NoticeShelf({ notices, activities, onDismiss, onTogglePin, floating = f
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
   // 默认折叠：仅记录展开的 id；不在 state 中的视为折叠（逻辑层未改）
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
-  const [copiedId, setCopiedId] = useState<string | null>(null);
+  // 复制结果按通知 + 本次尝试记：成功短暂显示「已复制」，失败显示「复制失败」并停久一点——
+  // 以前这里直接调剪贴板且把异常吞掉，非安全上下文（局域网/Tailscale 的 http）下按钮点了没任何反应。
+  // attempt 必须有：只按 id 清除的话，上一次的失败定时器会把下一次的成功状态一起清掉。
+  const [copyState, setCopyState] = useState<{ id: string; ok: boolean; attempt: number } | null>(null);
+  const copyAttemptRef = useRef(0);
 
   if (notices.length === 0 && activities.length === 0) return null;
   const orderedNotices = [...notices].sort((a, b) => Number(b.pinned) - Number(a.pinned));
@@ -1450,15 +1455,17 @@ function NoticeShelf({ notices, activities, onDismiss, onTogglePin, floating = f
   };
 
   const copyNotice = async (notice: NoticeItem) => {
+    const attempt = (copyAttemptRef.current += 1);
+    let ok = true;
     try {
-      await navigator.clipboard.writeText(notice.message);
-      setCopiedId(notice.id);
-      window.setTimeout(() => {
-        setCopiedId((current) => (current === notice.id ? null : current));
-      }, 1200);
+      await copyText(notice.message);
     } catch {
-      // 剪贴板不可用时静默失败，不改 notice 逻辑
+      ok = false;
     }
+    setCopyState({ id: notice.id, ok, attempt });
+    window.setTimeout(() => {
+      setCopyState((current) => (current && current.id === notice.id && current.attempt === attempt ? null : current));
+    }, ok ? 1200 : 2600);
   };
 
   return (
@@ -1561,11 +1568,13 @@ function NoticeShelf({ notices, activities, onDismiss, onTogglePin, floating = f
               )}
             </div>
             <NoticeIconButton
-              label={copiedId === notice.id ? t("notice_copied") : t("notice_copy")}
-              active={copiedId === notice.id}
+              label={copyState?.id === notice.id ? t(copyState.ok ? "notice_copied" : "notice_copyFailed") : t("notice_copy")}
+              active={copyState?.id === notice.id && copyState.ok}
               onClick={() => { void copyNotice(notice); }}
             >
-              {copiedId === notice.id ? (
+              {copyState?.id === notice.id && !copyState.ok ? (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--status-danger)" strokeWidth="2" aria-hidden="true"><path d="M12 8v5m0 3h.01" /><circle cx="12" cy="12" r="9" /></svg>
+              ) : copyState?.id === notice.id ? (
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M20 6 9 17l-5-5" /></svg>
               ) : (
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h10" /></svg>
