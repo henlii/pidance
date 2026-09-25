@@ -256,14 +256,17 @@ export function isImeComposing(
  *
  * ## 优先级表（同一按键只会被一个窗口处理）
  *
- * 1. **事件目标已经有人管**（输入框本身、面板的 keytrap、任何可编辑/可交互元素）→ 归 DOM，
- *    窗口 ③ 不抢。这一条同时覆盖了「输入框聚焦时维持现状」：输入框聚焦时 keydown 的目标
- *    就是那个 textarea。
- * 2. **输入框聚焦** → 窗口 ②（`useExtensionWidgetKeys`）与输入框自己处理；此时
- *    `extensionWidgetKeysEnabled` 要求「没有 custom 面板」，而窗口 ③ 要求「插件界面显示中」，
- *    两者按构造互斥。
- * 3. **面板被插件收起**（`hidden`，此时不是「显示中」）→ 窗口 ① 的白名单键。
- * 4. **插件界面显示中** → 窗口 ③：除下面这些之外都交给插件 —— 浏览器/系统保留的
+ * 0. **面板被插件收起**（`hidden`，此时不是「显示中」）→ 窗口 ① 的白名单键。它排在 DOM 归属
+ *    **之前**是有意的：这条窗口的主场景恰恰是「输入框仍然聚焦」（用户打完字、插件把面板收起来），
+ *    若先按焦点让位，rpiv-ask-user 那种「收起后靠一个键重新展开」的写法就再也收不到键。
+ *    它的白名单本身很窄（Escape / F1–F12 / Alt·Ctrl + 非保留字符）。
+ * 1. **事件目标已经有归属者** → 归 DOM，窗口 ③ 不抢。判据是**通用**的：焦点落在任何一个真实元素上
+ *    （不只是输入框/按钮，还包括壳自己的拖宽手柄 `role="separator"`、子会话谱系树行、
+ *    可聚焦的工具输出 `<pre tabIndex={0}>`），按键就归它 —— 这些控件聚焦后本来就用方向键做事。
+ *    输入框聚焦时 keydown 的目标就是那个 textarea，所以「输入框聚焦时维持现状」也由这条覆盖。
+ * 2. **输入框聚焦且没有插件界面** → 窗口 ②（`useExtensionWidgetKeys`）与输入框自己处理；
+ *    它要求「没有 custom 面板」，与窗口 ③ 要求「插件界面显示中」按构造互斥。
+ * 3. **插件界面显示中** → 窗口 ③：除下面这些之外都交给插件 —— 浏览器/系统保留的
  *    Cmd(Meta) 组合、浏览器保留的 Ctrl 组合（含 Ctrl+Space）、Tab/Shift+Tab（无障碍焦点遍历，
  *    必须留给浏览器，否则键盘用户再也走不出面板）、输入法合成中或刚结束的宽限期内。
  *
@@ -285,20 +288,16 @@ export interface ExtensionSurfaceKeyInput {
   shiftKey: boolean;
   /** 输入法合成中，或 `compositionend` 之后的宽限期内。 */
   composing: boolean;
-  /** 事件目标已经有 DOM 归属者（见 `isDomOwnedKeyTarget`）。 */
+  /** 已有 DOM 归属者（见 `isDomOwnedKeyTarget`）：焦点在那个元素（或其内部）上。 */
   domOwned: boolean;
-  /** 这个键已经被窗口 ①（面板收起时的白名单）认领，别再发一次。 */
-  claimedByPanelWindow: boolean;
 }
 
 export function resolveExtensionSurfaceKeyAction(
   input: ExtensionSurfaceKeyInput,
 ): ExtensionSurfaceKeyAction {
   if (input.composing) return "ignore";
-  // 优先级 1：DOM 已经有归属者（输入框 / 面板 keytrap / 按钮 / 链接 / 菜单项…）
+  // 优先级 1：DOM 已经有归属者（输入框 / 面板 keytrap / 按钮 / 焦点所在的任何真实元素）
   if (input.domOwned) return "ignore";
-  // 优先级 3 与 4 的边界：白名单键归窗口 ①，这里不重复发送
-  if (input.claimedByPanelWindow) return "ignore";
   // Cmd/Ctrl+… 在 macOS 上大量是系统级组合，Meta 一律不碰
   if (input.metaKey) return "ignore";
   // Tab 是无障碍的焦点遍历：面板/对话框里的按钮只能靠它到达
@@ -310,49 +309,91 @@ export function resolveExtensionSurfaceKeyAction(
 }
 
 /**
- * 事件目标是不是「已经有 DOM 归属者」的元素。
+ * 壳上「自己收键」的专属标记。目前只有壳自有模态（components/ui/ViewportDialog.tsx）：
+ * 它开着时键盘归它（Escape 关面板、方向键在列表里走），插件按键路由要让位。
  *
- * 面板显示期间我们只想接管**没有归属**的按键；DOM 里已经有交互元素时（输入框、面板的
- * keytrap textarea、按钮、链接、菜单项……）按键归它，抢过来会造成一次按键两个消费者
- * （例如对话框按钮的 Enter 既触发点击、又被当成插件的确认键）。
+ * 用专属标记而不是 `role`/`aria-modal` —— 插件面板外壳（components/ExtensionPanelChrome.tsx）
+ * 也用 `aria-modal`，而那正是窗口 ③ 的主场景，不能被一并跳过。
  *
- * 用注入的鸭子类型参数（只要 `closest`）而不是直接依赖 DOM 节点：这个模块的单测不开 DOM。
+ * 为什么不在这里列一堆标签（input/button/[role=…]）：那**必然漏**。壳自己就有好几处
+ * 「聚焦后用方向键做事」的控件（拖宽手柄、谱系树行、工具输出 `<pre tabIndex={0}>`），
+ * 只认标签会把它们的按键抢走。归属判据见下面的通用规则。
  */
-export const DOM_OWNED_KEY_TARGET_SELECTOR = [
-  "input",
-  "textarea",
-  "select",
-  "button",
-  "a[href]",
-  "summary",
-  "[contenteditable]",
-  '[role="button"]',
-  '[role="link"]',
-  '[role="menuitem"]',
-  '[role="option"]',
-  '[role="tab"]',
-  '[role="checkbox"]',
-  '[role="switch"]',
-  '[role="radio"]',
-  '[role="slider"]',
-  '[role="textbox"]',
-  '[role="combobox"]',
-  '[role="listbox"]',
-  '[role="menu"]',
-  // 壳自己的模态（components/ui/ViewportDialog.tsx）：它开着的时候键盘归它（Escape 关面板、
-  // 方向键在列表里走），插件按键路由要让位。用专属标记而不是 aria-modal —— 插件面板外壳
-  // （components/ExtensionPanelChrome.tsx）也有 aria-modal，那才是窗口 ③ 的主场景。
-  '[data-pidance-modal="true"]',
-].join(", ");
+export const SHELL_KEY_OWNING_SELECTOR = '[data-pidance-modal="true"]';
 
-export function isDomOwnedKeyTarget(
-  target: { closest?: (selector: string) => unknown } | null | undefined,
-): boolean {
-  if (!target || typeof target.closest !== "function") return false;
+/** 鸭子类型的最小节点形状（这个模块的单测不开 DOM）。 */
+export interface KeyTargetLike {
+  closest?: (selector: string) => unknown;
+  /** 真实 DOM 节点才有：用来把 `body`/`documentElement`（= 谁都没聚焦）认出来。 */
+  ownerDocument?: { body?: unknown; documentElement?: unknown } | null;
+  /** 真实 DOM 元素才有：判断目标是不是在焦点元素内部。 */
+  contains?: (node: unknown) => boolean;
+}
+
+/** 焦点元素是不是「根」——`body`/`documentElement` 代表没有真正的归属者。 */
+function isRootFocus(node: KeyTargetLike | null | undefined): boolean {
+  const doc = node?.ownerDocument;
+  if (!doc) return false;
+  return node === doc.body || node === doc.documentElement;
+}
+
+/** 目标就是焦点元素，或落在焦点元素内部。 */
+function belongsToFocused(target: KeyTargetLike, activeElement: KeyTargetLike): boolean {
+  if (target === activeElement) return true;
+  if (typeof activeElement.contains !== "function") return false;
   try {
-    return target.closest(DOM_OWNED_KEY_TARGET_SELECTOR) !== null;
+    return activeElement.contains(target) === true;
   } catch {
     // 拿不准就不抢（宁可少路由，也不要把按键从真正的归属者手里夺走）
     return true;
   }
+}
+
+/**
+ * 这次按键是不是「已经有 DOM 归属者」。
+ *
+ * 判据两条，任一成立即归 DOM：
+ *
+ * 1. **焦点在真实元素上**：键盘事件的目标就是当前焦点元素（或其内部），所以
+ *    「焦点不是 `body`/`documentElement`」等价于「这个键有人管」。这一条覆盖了输入框、面板
+ *    keytrap、按钮，也覆盖了壳自己的拖宽手柄、谱系树行、可聚焦的工具输出 —— 那些控件聚焦后
+ *    本来就用方向键做事，抢过来会让它们失灵（issue #102 审查的阻断项）。
+ * 2. **目标带壳的专属标记**（`SHELL_KEY_OWNING_SELECTOR`）：壳模态打开时会主动聚焦自己的面板，
+ *    但用户点到背景上焦点会落回 `body`，那时第 1 条不再成立；标记与焦点无关，能兜住这种情况。
+ *
+ * 两条都不成立（没人聚焦、也不是壳模态）→ 归插件，这正是窗口 ③ 的主场景。
+ */
+export function isDomOwnedKeyTarget(
+  target: KeyTargetLike | null | undefined,
+  activeElement: KeyTargetLike | null | undefined,
+): boolean {
+  if (!target && !activeElement) return false;
+  if (activeElement && !isRootFocus(activeElement) && target && belongsToFocused(target, activeElement)) {
+    return true;
+  }
+  if (target && typeof target.closest === "function") {
+    try {
+      return target.closest(SHELL_KEY_OWNING_SELECTOR) !== null;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 插件界面关掉之后，该不该把焦点交回输入框。
+ *
+ * 只在「由有变无」且**焦点已经没人接管**（`null` / `body` / `documentElement`）时归还：
+ * 面板卸载后焦点通常落到 `body`，不还会让用户得先点一下输入框才能继续打字；
+ * 但用户若已经在别处打字（侧栏搜索框之类），那就别抢。
+ */
+export function shouldReturnComposerFocus(input: {
+  wasSurfaceActive: boolean;
+  surfaceActive: boolean;
+  /** `document.activeElement`。 */
+  activeElement: KeyTargetLike | null | undefined;
+}): boolean {
+  if (!input.wasSurfaceActive || input.surfaceActive) return false;
+  return !input.activeElement || isRootFocus(input.activeElement);
 }

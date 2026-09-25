@@ -13,15 +13,18 @@ test("窗口 ① 先判、窗口 ③ 后判：白名单键不会被两个窗口�
   assert.ok(panelWindow > -1, "缺少窗口 ①（面板收起时的白名单）判定");
   assert.ok(surfaceWindow > -1, "缺少窗口 ③（插件界面显示中）判定");
   assert.ok(panelWindow < surfaceWindow, "顺序反了：白名单键必须先归窗口 ①");
-  // 窗口 ③ 的入参里要带上「已被窗口 ① 认领」，否则同一个键会被发两次
-  assert.ok(
-    handler.includes("claimedByPanelWindow,"),
-    "窗口 ③ 不知道按键已被窗口 ① 认领，会重复发送",
-  );
+  // 不重复发送靠的是窗口 ① 的分支**提前 return**：走到窗口 ③ 时那个键已经发过了。
+  // （曾经用一个恒为 false 的入参 claimedByPanelWindow 表达这件事，是死参数，已删。）
+  const panelBranch = handler.slice(panelWindow, surfaceWindow);
+  assert.ok(/return;/.test(panelBranch), "窗口 ① 处理后必须 return，否则同一个键会走窗口 ③ 再发一次");
 });
 
-test("窗口 ③ 按「事件目标有没有 DOM 归属者」让位（输入框/面板 keytrap/按钮优先）", () => {
-  assert.ok(handler.includes("isDomOwnedKeyTarget(event.target"), "未按事件目标判断 DOM 归属");
+test("窗口 ③ 按「焦点落在哪个元素上」让位（不只是输入框/按钮）", () => {
+  // 判据是通用的：目标 + document.activeElement。只传目标会退回「标签白名单」那套，
+  // 壳自己的拖宽手柄 / 谱系树行 / 可聚焦的工具输出会被抢走按键（issue #102 审查阻断项）。
+  assert.ok(handler.includes("isDomOwnedKeyTarget("), "未判断 DOM 归属");
+  assert.ok(handler.includes("event.target"), "没用事件目标");
+  assert.ok(handler.includes("document.activeElement"), "没把当前焦点元素传进去");
 });
 
 test("输入法：合成中与 compositionend 之后的宽限期都不路由（两个窗口都适用）", () => {

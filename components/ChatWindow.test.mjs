@@ -121,9 +121,13 @@ test("#102：插件界面显示中时按键归插件，关闭后焦点还给输�
   assert.ok(source.includes("chatInputRef?.current?.focus()"), "插件界面关闭后未把焦点还给输入框");
   const effect = source.slice(source.indexOf("const extensionSurfaceWasActiveRef"), source.indexOf("chatInputRef?.current?.focus()"));
   assert.ok(effect.includes("useLayoutEffect("), "焦点归还应在同一次提交里完成（layout effect）");
-  assert.match(effect, /if \(was && !active\b[^)]*\)/, "只在「从有到无」的那一次归还焦点");
-  // 面板里原有的焦点会随卸载落到 body；用户已经在别处打字时不要抢（见源码里的注释）。
-  assert.ok(effect.includes("canTakeFocus"), "归还焦点前要确认焦点没人接管");
+  // 「只在从有到无、且焦点没人接管时归还」这条判据已抽到纯函数里，
+  // **行为**由 lib/extension-panel-keys.test.mjs 的 shouldReturnComposerFocus 用例覆盖
+  // （这里只锁「接线没被绕过」—— 不锁的话，直接在 effect 里 focus() 也能过）。
+  assert.match(effect, /shouldReturnComposerFocus\(\{/, "判定没有走纯函数（行为测试就管不到它了）");
+  assert.match(effect, /wasSurfaceActive: was/, "缺「之前是活跃」这个入参");
+  assert.match(effect, /surfaceActive: active/, "缺「现在是活跃」这个入参");
+  assert.ok(effect.includes("document.activeElement"), "没把当前焦点元素交给判据");
 });
 
 test("本轮写入的文件：只在收尾 assistant 消息下汇总一次，并透传给 MessageView", () => {

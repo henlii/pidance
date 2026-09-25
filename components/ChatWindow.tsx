@@ -43,6 +43,7 @@ import { useAudio } from "@/hooks/useAudio";
 import { useI18n } from "@/lib/i18n";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useExtensionTerminalInput } from "@/hooks/useExtensionTerminalInput";
+import { shouldReturnComposerFocus, type KeyTargetLike } from "@/lib/extension-panel-keys";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useMessageJump, type MessageJumpRailHandle } from "@/hooks/useMessageJump";
 import { useRenderSize } from "@/hooks/useRenderSize";
@@ -235,11 +236,18 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     const active = extensionSurfaceActive;
     const was = extensionSurfaceWasActiveRef.current;
     extensionSurfaceWasActiveRef.current = active;
-    // 只在「焦点已经没人接管」时归还：面板里原有的焦点会随卸载落到 body，
-    // 但用户若已经在别处（侧栏搜索框之类）打字，就别把焦点抢走。
-    const activeElement = document.activeElement;
-    const canTakeFocus = !activeElement || activeElement === document.body;
-    if (was && !active && canTakeFocus) chatInputRef?.current?.focus();
+    // 判定抽到纯函数里（lib/extension-panel-keys.ts）：只在「由有变无」且焦点已经没人接管时
+    // 归还 —— 面板里原有的焦点会随卸载落到 body，但用户若已经在别处（侧栏搜索框之类）打字，
+    // 就别把焦点抢走。这样这条规则有行为测试，而不是靠读源码字符串。
+    if (
+      shouldReturnComposerFocus({
+        wasSurfaceActive: was,
+        surfaceActive: active,
+        activeElement: document.activeElement as KeyTargetLike | null,
+      })
+    ) {
+      chatInputRef?.current?.focus();
+    }
   }, [extensionSurfaceActive, chatInputRef]);
 
   // 插件组件按可用尺寸排版与裁切：视口变化时让服务端重新渲染，而不是交给 CSS 硬断行

@@ -9,6 +9,7 @@ import {
   isPlainCharacterKey,
   resolveExtensionSurfaceKeyAction,
   shouldRouteKeyToExtensionListener,
+  type KeyTargetLike,
 } from "@/lib/extension-panel-keys";
 import { toTerminalKeyData } from "@/lib/terminal-input";
 
@@ -26,15 +27,17 @@ import { toTerminalKeyData } from "@/lib/terminal-input";
  *   在此之前这种情形下按键没有归属者：面板自己可聚焦时由它的 keytrap 收（那条路不变），
  *   但焦点不在面板里（用户点了别处、或对话框那种没有 keytrap 的界面）时插件就完全收不到。
  *
- * 优先级表（同一按键只会被一个窗口处理，矩阵见 `lib/extension-panel-keys.test.mjs`）：
+ * 实际顺序（同一按键只会被一个窗口处理，矩阵见 `lib/extension-panel-keys.test.mjs`）：
  *
- * 1. 事件目标已经有 DOM 归属者（输入框本身、面板 keytrap、按钮/链接/菜单项…）→ 归 DOM，
- *    这里不抢。**「输入框聚焦时维持现状」就由这一条覆盖**：输入框聚焦时 keydown 的目标
- *    正是那个 textarea。抢过来会造成一次按键两个消费者（对话框按钮的 Enter 既点按钮、
- *    又被当成插件的确认键）。
- * 2. 输入框聚焦且没有面板 → 窗口 ②（`useExtensionWidgetKeys`，见 `ChatInput`）。
- * 3. 面板被收起 → 窗口 ①（白名单，行为与之前一致）。
- * 4. 插件界面显示中 → 窗口 ③。
+ * 1. **窗口 ① 先判**：面板被插件收起 → 白名单键。它**有意**排在 DOM 归属之前 —— 这条窗口的
+ *    主场景就是「输入框仍然聚焦」（用户打完字、插件把面板收起来），先按焦点让位的话，
+ *    rpiv-ask-user 那种「收起后靠一个键重新展开」的写法就再也收不到键。白名单本身很窄。
+ * 2. **窗口 ③**：插件界面显示中 → 事件目标已有 DOM 归属者就让位。判据是**通用**的
+ *    （焦点落在任何真实元素上都算，见 `isDomOwnedKeyTarget`）：只列 input/button 之类的标签
+ *    必然漏掉壳自己的拖宽手柄、谱系树行、可聚焦的工具输出，那些控件聚焦后本来就用方向键做事。
+ *    输入框聚焦时 keydown 的目标就是那个 textarea，所以「输入框聚焦时维持现状」也由这条覆盖；
+ *    抢过来会造成一次按键两个消费者（对话框按钮的 Enter 既点按钮、又被当成插件的确认键）。
+ * 3. 输入框聚焦且插件界面没显示 → 窗口 ②（`useExtensionWidgetKeys`，见 `ChatInput`）。
  *
  * 输入法：合成中（含 `keyCode === 229`）与 `compositionend` 之后的 `IME_COMPOSITION_GRACE_MS`
  * 宽限期内一律不路由，两个窗口都适用 —— 否则合成提交那一下会先被当成插件的按键吃掉。
@@ -68,9 +71,10 @@ export function useExtensionTerminalInput(options: {
       const composing = isImeComposing(event, compositionEndAtRef.current, now);
       if (composing) return;
 
-      // 窗口 ①：面板收起时的白名单键。行为与「窗口 ③」引入前完全一致。
-      const claimedByPanelWindow = hiddenPanelRouting && shouldRouteKeyToExtensionListener(event);
-      if (claimedByPanelWindow) {
+      // 窗口 ①：面板收起时的白名单键（行为与「窗口 ③」引入前完全一致）。它先判是有意的：
+      // 这条窗口的主场景就是「输入框仍然聚焦」，先按焦点让位的话插件再也收不到那个收缩键。
+      const panelWindowClaimsTheKey = hiddenPanelRouting && shouldRouteKeyToExtensionListener(event);
+      if (panelWindowClaimsTheKey) {
         const data = toTerminalKeyData(event);
         if (!data) return;
         // 此刻面板已收起，按键没有别的去处：直接吞掉再问插件。
@@ -90,8 +94,12 @@ export function useExtensionTerminalInput(options: {
         metaKey: event.metaKey,
         shiftKey: event.shiftKey,
         composing,
-        domOwned: isDomOwnedKeyTarget(event.target as { closest?: (selector: string) => unknown } | null),
-        claimedByPanelWindow,
+        // 归属判据是通用的「焦点落在真实元素上」：输入框、面板 keytrap、壳的拖宽手柄、
+        // 谱系树行、可聚焦的工具输出都算（只认标签白名单必然漏，见 isDomOwnedKeyTarget）。
+        domOwned: isDomOwnedKeyTarget(
+          event.target as KeyTargetLike | null,
+          document.activeElement as KeyTargetLike | null,
+        ),
       });
       if (action !== "route") return;
 
