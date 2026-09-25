@@ -8,38 +8,8 @@
  * 测试传假刷新器来断言状态码与响应体，不必触网。
  */
 
-import { NextResponse } from "next/server";
-import {
-  ModelCatalogRefreshError,
-  refreshModelCatalog,
-} from "@/lib/model-catalog-refresh";
+import { createRefreshHandler } from "@/lib/models-refresh-route";
 
 export const dynamic = "force-dynamic";
-
-type RefreshFn = (options: { signal?: AbortSignal }) => Promise<{ detail: Record<string, unknown> | null }>;
-
-export function createRefreshHandler(refresh: RefreshFn = refreshModelCatalog) {
-  return async function POST(req: Request) {
-    try {
-      const { detail } = await refresh({ signal: req.signal });
-      return NextResponse.json({ ok: true, detail });
-    } catch (error) {
-      if (error instanceof ModelCatalogRefreshError) {
-        return NextResponse.json(
-          {
-            error: error.message,
-            code: error.code,
-            ...(error.providers ? { providers: error.providers } : {}),
-          },
-          { status: error.code === "unavailable" ? 503 : 502 },
-        );
-      }
-      return NextResponse.json(
-        { error: error instanceof Error ? error.message : String(error) },
-        { status: 500 },
-      );
-    }
-  };
-}
 
 export const POST = createRefreshHandler();
