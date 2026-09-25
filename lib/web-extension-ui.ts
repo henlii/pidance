@@ -702,8 +702,10 @@ export function createWebExtensionUIAdapter(
       typeof disposable?.dispose === "function"
         ? () => (component as { dispose: () => void }).dispose()
         : undefined;
-    // 组件的 handleMouse 可以随时改（对象字段），所以每次调用时再取一次而不是把
-    // 函数存死；这里只决定「这个 widget 有没有鼠标能力」。
+    // `interactive` 决定「这个 widget 有没有鼠标能力」（前端据它决定要不要为点击付一次
+    // 往返），只在挂载/替换组件时采样**一次**：setWidget 收到组件那一刻还没有 handleMouse
+    // 的话，之后再挂上去不会自动变可交互，要重新 setWidget 才会重采样。
+    // 真正调用时则**每次再取一次**函数字段（组件可以随时换实现），不是把函数存死。
     interactive = typeof disposable?.handleMouse === "function";
     if (interactive) {
       entry.handleMouse = (event) => {

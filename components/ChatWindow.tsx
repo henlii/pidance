@@ -12,6 +12,7 @@ import {
   markLongPressFired,
   mouseButtonName,
   shouldFireLongPress,
+  touchCancel,
   touchEnd,
   touchMove,
   touchStart,
@@ -1349,7 +1350,9 @@ function ExtensionWidgetBody({
         if (!touch || !origin) return;
         const dx = touch.clientX - origin.x;
         const dy = touch.clientY - origin.y;
-        // 滑动 = 滚动：长按作废，随后的 click 浏览器本来也不会发。
+        // 滑动 = 滚动：长按作废，并记下「这次手势的 click 不能转发」——
+        // 正文区是内滚容器（touch-action: pan-y），手机上滑一下再松手很常见，
+        // 浏览器若补一次 click，插件会把它当成「点了第 0 行」（fleet 的整块切换会误触）。
         if (isScrollGesture(dx, dy)) {
           touchRef.current = touchMove(touchRef.current, dx, dy);
           clearLongPressTimer();
@@ -1362,7 +1365,10 @@ function ExtensionWidgetBody({
       }}
       onTouchCancel={() => {
         clearLongPressTimer();
-        touchRef.current = INITIAL_WIDGET_TOUCH_STATE;
+        // 系统长按菜单 / 文本选择 / 手势导航都会以 cancel 结束触摸，之后浏览器仍可能补一次
+        // click。**不能**当成「什么都没发生」：清空状态会让那次 click 被当成真 tap 转发出去
+        // （长按已经作为右键派发过，再补一次左键就是用户没做的操作）。
+        touchRef.current = touchCancel(touchRef.current);
         pressOriginRef.current = null;
       }}
       style={{
