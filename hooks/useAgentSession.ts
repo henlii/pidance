@@ -13,6 +13,7 @@ import type {
   BinaryMessageInput,
   ChatInputHandle,
 } from "@/lib/types";
+import { capabilityFeatureOf, hasSeenCapabilityFeature, rememberCapabilityFeature } from "@/lib/capability-notice-seen";
 import { copyText } from "@/lib/clipboard";
 import { preserveCustomRenderedLines } from "@/lib/custom-rendered-lines";
 import type { SessionActivity } from "@/lib/session-activity";
@@ -676,6 +677,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const applyCapabilityNotices = useCallback((state?: AgentStateResponse | null) => {
     if (!state) return;
     for (const notice of pickCapabilityNotices(state.extensionCapabilityNotices)) {
+      // 每种能力只在同一个浏览器里提示一次：id 是每次新生成的 uuid，按 id 记挡不住刷新/重启。
+      const feature = capabilityFeatureOf(String(notice.message));
+      if (hasSeenCapabilityFeature(feature)) {
+        claimNoticeHandoff(notice.id);
+        continue;
+      }
+      rememberCapabilityFeature(feature);
       if (!claimNoticeHandoff(notice.id)) continue;
       // 显式带上状态自己的会话 id：水合期间"当前会话"可能还滞后一个渲染，
       // 省略就会把通知放进上一个会话的队列（那条提示于是永远不显示）。
@@ -1776,6 +1784,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // 插件自己的 notify 也走这条分支——它的 id 每次都是新 uuid
         // （web-extension-ui 的 notify 用 randomUUID），所以记下来只会让"同一条 id 再
         // 出现"被跳过，不影响正常通知。
+        const capabilityFeature = capabilityFeatureOf(String(effect.message));
+        if (hasSeenCapabilityFeature(capabilityFeature)) {
+          claimNoticeHandoff(effect.id);
+          continue;
+        }
+        rememberCapabilityFeature(capabilityFeature);
         claimNoticeHandoff(effect.id);
         addNotice({ id: effect.id, message: effect.message, type: effect.noticeType, activityRecord: effect.activityRecord });
         if (effect.activityRecord) {

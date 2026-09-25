@@ -23,6 +23,7 @@ import { createJiti } from "jiti";
 const jiti = createJiti(import.meta.url);
 const { pickCapabilityNotices, applyExtensionUiRequest } = await jiti.import("../lib/extension-ui-bridge.ts");
 const { createNoticeQueueStore } = await jiti.import("../lib/notice-queue-store.ts");
+const { capabilityFeatureOf, loadSeenCapabilityFeatures, markCapabilityFeatureSeen } = await jiti.import("../lib/capability-notice-seen.ts");
 
 /** 抽出 hook 源码里 `const <name> = useCallback((…) => {…}, […])` 的第一个参数（真实函数）。 */
 function extractCallback(env, name) {
@@ -51,8 +52,15 @@ function extractCallback(env, name) {
  * 一套"页面加载"的环境：真实的 claimNoticeHandoff + applyCapabilityNotices +
  * handleExtensionUiRequest（SSE 路径），共享一份 handedNoticeIdsRef 与通知队列。
  */
-function makeEnv() {
+function makeEnv(options = {}) {
   const store = createNoticeQueueStore();
+  // 「每种能力只提示一次」的记忆：默认每个 env 一份（= 新浏览器），传同一个就模拟整页刷新。
+  const storage = options.storage ?? (() => {
+    const map = new Map();
+    return { getItem: (k) => (map.has(k) ? map.get(k) : null), setItem: (k, v) => void map.set(k, v) };
+  })();
+  const hasSeenCapabilityFeature = (feature) => (feature ? loadSeenCapabilityFeatures(storage).has(feature) : false);
+  const rememberCapabilityFeature = (feature) => markCapabilityFeatureSeen(storage, feature);
   store.activate("s1");
   const calls = [];
   const handedNoticeIdsRef = { current: new Set() };
@@ -63,7 +71,7 @@ function makeEnv() {
     store.enqueue({ ...notice, sessionId: notice.sessionId ?? "s1" });
   };
   const applyCapabilityNotices = extractCallback(
-    { pickCapabilityNotices, addNotice, claimNoticeHandoff },
+    { pickCapabilityNotices, addNotice, claimNoticeHandoff, capabilityFeatureOf, hasSeenCapabilityFeature, rememberCapabilityFeature },
     "applyCapabilityNotices",
   );
   const handleExtensionUiRequest = extractCallback({
@@ -75,8 +83,11 @@ function makeEnv() {
     addLiveActivity: () => {},
     setExtensionWindowTitle: () => {},
     opts: {},
+    capabilityFeatureOf,
+    hasSeenCapabilityFeature,
+    rememberCapabilityFeature,
   }, "handleExtensionUiRequest");
-  return { store, calls, handedNoticeIdsRef, claimNoticeHandoff, applyCapabilityNotices, handleExtensionUiRequest };
+  return { store, calls, storage, handedNoticeIdsRef, claimNoticeHandoff, applyCapabilityNotices, handleExtensionUiRequest };
 }
 
 const notice = (id) => ({ id, message: 'Extension UI "x" is limited', notifyType: "warning" });
@@ -102,7 +113,8 @@ test("水合必须显式带上状态自己的会话 id：不能靠「此刻激�
   assert.equal(calls[0].sessionId, "s1", "必须把状态自己的 sessionId 传给 addNotice");
   assert.equal(store.queueLength("s1"), 1, "归属正确的会话才显示得出来");
   // 旧 Host 不带 sessionId 时退回"当前会话"（不凭空造一个 id）——队列按 activeSessionId 收。
-  applyCapabilityNotices({ extensionCapabilityNotices: [notice("n2")] });
+  // 换一个能力名：这一条验的是"显式带 sessionId"，不是一次性抑制
+  applyCapabilityNotices({ extensionCapabilityNotices: [{ ...notice("n2"), message: 'Extension UI "anotherFeature" is limited' }] });
   assert.equal(calls[1].sessionId, null, "缺 sessionId 时按既有语义走当前会话（null = 当前）");
   assert.equal(store.queueLength("s1"), 2, "缺 sessionId 的那条也要落进当前会话的队列");
 });
@@ -148,15 +160,28 @@ test("认领按 id：插件自己的 notify 占用的 id 不影响别的宿主�
   assert.equal(store.queueLength("s1"), 1, "插件通知不在快照里，所以水合不会把它重放出来");
 });
 
-test("整页刷新后允许再出现一次（提示的本意；ref 与队列都随页面重建）", () => {
-  const first = makeEnv();
+test("同一个浏览器里同一种能力只提示一次：整页刷新也不再弹（storage 是共享的）", () => {
+  const storage = (() => {
+    const map = new Map();
+    return {
+      getItem: (k) => (map.has(k) ? map.get(k) : null),
+      setItem: (k, v) => void map.set(k, v),
+    };
+  })();
+  const first = makeEnv({ storage });
   first.applyCapabilityNotices({ sessionId: "s1", extensionCapabilityNotices: [notice("n1")] });
-  assert.equal(first.store.queueLength("s1"), 1);
-  // 整页刷新：新的 hook 实例（新 ref）+ 新的通知队列单例。
-  const second = makeEnv();
-  assert.deepEqual(second.store.getVisible(), [], "刷新后先是空的");
+  assert.equal(first.store.queueLength("s1"), 1, "第一次要看到");
+  first.store.dismiss("n1");
+  // 整页刷新：新 hook 实例 + 新通知队列，但 localStorage 还在（这就是用户看到的"还是报"）。
+  const second = makeEnv({ storage });
   second.applyCapabilityNotices({ sessionId: "s1", extensionCapabilityNotices: [notice("n1")] });
-  assert.equal(second.store.queueLength("s1"), 1, "刷新后提示重新出现一次");
+  assert.equal(second.store.queueLength("s1"), 0, "同一能力刷新后不得再提示");
+  // 换了能力（新插件/新边界）仍然要提示一次。
+  second.applyCapabilityNotices({
+    sessionId: "s1",
+    extensionCapabilityNotices: [{ ...notice("n2"), message: 'Extension UI "brandNewFeature" is limited' }],
+  });
+  assert.equal(second.store.queueLength("s1"), 1, "新能力仍要提示");
 });
 
 test("切走再切回同一会话不算刷新：本页已经交过就不重弹", () => {

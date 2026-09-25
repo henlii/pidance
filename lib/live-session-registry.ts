@@ -203,6 +203,19 @@ function getLocalRunningAndStartingIds(): string[] {
   return [...ids];
 }
 
+/**
+ * 「真的在跑」的会话：正在执行，或者本轮已经登记过 prompt 起始时刻（agent_end 才清）。
+ *
+ * `starting`（仅打开/唤起 host）不算 —— 见 `lastActuallyRunningIds` 的注释。
+ */
+function getLocalActuallyRunningIds(): string[] {
+  const ids = new Set<string>(getLocalRunningStartedAt().keys());
+  for (const [sessionId, session] of getRegistry()) {
+    if (session.isRunning()) ids.add(session.sessionId || sessionId);
+  }
+  return [...ids];
+}
+
 /** lease 覆盖 live writer 窗口；正常 settled run 会立即 dispose host。 */
 function getLocalWriterAndStartingIds(): string[] {
   const ids = new Set<string>(getStartingSessionIds());
@@ -284,8 +297,14 @@ export function listPendingExtensionUi(): PendingExtensionUi[] {
 }
 
 let lastRunningSnapshot = "";
-/** 上一次广播出去的运行集（用来识别「本轮不再运行」的会话 → 写未读时钟的 completedAt）。 */
-let lastRunningIds: string[] = [];
+/**
+ * 上一次「**真的在跑**」的集合（正在执行 prompt / bash / 流式 / 压缩，或本轮已登记过 prompt 起始时刻）。
+ *
+ * 不能拿运行集直接判未读：打开一个会话会让 host 进入 **starting**，稳定后离开运行集，
+ * 那并不是「跑完了」。以前就是这么判的 —— 于是**只打开、没提问**也会写一条 completedAt，
+ * 侧栏立刻多一个未读（实测：在另一个进程里打开用户的会话，对方的侧栏就多一条未读）。
+ */
+let lastActuallyRunningIds: string[] = [];
 
 /**
  * 新会话启动期的临时 key 前缀（真正 id 由 Pi 生成，见 session-service 的 startLockedSession）。
@@ -327,6 +346,8 @@ export function notifyRunningChange(): void {
   syncOwnedRunningLeases();
   const ids = getRunningRpcSessionIds();
   const pending = listPendingExtensionUi();
+  // 未读只看「真的在跑」的集合，不看含 starting 的运行集（只打开会话不该产生未读）。
+  const actuallyRunning = getLocalActuallyRunningIds();
   const snapshot = JSON.stringify({
     ids: [...ids].sort(),
     pending: pending.map((item) => ({
@@ -339,8 +360,8 @@ export function notifyRunningChange(): void {
   // 未读改跨端（#65）：run 结束由**服务端**记时刻，这样即使当时没有任何浏览器开着，
   // 未读也是准的；各端只负责写自己的 readAt（未读 ⟺ completedAt > readAt，两侧都是
   // 单调时间戳取并集，不需要 CAS）。写盘挪到事件回调之外，避免拖住运行集广播。
-  const finished = lastRunningIds.filter((id) => !ids.includes(id) && !isPlaceholderSessionId(id));
-  lastRunningIds = [...ids];
+  const finished = lastActuallyRunningIds.filter((id) => !actuallyRunning.includes(id) && !isPlaceholderSessionId(id));
+  lastActuallyRunningIds = [...actuallyRunning];
   if (finished.length > 0) {
     const at = new Date().toISOString();
     setTimeout(() => {
