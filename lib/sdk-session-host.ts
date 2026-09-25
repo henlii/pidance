@@ -1600,6 +1600,10 @@ export class SdkSessionHost {
           return result;
         },
         reload: async () => {
+          // TUI 的 handleReloadCommand 先 resetExtensionUI()（其中包含 setHiddenThinkingLabel()），
+          // 插件重载后从干净状态重新注册。这里至少要把插件设过的折叠行标签清掉：重载后插件
+          // 不一定再设一次，留着的旧标签会一直盖着思考块折叠行的正文摘要。
+          this.extensionUi?.uiContext.setHiddenThinkingLabel();
           await session.reload();
         },
       },

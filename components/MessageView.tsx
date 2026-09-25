@@ -1194,7 +1194,9 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
    *
    * 对齐 TUI：思考收起时那一行画的就是这个标签（默认 "Thinking..."），展开才画正文。
    * 所以这里不是"加在标题上"，而是占掉折叠行的位置；展开态的内容不受影响。
-   * 文案原样显示（这是插件文案，不是我们的 i18n 文案），过长截断并把全文放进 title。
+   * 文案原样显示（这是插件文案，不是我们的 i18n 文案），过长截断并把全文放进 title ——
+   * 但**只有真被截断时**才挂 title：摘要行占满剩余宽度，没截断还给 tooltip 会盖住
+   * 卡片头右侧的「展开过程」提示。
    */
   const labelText =
     typeof hiddenThinkingLabel === "string" && hiddenThinkingLabel !== ""
@@ -1269,7 +1271,7 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
         expanded={expanded}
         onToggle={() => void toggle()}
         summary={expanded ? null : (labelText ?? collapsedText)}
-        summaryTitle={expanded || labelText === null ? null : hiddenThinkingLabel}
+        summaryTitle={expanded || labelText === null || labelText === hiddenThinkingLabel ? null : hiddenThinkingLabel}
         meta={duration === undefined ? null : formatElapsedDuration(duration * 1000)}
       />
       {expanded && (

@@ -333,6 +333,12 @@ test("思考块：截断切点不劈开代理对（emoji 不会被切成半个�
   assert.equal((shown.match(/…/g) ?? []).length, 1);
 });
 
+test("思考块：标签没被截断时不挂摘要 title（免得盖住展开提示）", () => {
+  const html = renderMessage(thinkingMessage("内容"), { hiddenThinkingLabel: "检索记忆…" });
+  assert.ok(html.includes("检索记忆…"), "短标签照常显示在折叠行");
+  assert.ok(!html.includes('title="检索记忆…"'), "没截断就不该挂摘要 title");
+});
+
 test("实时工具：运行中保持折叠，折叠摘要显示快照输出的最后一行", () => {
   const html = renderMessage(toolMessage(), {
     toolExecutionSnapshots: [{
