@@ -21,6 +21,15 @@
  * 图形渲染（`components/MarkdownBody.tsx` 动态 `import("mermaid")` 出 SVG，还带预览按钮），
  * 接上链首会把代码块换成 ASCII 图、把我们更好的渲染路径挡掉。所以这里**只跑扩展转换器**。
  *
+ * **有意分块（与 TUI 的第二处差别）**：TUI 在渲染前把**连续 thinking 块**用 `\n\n` 拼成一次转换
+ * （`assistant-message.js`），把用户消息的**全部 text 块**拼成一个字符串再转、正文还会 `trim()`。
+ * 这里**逐块**转换、只跳过空白块、不 trim，理由是结构完整性：
+ * - 投影里的块与磁盘 entry 是**按下标一一对应**的 —— `getEntryThinking(sessionId, entryId, blockIndex)`
+ *   正是按这个下标回读磁盘上那块思考正文；把 N 块并成 1 块会让下标错位、按需加载取到错的块。
+ * - 一次转换后的整段文本**无法可靠拆回** N 块（转换器是任意函数）。
+ * - 投影出来的 text 同时供复制/摘录使用，`trim()` 会悄悄改内容（TUI 那里 trim 只是渲染需要）。
+ * 单块消息（绝大多数）两条路径完全一致。
+ *
  * 边界：
  * - **只读投影**：只改投影出来的文本，不写 JSONL、不执行会话动作、不唤醒 writer。
  * - 加载扩展失败 / 没有转换器 → 调用方零成本跳过（返回 null）。
@@ -168,6 +177,32 @@ function memoState(): Map<string, string> {
  * 同时清掉链缓存与单条消息记忆化，**并把共享的扩展加载缓存一起失效** —— 只清本模块的链
  * 缓存是不够的：下一次解析会从那份更外层的缓存里拿到**旧插件代码**，链看起来重建了、其实没变。
  */
+/**
+ * 转换器链的世代号：每次 `invalidateMarkdownTransformCache()` 自增。
+ *
+ * 给**活宿主**用：它缓存了一份解析好的链（流式路径是同步的，没法每次都 await），
+ * 失效之后必须知道"手里这份已经过期"，否则卸载插件后还会继续改写新消息。
+ */
+export function markdownTransformerGeneration(): number {
+  return chainCacheState().generation;
+}
+
+/**
+ * 失效通知：活宿主**缓存**了一份解析好的链（流式路径是同步的，来不及 await），
+ * 失效时它必须知道手里那份已经过期。宿主在 start 时订阅、destroy 时退订。
+ *
+ * 只是「去重解析」的通知：本身不解析，收到的一方各自按自己的 cwd 重解析
+ * （同一 cwd 的在途解析由 resolveMarkdownTransformerChain 合流，不会重复加载扩展）。
+ */
+const invalidationListeners = new Set<() => void>();
+
+export function onMarkdownTransformerInvalidate(listener: () => void): () => void {
+  invalidationListeners.add(listener);
+  return () => {
+    invalidationListeners.delete(listener);
+  };
+}
+
 export function invalidateMarkdownTransformCache(): void {
   const state = globalThis.__piPidanceMarkdownTransformerCache;
   if (state) {
@@ -177,6 +212,14 @@ export function invalidateMarkdownTransformCache(): void {
   }
   globalThis.__piPidanceMarkdownTransformMemo?.clear();
   invalidateLoadedExtensionsCache();
+  // 通知活宿主：它们手里缓存的链已经过期（见 onMarkdownTransformerInvalidate）。
+  for (const listener of [...invalidationListeners]) {
+    try {
+      listener();
+    } catch {
+      /* 单个订阅者出错不影响失效本身 */
+    }
+  }
 }
 
 /**
@@ -265,10 +308,15 @@ export function hashContent(text: string): string {
   return hash.toString(16);
 }
 
-// ── 投影窗口的变换 ────────────────────────────────────────────────────────
+// ── 渲染边界的变换（两条路径共用同一套按消息规则）──────────────────────────
+//
+// 调用点是**两条**渲染边界：
+// 1. 已落盘的投影窗口（分页后的那一段 / 首屏尾页）—— 见 session-service；
+// 2. **流式消息**（SSE 的 message_start / message_update / message_end）—— 见 sdk-session-host。
+//    进行中的助手消息还没入库，投影窗口里根本没有它，所以这条必须单独接。
 
 /** 只读取变换需要的字段，避免依赖具体消息类型。 */
-interface ProjectedMessageLike {
+interface MarkdownMessageLike {
   role?: unknown;
   content?: unknown;
 }
@@ -281,6 +329,9 @@ function transformContentBlock(
   const record = asRecord(block);
   if (!record) return { block, changed: false };
   if (record.type === "text" && typeof record.text === "string") {
+    // 与 TUI 的一处差别（有意，见文件头的分块说明）：TUI 渲染前会 `trim()` 正文并跳过空白块，
+    // 这里**只跳过空白块**、不 trim —— 投影出来的 text 同时还要给复制/摘录用，trim 会悄悄改内容。
+    if (record.text.trim() === "") return { block, changed: false };
     const next = transformMarkdownOnce({
       chain: options.chain,
       messageId: options.messageId,
@@ -307,14 +358,94 @@ function transformContentBlock(
   return { block, changed: false };
 }
 
+export interface TransformMessageOptions {
+  chain: MarkdownTransformerChain;
+  availableWidth: number;
+  /**
+   * 这条消息是否正在流式输出（SDK 调用点：流式每帧 true，结束那一帧 false）。
+   * 与 SDK 一致：**用户消息恒 false**（`user-message.js` 传的是字面量 false）。
+   */
+  isStreaming: boolean;
+  /** 记忆化用的消息 id；不给就用 `#stream`（流式帧内容每帧都变，调用方应传 useCache: false）。 */
+  messageId?: string;
+  useCache?: boolean;
+}
+
+/**
+ * 变换**一条消息**的 markdown 正文（用户消息 / 助手正文 / 助手思考）。
+ *
+ * - 用户消息 → `messageType: "user"`（`isStreaming` 恒 false）；助手正文 → `"assistant"`、
+ *   助手思考 → `"assistant-thinking"`；
+ * - 其它角色（toolResult / custom / bashExecution / branchSummary…）**不动**：
+ *   SDK 也只转换用户与助手的 markdown；
+ * - 没有任何改动时返回**原对象**（调用方据此跳过重发/重渲染）。
+ *
+ * **有意分块（与 TUI 的差别，写在文件头那节）**：TUI 把连续 thinking 用 `\n\n` 拼成一次转换、
+ * 用户消息把全部 text 块拼成一个字符串再转。这里**逐块**转换，因为投影里的块与磁盘 entry 是
+ * **按下标一一对应**的（`getEntryThinking(sessionId, entryId, blockIndex)` 就是按这个下标回读磁盘），
+ * 把 N 块并成 1 块会让下标错位、按需加载的思考正文对不上；而一次转换后的整段文本也无法可靠拆回 N 块。
+ * 单块消息（绝大多数）两条路径完全一致。
+ */
+export function transformMessageMarkdown(
+  message: unknown,
+  options: TransformMessageOptions,
+): unknown {
+  const record = asRecord(message) as MarkdownMessageLike | null;
+  const role = record?.role;
+  const messageId = options.messageId ?? "#stream";
+  const useCache = options.useCache !== false;
+
+  if (role === "user") {
+    const contextUser: MarkdownTransformContext = {
+      messageType: "user",
+      isStreaming: false,
+      availableWidth: options.availableWidth,
+    };
+    const content = record?.content;
+    if (typeof content === "string") {
+      const next = transformMarkdownOnce({ chain: options.chain, messageId, markdown: content, context: contextUser, useCache });
+      return next === content ? message : { ...(message as object), content: next };
+    }
+    if (Array.isArray(content)) {
+      let changed = false;
+      const blocks = content.map((block) => {
+        const result = transformContentBlock(block, contextUser, { chain: options.chain, messageId, useCache });
+        if (result.changed) changed = true;
+        return result.block;
+      });
+      return changed ? { ...(message as object), content: blocks } : message;
+    }
+    return message;
+  }
+
+  if (role === "assistant" && Array.isArray(record?.content)) {
+    let changed = false;
+    const blocks = record.content.map((block) => {
+      const blockRecord = asRecord(block);
+      const type = blockRecord?.type === "thinking" ? "assistant-thinking" : "assistant";
+      const result = transformContentBlock(
+        block,
+        { messageType: type, isStreaming: options.isStreaming, availableWidth: options.availableWidth },
+        { chain: options.chain, messageId, useCache },
+      );
+      if (result.changed) changed = true;
+      return result.block;
+    });
+    return changed ? { ...(message as object), content: blocks } : message;
+  }
+
+  return message;
+}
+
 /**
  * 变换一个**已经切片好的**投影上下文（分页窗口 / 首屏尾页）。
  *
+ * 只处理窗口内的消息，且**不声称任何一条在流式输出**：进行中的助手消息还没入库、
+ * 根本不在窗口里，窗口末尾通常是刚落盘的用户消息或上一条已结束的助手消息 ——
+ * 把"整轮 run 在跑"当成"这条 entry 在流式"会把它错标成流式。
+ * 真正的流式正文走 SSE 那条路径（见 transformMessageMarkdown 的调用点）。
+ *
  * - 只在给定窗口内工作（不做第二次扫盘、不碰 leaf 之外的 entry）；
- * - 用户消息 → `messageType: "user"`（`isStreaming` 恒 false，与 SDK 调用点一致）；
- *   助手正文 → `"assistant"`、助手思考 → `"assistant-thinking"`；
- * - 其它角色（toolResult / custom / bashExecution / branchSummary…）**不动**：
- *   SDK 也只转换用户与助手的 markdown；
  * - 没有任何改动时返回**原对象**（避免无谓的重渲染与内存开销）。
  */
 export function transformContextMarkdown<C>(
@@ -322,78 +453,28 @@ export function transformContextMarkdown<C>(
   options: {
     chain: MarkdownTransformerChain;
     availableWidth: number;
-    /** 正在流式输出的那条消息的 id（entryId）；其它消息按非流式处理。 */
-    streamingEntryId?: string | null;
     useCache?: boolean;
   },
 ): C {
-  if (!asRecord(context)) return context;
-  const messages = (context as { messages?: unknown }).messages;
+  const messages = (context as { messages?: unknown } | null)?.messages;
   if (!Array.isArray(messages) || messages.length === 0) return context;
   const entryIds = (context as { entryIds?: unknown }).entryIds;
   const useCache = options.useCache !== false;
   let changedAny = false;
 
   const nextMessages = messages.map((message, index) => {
-    const record = asRecord(message) as ProjectedMessageLike | null;
-    const role = record?.role;
     const entryId = Array.isArray(entryIds) && typeof entryIds[index] === "string"
       ? (entryIds[index] as string)
       : `#${index}`;
-    const isStreaming = options.streamingEntryId != null && options.streamingEntryId === entryId;
-
-    if (role === "user") {
-      const contextUser: MarkdownTransformContext = {
-        messageType: "user",
-        isStreaming: false,
-        availableWidth: options.availableWidth,
-      };
-      const content = record?.content;
-      if (typeof content === "string") {
-        const next = transformMarkdownOnce({
-          chain: options.chain,
-          messageId: entryId,
-          markdown: content,
-          context: contextUser,
-          useCache,
-        });
-        if (next === content) return message;
-        changedAny = true;
-        return { ...(message as object), content: next };
-      }
-      if (Array.isArray(content)) {
-        let changed = false;
-        const blocks = content.map((block) => {
-          const result = transformContentBlock(block, contextUser, { chain: options.chain, messageId: entryId, useCache });
-          if (result.changed) changed = true;
-          return result.block;
-        });
-        if (!changed) return message;
-        changedAny = true;
-        return { ...(message as object), content: blocks };
-      }
-      return message;
-    }
-
-    if (role === "assistant" && Array.isArray(record?.content)) {
-      let changed = false;
-      const blocks = record.content.map((block) => {
-        const blockRecord = asRecord(block);
-        const type = blockRecord?.type === "thinking" ? "assistant-thinking" : "assistant";
-        const result = transformContentBlock(
-          block,
-          { messageType: type, isStreaming, availableWidth: options.availableWidth },
-          { chain: options.chain, messageId: entryId, useCache },
-        );
-        if (result.changed) changed = true;
-        return result.block;
-      });
-      if (!changed) return message;
-      changedAny = true;
-      return { ...(message as object), content: blocks };
-    }
-
-    return message;
+    const next = transformMessageMarkdown(message, {
+      chain: options.chain,
+      availableWidth: options.availableWidth,
+      isStreaming: false,
+      messageId: entryId,
+      useCache,
+    });
+    if (next !== message) changedAny = true;
+    return next;
   });
 
   if (!changedAny) return context;

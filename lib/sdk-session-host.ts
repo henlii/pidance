@@ -136,7 +136,13 @@ import {
 } from "./send-file-to-user";
 import { DEFAULT_CUSTOM_UI_ROWS } from "./custom-ui-terminal";
 import { readComposerDraftText } from "./composer-draft-text";
-import type { MarkdownTransformer } from "./extension-markdown-transformers";
+import {
+  markdownTransformerGeneration,
+  onMarkdownTransformerInvalidate,
+  resolveMarkdownTransformerChain,
+  transformMessageMarkdown,
+  type MarkdownTransformerChain,
+} from "./extension-markdown-transformers";
 import type { BinaryMessageData, BinaryMessageInput } from "./types";
 import {
   loadPiTheme,
@@ -249,6 +255,14 @@ export type SdkSessionHostOptions = {
   cacheSessionPath?: (sessionId: string, sessionFile: string) => void;
   /** registry rekey：fork/new 替换 session 后更新 key */
   onSessionRekeyed?: (oldId: string, newId: string, host: SdkSessionHost) => void;
+  /**
+   * 插件 markdown 转换器链的解析（issue #106）。缺省按会话 cwd 从磁盘加载扩展
+   * （与 entry 渲染器同一条来源与缓存）；测试注入以避免加载真实扩展。
+   */
+  markdownChainResolver?: (options: {
+    cwd: string;
+    agentDir?: string;
+  }) => Promise<MarkdownTransformerChain | null>;
 };
 
 function asString(value: unknown): string | undefined {
@@ -297,6 +311,11 @@ export function openSessionManagerForHost(
 export class SdkSessionHost {
   private listeners: SdkEventListener[] = [];
   private runtime: AgentSessionRuntime | null = null;
+  /** markdown 转换器链缓存：世代号 + 链（issue #106，见 currentMarkdownChain）。 */
+  private markdownChain: { generation: number; chain: MarkdownTransformerChain | null } | null = null;
+  private markdownChainRefreshing: Promise<void> | null = null;
+  /** 插件失效通知的退订入口（start 订阅、destroy 退订）。 */
+  private unsubscribeMarkdownInvalidation: (() => void) | null = null;
   private unsubscribe: (() => void) | null = null;
   private extensionUi: WebExtensionUIAdapter | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -505,16 +524,7 @@ export class SdkSessionHost {
   }
 
   /**
-   * 模型是否正在流式输出一条消息（与 `isRunning` 有意区分：那个还含 bash / 压缩 / 排队中）。
-   * 只读投影用它决定 markdown 转换器的 `isStreaming`（issue #106）。
-   */
-  isStreaming(): boolean {
-    if (!this._alive || !this.runtime) return false;
-    return this.runtime.session.isStreaming === true;
-  }
-
-  /**
-   * 客户端上报的渲染列数（`set_render_size`）。只读投影用它当 markdown 转换器的
+   * 客户端上报的渲染列数（`set_render_size`）。只读投影与流式渲染都用它当 markdown 转换器的
    * `availableWidth`（issue #106）：没有上报过时就是桥的默认值 `RENDER_WIDTH`。
    */
   getRenderWidth(): number {
@@ -522,19 +532,77 @@ export class SdkSessionHost {
   }
 
   /**
-   * 本会话扩展运行时的 markdown 转换器（issue #106）。
+   * 解析并缓存本会话的 markdown 转换器链（issue #106 的渲染边界）。
    *
-   * 为什么 live 走这里而不是重新加载扩展：这些就是**插件注册时的同一批函数对象**
-   * （与 TUI 用的那份同源），不需要跑一遍扩展工厂，也不会出现「live 会话与读盘会话
-   * 拿到不同版本插件代码」的偏差。读盘会话没有宿主，改用按 cwd 加载（见 session-service）。
+   * 与只读投影**同一条来源**（按会话 cwd 从磁盘加载扩展、由 `invalidateMarkdownTransformCache()`
+   * 失效）—— 一页里不会出现「流式用旧插件、投影用新插件」两代混用。
+   * 流式路径是同步的，所以这里先把链缓存下来，失效（世代号变了）后重新解析。
    */
-  getMarkdownTransformers(): MarkdownTransformer[] {
-    const runner = this.runtime?.session?.extensionRunner as
-      | { getMarkdownTransformers?: () => unknown }
-      | undefined;
-    const transformers = runner?.getMarkdownTransformers?.();
-    if (!Array.isArray(transformers)) return [];
-    return transformers.filter((item): item is MarkdownTransformer => typeof item === "function");
+  private async refreshMarkdownChain(): Promise<void> {
+    const generation = markdownTransformerGeneration();
+    try {
+      const resolve = this.options.markdownChainResolver ?? resolveMarkdownTransformerChain;
+      const chain = await resolve({ cwd: this.realCwd, agentDir: this.agentDir });
+      this.markdownChain = { generation, chain };
+    } catch {
+      // 只读投影失败要安全降级：没有链就是不转换，绝不让事件流出错。
+      this.markdownChain = { generation, chain: null };
+    }
+  }
+
+  /**
+   * 当前该用的转换器链；没有（还没解析出来 / 刚失效正在重解析）→ null。
+   *
+   * 失效之后**先不转换**而不是继续用手里那份旧链：旧链里可能正是刚被卸载的那个插件，
+   * 继续用等于"卸载了还在改文本"。这段窗口极短（一次扩展加载），而且流式正文只是过程态 ——
+   * run 结束时投影（走磁盘链）会把最终文本改回来。
+   */
+  private currentMarkdownChain(): MarkdownTransformerChain | null {
+    const generation = markdownTransformerGeneration();
+    if (this.markdownChain && this.markdownChain.generation === generation) {
+      return this.markdownChain.chain;
+    }
+    if (!this.markdownChainRefreshing) {
+      this.markdownChainRefreshing = this.refreshMarkdownChain()
+        .catch(() => {})
+        .then(() => {
+          this.markdownChainRefreshing = null;
+        });
+    }
+    return null;
+  }
+
+  /**
+   * 流式消息的 markdown 转换（issue #106 的第二条渲染边界）。
+   *
+   * 进行中的助手消息**还没入库**（SDK 在 `message_end` 之后才 `appendMessage`），投影窗口里
+   * 根本没有它 —— 只接投影的话，整段生成（含流式思考块）都不会经过插件转换器，用户看到的
+   * 一直是原文。TUI 同样是每帧 `message_update` 都转、结束帧再以 `isStreaming: false` 转一次。
+   *
+   * 只改**发给浏览器的副本**，绝不写回 SessionManager：写回的话读盘投影会再转一次（双应用）。
+   */
+  private withTransformedMessage(event: SdkAgentEvent): SdkAgentEvent {
+    if (event.type !== "message_start" && event.type !== "message_update" && event.type !== "message_end") {
+      return event;
+    }
+    const message = (event as { message?: unknown }).message;
+    if (!message) return event;
+    try {
+      const chain = this.currentMarkdownChain();
+      if (!chain) return event;
+      const next = transformMessageMarkdown(message, {
+        chain,
+        availableWidth: this.renderWidth,
+        // 结束帧以非流式转一次（与 TUI 的最终渲染同口径）；流式中的每帧是流式。
+        isStreaming: event.type !== "message_end",
+        // 流式帧的内容每帧都在变，记忆化只会撑大表且几乎不可能命中。
+        useCache: false,
+      });
+      return next === message ? event : { ...event, message: next };
+    } catch {
+      // 转换失败不影响事件流：原文照发。
+      return event;
+    }
   }
 
   /**
@@ -2001,6 +2069,8 @@ export class SdkSessionHost {
       // （同一帧既要带上下文占用、也要带吞吐读数）。
       if (usage) eventToEmit = { ...eventToEmit, contextUsage: usage };
     }
+    // 流式消息的 markdown 转换（issue #106）：只改发给浏览器的副本。
+    eventToEmit = this.withTransformedMessage(eventToEmit);
     // 工具定义的显示元数据（label / renderShell，issue #75）：不依赖主题，
     // 因此放在渲染桥之前 —— 主题加载失败时仍然应该带上人类可读名与外壳声明。
     eventToEmit = this.withToolDisplayMeta(eventToEmit);
@@ -2430,6 +2500,13 @@ export class SdkSessionHost {
 
   async start(): Promise<void> {
     try {
+      // 先把插件 markdown 转换器链解析出来（issue #106）：流式路径要在第一个 message 事件上
+      // 就能转换，而那时来不及 await。失败不影响启动（没有链就是不转换）。
+      await this.refreshMarkdownChain();
+      // 插件增删后立刻重解析：不等下一个 message 事件（那样会有一帧按原文发）。
+      this.unsubscribeMarkdownInvalidation = onMarkdownTransformerInvalidate(() => {
+        void this.refreshMarkdownChain();
+      });
       const sessionManager = openSessionManagerForHost(
         this.realSessionFile,
         this.options.cwd,
@@ -3651,6 +3728,9 @@ export class SdkSessionHost {
   private beginDispose(): Promise<void> {
     if (this.destroyPromise) return this.destroyPromise;
     this._alive = false;
+    // 退订插件失效通知：全局订阅表不能留住已销毁的宿主。
+    this.unsubscribeMarkdownInvalidation?.();
+    this.unsubscribeMarkdownInvalidation = null;
     // 调度器的待执行定时器必须在这里清掉：销毁后再推 rendered_lines_update 会把
     // 已经不在的会话写进事件流（前端按 toolCallId 找不到宿主，只会白收事件）。
     this.toolRenderScheduler.dispose();

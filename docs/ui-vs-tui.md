@@ -179,20 +179,41 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
 `hidden ? new Text(...hiddenThinkingLabel...) : new Markdown(正文)`），未设置 / 空串 / 纯空白恢复既有的 i18n 摘要；
 标签**原样显示**（插件文案，不走 i18n），超过 60 个码点从中间截断、全文进 `title`（仅在真的截断时挂）。
 随状态下发（`state.hiddenThinkingLabel`）以便后开的页面补上，切会话与插件 `reload()` 都会重置。
-**`registerMarkdownTransformer` 也已实现**（2026-09-26，issue #106）：插件转换器在**服务端渲染边界**应用 ——
-分页 / 首屏切完窗口之后（`lib/session-service.ts` 的 `getContextPage`，以及首屏路由切完尾页调的
-`transformContextMarkdown`），以及按需加载的思考正文（`getEntryThinking`，首屏 `deferThinking` 之后正文是
-单独取回的，那条路径不接就等于带思考块的转换永远看不到）。语义逐条对齐 SDK 的 `markdown-transform.js`：
+**`registerMarkdownTransformer` 也已实现**（2026-09-26，issue #106）：插件转换器在**服务端渲染边界**应用，
+而且是**两条**边界，缺一条都会让转换在真实使用时看不见：
+- **已落盘的投影**：分页 / 首屏切完窗口之后（`lib/session-service.ts` 的 `getContextPage`，以及首屏路由切完尾页调的
+  `transformContextMarkdown`），加上按需加载的思考正文（`getEntryThinking`，首屏 `deferThinking` 之后正文是单独取回的）。
+- **流式消息**：SSE 的 `message_start` / `message_update` / `message_end`（`lib/sdk-session-host.ts` 的
+  `withTransformedMessage`）。进行中的助手消息**还没入库**，投影窗口里根本没有它 —— 只接第一条边界的话，
+  整段生成（含流式思考块）都不过转换器，用户看到的始终是原文，只有 run 结束后的尾页归并才纠正一次。
+  只改**发给浏览器的副本**，不写回 SessionManager（写回会让读盘投影再转一次 = 双应用）。
+语义逐条对齐 SDK 的 `markdown-transform.js`：
 链式传递（后一个拿前一个的输出）、返回非字符串忽略、**抛错只跳过这一个**（不是整条放弃）；
 上下文与 SDK 的调用点一致：用户消息 `"user"`（`isStreaming` 恒 false）、助手正文 `"assistant"`、
-助手思考 `"assistant-thinking"`，`isStreaming` 只对**正在输出的那条**为真，`availableWidth` 取客户端
-上报的渲染列数（没上报过就是渲染桥的默认宽度）。只在**切片后的窗口**内工作（不为了渲染去扫整条 leaf），
+助手思考 `"assistant-thinking"`。**`isStreaming` 只在流式边界上为真**（`message_update` 每帧 true、
+`message_end` 以 false 转一次，与 TUI 的最终渲染同口径）；**投影边界一律 false** —— 宿主暴露的
+`isStreaming()` 是**整轮 run** 的标记（SDK 的 `_isAgentRunActive`），不是「这条 entry 正在收 token」，
+拿它去标窗口末尾会把刚落盘的用户消息或上一条已结束的助手消息错标成流式（审查 P1）。
+`availableWidth` 取客户端上报的渲染列数（没上报过就是渲染桥的默认宽度）；多标签是**最后上报者胜**，
+宽度变化不会像工具行那样主动推一帧，已显示的正文要等下一次上下文拉取才重算（取舍：缓存键里带宽度，
+所以重算一定正确，只是不主动刷新）。只在**切片后的窗口**内工作（不为了渲染去扫整条 leaf），
 工具结果 / 自定义消息 / bash 输出**不动**；单条消息按 (链指纹, entryId, 内容 hash, 宽度, 流式状态, messageType)
-记忆化，插件安装 / 卸载时随扩展加载缓存一起失效。
+记忆化（流式帧内容每帧都变，那条路径不用记忆化）。
+**转换器链一律取「按 cwd 从磁盘加载的扩展」**（与 entry 渲染器、工具显示元数据同一条来源），
+**不看活宿主手里那批函数对象**：插件增删只失效模块缓存、不会重建活会话的 extension runner，
+以宿主为准的话卸载插件后这个会话会一直用旧插件的转换器改文本（一页里混两代插件，审查 P1）。
+宿主缓存了一份链供流式路径同步使用，`invalidateMarkdownTransformCache()` 会通知活宿主立刻重解析；
+失效到重解析落地之间**按原文发**（宁可原文，也不用已卸载插件的代码 —— 流式只是过程态，run 结束时投影会给出最终文本）。
 **一处有意分叉**：TUI 的链首还有 SDK 自带的 mermaid 转换器，它把 ```mermaid 代码块换成本地渲染的 **ASCII 图**
 （实测：输入 `graph TD; A-->B;` 的围栏 → 输出 `` ` ┌───┐` `` 这类行内 code span，还按 `availableWidth` 裁剪）。
 Web 端已经有**真正的图形渲染**（`components/MarkdownBody.tsx` 动态 `import("mermaid")` 出 SVG，带预览与代码回退），
-接上链首会把围栏换掉、把更好的渲染路径挡死，所以这里**只跑扩展转换器**。
+接上链首会把围栏换掉、把更好的渲染路径挡死，所以这里**只跑扩展转换器**（两条边界都不拼；
+宿主侧的护栏测试用恒等转换器断言 `mermaid` 围栏原样传下去）。
+**第二处有意分叉（分块粒度）**：TUI 渲染前把**连续 thinking 块**用 `\n\n` 拼成一次转换、把用户消息的
+**全部 text 块**拼成一个字符串再转，正文还会 `trim()`。这里**逐块**转换、只跳过空白块、不 trim ——
+投影里的块与磁盘 entry 是**按下标一一对应**的（`getEntryThinking(sessionId, entryId, blockIndex)` 按这个
+下标回读磁盘），并块会让下标错位、按需加载取到错的块；一次转换后的整段文本也无法可靠拆回 N 块；
+而投影出来的 text 同时供复制/摘录使用，`trim()` 会悄悄改内容。单块消息（绝大多数）两条路径完全一致。
 
 10. **仍存在的差异**：
    - `subagent-fleet-status`（placement `belowEditor`）是 TUI 组件，经渲染桥转成文本，里面的 `↓/← to inspect` 是终端键位。Web 侧现在改写这行：去掉键位提示段，保留 agent 数与 token 读数（`rewriteFleetStatusLines`）；整行只剩提示时不渲染该 widget。

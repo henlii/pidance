@@ -39,7 +39,7 @@ rpiv-*、pi-advisor-flow、pi-cache-optimizer 等）的实际调用确认可达�
 | 18 | `tui.stop()/start()` 是 no-op（无 warning） | `lib/custom-ui-terminal.ts` `onUnsupported` | rpiv-ask-user `state/external-editor.ts`（Ctrl+G 外部编辑器） | 不做真「让出终端」，但要给一次可见失败 | **已修**（#76）：每个实例报一次（不刷屏），调用方能看到「Web 端不支持让出终端」 |
 | 19 | `setTitle` 30s 后静默回落项目名 | `lib/window-title.ts` + `components/AppShell.tsx` | 无插件用 | 保持到切会话或下次 `setTitle` | **已修**（#76）：删掉 TTL（TUI 没有到期）；覆盖按**会话键**作废（只比 base 不够——同项目两个会话 base 相同会串）。已知差异：同会话**改名**不会清掉插件标题，只记录不实现 |
 | 20 | `registerShortcut` 无落点 | — | pi-subagents 仅当用户配置了 `foregroundDetachShortcut` | 待评估 | **暂缓**（#76 核实：本机 `settings.json` 未配置该键，不可达） |
-| 21 | `registerMarkdownTransformer` 无消费方 | — | 已装插件 0 注册 | 待评估 | **暂缓**（#76 核实：9 个已装插件 0 命中） |
+| 21 | `registerMarkdownTransformer` 无消费方 | — | 已装插件 0 注册 | **已修**（issue #106） | 两条渲染边界（投影 + 流式）都跑转换器；链只取磁盘来源、失效通知活宿主；mermaid 链首与**分块粒度**两处有意分叉（见 `docs/ui-vs-tui.md`） |
 | 22 | `Image` 组件 / 终端图片协议无落点 | `lib/custom-ui-terminal.ts` 恒 `kittyProtocolActive: false` | 已装插件 0 使用 | 待评估 | **暂缓**（#76 核实：0 命中） |
 | 23 | 对话框没有 countdown（`timeout` 只在服务端自结算） | `components/ExtensionDialog.tsx` | 已装插件无带 `timeout` 的调用 | 低 | **暂缓**（#76 核实：0 处传 `timeout`；到期已能正常关闭，缺的只是倒计时显示） |
 

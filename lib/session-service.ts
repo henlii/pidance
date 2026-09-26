@@ -30,11 +30,9 @@ import { invalidateSessionReadCache } from "./session-read-manager-cache";
 import { resolveEntryLinesProvider, resolveMessageLinesProvider } from "./extension-entry-renderers";
 import { resolveToolMetaProvider } from "./tool-display-meta";
 import {
-  createMarkdownTransformerChain,
   transformMarkdownOnce,
   resolveMarkdownTransformerChain,
   transformContextMarkdown as applyContextMarkdownTransform,
-  type MarkdownTransformer,
   type MarkdownTransformerChain,
 } from "./extension-markdown-transformers";
 import { RENDER_WIDTH } from "./tui-render-bridge";
@@ -609,20 +607,19 @@ async function resolveForeignMessageLines(
 /**
  * 解析本会话的 markdown 转换器链（issue #106）。
  *
- * live 会话直接用宿主扩展运行时的那批转换器（与 TUI 同一批**函数对象**，不额外跑一遍扩展工厂）；
- * 读盘/只读会话按会话头的 cwd 加载扩展（与 entry / 消息渲染器共用加载缓存）。
+ * **一律按会话头的 cwd 从磁盘加载扩展**（与 entry 渲染器、工具显示元数据同一条来源与同一份
+ * 缓存），**不看活宿主手里的那批函数对象**。理由（审查 P1）：
+ * - 插件安装/卸载只会失效模块缓存（`invalidateMarkdownTransformCache()`），**不会重建**活会话的
+ *   extension runner。以宿主为准的话，卸载插件后这个会话会一直用旧插件的转换器改写下文，
+ *   直到宿主销毁；而同一页里的 entry 渲染器已经换成新插件集 —— 一页里混两代插件。
+ * - 磁盘这份由 `invalidateMarkdownTransformCache()` 正确失效，卸载后立即不再应用旧转换器。
  * 任何失败 → null：调用方原样返回投影，绝不让会话读取整体失败。
  */
 async function resolveMarkdownChainForSession(
-  live: { getMarkdownTransformers?: () => MarkdownTransformer[] } | undefined,
   filePath: string | null,
   deps: Pick<SessionServiceDeps, "archiveAgentDir" | "resolveMarkdownTransformers">,
 ): Promise<MarkdownTransformerChain | null> {
   try {
-    const liveTransformers = live?.getMarkdownTransformers?.();
-    // live 会话以运行时为准（哪怕结果是空数组）：不要去磁盘再加载一遍 —— 两边的插件
-    // 可能不是同一份代码，链的内容也会跟着漂。
-    if (Array.isArray(liveTransformers)) return createMarkdownTransformerChain(liveTransformers);
     if (!filePath) return null;
     const cwd = readSessionHeader(filePath)?.cwd;
     if (!cwd) return null;
@@ -633,42 +630,30 @@ async function resolveMarkdownChainForSession(
   }
 }
 
-/** 窗口里最后一条消息的 entryId —— 流式输出中的那条一定在窗口末尾。 */
-function lastWindowEntryId(context: unknown): string | null {
-  if (!context || typeof context !== "object") return null;
-  const ids = (context as { entryIds?: unknown }).entryIds;
-  const messages = (context as { messages?: unknown }).messages;
-  if (!Array.isArray(ids) || !Array.isArray(messages) || messages.length === 0) return null;
-  const id = ids[messages.length - 1];
-  return typeof id === "string" ? id : null;
-}
-
 /**
  * 对**已经切片好的**投影窗口应用 markdown 转换器（issue #106 的渲染边界）。
  *
  * 只在这个窗口内工作（不再扫盘、不碰 leaf 之外的 entry）；没有链时原样返回同一对象。
- * `availableWidth` 用客户端上报的渲染列数（没上报过就是桥的默认宽度），
- * `streamingEntryId` 只在宿主正在流式输出时给最后一条消息 —— 与 SDK 的
- * `createMarkdownTransform("assistant", this.isStreaming, ...)` 同口径。
+ * `availableWidth` 用客户端上报的渲染列数（没上报过就是桥的默认宽度）。
+ *
+ * **不声称任何一条在流式输出**：宿主暴露的 `isStreaming()` 是**整轮 run** 的标记
+ * （SDK 的 `_isAgentRunActive`），而进行中的那条助手消息还没入库、不在窗口里 ——
+ * 拿它去标窗口末尾会把刚落盘的用户消息或上一条已结束的助手消息错标成流式。
+ * 真正的流式正文由 SSE 那条渲染边界负责（见 sdk-session-host 的 withTransformedMessage）。
  */
 async function applyMarkdownTransformToContext(
   context: unknown,
   options: {
-    live: {
-      getMarkdownTransformers?: () => MarkdownTransformer[];
-      getRenderWidth?: () => number;
-      isStreaming?: () => boolean;
-    } | undefined;
+    live: { getRenderWidth?: () => number } | undefined;
     filePath: string | null;
     deps: Pick<SessionServiceDeps, "archiveAgentDir" | "resolveMarkdownTransformers">;
   },
 ): Promise<unknown> {
-  const chain = await resolveMarkdownChainForSession(options.live, options.filePath, options.deps);
+  const chain = await resolveMarkdownChainForSession(options.filePath, options.deps);
   if (!chain) return context;
   return applyContextMarkdownTransform(context, {
     chain,
     availableWidth: options.live?.getRenderWidth?.() ?? RENDER_WIDTH,
-    streamingEntryId: options.live?.isStreaming?.() === true ? lastWindowEntryId(context) : null,
   });
 }
 
@@ -1319,7 +1304,8 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         };
       }
       // 渲染边界（issue #106）：**切片之后**才应用插件 markdown 转换器，所以只处理这一页，
-      // 不会为了渲染去扫整条 leaf。
+      // 不会为了渲染去扫整条 leaf。进行中的那条助手消息不在这里（它还没入库），
+      // 走 SSE 那条边界。
       const transformed = await applyMarkdownTransformToContext(context, {
         live: service.getLive(sessionId),
         filePath: view.filePath,
@@ -1351,10 +1337,9 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       const text = getThinkingText(block);
       // 思考正文的 markdown 渲染入口（issue #106）：首屏 deferThinking 之后正文是按需取回的，
       // 转换器必须在这里补齐，否则带思考块的插件转换在那条路径上永远看不到（投影里正文是空的）。
-      // `isStreaming` 恒 false：会走到这里的都是已结束的历史块；正在流式输出的那条正文不 defer，
-      // 走投影路径（那里带真实 isStreaming）。
-      const live = service.getLive(sessionId);
-      const chain = await resolveMarkdownChainForSession(live, view.filePath, deps);
+      // `isStreaming` 恒 false：会走到这里的都是**已落盘的历史块**；正在流式输出的正文不 defer、
+      // 也还没入库，它走 SSE 那条渲染边界（sdk-session-host 的 withTransformedMessage）。
+      const chain = await resolveMarkdownChainForSession(view.filePath, deps);
       if (!chain) return { thinking: text };
       return {
         thinking: transformMarkdownOnce({
@@ -1364,7 +1349,7 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
           context: {
             messageType: "assistant-thinking",
             isStreaming: false,
-            availableWidth: live?.getRenderWidth?.() ?? RENDER_WIDTH,
+            availableWidth: service.getLive(sessionId)?.getRenderWidth?.() ?? RENDER_WIDTH,
           },
         }),
       };
