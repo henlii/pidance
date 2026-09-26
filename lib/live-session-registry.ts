@@ -257,8 +257,17 @@ export function getRunningStartedAtTable(
   return table;
 }
 
+/**
+ * 侧栏「运行中」徽标 / 计时 / running SSE 的 id 集合。
+ *
+ * 与 {@link getRunningRpcSessionIds} 的区别：**只算「真的有一轮在跑」**，
+ * 不含仅处于「host 启动中（starting）」的会话 —— 打开/唤起 host 不该让侧栏点亮运行中
+ * （用户实测：点一个空闲会话会让它在运行集里待约 2.5 秒，正是 host 启动的时长）。
+ * 发送侧的「冷启动窗口」由客户端自己的乐观标记（catalogStore.markStarting）负责，
+ * 不依赖这里。
+ */
 export function getRunningSessionIds(): string[] {
-  return getRunningRpcSessionIds();
+  return getLocalActuallyRunningIds();
 }
 
 function getRunningListeners(): Set<(ids: string[]) => void> {
@@ -345,7 +354,8 @@ function syncOwnedRunningLeases(): void {
 
 export function notifyRunningChange(): void {
   syncOwnedRunningLeases();
-  const ids = getRunningRpcSessionIds();
+  // 与侧栏同一套（不含仅 starting），见 getRunningSessionIds 的注释。
+  const ids = getRunningSessionIds();
   const pending = listPendingExtensionUi();
   // 未读只看「真的在跑」的集合，不看含 starting 的运行集（只打开会话不该产生未读）。
   const actuallyRunning = getLocalActuallyRunningIds();

@@ -40,6 +40,7 @@ import {
   getRpcSession,
   waitForSessionStart,
   getRunningRpcSessionIds,
+  getRunningSessionIds,
   listPendingExtensionUi,
   startRpcSession,
   subscribeRunningSessions,
@@ -237,6 +238,8 @@ export type SessionServiceDeps = {
     navigationActions?: NavigationActions,
   ) => Promise<{ session: LiveAgentSession; realSessionId: string }>;
   getRunningRpcSessionIds: () => string[];
+  /** 仅「真的在跑」的会话（不含仅 host 启动）；侧栏徽标/计时/SSE 用这套。 */
+  getRunningSessionIds: () => string[];
   listPendingExtensionUi: () => PendingExtensionUi[];
   subscribeRunningSessions: (listener: (ids: string[]) => void) => () => void;
   allowFileRoot: (root: string) => void;
@@ -292,6 +295,7 @@ const defaultDeps: SessionServiceDeps = {
   waitForSessionStart,
   startRpcSession,
   getRunningRpcSessionIds,
+  getRunningSessionIds,
   listPendingExtensionUi,
   subscribeRunningSessions,
   allowFileRoot,
@@ -802,7 +806,8 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         sessions: active,
         archivedSessions: archived,
         archivedCount: archived.length,
-        runningSessionIds: deps.getRunningRpcSessionIds(),
+        // 与徽标同源：不含仅 host 启动的会话。
+        runningSessionIds: deps.getRunningSessionIds(),
       };
     },
 
@@ -1584,12 +1589,13 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
     },
 
     getRunningIds() {
-      return deps.getRunningRpcSessionIds();
+      // 侧栏徽标：只算「真的在跑」（不含仅 host 启动，见 live-session-registry 的注释）。
+      return deps.getRunningSessionIds();
     },
 
     getRunningStartedAt() {
-      // 仅本轮正在执行的会话：running-state（发送时间）优先，starting 补齐。
-      const runningIds = new Set(deps.getRunningRpcSessionIds());
+      // 仅本轮正在执行的会话：running-state（发送时间）优先；不算仅 host 启动的（与徽标同源）。
+      const runningIds = new Set(deps.getRunningSessionIds());
       const merged: Record<string, number> = {};
       for (const [id, startedAt] of readRunningStartedAt()) {
         if (runningIds.has(id)) merged[id] = startedAt;
