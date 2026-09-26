@@ -27,6 +27,9 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const exec = promisify(execFile);
 const URL_BASE = process.env.PIDANCE_TEST_URL ?? "http://127.0.0.1:31416";
@@ -79,7 +82,7 @@ async function waitForShell({ attempts = 8, stepMs = 1500 } = {}) {
  * 用例入口：切到一个**独立**的 agent-browser 会话并把它带到「可开始操作」的状态。
  * 统一设桌面视口（1280×720）——各用例需要的尺寸自己再设，否则会沿用浏览器默认（可能落到移动断点）。
  */
-async function beginCase(label) {
+async function beginCase(label, { prefsMock = false } = {}) {
   if (previousSession && previousSession !== SESSION) {
     // 先登出再关浏览器：登出会删掉该设备记录（#62），否则每次跑用例都留一条 10 年期记录
     await logoutCurrentSession(previousSession);
@@ -89,7 +92,11 @@ async function beginCase(label) {
   previousSession = SESSION;
   // 清掉上一轮失败可能留下的同名会话，保证是全新实例（干净 localStorage/cookie）。
   await ab(["close", SESSION], { json: false }).catch(() => {});
-  await ab(["open", URL_BASE, "--session", SESSION], { json: false }).catch(() => {});
+  // init script 必须在**首次导航之前**注册：注册后对这个会话的后续导航都生效。
+  await ab(["open", URL_BASE, "--session", SESSION], {
+    json: false,
+    env: prefsMock ? initScriptEnv(prefsMockScript()) : null,
+  }).catch(() => {});
   await ensureAuthed();
   await ab(["set", "viewport", "1280", "720", "--session", SESSION], { json: false }).catch(() => {});
   const ready = await waitForShell();
@@ -113,9 +120,13 @@ async function clearSessionUnreadClock(id) {
 
 
 /** 运行 agent-browser 命令并解析 JSON 输出。 */
-async function ab(args, { json = true } = {}) {
+async function ab(args, { json = true, env = null } = {}) {
   const cmd = ["agent-browser", ...(json ? ["--json"] : []), ...args];
-  const { stdout } = await exec(cmd[0], cmd.slice(1), { maxBuffer: 64 * 1024 * 1024 });
+  // env：agent-browser 的 init script 是**按环境变量在会话首次导航前注册**的（见 prefsMockScript）。
+  const { stdout } = await exec(cmd[0], cmd.slice(1), {
+    maxBuffer: 64 * 1024 * 1024,
+    ...(env ? { env: { ...process.env, ...env } } : {}),
+  });
   if (!json) return stdout.trim();
   try {
     return JSON.parse(stdout);
@@ -127,6 +138,60 @@ async function ab(args, { json = true } = {}) {
 async function abSync(args) {
   const cmd = ["agent-browser", ...args];
   return execFileSync(cmd[0], cmd.slice(1), { maxBuffer: 64 * 1024 * 1024, encoding: "utf8" });
+}
+
+/**
+ * B4 的偏好注入通道（issue #94）。
+ *
+ * 为什么不用 `network route --body`：本机 harness（agent-browser 0.27.0）上它**不生效** ——
+ * 实测装好 route 后，页面自己的 fetch 在**同一文档**与**导航之后的文档**里拿到的都还是真响应
+ * （`--abort` 才生效），于是 B4 的控制项长期空转。
+ *
+ * 改成导航前注册一个 init script 包装 `window.fetch`：
+ *   - **只拦 GET `/api/preferences`**：PUT 必须照走服务端，否则「客户端整包回写」（#62）就检测不到了；
+ *   - 载荷放在 localStorage（键见 PREFS_MOCK_KEY）：默认不写 = 原样透传，想注入时写一次即可，
+ *     **不必重新注册**（init script 对同一 agent-browser 会话的所有后续导航都生效）；
+ *   - 命中次数记在 `window.__pidancePrefsMockHits`，供控制项断言「通道真的被页面用上了」。
+ */
+const PREFS_MOCK_KEY = "pidance:qa-prefs-mock";
+let prefsMockScriptPath = null;
+function prefsMockScript() {
+  if (prefsMockScriptPath) return prefsMockScriptPath;
+  const file = join(tmpdir(), `pidance-prefs-mock-${process.pid}.js`);
+  writeFileSync(file, [
+    "(() => {",
+    `  const KEY = "${PREFS_MOCK_KEY}";`,
+    "  const orig = window.fetch;",
+    "  window.__pidancePrefsMockHits = 0;",
+    "  window.fetch = function (input, init) {",
+    "    try {",
+    "      const url = typeof input === 'string' ? input : (input && input.url) || '';",
+    "      const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();",
+    "      if (method === 'GET' && new URL(url, location.href).pathname === '/api/preferences') {",
+    "        const raw = localStorage.getItem(KEY);",
+    "        if (raw) {",
+    "          window.__pidancePrefsMockHits += 1;",
+    "          return Promise.resolve(new Response(raw, { status: 200, headers: { 'content-type': 'application/json' } }));",
+    "        }",
+    "      }",
+    "    } catch (e) { /* 包装失败就退回真 fetch，别把页面弄坏 */ }",
+    "    return orig.apply(this, arguments);",
+    "  };",
+    "})();",
+    "",
+  ].join("\n"), "utf8");
+  prefsMockScriptPath = file;
+  return file;
+}
+function removePrefsMockScript() {
+  if (!prefsMockScriptPath) return;
+  try { rmSync(prefsMockScriptPath, { force: true }); } catch { /* 删不掉不影响用例 */ }
+  prefsMockScriptPath = null;
+}
+/** 把 init script 追加进 AGENT_BROWSER_INIT_SCRIPTS（逗号分隔的**路径**列表；传内联代码无效）。 */
+function initScriptEnv(path) {
+  const existing = process.env.AGENT_BROWSER_INIT_SCRIPTS;
+  return { AGENT_BROWSER_INIT_SCRIPTS: existing ? `${existing},${path}` : path };
 }
 
 /**
@@ -1150,7 +1215,8 @@ test("A1/A2/A3/D6：运行中会话的列表运行态与时长、硬刷新恢复
 });
 
 test("B4：未读时钟跨端（服务端记 completedAt、各端记 readAt，取并集判定未读）", { timeout: 300_000 }, async () => {
-  await beginCase("b4");
+  // 本用例要注入服务端偏好：把 fetch 包装通道在**首次导航前**注册好（见 prefsMockScript）。
+  await beginCase("b4", { prefsMock: true });
   // #28 待办二 B4 + #65：未读时钟**跨端** —— 服务端在 run 结束时记 completedAt，各端打开会话时
   // 记 readAt，未读 ⟺ completedAt > readAt。三层断言：
   //   1) 正例：run 完成后显示未读，且**服务端**记下了 completedAt（不依赖任何浏览器开着）；
@@ -1177,6 +1243,16 @@ test("B4：未读时钟跨端（服务端记 completedAt、各端记 readAt，�
     });
     assert.equal(res.ok, true, `还原共享偏好失败（HTTP ${res.status}）`);
   };
+  /**
+   * 装上/卸下注入载荷（下一次导航生效）。
+   * 不装时 init script 透传真响应，所以用例前半段完全不受影响；
+   * 载荷放 localStorage 而不是重新注册脚本，才能在同一会话里换 3a/3b 两份不同的时钟。
+   * 定义在**用例体作用域**：外层的 finally 也要能卸下载荷。
+   */
+  const armPrefsMock = (payload) =>
+    evalResult(`(() => { localStorage.setItem(${JSON.stringify(PREFS_MOCK_KEY)}, ${JSON.stringify(JSON.stringify(payload))}); return true; })()`);
+  const disarmPrefsMock = () =>
+    evalResult(`(() => { try { localStorage.removeItem(${JSON.stringify(PREFS_MOCK_KEY)}); } catch {} return true; })()`);
   // 本地缓存 2026-09-21 起是**时钟 JSON**（#65：未读改跨端），不再是不带时间戳的 id 列表
   const unreadProbe = (id) => `(() => {
     const zh = String(document.documentElement.lang || "").toLowerCase().startsWith("zh");
@@ -1194,6 +1270,7 @@ test("B4：未读时钟跨端（服务端记 completedAt、各端记 readAt，�
       localCompleted: Boolean(clock && clock.completedAt && clock.completedAt["${id}"]),
       localRead: Boolean(clock && clock.readAt && clock.readAt["${id}"]),
       lang: document.documentElement.lang || null,
+      mockHits: Number(window.__pidancePrefsMockHits || 0),
     };
   })()`;
   /** 服务端未读时钟（#65：completedAt 由服务端写、readAt 由各端写）。 */
@@ -1345,18 +1422,19 @@ test("B4：未读时钟跨端（服务端记 completedAt、各端记 readAt，�
         }))()`);
         assert.fail(`${label}: 测试会话未出现在侧栏 diag=${JSON.stringify(diag)}`);
       }
-      // 控制项之二：被 mock 的 /api/preferences 确实被页面请求过
-      const requests = await ab(["network", "requests", "--json", "--session", SESSION]);
-      const list = requests?.data?.requests ?? requests?.data ?? [];
-      const hit = Array.isArray(list) && list.some((item) => String(item?.url ?? "").includes("/api/preferences"));
-      assert.equal(hit, true, `${label}: 页面没有请求 /api/preferences（mock 未被使用，本步空转）`);
+      // 控制项之二：注入通道确实**被页面用上了**（init script 的 fetch 包装命中过）。
+      // 不能再用 `network requests` 判断：包装器直接返回 Response，根本不发网络请求（这正是它的作用）。
+      assert.ok(
+        Number(fresh?.mockHits || 0) > 0,
+        `${label}: 页面没有走到注入的偏好通道（mock 未被使用，本步空转）hits=${fresh?.mockHits}`,
+      );
       return fresh;
     };
 
     // ── 3a) 跨端未读：服务端说「完成晚于阅读」→ 新设备必须显示未读 ──
     // （#65 之前这里是反过来的：未读只活在本机，服务端的时钟必须被忽略。语义已按产品决定反转。）
     const completedNow = new Date().toISOString();
-    await ab(["network", "route", `${URL_BASE}/api/preferences`, "--body", JSON.stringify(unreadPayload({ completedAt: { [createdId]: completedNow }, readAt: {} })), "--session", SESSION], { json: false });
+    await armPrefsMock(unreadPayload({ completedAt: { [createdId]: completedNow }, readAt: {} }));
     try {
       const freshUnread = await probeFreshDevice("3a 跨端未读", "completed");
       assert.equal(
@@ -1365,13 +1443,13 @@ test("B4：未读时钟跨端（服务端记 completedAt、各端记 readAt，�
         `新设备没有显示服务端记录的未读（跨端未读不成立：未读又只活在本机）probe=${JSON.stringify(freshUnread)}`,
       );
     } finally {
-      await ab(["network", "unroute", `${URL_BASE}/api/preferences`, "--session", SESSION], { json: false }).catch(() => {});
+      await disarmPrefsMock().catch(() => {});
     }
 
     // ── 3b) 跨端已读：服务端说「阅读晚于完成」→ 新设备不得显示未读 ──
     const completedOld = new Date(Date.now() - 60_000).toISOString();
     const readNewer = new Date().toISOString();
-    await ab(["network", "route", `${URL_BASE}/api/preferences`, "--body", JSON.stringify(unreadPayload({ completedAt: { [createdId]: completedOld }, readAt: { [createdId]: readNewer } })), "--session", SESSION], { json: false });
+    await armPrefsMock(unreadPayload({ completedAt: { [createdId]: completedOld }, readAt: { [createdId]: readNewer } }));
     try {
       const freshRead = await probeFreshDevice("3b 跨端已读", "read");
       assert.equal(
@@ -1380,7 +1458,7 @@ test("B4：未读时钟跨端（服务端记 completedAt、各端记 readAt，�
         "另一台设备已读的会话在新设备上仍显示未读（跨端已读不成立）",
       );
     } finally {
-      await ab(["network", "unroute", `${URL_BASE}/api/preferences`, "--session", SESSION], { json: false }).catch(() => {});
+      await disarmPrefsMock().catch(() => {});
     }
     // 共享偏好是用户数据：本用例跑完必须与跑前逐字一致（曾经因为 mock 缺字段把项目列表清空过）。
     const afterPrefsRes = await fetch(`${URL_BASE}/api/preferences`, { headers: AUTH_HEADER });
@@ -1412,7 +1490,8 @@ test("B4：未读时钟跨端（服务端记 completedAt、各端记 readAt，�
       "跑完没能还原共享的项目列表",
     );
   } finally {
-    await ab(["network", "unroute", "--session", SESSION], { json: false }).catch(() => {});
+    await disarmPrefsMock().catch(() => {});
+    removePrefsMockScript();
     // 兜底：断言失败（例如还原断言自己红了）时也要把注入字段还原，别把用户的偏好留在脏状态。
     await restoreSharedPrefs().catch(() => {});
     if (createdId) {
