@@ -18,9 +18,17 @@ import {
   loadPiTheme,
   onPiThemeChange,
   RENDER_WIDTH,
+  renderMountedComponentOutput,
   renderWidgetComponentLines,
 } from "./tui-render-bridge";
-import type { CustomPanelBounds, CustomPanelFocus, ExtensionUiCustomLayout } from "./types";
+import { sameImageFallbacks, sameRenderedImages, type RenderedImage, type RenderedImageFallback } from "./kitty-image";
+import type {
+  CustomPanelBounds,
+  CustomPanelFocus,
+  ExtensionRenderedImage,
+  ExtensionRenderedImageFallback,
+  ExtensionUiCustomLayout,
+} from "./types";
 import {
   buildCompletionChain,
   classifyCompletionSuggestions,
@@ -783,6 +791,8 @@ export function createWebExtensionUIAdapter(
       method: "setWidget",
       widgetKey: key,
       widgetLines: undefined,
+      widgetImages: [],
+      widgetImageFallbacks: undefined,
       widgetPlacement: placement,
       widgetInteractive: false,
     });
@@ -811,22 +821,34 @@ export function createWebExtensionUIAdapter(
     let component: unknown;
     let scheduled = false;
     let interactive = false;
+    /** 上一次**推给前端**的图片：没变就不重发 base64（几百 KB × 每帧会很贵）。 */
+    let publishedImages: RenderedImage[] | undefined;
+    /** 降级说明同理：没变就省略；变空要显式发空数组（缺省 = 与上一帧相同）。 */
+    let publishedFallbacks: RenderedImageFallback[] | undefined;
 
     const publish = () => {
       scheduled = false;
       // 已被替换或卸载：丢弃这帧，避免把旧 widget 写回去
       if (widgetFactories.get(key) !== entry) return;
-      const lines = renderWidgetComponentLines(component, renderWidth);
-      if (lines === null) return;
+      const output = renderMountedComponentOutput(component, renderWidth);
+      if (output === null) return;
+      const { lines, images, fallbacks: imageFallbacks } = output;
       // 前端只对 `interactive` 的 widget 挂点击处理：没实现 handleMouse 的组件
       // 不该为每次点击付一次往返（全局能力提示里也说的是「鼠标只在实现了才送达」）。
-      widgets.set(key, { lines, placement, interactive });
+      widgets.set(key, { lines, images, imageFallbacks, placement, interactive });
+      // 图片没变时省略字段（客户端保留上一帧的图）；变了就把新数组发过去（空数组表示「图没了」）。
+      const imagesChanged = !sameRenderedImages(publishedImages, images);
+      if (imagesChanged) publishedImages = images;
+      const fallbacksChanged = !sameImageFallbacks(publishedFallbacks, imageFallbacks);
+      if (fallbacksChanged) publishedFallbacks = imageFallbacks;
       emit({
         type: "extension_ui_request",
         id: randomUUID(),
         method: "setWidget",
         widgetKey: key,
         widgetLines: lines,
+        widgetImages: imagesChanged ? images : undefined,
+        widgetImageFallbacks: fallbacksChanged ? imageFallbacks : undefined,
         widgetPlacement: placement,
         widgetInteractive: interactive,
       });
@@ -1274,6 +1296,8 @@ export function createWebExtensionUIAdapter(
         };
         // 最后一次渲染的行：hidden 切换时要把完整状态重发一遍（前端按事件整体替换）
         let lastLines: string[] = [];
+        let lastImages: ExtensionRenderedImage[] = [];
+        let lastImageFallbacks: ExtensionRenderedImageFallback[] = [];
         let hidden = false;
         /** 焦点三态（见 CustomPanelFocus）：默认面板持有。 */
         let focusState: CustomPanelFocus = nonCapturing ? "editor" : "panel";
@@ -1291,6 +1315,8 @@ export function createWebExtensionUIAdapter(
             id,
             method: "custom",
             lines: lastLines,
+            ...(lastImages.length > 0 ? { images: lastImages } : {}),
+            ...(lastImageFallbacks.length > 0 ? { imageFallbacks: lastImageFallbacks } : {}),
             focus: focusState,
             ...(hidden ? { hidden } : {}),
             ...(layout ? { layout } : {}),
@@ -1300,6 +1326,8 @@ export function createWebExtensionUIAdapter(
           customSnapshot = {
             id,
             lines: [...lastLines],
+            ...(lastImages.length > 0 ? { images: lastImages } : {}),
+            ...(lastImageFallbacks.length > 0 ? { imageFallbacks: lastImageFallbacks } : {}),
             focus: focusState,
             ...(hidden ? { hidden } : {}),
             ...(layout ? { layout } : {}),
@@ -1307,16 +1335,24 @@ export function createWebExtensionUIAdapter(
         };
         const emitLines = () => {
           if (doneCalled) return;
+          // 走渲染桥的 output 版本：面板组件里的 pi-tui Image 会编码成 Kitty 序列，
+          // 必须先摘成结构化图片再下发（同一次渲染的文本上限只作用于文本，见 issue #104）。
           let lines: string[] = [];
+          let images: ExtensionRenderedImage[] = [];
+          let imageFallbacks: ExtensionRenderedImageFallback[] = [];
           try {
-            const rendered = component?.render?.(renderWidth);
-            if (Array.isArray(rendered)) {
-              lines = rendered.filter((line): line is string => typeof line === "string");
+            const output = component ? renderMountedComponentOutput(component, renderWidth) : null;
+            if (output) {
+              lines = output.lines;
+              images = output.images;
+              imageFallbacks = output.fallbacks;
             }
           } catch (error) {
             console.error("[pidance] custom UI render failed:", error);
           }
           lastLines = lines;
+          lastImages = images;
+          lastImageFallbacks = imageFallbacks;
           emitCustom();
         };
         const setHidden = (value: boolean) => {

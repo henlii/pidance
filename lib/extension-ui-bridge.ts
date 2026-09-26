@@ -206,7 +206,7 @@ export function pickCapabilityNotices(
  */
 export function restoreCustomUi(
   state: ExtensionUiState,
-  active: { id?: unknown; lines?: unknown; layout?: unknown; hidden?: unknown } | null | undefined,
+  active: { id?: unknown; lines?: unknown; images?: unknown; imageFallbacks?: unknown; layout?: unknown; hidden?: unknown } | null | undefined,
 ): ExtensionUiState {
   const id = typeof active?.id === "string" && active.id ? active.id : null;
   if (!id) return state;
@@ -228,6 +228,10 @@ export function restoreCustomUi(
       id,
       method: "custom",
       lines,
+      ...(Array.isArray(active?.images) && active.images.length > 0 ? { images: active.images } : {}),
+      ...(Array.isArray(active?.imageFallbacks) && active.imageFallbacks.length > 0
+        ? { imageFallbacks: active.imageFallbacks }
+        : {}),
       ...(hidden ? { hidden } : {}),
       ...(layout ? { layout } : {}),
     } as ExtensionUiCustomRequest,
@@ -387,9 +391,21 @@ export function applyExtensionUiRequest(
         if (index === -1) return { state, effects: [] };
         return { state: { ...state, widgets: state.widgets.filter((item) => item.key !== request.widgetKey) }, effects: [] };
       }
+      // 图片字段缺省 = 「与上一帧相同」：服务端图片没变时省略 base64（几百 KB × 每帧太贵），
+      // 所以这里要保留上一帧的图；显式空数组则表示图没了，要清掉。
+      const previousImages = index === -1 ? undefined : state.widgets[index]?.images;
+      const previousFallbacks = index === -1 ? undefined : state.widgets[index]?.imageFallbacks;
+      const images = Array.isArray(request.widgetImages)
+        ? (request.widgetImages.length > 0 ? request.widgetImages : undefined)
+        : previousImages;
+      const imageFallbacks = Array.isArray(request.widgetImageFallbacks)
+        ? (request.widgetImageFallbacks.length > 0 ? request.widgetImageFallbacks : undefined)
+        : previousFallbacks;
       const item = {
         key: request.widgetKey,
         lines: request.widgetLines,
+        ...(images ? { images } : {}),
+        ...(imageFallbacks ? { imageFallbacks } : {}),
         placement: request.widgetPlacement ?? "aboveEditor",
         interactive: request.widgetInteractive === true,
       } as ExtensionWidgetItem;
@@ -400,6 +416,8 @@ export function applyExtensionUiRequest(
         current
         && current.placement === item.placement
         && current.lines === item.lines
+        && current.images === item.images
+        && current.imageFallbacks === item.imageFallbacks
         && current.interactive === item.interactive
       ) return { state, effects: [] };
       const widgets = [...state.widgets.filter((existing) => existing.key !== request.widgetKey), item];
@@ -486,7 +504,23 @@ export function applyExtensionUiRequest(
           request.focus === "editor" && state.customUi?.focus !== "editor"
             ? [{ type: "focusEditor" }]
             : [];
-        return { state: { ...state, customUi: { ...request, lines } }, effects };
+        // images / imageFallbacks 同样收口：只认数组，元素形状交给渲染层兜。
+        const images = Array.isArray(request.images) ? request.images : [];
+        const imageFallbacks = Array.isArray(request.imageFallbacks) ? request.imageFallbacks : [];
+        return {
+          state: {
+            ...state,
+            customUi: {
+              ...request,
+              lines,
+              // 显式覆盖而不是「有效才补」：展开 request 会把坏形状原样带进来，
+              // 这里按「有效数组 | undefined」收口，前端只认已知形状。
+              images: images.length > 0 ? images : undefined,
+              imageFallbacks: imageFallbacks.length > 0 ? imageFallbacks : undefined,
+            },
+          },
+          effects,
+        };
       }
     default:
       return { state, effects: [] };

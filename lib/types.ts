@@ -1,4 +1,6 @@
 // Types mirrored from pi-mono coding-agent session-manager
+import type { RenderedImage as ExtensionRenderedImage, RenderedImageFallback as ExtensionRenderedImageFallback } from "./kitty-image";
+export type { ExtensionRenderedImage, ExtensionRenderedImageFallback };
 
 export interface SessionHeader {
   type: "session";
@@ -282,6 +284,10 @@ export type ExtensionUiRequest =
       method: "setWidget";
       widgetKey: string;
       widgetLines?: string[];
+      /** 组件里的终端图片（Kitty 协议；issue #104）。 */
+      widgetImages?: ExtensionRenderedImage[];
+      /** 摘不出图的位置（可见降级说明）。 */
+      widgetImageFallbacks?: ExtensionRenderedImageFallback[];
       widgetPlacement?: "aboveEditor" | "belowEditor";
       /**
        * widget 的内容是**组件**（工厂形式）且该组件实现了 `handleMouse` 时为 true。
@@ -383,6 +389,10 @@ export type ExtensionUiRequest =
       id: string;
       method: "custom";
       lines: string[];
+      /** 面板里的终端图片（Kitty 协议；issue #104）。与 lines 一起下发，客户端按 lineIndex 摆回原位。 */
+      images?: ExtensionRenderedImage[];
+      /** 摘不出图的位置（客户端按 i18n 文案渲染可见说明，不静默丢）。 */
+      imageFallbacks?: ExtensionRenderedImageFallback[];
       closed?: boolean;
       /** 插件把面板收起了（overlay 句柄的 setHidden）：前端让位给背后的会话内容。 */
       hidden?: boolean;
@@ -467,6 +477,10 @@ export interface ExtensionStatusItem {
 export interface ExtensionWidgetItem {
   key: string;
   lines: string[];
+  /** 组件里的终端图片（Kitty 协议；issue #104）。 */
+  images?: ExtensionRenderedImage[];
+  /** 摘不出图的位置（可见降级说明）。 */
+  imageFallbacks?: ExtensionRenderedImageFallback[];
   placement: "aboveEditor" | "belowEditor";
   /**
    * 该 widget 的组件实现了 `handleMouse`（Web 侧据此决定点击要不要转发给插件）。

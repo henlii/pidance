@@ -624,6 +624,7 @@ export const zhCN: Record<TranslationKey, string> = {
   message_loadingOutput: "正在加载完整输出…",
   message_downloadFullOutput: "下载完整输出",
   message_imageAlt: "图片",
+  message_imageUnavailable: "图片无法显示（{reason}）",
   message_openImage: "打开图片",
   message_closeImage: "关闭图片",
   message_imagePreview: "图片预览",

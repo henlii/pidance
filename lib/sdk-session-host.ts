@@ -5,7 +5,12 @@
 import { randomUUID } from "node:crypto";
 // pi-tui 的默认键位表 + 解析器：SDK 的 `KeybindingsManager` 没有从包入口导出（子路径也被 exports
 // 挡住），而它的默认键位就是 pi-tui 这套定义、解析语义也由这个类负责。
-import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
+import {
+  KeybindingsManager as TuiKeybindingsManager,
+  TUI_KEYBINDINGS,
+  getCapabilities as getTuiCapabilities,
+  setCapabilities as setTuiCapabilities,
+} from "@earendil-works/pi-tui";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -166,6 +171,7 @@ import {
   renderToolCallLines,
   renderToolResultLines,
   setPiThemeConstructor,
+  setPiImageCapabilityHooks,
   setRenderBridgeWarningSink,
   setSdkThemeProbe,
   verifySdkGlobalTheme,
@@ -181,6 +187,22 @@ import { createToolRenderScheduler, pickChangedSlots } from "./tool-render-sched
  * 主题实例必须由这里（allowlist 里的 server adapter）注入 —— 见 issue #97。
  */
 setPiThemeConstructor(SdkTheme as unknown as PiThemeConstructor);
+
+/**
+ * 把 pi-tui 的**图片能力**读写钩子交给渲染桥（issue #104）。
+ *
+ * 为什么不直接置位：能力是进程全局的，长期开成 kitty 会让别的渲染路径也以为有图片能力。
+ * 渲染桥只在单次 render 期间打开、渲染完立刻还原（见 withKittyImages）。
+ * 这里注入的是 pi-tui 的真实现，因此插件里的 `getCapabilities().images` 在渲染那一刻是
+ * "kitty" —— Image 组件才会编码序列而不是退回文本说明。
+ */
+setPiImageCapabilityHooks({
+  getImages: () => getTuiCapabilities().images,
+  setImages: (value) => {
+    const current = getTuiCapabilities();
+    setTuiCapabilities({ ...current, images: value });
+  },
+});
 
 export type SdkAgentEvent = {
   type: string;

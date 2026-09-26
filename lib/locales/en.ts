@@ -624,6 +624,7 @@ export const en = {
   message_loadingOutput: "Loading full output…",
   message_downloadFullOutput: "Download full output",
   message_imageAlt: "Image",
+  message_imageUnavailable: "Image unavailable ({reason})",
   message_openImage: "Open image",
   message_closeImage: "Close image",
   message_imagePreview: "Image preview",

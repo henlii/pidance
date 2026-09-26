@@ -2,6 +2,7 @@
 
 import { Fragment, useEffect, useRef, useState } from "react";
 import { normalizeCustomPanelLines, parseAnsiLine, stripAnsi } from "@/lib/ansi";
+import { RenderedLineBlocks } from "./RenderedLines";
 import { shouldCaptureCustomPanelKey } from "@/lib/extension-panel-keys";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { buildExtensionOverlayStyle } from "@/lib/extension-overlay-layout";
@@ -253,12 +254,15 @@ export function ExtensionCustomPanel({
             if (mouse) onMouse?.(request, mouse);
           }}
         >
-          {(displayLines.length ? displayLines : [""]).map((line, index, allLines) => (
-            <Fragment key={index}>
-              {renderAnsiLine(line, `line-${index}`)}
-              {index < allLines.length - 1 ? "\n" : null}
-            </Fragment>
-          ))}
+          <RenderedLineBlocks
+            lines={displayLines.length ? displayLines : [""]}
+            images={request.images}
+            imageFallbacks={request.imageFallbacks}
+            keyPrefix="panel-line"
+            renderLine={renderAnsiLine}
+            imageAlt={t("message_imageAlt")}
+            fallbackLabel={(reason) => t("message_imageUnavailable", { reason })}
+          />
         </pre>
       </ExtensionPanelChrome>
     </div>

@@ -230,6 +230,7 @@ Web 端已经有**真正的图形渲染**（`components/MarkdownBody.tsx` 动态
 下标回读磁盘），并块会让下标错位、按需加载取到错的块；一次转换后的整段文本也无法可靠拆回 N 块；
 而投影出来的 text 同时供复制/摘录使用，`trim()` 会悄悄改内容。单块消息（绝大多数）两条路径完全一致。
 
+
 10. **仍存在的差异**：
    - `subagent-fleet-status`（placement `belowEditor`）是 TUI 组件，经渲染桥转成文本，里面的 `↓/← to inspect` 是终端键位。Web 侧现在改写这行：去掉键位提示段，保留 agent 数与 token 读数（`rewriteFleetStatusLines`）；整行只剩提示时不渲染该 widget。
    - **`tui.focusedComponent` 已注入**（2026-09-24）：客户端在输入框聚焦/失焦/切后台时上报 `editor_focus`，服务端把它投影成 `tui.focusedComponent`——有焦点时给一个**鸭子类型探针**（只有 `render`/`invalidate`/`handleInput`/`getText`/`setText` 五个 no-op 成员，见 `lib/custom-ui-terminal.ts` 的 `createEditorFocusProbe`），无焦点时 `undefined`。pi-subagents 的 fleet widget 靠它决定方向键能不能进选择态（`fleet-status.ts` 的 `editorHasFocus()`），配合第 6 条的 widget 选择态窄道即可用。焦点按**标签**（clientId）聚合：任一标签的输入框聚焦即视为聚焦，后台标签失焦不会清掉前台标签的焦点（旧实现是单槽 last-write）；每项带 60 秒 TTL，标签被直接关掉后焦点自己过期。客户端不为补报单独发请求——**窗口 ②**（widget 选择态）那条 `terminal_input` 命令带 `assertFocus`，服务端把按键交给插件**之前**先刷新焦点（拆成两条 HTTP 会乱序，表现为冷启动或过期后第一次 `↓` 不激活）。**窗口 ①/③ 故意不带**：它们成立时输入框并没有聚焦（① 是面板已被收起、③ 是用户正在跟插件界面交互），带上等于把 `tui.focusedComponent` 谎报成「主编辑器聚焦」，会骗过 pi-subagents 那类拿它当激活门槛的界面（`lib/extension-panel-keys.ts` 的模块注释里写了这条取舍）。
@@ -251,6 +252,14 @@ Web 端已经有**真正的图形渲染**（`components/MarkdownBody.tsx` 动态
    - **展开/收回，默认展开**：header 有「收回 / 展开」开关（`ExtensionPanelChrome` 的本地 state，不跨请求记忆，默认展开）。展开同时抬高面板与提问区的上限（`.extension-panel-shell--expanded`，桌面 `min(78vh, 900px)` / 窄屏 `calc(100dvh - 96px - 安全区)`，提问区 60vh / 窄屏 56vh）——**只抬面板不抬提问区等于没解决「问题显示不全」**，这条改动两侧必须成对。默认展开是安全的：`max-height` 只是上限，面板高度仍由内容决定，短提问不会因此占满屏。
    - 验收：`/tmp` 下的临时脚本 `extension-panel-readability.mjs`（CDP 拦截 `/state` 注入 `pendingExtensionRequests`，桌面 1280x900 + 窄屏 390x844 各 10 项）与单测 `components/ExtensionDialog.test.mjs` 的 CSS 契约。
 
+11. **终端内联图片（Kitty 图形协议）有落点**（2026-09-26，issue #104）：渲染期间**临时**把 `getCapabilities().images` 置成 `kitty`
+    （渲染完立刻还原 —— 能力是进程全局的，长期置位会污染别的渲染路径），插件用 pi-tui 的 `Image` 组件时才会编码出 `\x1b_G…` 序列。
+    渲染桥**先摘图、再判文本上限**：一张图的 base64 轻易超过「单行 4000 字符 / 合计 200KB」，
+    先校验的话整段渲染（含旁边的正常文本）会被一起丢掉。摘出的图随渲染结果下发（`{ id, mime, base64, cols, rows, lineIndex }`），
+    客户端按 `rows × 实测行高` 预留高度画真 `<img>`（`alt` 走 i18n 的「图片」），并把后面 `rows-1` 个占位空行跳过（否则高度会算两遍）。
+    **已有图片**：custom 面板、widget 组件。**仍是可见降级（一句文本说明）**：工具卡、页头/页脚槽位、entry 与消息投影行
+    （后两者在磁盘投影里是 `string[]`，要带图得改读写视图的形状）。摘不出图的（超过 4MB、非 PNG、分块不完整、空载荷）
+    也一律降级成说明，**不静默丢**。
 ---
 
 ## 6. 刻意分叉（不要“对齐”掉）
