@@ -219,6 +219,7 @@ export function ExtensionCustomPanel({
       >
         <textarea
           ref={inputRef}
+          data-extension-keytrap="true"
           aria-label={t("chat_extensionPanel")}
           autoCapitalize="off"
           autoComplete="off"

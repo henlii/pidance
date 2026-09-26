@@ -321,6 +321,18 @@ export function resolveExtensionSurfaceKeyAction(
  */
 export const SHELL_KEY_OWNING_SELECTOR = '[data-pidance-modal="true"]';
 
+/** 插件面板自己的键盘捕获元素（见 `ExtensionCustomPanel`）。 */
+export const EXTENSION_KEYTRAP_SELECTOR = '[data-extension-keytrap="true"]';
+
+function isExtensionSurfaceKeytrap(el: KeyTargetLike | null | undefined): boolean {
+  if (!el || typeof el.closest !== "function") return false;
+  try {
+    return el.closest(EXTENSION_KEYTRAP_SELECTOR) !== null;
+  } catch {
+    return false;
+  }
+}
+
 /** 鸭子类型的最小节点形状（这个模块的单测不开 DOM）。 */
 export interface KeyTargetLike {
   closest?: (selector: string) => unknown;
@@ -368,6 +380,11 @@ export function isDomOwnedKeyTarget(
   activeElement: KeyTargetLike | null | undefined,
 ): boolean {
   if (!target && !activeElement) return false;
+  // 插件面板自己的键盘捕获元素（keytrap）不是壳的控件：它拿焦点只是为了让按键有落点，
+  // 判成「DOM 归属」会让插件一个键都收不到（面板无法操作）。这是窗口 ③ 的主场景。
+  if (isExtensionSurfaceKeytrap(target) || isExtensionSurfaceKeytrap(activeElement)) {
+    return false;
+  }
   if (activeElement && !isRootFocus(activeElement) && target && belongsToFocused(target, activeElement)) {
     return true;
   }
