@@ -62,6 +62,7 @@ import { getSessionCapabilities } from "@/components/session-capabilities";
 import { useSessionCommands } from "@/hooks/useSessionCommands";
 import { useChatAutoFollow } from "@/hooks/useChatAutoFollow";
 import { ensureServerPrefsLoaded, setServerPref, useServerPreferences } from "@/lib/server-preferences";
+import { subscribePiThemeApplied } from "@/lib/pi-theme-signal";
 import { resolveDisplayModel, settleModelOverride } from "@/lib/model-selection";
 import { useI18n } from "@/lib/i18n";
 import { LoadFailedError, loadWithBoundedRetry } from "@/lib/load-retry";
@@ -1390,6 +1391,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setError(null);
     void loadSession(sid, true, true);
   }, [loadSession]);
+
+  /**
+   * 插件 ANSI 主题变了 → 重拉当前会话的一页（issue #109）。
+   *
+   * 为什么必须重拉：`renderedLines` 是**服务端按当时的主题**渲染好的行，浏览器手里那份
+   * 不会随主题切换自己变（widget / custom 面板 / 工具行由宿主重渲走 SSE，消息投影行没有这条通路）。
+   * 走既有 `loadSession`（tail 页）而不是新接口：只刷新窗口内那一屏，老历史按需翻页时自然带上新色。
+   * 不置 loading、不取状态：主题切换不该让界面闪一下「正在加载会话…」。
+   */
+  const refreshProjectionForTheme = useCallback(() => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    void loadSession(sid, false, false);
+  }, [loadSession]);
+
+  useEffect(() => subscribePiThemeApplied(refreshProjectionForTheme), [refreshProjectionForTheme]);
 
   /**
    * 向上滚动加载更旧历史（OpenChamber loadOlder 语义）。

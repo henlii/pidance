@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { mergeUnreadSessionState, parseUnreadSessionState } from "./unread-sessions-storage";
 import { subscribeAppEvents } from "./app-events-stream";
+import { notifyPiThemeAppliedFromPrefsPayload } from "./pi-theme-signal";
 
 export type ServerPrefs = Record<string, unknown>;
 
@@ -505,6 +506,10 @@ function startPrefsEventStream(): void {
       lastSeenRevision = payload.revision;
     }
     if (payload.changed) applyPrefChanges(payload.changed);
+    // 主题变了 → 已投影的插件渲染行还是旧色值（issue #109）。通知一次，由会话侧重拉一页。
+    // 只在这儿（远程广播）通知，不在本地 setServerPref 那一刻：服务端是「先切插件主题、再广播」，
+    // 本地那一刻早于 PUT（还防抖 400ms），拉回来仍是旧色。
+    notifyPiThemeAppliedFromPrefsPayload(payload);
   });
 }
 
