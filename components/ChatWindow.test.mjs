@@ -118,11 +118,13 @@ test("#102：插件界面显示中时按键归插件，关闭后焦点还给输�
   // #107：接管面板拿着键盘时，窗口 ① 的捕获式预抢必须让位 —— 接管面板的按键走
   // editor_component_input，适配器先过插件全局监听器（pi-tui 顺序）再进被接管的组件；
   // 被窗口 ① 抢先吃掉的话，未被消费的键就永远到不了插件编辑器。
-  assert.match(
-    hookCall,
-    /hiddenPanelRouting:[\s\S]{0,240}!editorTakeoverHoldsKeys/,
-    "接管面板拿键盘时窗口 ① 未让位（捕获阶段会吞掉未被消费的键）",
-  );
+  // 窗口 ① 的让位判据（#107 审查 次要 6）：**不再**是「接管显示就整段关掉窗口 ①」——
+  // 那样焦点在消息列表时，收起面板的白名单键既不进插件的全局监听器、也不进接管组件。
+  // 现在是「事件目标落在接管 keytrap 里才让位」，判据由 hook 侧实现（那里有行为断言）。
+  assert.match(hookCall, /takeoverKeytrap: \(\) => editorTakeoverKeytrapRef\.current/, "窗口 ① 要让位给接管 keytrap");
+  assert.ok(!hookCall.includes("editorTakeoverHoldsKeys"), "窗口 ① 不该再看「接管是否显示」整段停手");
+  assert.match(source, /const editorTakeoverKeytrapRef = useRef<Element \| null>\(null\)/, "keytrap 定位器要在渲染前备好");
+  assert.match(source, /onKeytrapElement=\{/, "接管面板要把自己的 keytrap 元素登记上来");
   assert.match(
     source,
     /const editorTakeoverHoldsKeys = editorTakeoverActive && !extensionSurfaceActive;/,

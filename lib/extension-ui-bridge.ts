@@ -381,14 +381,26 @@ export type ExtensionUiEffect =
    * 而输入框的句柄只有 useAgentSession 拿得到。
    */
   | { type: "focusEditor" }
-  | { type: "insertText"; text: string }
+  | {
+    type: "insertText";
+    text: string;
+    /** 宿主是否已把文本喂给接管组件（决定显示接管的标签该不该再送一遍）。 */
+    appliedToTakeover: boolean;
+    /** 只发给这一个标签（缺省 = 广播）；非本标签的文本事件直接忽略。 */
+    clientId?: string;
+  }
   /**
    * 插件编辑器提交了一段文本（组件声明的 `onSubmit(text)`）。
    *
    * 由客户端交给既有发送入口，**不**直连服务端：队列、写者所有权、只读判定
    * 都在那条管线里，绕过去会让这些语义各说各话。
    */
-  | { type: "editorSubmit"; text: string };
+  | {
+    type: "editorSubmit";
+    text: string;
+    /** 触发这次提交的标签；缺省 = 未知来源（由正在显示接管的标签兜底执行）。 */
+    clientId?: string;
+  };
 
 export function applyExtensionUiRequest(
   state: ExtensionUiState,
@@ -438,7 +450,14 @@ export function applyExtensionUiRequest(
       return { state: { ...state, editorTakeover: next }, effects: [] };
     }
     case "editorComponentSubmit":
-      return { state, effects: [{ type: "editorSubmit", text: request.text }] };
+      return {
+        state,
+        effects: [{
+          type: "editorSubmit",
+          text: request.text,
+          ...(typeof request.clientId === "string" && request.clientId ? { clientId: request.clientId } : {}),
+        }],
+      };
     case "notify":
       return {
         state,
@@ -557,7 +576,15 @@ export function applyExtensionUiRequest(
       };
     }
     case "set_editor_text":
-      return { state, effects: [{ type: "insertText", text: request.text }] };
+      return {
+        state,
+        effects: [{
+          type: "insertText",
+          text: request.text,
+          appliedToTakeover: request.appliedToTakeover === true,
+          ...(typeof request.clientId === "string" && request.clientId ? { clientId: request.clientId } : {}),
+        }],
+      };
     case "custom":
       if (request.closed) {
         return request.id === state.customUi?.id

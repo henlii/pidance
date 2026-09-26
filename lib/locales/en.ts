@@ -271,6 +271,7 @@ export const en = {
   /** 插件自定义编辑器（setEditorComponent）接管输入框时的标题与退出入口。 */
   chat_editorTakeover: 'Plugin editor',
   chat_editorTakeoverExit: 'Back to input box',
+  chat_editorTakeoverQueued: "{count} queued",
   chat_editorTakeoverHint: 'Keys go to the plugin editor. Press "Back to input box" to use the normal composer again.',
   chat_editorTakeoverCollapsed: 'Plugin editor is hidden; using the normal input box.',
   chat_editorTakeoverReenter: 'Use plugin editor',

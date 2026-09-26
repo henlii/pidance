@@ -38,9 +38,20 @@ export function ExtensionEditorTakeover({
   request,
   onInput,
   onExit,
+  queuedCount = 0,
+  onKeytrapElement,
   autoFocus = true,
 }: {
   request: ExtensionUiEditorComponentRequest;
+  /**
+   * 已排队（follow-up）的条数。
+   *
+   * 接管期间队列条随我们自己的输入框一起消失，但入队照旧 —— 不提示的话用户在插件编辑器里
+   * 看不到刚排进去的那条，会以为消息丢了、再发一遍。
+   */
+  queuedCount?: number;
+  /** 把 keytrap 元素交给上层：窗口 ① 的让位判据要用它（见 useExtensionTerminalInput）。 */
+  onKeytrapElement?: (element: Element | null) => void;
   onInput: (request: ExtensionUiEditorComponentRequest, data: string) => void;
   /** 「返回输入框」：本页收起接管（下次刷新/插件重设仍会回来）。 */
   onExit: () => void;
@@ -73,6 +84,12 @@ export function ExtensionEditorTakeover({
   useEffect(() => {
     if (autoFocus) inputRef.current?.focus();
   }, [request.id, autoFocus]);
+
+  useEffect(() => {
+    if (!onKeytrapElement) return;
+    onKeytrapElement(inputRef.current);
+    return () => onKeytrapElement(null);
+  }, [onKeytrapElement]);
 
   const send = (data: string) => {
     if (data) onInput(requestRef.current, data);
@@ -170,6 +187,7 @@ export function ExtensionEditorTakeover({
         </pre>
         <div style={{ fontSize: 11, color: "var(--text-dim)", padding: "4px 10px 0" }}>
           {t("chat_editorTakeoverHint")}
+          {queuedCount > 0 ? `　${t("chat_editorTakeoverQueued", { count: queuedCount })}` : ""}
         </div>
       </section>
     </div>

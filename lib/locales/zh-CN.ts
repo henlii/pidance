@@ -265,6 +265,7 @@ export const zhCN: Record<TranslationKey, string> = {
   /** 插件自定义编辑器（setEditorComponent）接管输入框时的标题与退出入口。 */
   chat_editorTakeover: '插件编辑器',
   chat_editorTakeoverExit: '返回输入框',
+  chat_editorTakeoverQueued: "已排队 {count} 条",
   chat_editorTakeoverHint: '按键交给插件编辑器。想用普通输入框时点「返回输入框」。',
   chat_editorTakeoverCollapsed: '插件编辑器已收起，当前用普通输入框。',
   chat_editorTakeoverReenter: '回到插件编辑器',

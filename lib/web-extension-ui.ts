@@ -10,6 +10,7 @@ import {
   DEFAULT_CUSTOM_UI_ROWS,
 } from "./custom-ui-terminal";
 import { getAgentDir } from "./pi-paths";
+import { asBracketedPaste } from "./terminal-input";
 import { getPidancePrefsBus } from "./pidance-prefs-bus";
 import { updatePidancePref } from "./pidance-prefs-file";
 import { listPiThemes, loadPiThemeByName, setPiTheme } from "./pi-theme-registry";
@@ -214,7 +215,24 @@ export type WebExtensionUIAdapter = {
    * 被接管的编辑器组件 —— 终端里监听器本来就在聚焦组件之前。没有接管时返回
    * `{ consumed: false }`（前端据此知道这次没有被消费）。
    */
-  dispatchEditorComponentInput: (data: string) => { consumed: boolean; data?: string };
+  dispatchEditorComponentInput: (
+    data: string,
+    /** 触发这次输入的标签（提交要按它定向，见 editorComponentSubmit 的 clientId）。 */
+    clientId?: string,
+  ) => { consumed: boolean; data?: string };
+  /**
+   * 把文本放回**当前接管组件**（组件实现了 setText 时）。
+   *
+   * 用途：提交失败/早退时把原文交回用户正看着的那块编辑器（它自己已经清空了），
+   * 以及用户重新进入接管时把输入框里的草稿灌回去。请求 id 不匹配（接管换过）则不动。
+   */
+  applyEditorTakeoverText: (requestId: string, text: string) => boolean;
+  /**
+   * 用户点了「返回输入框」：把组件里的文本交还给**这个标签**的输入框。
+   *
+   * 只发给发起标签（clientId 定向）：其它标签还显示着接管面板，不该被动改内容。
+   */
+  dismissEditorTakeover: (requestId: string, clientId?: string) => boolean;
 
   /** 按新的可用尺寸重排已挂载的插件界面（custom 面板 + widget 工厂）。 */
   setRenderSize: (size: { width: number; rows: number }) => boolean;
@@ -783,14 +801,44 @@ export function createWebExtensionUIAdapter(
   };
 
   /**
+   * 取接管组件当前的文本（TUI 的写法：`getExpandedText?.() ?? getText()`）。
+   * 取不到 / 抛错 → 空串（绝不因为一个坏组件把收尾路径炸掉）。
+   */
+  const readEditorTakeoverText = (entry: { component: unknown }): string => {
+    const component = entry.component as
+      { getExpandedText?: () => unknown; getText?: () => unknown } | null | undefined;
+    if (!component) return "";
+    try {
+      const expanded = component.getExpandedText?.();
+      if (typeof expanded === "string") return expanded;
+      const plain = component.getText?.();
+      if (typeof plain === "string") return plain;
+    } catch (error) {
+      console.warn("[pidance] extension editor component getText failed:", error);
+    }
+    return "";
+  };
+
+  /**
    * 收掉当前接管并（默认）告诉客户端恢复自己的输入框。
    *
    * `silent` 给 dispose 用：那时宿主正在销毁，没必要再发一帧。
    * 组件实现了 `dispose` 就调（TUI 里换编辑器时也是这么收尾的），抛错不影响我们摘掉它。
    */
+  /**
+   * 当前正在处理的 editor_component_input 来自哪个标签。
+   *
+   * 组件的 onSubmit 是在 handleInput 里**同步**被调的，所以用一个同步标记就能把来源带出去；
+   * 非客户端来源（插件自己调 onSubmit）保持 null，由正在显示接管的标签兜底执行。
+   */
+  let submitOriginClientId: string | null = null;
+
   const unmountEditorTakeover = (options?: { silent?: boolean }) => {
     const entry = editorTakeover;
     if (!entry) return;
+    // 组件里的文本不能随它一起消失（issue #107 审查 重要 5）：TUI 恢复默认编辑器时
+    // 也会先 `currentText = this.editor.getText()` 再灌回默认编辑器。
+    const carried = readEditorTakeoverText(entry);
     editorTakeover = null;
     customRenderers.delete(renderEditorTakeover);
     try {
@@ -800,6 +848,17 @@ export function createWebExtensionUIAdapter(
     }
     if (!options?.silent) {
       emit({ type: "extension_ui_request", id: entry.id, method: "editorComponent", closed: true });
+      // 交还给输入框：`closed` 已经先到，客户端那时不再是「正在显示接管」，
+      // 所以这条（appliedToTakeover=false）会落进可见的输入框，而不是又被送进组件。
+      if (carried) {
+        emit({
+          type: "extension_ui_request",
+          id: randomUUID(),
+          method: "set_editor_text",
+          text: carried,
+          appliedToTakeover: false,
+        });
+      }
     }
   };
 
@@ -838,6 +897,34 @@ export function createWebExtensionUIAdapter(
       ...(imagesChanged ? { images: entry.images } : {}),
       ...(fallbacksChanged ? { imageFallbacks: entry.imageFallbacks } : {}),
     });
+  };
+
+  /**
+   * 前端在插件编辑器里的输入：先过全局监听器（pi-tui 顺序），未被消费才进组件。
+   *
+   * 抽成局部函数是为了 `pasteToEditor` 也能直接调它（对象字面量里的 `this` 被推断成
+   * `ExtensionUIContext`，拿不到兄弟方法）。
+   */
+  const dispatchEditorInput = (data: string, clientId?: string): { consumed: boolean; data?: string } => {
+    const dispatched = runTerminalInputListeners(data);
+    if (dispatched.consumed) return dispatched;
+    const next = dispatched.data ?? data;
+    if (next.length === 0) return { consumed: true, data: next };
+    const entry = editorTakeover;
+    if (!entry?.component) return { consumed: false, data: next };
+    // 组件的 onSubmit 会在 handleInput 里**同步**被调，这里把来源标签放进作用域，
+    // 让随之发出的 editorComponentSubmit 只被这个标签执行（多标签不重复发送）。
+    const previousOrigin = submitOriginClientId;
+    submitOriginClientId = clientId ?? null;
+    try {
+      entry.component.handleInput?.(next);
+    } catch (error) {
+      console.warn("[pidance] extension editor component input failed:", error);
+    } finally {
+      submitOriginClientId = previousOrigin;
+    }
+    renderEditorTakeover();
+    return { consumed: true, data: next };
   };
 
   /**
@@ -895,6 +982,9 @@ export function createWebExtensionUIAdapter(
           id: entry.id,
           method: "editorComponentSubmit",
           text: typeof text === "string" ? text : String(text ?? ""),
+          // 提交只该由**敲字的那个标签**执行（见 lib/types.ts）。这个来源在
+          // dispatchEditorComponentInput 里同步捕获 —— onSubmit 就是在它里面被调的。
+          ...(submitOriginClientId ? { clientId: submitOriginClientId } : {}),
         });
       };
       // onChange 在 TUI 里驱动的是应用自己的记账（默认编辑器那边是「bash 模式」判定）。
@@ -1752,6 +1842,14 @@ export function createWebExtensionUIAdapter(
       });
     },
     pasteToEditor(text) {
+      // TUI 把两者分开（interactive-mode）：`pasteToEditor` 是把带括号粘贴标记的文本喂进
+      // **当前编辑器**的 `handleInput`，只有 `setEditorText` 才是 `setText`。
+      // 接管期间「当前编辑器」就是插件组件 → 走 handleInput，否则会把整段文本当成
+      // 「替换全部内容」覆盖掉组件里的内容，而不是插进光标处。
+      if (editorTakeover?.component) {
+        dispatchEditorInput(asBracketedPaste(text));
+        return;
+      }
       this.setEditorText(text);
     },
     setEditorText(text) {
@@ -1760,36 +1858,35 @@ export function createWebExtensionUIAdapter(
       // 组件漏实现 setText 时退回客户端路径（前端按粘贴送进接管面板），仍然不是静默丢。
       const takeoverComponent = editorTakeover?.component as { setText?: unknown } | null | undefined;
       const setText = takeoverComponent?.setText;
+      let applied = false;
       if (takeoverComponent && typeof setText === "function") {
         try {
           (setText as (value: string) => void).call(takeoverComponent, text);
           renderEditorTakeover();
-          return;
+          applied = true;
         } catch (error) {
           console.warn("[pidance] extension editor component setText failed:", error);
         }
       }
+      // **一律广播**（issue #107 审查 重要 4）：显示接管的标签靠 appliedToTakeover 知道
+      // 组件已经拿到了（不该再当粘贴送一遍），而**没在显示**接管的标签（手机、设置关掉、
+      // 用户点过「返回输入框」）本来就看不到组件里的字，必须落进它们可见的输入框 ——
+      // 否则「组件实现了 setText」就等于把这些用户变成收不到字的人。
       emit({
         type: "extension_ui_request",
         id: randomUUID(),
         method: "set_editor_text",
         text,
+        appliedToTakeover: applied,
       });
     },
     getEditorText() {
       // 接管期间「core input editor」就是**插件组件**：与 TUI 一致（`editor.getExpandedText?.() ?? editor.getText()`）
       // 回传它的文本 —— 否则 pi-subagents 一类插件会拿旧草稿去判断「输入框是否为空」，判断错人。
-      const takeoverComponent = editorTakeover?.component as
-        { getExpandedText?: () => unknown; getText?: () => unknown } | null | undefined;
-      if (takeoverComponent) {
-        try {
-          const expanded = takeoverComponent.getExpandedText?.();
-          if (typeof expanded === "string") return expanded;
-          const plain = takeoverComponent.getText?.();
-          if (typeof plain === "string") return plain;
-        } catch (error) {
-          console.warn("[pidance] extension editor component getText failed:", error);
-        }
+      const takeoverEntry = editorTakeover;
+      if (takeoverEntry) {
+        const carried = readEditorTakeoverText(takeoverEntry);
+        if (carried) return carried;
       }
       // SDK 契约（core/extensions/types.d.ts:134）："Get the current text from the
       // core input editor." Web 的「core input editor」是浏览器里的 React 输入框，
@@ -2060,20 +2157,49 @@ export function createWebExtensionUIAdapter(
      * 组件的 `handleInput` 抛错不往上抛（一个坏组件不该让整个按键通道炸掉），
      * 但会重渲一帧——插件可能已经在自己内部改过状态。
      */
-    dispatchEditorComponentInput(data) {
-      const dispatched = runTerminalInputListeners(data);
-      if (dispatched.consumed) return dispatched;
-      const next = dispatched.data ?? data;
-      if (next.length === 0) return { consumed: true, data: next };
+    dispatchEditorComponentInput(data, clientId) {
+      return dispatchEditorInput(data, clientId);
+    },
+
+    /**
+     * 把文本放回当前接管组件（提交失败回填 / 重新进入时灌草稿）。
+     * 请求 id 不匹配（接管已经换过）或组件没有 setText → false，调用方据此决定兜底。
+     */
+    applyEditorTakeoverText(requestId, text) {
       const entry = editorTakeover;
-      if (!entry?.component) return { consumed: false, data: next };
+      if (!entry || entry.id !== requestId) return false;
+      const setText = (entry.component as { setText?: unknown } | null | undefined)?.setText;
+      if (typeof setText !== "function") return false;
       try {
-        entry.component.handleInput?.(next);
+        (setText as (value: string) => void).call(entry.component, text);
+        renderEditorTakeover();
+        return true;
       } catch (error) {
-        console.warn("[pidance] extension editor component input failed:", error);
+        console.warn("[pidance] extension editor component setText failed:", error);
+        return false;
       }
-      renderEditorTakeover();
-      return { consumed: true, data: next };
+    },
+
+    /**
+     * 「返回输入框」：把组件里的文本交还给发起标签的输入框（clientId 定向）。
+     *
+     * 为什么不广播：其它标签还显示着接管面板，给它们插进输入框既没用（它们看不到），
+     * 又会在它们下次收起时冒出一份不该有的文本。
+     */
+    dismissEditorTakeover(requestId, clientId) {
+      const entry = editorTakeover;
+      if (!entry || entry.id !== requestId) return false;
+      const carried = readEditorTakeoverText(entry);
+      if (!carried) return false;
+      emit({
+        type: "extension_ui_request",
+        id: randomUUID(),
+        method: "set_editor_text",
+        text: carried,
+        appliedToTakeover: false,
+        ...(clientId ? { clientId } : {}),
+      });
+      return true;
     },
 
     setRenderSize(size) {

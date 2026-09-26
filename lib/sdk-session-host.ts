@@ -3589,7 +3589,24 @@ export class SdkSessionHost {
         // 未被消费才进组件；所以这里不另外调 dispatchTerminalInput。
         const data = typeof command.data === "string" ? command.data : "";
         if (!data) return { consumed: false };
-        return this.extensionUi?.dispatchEditorComponentInput(data) ?? { consumed: false };
+        // clientId：提交要按「谁敲的字」定向，否则每个标签都会发一次（见 lib/types.ts）。
+        return this.extensionUi?.dispatchEditorComponentInput(data, asString(command.clientId) ?? undefined)
+          ?? { consumed: false };
+      }
+
+      case "editor_component_set_text": {
+        // 把文本放回接管组件：提交失败回填原文 / 用户重新进入接管时灌草稿（issue #107）。
+        const requestId = asString(command.requestId) ?? "";
+        const text = typeof command.text === "string" ? command.text : "";
+        if (!requestId || !text) return { applied: false };
+        return { applied: this.extensionUi?.applyEditorTakeoverText(requestId, text) ?? false };
+      }
+
+      case "editor_takeover_dismiss": {
+        // 用户点了「返回输入框」：把组件里的文本交还给**这个标签**的输入框（clientId 定向）。
+        const requestId = asString(command.requestId) ?? "";
+        if (!requestId) return { dismissed: false };
+        return { dismissed: this.extensionUi?.dismissEditorTakeover(requestId, asString(command.clientId) ?? undefined) ?? false };
       }
 
       case "terminal_input": {

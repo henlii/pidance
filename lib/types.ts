@@ -383,6 +383,17 @@ export type ExtensionUiRequest =
       id: string;
       method: "set_editor_text";
       text: string;
+      /**
+       * 宿主是否已经把这段文本喂给**当前接管组件**（组件实现了 setText 时）。
+       *
+       * 客户端据此决定落点（issue #107 审查 重要 4）：正在显示接管面板的标签，
+       * 只有 appliedToTakeover 为 false 时才该把它当粘贴送进组件 —— 否则组件会拿到两份；
+       * 没在显示接管的标签（手机、设置关掉、用户点过「返回输入框」）一律落进可见输入框，
+       * 这样「组件有 setText」不会把手机用户变成收不到字的人。
+       */
+      appliedToTakeover?: boolean;
+      /** 只发给这一个标签（缺省 = 广播）。收起接管时把组件文本交还给发起标签的输入框。 */
+      clientId?: string;
     }
   | {
       type: "extension_ui_request";
@@ -433,6 +444,14 @@ export type ExtensionUiRequest =
        */
       method: "editorComponentSubmit";
       text: string;
+      /**
+       * 触发这次提交的标签（由 editor_component_input 带上来）。
+       *
+       * 只有这个标签该执行提交：否则每个订阅该会话的标签都会发一次 —— 空闲时后到的
+       * 会被 busy 回绝并弹失败提示，斜杠命令会执行两遍，运行中会重复入队。
+       * 缺省（提交不是由客户端按键触发）时由**正在显示接管面板**的标签兜底执行。
+       */
+      clientId?: string;
     };
 
 /**
