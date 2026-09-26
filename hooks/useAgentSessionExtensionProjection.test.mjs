@@ -63,6 +63,7 @@ const FIELD_PROBES = [
   { field: "extensionCapabilityNotices", apply: "applyCapabilityNotices", value: [{ id: "n1", message: "x" }] },
   { field: "pendingExtensionRequests", apply: "applyQueue", value: [{ id: "req-1", method: "input" }] },
   { field: "activeCustomUi", apply: "applyActiveCustomUi", value: null },
+  { field: "extensionEditorComponent", apply: "applyEditorTakeover", value: { requestId: "ed-1", lines: ["x"] } },
 ];
 
 /** 一份「全部字段都带」的状态快照。 */
@@ -95,6 +96,7 @@ function makeEnv() {
     applyExtensionSlots: () => applied.push("applySlots"),
     applyCapabilityNotices: () => applied.push("applyCapabilityNotices"),
     applyActiveCustomUi: () => applied.push("applyActiveCustomUi"),
+    applyExtensionEditorTakeover: () => applied.push("applyEditorTakeover"),
     filterSettledBlockingRequests: (queue) => queue,
     pickBlockingExtensionRequests: (value) => (Array.isArray(value) ? value : []),
     projectBlockingHead: () => ({}),

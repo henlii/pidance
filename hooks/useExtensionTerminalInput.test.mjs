@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import ts from "typescript";
+import { createJiti } from "jiti";
+
+const jiti = createJiti(import.meta.url);
+const { shouldRouteKeyToExtensionListener } = await jiti.import("../lib/extension-panel-keys.ts");
 
 const source = readFileSync(fileURLToPath(new URL("./useExtensionTerminalInput.ts", import.meta.url)), "utf8");
 /** 只看 onKeyDown 的实现（文档注释里也会提到这些名字，不能拿全文件比位置）。 */
@@ -60,4 +65,68 @@ test("卸载时两个监听器都要摘掉", () => {
     source.includes('window.removeEventListener("compositionend", onCompositionEnd, true)'),
     "未摘 compositionend",
   );
+});
+
+/**
+ * 窗口 ① 的判定表达式（含 #107 加进来的接管 keytrap 让位）。
+ *
+ * 这里抽**真实表达式**求值，而不是拿字符串比对源码：让位条件（事件目标落在接管 keytrap 里）
+ * 是个布尔语义，源码断言看不出「反过来写」或「直接短路掉整个窗口 ①」。
+ */
+function extractPanelWindowCondition() {
+  const text = readFileSync(fileURLToPath(new URL("./useExtensionTerminalInput.ts", import.meta.url)), "utf8");
+  const tree = ts.createSourceFile("hook.ts", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let expression;
+  function visit(node) {
+    if (ts.isVariableDeclaration(node)
+      && node.name.getText(tree) === "panelWindowClaimsTheKey"
+      && node.initializer) {
+      expression = node.initializer.getText(tree);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(tree);
+  assert.ok(expression, "没有找到 panelWindowClaimsTheKey 的判定表达式");
+  const js = ts.transpileModule("const value = " + expression + ";", {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+  }).outputText;
+  return (env) => new Function(...Object.keys(env), js + "; return value;")(...Object.values(env));
+}
+
+const panelWindow = extractPanelWindowCondition();
+/** 一个「白名单键」的事件（Escape 属于 shouldRouteKeyToExtensionListener 的白名单）。 */
+const keyEvent = (target) => ({ key: "Escape", ctrlKey: false, altKey: false, metaKey: false, shiftKey: false, target });
+const OTHER = { id: "other" };
+const KEYTRAP = { id: "keytrap" };
+
+function decide({ hiddenPanelRouting = true, keytrap = null, target = OTHER, event = keyEvent(target) } = {}) {
+  return panelWindow({
+    hiddenPanelRouting,
+    shouldRouteKeyToExtensionListener,
+    takeoverKeytrap: () => keytrap,
+    event,
+  });
+}
+
+test("窗口 ①：事件目标在接管 keytrap 里时让位（键归被接管的插件编辑器）", () => {
+  const keytrap = { contains: (node) => node === KEYTRAP };
+  assert.equal(
+    decide({ keytrap, target: KEYTRAP, event: keyEvent(KEYTRAP) }),
+    false,
+    "焦点在接管面板里时，白名单键不该被窗口 ① 抢走（它要进插件的 handleInput）",
+  );
+});
+
+test("窗口 ①：焦点不在接管面板里时照旧归插件（不能因为「接管显示」就整段停手）", () => {
+  const keytrap = { contains: (node) => node === KEYTRAP };
+  assert.equal(
+    decide({ keytrap, target: OTHER, event: keyEvent(OTHER) }),
+    true,
+    "焦点在消息列表时，收起面板的白名单键仍要能到插件（评审给的反例）",
+  );
+  assert.equal(decide({ keytrap: null }), true, "没有接管 keytrap 时行为与引入前完全一致");
+});
+
+test("窗口 ①：面板没被收起时本来就不发（确认上面两条不是恒真）", () => {
+  assert.equal(decide({ hiddenPanelRouting: false }), false, "hiddenPanelRouting 为假时窗口 ① 不该接管按键");
 });

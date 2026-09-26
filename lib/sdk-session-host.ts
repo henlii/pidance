@@ -153,7 +153,7 @@ import {
   type SendFileToUserParams,
 } from "./send-file-to-user";
 import { DEFAULT_CUSTOM_UI_ROWS } from "./custom-ui-terminal";
-import { readComposerDraftText } from "./composer-draft-text";
+import { prependComposerDraftText, readComposerDraftText } from "./composer-draft-text";
 import {
   markdownTransformerGeneration,
   onMarkdownTransformerInvalidate,
@@ -1755,6 +1755,11 @@ export class SdkSessionHost {
       // 服务端偏好的那份镜像（见 lib/composer-draft-text.ts 的语义边界）。
       {
         readComposerText: () => readComposerDraftText(this.realSessionId, this.agentDir),
+        // 兜底（issue #107 三轮审查 重要 3）：插件自己调 onSubmit、而当时一个标签都没上报过时，
+        // 没有客户端能执行这次提交 —— 写进本会话草稿，至少不静默丢。
+        writeComposerDraft: (text: string) => {
+          prependComposerDraftText(this.realSessionId, text, this.agentDir);
+        },
         // 主题：用户主题目录按 agent 目录解析（与 SDK 的 getCustomThemesDir 同源）；
         // 插件切主题时也要把壳的亮/暗偏好写回同一个 agent 目录。
         agentDir: this.agentDir,
@@ -2835,6 +2840,9 @@ export class SdkSessionHost {
       // 状态，页面后加载只能靠快照补回来（否则刷新后插件页头页脚消失）。
       extensionHeader: this.extensionUi?.headerLines ?? null,
       extensionFooter: this.extensionUi?.footerLines ?? null,
+      // 插件编辑器的接管内容（issue #107）：工厂在扩展加载时设好，那一刻浏览器常还没订阅，
+      // 所以和后加载页面要看到的 widget / 槽位一样，靠状态投影补回来。
+      extensionEditorComponent: this.extensionUi?.editorTakeoverSnapshot ?? null,
       pendingExtensionRequests: Array.from(
         this.extensionUi?.pendingSnapshot.values() ?? [],
       ),
@@ -3578,6 +3586,46 @@ export class SdkSessionHost {
         const data = typeof command.data === "string" ? command.data : "";
         if (id) this.extensionUi?.inputCustom(id, data);
         return null;
+      }
+
+      case "editor_component_input": {
+        // 插件编辑器接管的按键（issue #107）：进被接管的编辑器组件。
+        // 顺序对齐 pi-tui —— 适配器内部先过全局监听器（可 consume / 改写），
+        // 未被消费才进组件；所以这里不另外调 dispatchTerminalInput。
+        const data = typeof command.data === "string" ? command.data : "";
+        if (!data) return { consumed: false };
+        // clientId：提交要按「谁敲的字」定向，否则每个标签都会发一次（见 lib/types.ts）。
+        return this.extensionUi?.dispatchEditorComponentInput(data, asString(command.clientId) ?? undefined)
+          ?? { consumed: false };
+      }
+
+      case "editor_component_set_text": {
+        // 把文本放回接管组件：提交失败回填原文 / 用户重新进入接管时灌草稿（issue #107）。
+        const requestId = asString(command.requestId) ?? "";
+        const text = typeof command.text === "string" ? command.text : "";
+        // 空串是**合法**值（用户把输入框删光后重进接管 = TUI 的 setText("")）：
+        // 旧写法把空串当成坏报文拒掉，组件里于是留着旧字（issue #107 三轮审查 次要 10）。
+        if (!requestId) return { applied: false };
+        return { applied: this.extensionUi?.applyEditorTakeoverText(requestId, text) ?? false };
+      }
+
+      case "editor_takeover_view": {
+        // 客户端上报「本页知道这个接管、并且是否正在显示它」（issue #107 三轮审查）。
+        // 两处要用：卸下工厂时只把组件文本交给刚才在显示接管的标签；插件自己调 onSubmit
+        // （没有来源标签）时挑**恰好一个**归属者。没有返回值 —— 这是纯登记。
+        const requestId = asString(command.requestId) ?? "";
+        const clientId = asString(command.clientId) ?? "";
+        if (requestId && clientId) {
+          this.extensionUi?.recordEditorTakeoverView(requestId, command.shown === true, clientId);
+        }
+        return null;
+      }
+
+      case "editor_takeover_dismiss": {
+        // 用户点了「返回输入框」：把组件里的文本交还给**这个标签**的输入框（clientId 定向）。
+        const requestId = asString(command.requestId) ?? "";
+        if (!requestId) return { dismissed: false };
+        return { dismissed: this.extensionUi?.dismissEditorTakeover(requestId, asString(command.clientId) ?? undefined) ?? false };
       }
 
       case "terminal_input": {

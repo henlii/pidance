@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useMemo, useId, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
+import type { SetStateAction } from "react";
 import { thinkingLabel as resolveThinkingLabel } from "@/lib/thinking-level-policy";
 import { createPortal } from "react-dom";
 import type { BuiltinSlashCommandResult, CommandArgumentCompletion, CompactResultInfo, QueuedMessageRow as QueuedRow, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
@@ -8,7 +9,7 @@ import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft
 import { getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { listThinkingDisplayLevel, modelClickThinkingLevel } from "@/lib/thinking-level-policy";
 import { thinkingLevelsFromMap } from "@/lib/thinking-levels";
-import { hydrateDraftFromServer } from "@/lib/draft-store";
+import { hydrateDraftFromServer, shouldPersistComposerDraft } from "@/lib/draft-store";
 import { ensureServerPrefsLoaded } from "@/lib/server-preferences";
 import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
@@ -513,6 +514,24 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const fileIndexMetaRef = useRef<{ cwd: string; fetchedAt: number } | null>(null);
   const fileIndexFetchingRef = useRef<string | null>(null);
   const draftKeyRef = useRef(draftKey);
+  /**
+   * 这个 key 的草稿是否**由用户（或代表用户的动作）改过**。
+   *
+   * 用途：挂载/换 key 后的一小段里，本地值还是空的、也还没跟服务端对齐；这时把空值写进
+   * 草稿会**删掉服务端那份** —— 而宿主兜底写下的接管提交正文就存在那里（issue #107 四轮
+   * 审查 阻断 1：插件自己调 onSubmit、而当时没有标签在显示接管时，宿主只能写草稿）。
+   */
+  const draftTouchedRef = useRef<string | null>(null);
+  /** 已经跟服务端草稿对齐过的 key（对齐后照常写，别让上面那条把关变成「永不写」）。 */
+  const [draftHydratedKey, setDraftHydratedKey] = useState<string | null>(null);
+  const markDraftTouched = useCallback(() => {
+    draftTouchedRef.current = draftKeyRef.current ?? null;
+  }, []);
+  /** 代表用户改正文的 setValue（用户输入 / 补全 / 插入 / 交还）。纯加载（水合、换 key）不走它。 */
+  const setValueTouched = useCallback((next: SetStateAction<string>) => {
+    markDraftTouched();
+    setValue(next);
+  }, [markDraftTouched]);
 
   // —— 模型信息与思考深度（需求 5）——
   /** 当前展开思考深度浮层的模型（provider:modelId）；null = 未展开 */
@@ -636,9 +655,18 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   useEffect(() => {
     const key = draftKey;
     if (!key) return;
-    void ensureServerPrefsLoaded().then(() => {
+    let prefsUnavailable = false;
+    void ensureServerPrefsLoaded()
+      .catch(() => {
+        // 读不到服务端偏好也要收尾：否则这一 key 的草稿写入会被下面那道闸一直挡住。
+        prefsUnavailable = true;
+      })
+      .then(() => {
       if (draftRestoredRef.current === key) return;
       draftRestoredRef.current = key;
+      // 对齐完成（找到远端草稿、没有远端草稿、或读失败）：之后照常写草稿。
+      setDraftHydratedKey(key);
+      if (prefsUnavailable) return;
       const remote = hydrateDraftFromServer(key);
       if (!remote) return;
       // 本地已有更新的内存草稿（本会话编辑过）则不覆盖
@@ -659,7 +687,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const ta = textareaRef.current;
     const current = ta ? ta.value : value;
     if (current.trim()) return;
-    setValue(text);
+    setValueTouched(text);
     setAtQuery(null);
     requestAnimationFrame(() => {
       if (!ta) return;
@@ -667,7 +695,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       ta.style.height = "auto";
       ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
     });
-  }, [value]);
+  }, [value, setValueTouched]);
 
   /**
    * 把图片追加到草稿（去重）：失败回滚与队列取回共用。
@@ -691,7 +719,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const ta = textareaRef.current;
     const current = ta ? ta.value : value;
     const combined = [text, current].filter((t) => t.trim()).join("\n\n");
-    setValue(combined);
+    setValueTouched(combined);
     setAtQuery(null);
     requestAnimationFrame(() => {
       if (!ta) return;
@@ -700,19 +728,19 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       ta.style.height = "auto";
       ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
     });
-  }, [value]);
+  }, [value, setValueTouched]);
 
   /** 从当前 draftKey 的草稿重建输入框（外部写入草稿后刷新显示）。 */
   const reloadDraftLocal = useCallback(() => {
     const key = draftKeyRef.current;
     const draft = key ? getDraft(key) : null;
-    setValue(draft?.value ?? "");
+    setValueTouched(draft?.value ?? "");
     setAttachedImages((prev) => {
       prev.forEach(revokeImagePreview);
       return draft?.images.map(draftImageToAttachedImage) ?? [];
     });
     setAtQuery(null);
-  }, []);
+  }, [setValueTouched]);
 
   useImperativeHandle(ref, () => ({
     // 焦点交回输入框：插件面板/对话框关闭后由 ChatWindow 调用（见那边的 layout effect）。
@@ -742,7 +770,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     replaceText(text: string) {
       // 分支 / 新会话预填：整体替换当前草稿（对齐 OC revert/fork 的 pendingInputText replace）。
       const ta = textareaRef.current;
-      setValue(text);
+      setValueTouched(text);
       setAtQuery(null);
       requestAnimationFrame(() => {
         if (!ta) return;
@@ -756,7 +784,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     insertText(text: string) {
       const ta = textareaRef.current;
       if (!ta) {
-        setValue((v) => v + (v ? " " : "") + text);
+        setValueTouched((v) => v + (v ? " " : "") + text);
         return;
       }
       const start = ta.selectionStart ?? ta.value.length;
@@ -765,7 +793,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       const after = ta.value.slice(end);
       const sep = before.length > 0 && !before.endsWith(" ") ? " " : "";
       const newVal = before + sep + text + after;
-      setValue(newVal);
+      setValueTouched(newVal);
       setAtQuery(null);
       requestAnimationFrame(() => {
         if (!ta) return;
@@ -963,7 +991,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   const clearInput = useCallback(() => {
-    setValue("");
+    setValueTouched("");
     valueRef.current = "";
     setAtQuery(null);
     if (draftKey) clearDraft(draftKey);
@@ -975,7 +1003,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [clearImages, clearUploads, clearPendingAttachments, draftKey]);
+  }, [clearImages, clearUploads, clearPendingAttachments, draftKey, setValueTouched]);
 
   /** 把已就绪上传路径拼进消息正文，供 agent 用工具读取。 */
   const composeMessageWithUploads = useCallback((base: string): string => {
@@ -1029,11 +1057,25 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   useEffect(() => {
     if (!draftKey || draftKeyRef.current !== draftKey) return;
+    // 挂载/换 key 后的那一小段：本地还是空值、也还没跟服务端对齐 —— 这时写空草稿会
+    // **删掉服务端那份**（宿主兜底写下的接管提交正文，issue #107 四轮审查 阻断 1）。
+    // 用户一旦动过正文（draftTouchedRef）就照他的意思写；对齐完成后也照常写，
+    // 所以这道闸不会变成「永不写」。
+    if (
+      !shouldPersistComposerDraft({
+        draftKey,
+        value,
+        touched: draftTouchedRef.current === draftKey,
+        hydratedKey: draftHydratedKey,
+      })
+    ) {
+      return;
+    }
     setDraft(draftKey, {
       value,
       images: attachedImages.map(imageToDraftImage),
     });
-  }, [attachedImages, draftKey, value]);
+  }, [attachedImages, draftKey, value, draftHydratedKey]);
 
   useEffect(() => {
     const previousDraftKey = draftKeyRef.current;
@@ -2801,7 +2843,7 @@ type AtMenuItem = CompletionMenuEntry<FileIndexEntry>;
             aria-activedescendant={inputActiveDescendant}
             aria-autocomplete="list"
             onChange={(e) => {
-              setValue(e.target.value);
+              setValueTouched(e.target.value);
               updateAtQuery(e.target.value, e.target.selectionStart);
             }}
             onSelect={(e) => {

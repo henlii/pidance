@@ -22,7 +22,7 @@
  *   而宿主传的是已落盘的会话 id，所以那一段文本这里读不到。
  */
 import { statSync } from "node:fs";
-import { getPidancePrefsPath, readPidancePrefs } from "./pidance-prefs-file";
+import { getPidancePrefsPath, readPidancePrefs, updatePidancePref } from "./pidance-prefs-file";
 
 /**
  * 偏好文件的字节上限：超过就当作读不到（空串）。
@@ -61,3 +61,50 @@ export function readComposerDraftText(sessionId: string, agentDir?: string): str
     return "";
   }
 }
+
+/**
+ * 把一段文本**前插**进某个会话的草稿（`drafts.<sessionId>.value`），保留已有正文与图片。
+ *
+ * 唯一调用方是插件编辑器接管的最后一级兜底（issue #107 三轮审查 重要 3）：插件自己调
+ * `onSubmit`、而当时没有任何标签上报过自己知道这个接管时，没有客户端可以执行这次提交，
+ * 把它写进草稿至少不静默丢 —— 用户下次打开会话就能看到。
+ *
+ * 与客户端 `restorePayloadToSession` 同一口径（前插 + 空行分隔），所以两边的落点一致。
+ * 只动 `value`：草稿里的图片引用属于用户，不能被插件文本顶掉。
+ */
+export function prependComposerDraftText(sessionId: string, text: string, agentDir?: string): boolean {
+  const value = typeof text === "string" ? text.trim() : "";
+  if (!sessionId || !value) return false;
+  try {
+    const prefs = readPidancePrefs(agentDir);
+    const drafts =
+      typeof prefs.drafts === "object" && prefs.drafts !== null && !Array.isArray(prefs.drafts)
+        ? (prefs.drafts as Record<string, unknown>)
+        : {};
+    const existing = drafts[sessionId];
+    const current =
+      typeof existing === "object" && existing !== null && !Array.isArray(existing)
+        ? (existing as Record<string, unknown>)
+        : {};
+    const previousValue = typeof current.value === "string" ? current.value : "";
+    // 同一段文本不重复前插：这条兜底可能与客户端回填落在同一次编辑会话里
+    // （卸载交还 + 回填），重复前插会让用户看到两份一模一样的正文。
+    if (previousValue.trim() === value) return false;
+    const images = Array.isArray(current.images) ? current.images : [];
+    updatePidancePref(
+      `drafts.${sessionId}`,
+      {
+        ...current,
+        value: [value, previousValue].filter((part) => part.trim()).join("\n\n"),
+        images,
+        updatedAt: Date.now(),
+      },
+      agentDir,
+    );
+    return true;
+  } catch (error) {
+    console.error("[pidance] prependComposerDraftText failed:", error);
+    return false;
+  }
+}
+

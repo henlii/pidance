@@ -683,3 +683,53 @@ export function saveAutoUpdateCheck(enabled: boolean): void {
   if (typeof window === "undefined") return;
   saveAutoUpdateCheckToStorage(window.localStorage, enabled);
 }
+
+/**
+ * 是否允许插件接管输入框（`ctx.ui.setEditorComponent`，issue #107）；默认开启。
+ *
+ * 存 localStorage 而不是服务端偏好：这是**这个浏览器**的取舍（手机上本来就不接管），
+ * 与折叠 widget / 能力提示同一个口径。关掉后插件仍认为自己拥有编辑器
+ * （它的 `getEditorComponent()` 照旧），只是本页不再显示接管面板。
+ */
+export const EDITOR_TAKEOVER_STORAGE_KEY = "pidance.editorTakeover";
+export const DEFAULT_EDITOR_TAKEOVER_ENABLED = true;
+/** 设置里改了以后通知同一页面的其它消费者（存储事件不跨同页）。 */
+export const EDITOR_TAKEOVER_CHANGED_EVENT = "pidance:editor-takeover-changed";
+
+export function parseEditorTakeoverEnabled(value: unknown): boolean {
+  // 与 autoUpdateCheck 同一口径：只有显式 false / "0" / "false" 才算关闭，脏数据保持开启。
+  if (value === false || value === 0 || value === "0" || value === "false") return false;
+  return true;
+}
+
+export function loadEditorTakeoverEnabledFromStorage(storage: StorageLike): boolean {
+  try {
+    const raw = storage.getItem(EDITOR_TAKEOVER_STORAGE_KEY);
+    if (raw === null) return DEFAULT_EDITOR_TAKEOVER_ENABLED;
+    try {
+      return parseEditorTakeoverEnabled(JSON.parse(raw) as unknown);
+    } catch {
+      return parseEditorTakeoverEnabled(raw);
+    }
+  } catch {
+    return DEFAULT_EDITOR_TAKEOVER_ENABLED;
+  }
+}
+
+export function loadEditorTakeoverEnabled(): boolean {
+  if (typeof window === "undefined") return DEFAULT_EDITOR_TAKEOVER_ENABLED;
+  return loadEditorTakeoverEnabledFromStorage(window.localStorage);
+}
+
+export function saveEditorTakeoverEnabledToStorage(storage: StorageLike, enabled: boolean): void {
+  try {
+    storage.setItem(EDITOR_TAKEOVER_STORAGE_KEY, JSON.stringify(parseEditorTakeoverEnabled(enabled)));
+  } catch {
+    // 忽略存储配额 / 隐私模式错误
+  }
+}
+
+export function saveEditorTakeoverEnabled(enabled: boolean): void {
+  if (typeof window === "undefined") return;
+  saveEditorTakeoverEnabledToStorage(window.localStorage, enabled);
+}

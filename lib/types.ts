@@ -383,6 +383,17 @@ export type ExtensionUiRequest =
       id: string;
       method: "set_editor_text";
       text: string;
+      /**
+       * 宿主是否已经把这段文本喂给**当前接管组件**（组件实现了 setText 时）。
+       *
+       * 客户端据此决定落点（issue #107 审查 重要 4）：正在显示接管面板的标签，
+       * 只有 appliedToTakeover 为 false 时才该把它当粘贴送进组件 —— 否则组件会拿到两份；
+       * 没在显示接管的标签（手机、设置关掉、用户点过「返回输入框」）一律落进可见输入框，
+       * 这样「组件有 setText」不会把手机用户变成收不到字的人。
+       */
+      appliedToTakeover?: boolean;
+      /** 只发给这一个标签（缺省 = 广播）。收起接管时把组件文本交还给发起标签的输入框。 */
+      clientId?: string;
     }
   | {
       type: "extension_ui_request";
@@ -403,6 +414,44 @@ export type ExtensionUiRequest =
        * 客户端只在**状态变化**时移动 DOM 焦点，否则插件每次重渲都会把焦点从用户手里抢回去。
        */
       focus?: CustomPanelFocus;
+    }
+  | {
+      type: "extension_ui_request";
+      id: string;
+      /**
+       * 插件自定义编辑器（`ctx.ui.setEditorComponent`）的接管帧（issue #107）。
+       *
+       * 与 custom 面板同一手法（渲染行 + 图片 + 快照），但它接管的是**输入框本体**：
+       * 客户端在输入框位置渲染这些行，把按键原样转给插件的 `handleInput`。
+       * `closed` 表示接管结束（插件卸下工厂 / 组件抛错降级），客户端恢复自己的输入框。
+       * 图片字段缺省 = 与上一帧相同（服务端没变就省略 base64），显式空数组 = 图没了。
+       */
+      method: "editorComponent";
+      lines?: string[];
+      images?: ExtensionRenderedImage[];
+      imageFallbacks?: ExtensionRenderedImageFallback[];
+      closed?: boolean;
+    }
+  | {
+      type: "extension_ui_request";
+      id: string;
+      /**
+       * 插件编辑器的提交（组件声明的 `onSubmit(text)`）。
+       *
+       * 正文**不走** set_editor_text：这条只说「插件编辑器提交了这段文本」，
+       * 由**客户端**交给既有发送入口（队列 / 写者所有权 / 只读判定都在那条管线里），
+       * 服务端不直接提交 —— 否则绕过前端会让忙碌与所有权语义各说各话。
+       */
+      method: "editorComponentSubmit";
+      text: string;
+      /**
+       * 触发这次提交的标签（由 editor_component_input 带上来）。
+       *
+       * 只有这个标签该执行提交：否则每个订阅该会话的标签都会发一次 —— 空闲时后到的
+       * 会被 busy 回绝并弹失败提示，斜杠命令会执行两遍，运行中会重复入队。
+       * 缺省（提交不是由客户端按键触发）时由**正在显示接管面板**的标签兜底执行。
+       */
+      clientId?: string;
     };
 
 /**

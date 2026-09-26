@@ -50,10 +50,18 @@ export function useExtensionTerminalInput(options: {
   sessionId: string | null;
   /** 窗口 ①：面板被插件收起（`hidden`）时的白名单键。 */
   hiddenPanelRouting: boolean;
+  /**
+   * 窗口 ① 的让位判据：事件目标落在插件编辑器接管的 keytrap 里时，这个键归接管组件
+   * （issue #107）。
+   *
+   * 不能改成「接管显示就整段关掉窗口 ①」：那样焦点在消息列表时，收起面板的白名单键
+   * 既不进插件监听器、也不进接管组件（评审指出的反例）。
+   */
+  takeoverKeytrap?: () => Element | null;
   /** 窗口 ③：插件界面正在显示（可见的 custom 面板 / overlay / 扩展对话框）。 */
   surfaceRouting: boolean;
 }): void {
-  const { sessionId, hiddenPanelRouting, surfaceRouting } = options;
+  const { sessionId, hiddenPanelRouting, surfaceRouting, takeoverKeytrap } = options;
   const compositionEndAtRef = useRef(0);
 
   useEffect(() => {
@@ -73,7 +81,11 @@ export function useExtensionTerminalInput(options: {
 
       // 窗口 ①：面板收起时的白名单键（行为与「窗口 ③」引入前完全一致）。它先判是有意的：
       // 这条窗口的主场景就是「输入框仍然聚焦」，先按焦点让位的话插件再也收不到那个收缩键。
-      const panelWindowClaimsTheKey = hiddenPanelRouting && shouldRouteKeyToExtensionListener(event);
+      const panelWindowClaimsTheKey = hiddenPanelRouting
+        && shouldRouteKeyToExtensionListener(event)
+        // 接管 keytrap 里的键归接管组件（它自己会 preventDefault 处理掉的那部分先走，
+        // 这里只是别把剩下的白名单键从它手里抢走）。
+        && !(takeoverKeytrap?.()?.contains(event.target as Node | null) ?? false);
       if (panelWindowClaimsTheKey) {
         const data = toTerminalKeyData(event);
         if (!data) return;
@@ -122,5 +134,5 @@ export function useExtensionTerminalInput(options: {
       window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("compositionend", onCompositionEnd, true);
     };
-  }, [sessionId, hiddenPanelRouting, surfaceRouting]);
+  }, [sessionId, hiddenPanelRouting, surfaceRouting, takeoverKeytrap]);
 }

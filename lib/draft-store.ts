@@ -40,6 +40,30 @@ function draftKeyPath(key: string): string {
   return `drafts.${key}`;
 }
 
+/**
+ * 挂载 / 换会话之后、还没跟服务端对齐时，输入框该不该把自己的值写回草稿。
+ *
+ * 为什么需要这道闸（issue #107 四轮审查 阻断 1）：宿主在「插件自己调 `onSubmit`、当时没有
+ * 任何标签在显示接管」时只能把正文写进**会话草稿** —— 那是唯一不依赖投递时机的落点
+ * （`lib/composer-draft-text.ts`）。而输入框一挂上就会把自己那份（此时是空的）写回草稿，
+ * 把刚写下的正文删掉：用户眼前那台插件编辑器已经在 `onSubmit` 之前清空了自己，
+ * 于是这段字彻底消失。
+ *
+ * 规则：空的 + 用户没动过 + 还没跟服务端对齐过 → 先别写。只要用户动过正文（哪怕清空），
+ * 或者已经对齐过（找到远端草稿、没有远端草稿、读失败都算），就照常写 —— 不会变成「永不写」。
+ */
+export function shouldPersistComposerDraft(input: {
+  draftKey: string | null | undefined;
+  value: string;
+  touched: boolean;
+  hydratedKey: string | null;
+}): boolean {
+  if (!input.draftKey) return false;
+  if (input.value !== "") return true;
+  if (input.touched) return true;
+  return input.hydratedKey === input.draftKey;
+}
+
 export function getDraft(key: string): ChatDraft | null {
   const draft = drafts.get(key);
   return draft ? cloneDraft(draft) : null;
