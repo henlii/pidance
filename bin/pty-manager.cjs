@@ -4,6 +4,7 @@
 const { existsSync, realpathSync } = require("fs");
 const { WebSocketServer } = require("ws");
 const { resolveShell } = require("./pty-shell.cjs");
+const { killPtyProcess, disposeWorkerChild } = require("./pty-process.cjs");
 const ptyWss = new WebSocketServer({ noServer: true });
 
 function sanitizeEnv(env) {
@@ -68,17 +69,57 @@ function startPtySession(options) {
     dispose: () => {
       if (disposed) return;
       disposed = true;
-      try {
-        if (proc.pid > 0) process.kill(-proc.pid, "SIGTERM");
-      } catch {
-        /* 进程组可能已不在 */
-      }
-      try {
-        proc.kill("SIGTERM");
-      } catch {
-        /* 已退出 */
-      }
+      killPtyProcess(proc);
     },
+  };
+}
+
+const PTY_HEARTBEAT_MS = 30_000;
+const PTY_HEARTBEAT_MAX_MISSED = 2;
+// 取舍：看的是 WebSocket 协议级 ping/pong（浏览器自动回 pong），**不是**终端有没有输出，
+// 所以前台跑 `sleep 600` 之类不会因为「没输出」被判死。代价是：手机锁屏后网络栈不再回 pong，
+// 连续 3 拍（约 90 秒）没有任何 pong 就会 terminate → 面板重连时是**新** shell。
+// 要更宽松就调大这两个常量；不要改成按终端输出判活（那会杀掉长任务）。
+
+/**
+ * 判断这条连接是真死还是只是安静：手机掉网、进程被冻住时 TCP 不会发 FIN，
+ * 服务端会一直攥着 ws 和它背后的 shell（孤儿进程，还占着端口/内存）。
+ * 按 ping/pong 收尾，连续几轮没有 pong 就 terminate（触发 close → dispose）。
+ * 计时器与 readyState 判定可注入，单测用假计时器驱动。
+ */
+function startPtyHeartbeat(ws, options = {}) {
+  const intervalMs = options.intervalMs ?? PTY_HEARTBEAT_MS;
+  const maxMissed = options.maxMissed ?? PTY_HEARTBEAT_MAX_MISSED;
+  const setIntervalFn = options.setIntervalFn ?? setInterval;
+  const clearIntervalFn = options.clearIntervalFn ?? clearInterval;
+  const isOpen = options.isOpen ?? (() => ws.readyState === 1);
+  let missedPongs = 0;
+  const onPong = () => {
+    missedPongs = 0;
+  };
+  ws.on("pong", onPong);
+  const timer = setIntervalFn(() => {
+    if (!isOpen()) return;
+    if (missedPongs >= maxMissed) {
+      try {
+        ws.terminate();
+      } catch {
+        /* 已断开 */
+      }
+      return;
+    }
+    missedPongs += 1;
+    try {
+      ws.ping();
+    } catch {
+      /* 已断开 */
+    }
+  }, intervalMs);
+  // unref：别让心跳计时器把进程吊在退出前。
+  if (timer && typeof timer.unref === "function") timer.unref();
+  return () => {
+    clearIntervalFn(timer);
+    if (typeof ws.off === "function") ws.off("pong", onPong);
   };
 }
 
@@ -86,10 +127,13 @@ function attachPtyToWebSocket(ws, cwd) {
   const { spawn } = require("child_process");
   const path = require("path");
   const workerPath = path.join(__dirname, "pty-worker.js");
+  let disposed = false;
   const child = spawn(process.execPath, [workerPath, cwd, "80", "24"], {
     stdio: ["pipe", "pipe", "pipe"],
     env: process.env,
   });
+  // stdin 在子进程已退出后写入会异步抛 EPIPE：这里吞掉，避免拆连接时崩服务端。
+  child.stdin.on("error", () => {});
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (data) => console.warn("[pidance] pty-worker stderr", data));
   child.on("error", (error) => console.warn("[pidance] pty-worker spawn", error.message));
@@ -98,7 +142,10 @@ function attachPtyToWebSocket(ws, cwd) {
     write: (data) => child.stdin.write(`${JSON.stringify({ type: "in", d: data })}\n`),
     resize: (cols, rows) => child.stdin.write(`${JSON.stringify({ type: "rs", cols, rows })}\n`),
     dispose: () => {
-      try { child.kill("SIGTERM"); } catch { /* ignore */ }
+      if (disposed) return;
+      disposed = true;
+      // 先请 worker 自己收尾，再按平台决定强杀时机（Windows 上不能同拍强杀，见 disposeWorkerChild）。
+      disposeWorkerChild(child);
     },
   };
   child.stdout.setEncoding("utf8");
@@ -135,8 +182,14 @@ function attachPtyToWebSocket(ws, cwd) {
     if (parsed && parsed.type === "in" && typeof parsed.d === "string") session.write(parsed.d);
     if (parsed && parsed.type === "rs" && parsed.cols > 0 && parsed.rows > 0) session.resize(parsed.cols, parsed.rows);
   });
-  ws.on("close", () => session.dispose());
-  ws.on("error", () => session.dispose());
+  // 心跳与 dispose 一起收：连接没了就别再 ping（也避免计时器残留）。
+  const stopHeartbeat = startPtyHeartbeat(ws);
+  const disposeSession = () => {
+    stopHeartbeat();
+    session.dispose();
+  };
+  ws.on("close", disposeSession);
+  ws.on("error", disposeSession);
   try { ws.send(JSON.stringify({ type: "out", d: "\r\n[pidance] terminal ready\r\n" })); } catch { /* ignore */ }
   return session;
 }
@@ -148,4 +201,4 @@ function completePtyUpgrade(req, socket, head, cwd) {
   });
 }
 
-module.exports = { startPtySession, tryLoadNodePty, resolvePtyCwd, attachPtyToWebSocket, completePtyUpgrade };
+module.exports = { startPtySession, tryLoadNodePty, resolvePtyCwd, attachPtyToWebSocket, completePtyUpgrade, startPtyHeartbeat };
