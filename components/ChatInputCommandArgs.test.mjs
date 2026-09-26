@@ -115,11 +115,14 @@ function keydownEnv({ argMenuOpen = true, argItems = [{ value: "token set ", lab
     getNextSlashIndex: () => 0,
     setSlashActiveIndex: () => {},
     setSlashMenuOpen: () => {},
+    // 菜单可见性现在由 atMenuActive 汇总（`@` token 或插件结果），候选列表是统一的
+    // atMenuItems（文件项 / 插件项，issue #101）。
+    atMenuActive: false,
     atMenuOpen: false,
     atQuery: null,
-    atMatches: [],
+    atMenuItems: [],
     atActiveIndex: 0,
-    applyAtCompletion: () => {},
+    applyMenuItem: () => {},
     setAtActiveIndex: () => {},
     setAtMenuOpen: () => {},
     isStreaming: false,

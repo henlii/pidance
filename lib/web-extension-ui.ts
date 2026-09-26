@@ -21,12 +21,21 @@ import {
   renderWidgetComponentLines,
 } from "./tui-render-bridge";
 import type { CustomPanelBounds, CustomPanelFocus, ExtensionUiCustomLayout } from "./types";
+import {
+  buildCompletionChain,
+  classifyCompletionSuggestions,
+  normalizeAppliedCompletion,
+  type CompletionItem,
+  type CompletionProvider,
+  type CompletionProviderFactory,
+  type CompletionSuggestionsOutcome,
+} from "./autocomplete-providers";
 
 /**
  * 能力提示快照的上限。
  *
- * 取舍：宿主能力提示的种类是**枚举**（现在公开面一共 3 种：addAutocompleteProvider、
- * setEditorComponent、onTerminalInput），
+ * 取舍：宿主能力提示的种类是**枚举**（现在公开面一共 2 种：setEditorComponent、
+ * onTerminalInput），
  * 远小于这个 16 条上限，所以正常永远截不到。
  * 保留上限只是防止将来有人拿新 feature 名反复调用（把 API 当循环用）让状态快照无界增长。
  * 截断保留**最新**的：最旧的、可能还没被用户看见的那条会先丢——在 3 种枚举的现实下
@@ -191,6 +200,38 @@ export type WebExtensionUIAdapter = {
    * 监听器只该由 `dispatchTerminalInput` 逐个调用。
    */
   readonly terminalInputListenerCount: number;
+  /**
+   * 已注册的自动补全 provider 工厂数量（只读）。
+   *
+   * 客户端**只在大于 0 时**才为一次输入发补全请求（没注册就零往返）。
+   */
+  readonly autocompleteProviderCount: number;
+  /** 链最终 provider 声明的触发字符（并集；客户端用它决定何时请求）。 */
+  readonly autocompleteTriggerCharacters: readonly string[];
+  /**
+   * 问插件补全链要候选（宿主按客户端请求调用）。
+   *
+   * 返回四态见 CompletionSuggestionsOutcome：链没注册/抛错/形状坏 → 客户端回退到自己的
+   * 文件补全；`empty` 是插件**明确**说没有候选，不回退。
+   */
+  suggestCompletions: (input: {
+    lines: string[];
+    cursorLine: number;
+    cursorCol: number;
+    force?: boolean;
+    signal: AbortSignal;
+  }) => Promise<CompletionSuggestionsOutcome | { kind: "no-provider" } | { kind: "error" }>;
+  /**
+   * 应用一个候选：替换区间由插件链自己决定（`applyCompletion`），不由客户端猜。
+   * 返回 null 表示插件链没给出可应用的结果（调用方保持文本不变）。
+   */
+  applyCompletion: (input: {
+    lines: string[];
+    cursorLine: number;
+    cursorCol: number;
+    item: CompletionItem;
+    prefix: string;
+  }) => { lines: string[]; cursorLine: number; cursorCol: number } | null;
   /**
    * 插件自定义的「收起的思考块」标签（只读）。
    *
@@ -520,6 +561,38 @@ export function createWebExtensionUIAdapter(
       id: randomUUID(),
       method: "terminalInputListeners",
       count: terminalInputListeners.size,
+    });
+  };
+
+  /**
+   * 插件自动补全的 provider 工厂链（`ctx.ui.addAutocompleteProvider`）。
+   *
+   * 与 SDK 一样**按注册顺序**依次包裹，链底是 Pidance 的等价物（见 lib/autocomplete-providers.ts）。
+   * 每次注册后重建一次链（SDK 的 setupAutocompleteProvider 同样是重建设置，不是增量改）。
+   */
+  let completionWrappers: CompletionProviderFactory[] = [];
+  let completionProvider: CompletionProvider | null = null;
+  let completionTriggerCharacters: string[] = [];
+
+  const rebuildCompletionChain = () => {
+    const built = buildCompletionChain(completionWrappers);
+    completionProvider = built.provider;
+    completionTriggerCharacters = built.triggerCharacters;
+  };
+
+  /**
+   * 补全能力变化的增量事件：客户端据此决定要不要为一次输入付往返。
+   *
+   * 与 terminalInputListeners 同一类一次性事件，所以**同时**要有状态投影里的真值
+   * （页面在插件注册之后才加载时只能靠水合拿到，见 projectState）。
+   */
+  const emitCompletionProviders = () => {
+    emit({
+      type: "extension_ui_request",
+      id: randomUUID(),
+      method: "autocompleteProviders",
+      count: completionWrappers.length,
+      triggerCharacters: [...completionTriggerCharacters],
     });
   };
 
@@ -1406,8 +1479,12 @@ export function createWebExtensionUIAdapter(
               : undefined,
       );
     },
-    addAutocompleteProvider() {
-      notifyUnsupported("addAutocompleteProvider");
+    addAutocompleteProvider(factory) {
+      // 对齐 SDK：push 进链后重建 provider（不是增量改），并重新下发布尔门槛。
+      if (typeof factory !== "function") return;
+      completionWrappers = [...completionWrappers, factory as CompletionProviderFactory];
+      rebuildCompletionChain();
+      emitCompletionProviders();
     },
     setEditorComponent(factory) {
       // undefined = 恢复默认（SDK 类型：EditorFactory | undefined）
@@ -1526,6 +1603,52 @@ export function createWebExtensionUIAdapter(
      */
     get terminalInputListenerCount() {
       return terminalInputListeners.size;
+    },
+    /** 已注册的自动补全 provider 工厂数量（只读）：客户端据此决定要不要发补全请求。 */
+    get autocompleteProviderCount() {
+      return completionWrappers.length;
+    },
+    /** 链最终 provider 声明的触发字符（并集）。 */
+    get autocompleteTriggerCharacters() {
+      return [...completionTriggerCharacters];
+    },
+    /**
+     * 问插件补全链要候选。
+     *
+     * 链未注册 → `no-provider`（理论上客户端不会问，这里再挡一次）。
+     * `getSuggestions` 抛错 → `error`：调用方回退到自己的文件补全（插件坏了不该让输入框变哑）。
+     * 返回空数组（`{ items: [] }`）→ `empty`：**明确没有候选**，调用方不回退。
+     */
+    async suggestCompletions(input) {
+      const provider = completionProvider;
+      if (!provider || completionWrappers.length === 0) return { kind: "no-provider" } as const;
+      try {
+        const result = await provider.getSuggestions(
+          input.lines,
+          input.cursorLine,
+          input.cursorCol,
+          { signal: input.signal, force: input.force },
+        );
+        return classifyCompletionSuggestions(result);
+      } catch {
+        return { kind: "error" } as const;
+      }
+    },
+    /**
+     * 应用候选：替换区间交给插件链（`applyCompletion`），返回归一化后的结果。
+     *
+     * 链未注册或结果形状不对 → null（调用方保持文本不变，不做「猜一个插入位置」这种兜底）。
+     */
+    applyCompletion(input) {
+      const provider = completionProvider;
+      if (!provider || completionWrappers.length === 0) return null;
+      try {
+        return normalizeAppliedCompletion(
+          provider.applyCompletion(input.lines, input.cursorLine, input.cursorCol, input.item, input.prefix),
+        );
+      } catch {
+        return null;
+      }
     },
     /**
      * 插件设置的折叠思考标签（只读）。

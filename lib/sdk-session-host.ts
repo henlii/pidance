@@ -298,6 +298,8 @@ export class SdkSessionHost {
   private runtime: AgentSessionRuntime | null = null;
   private unsubscribe: (() => void) | null = null;
   private extensionUi: WebExtensionUIAdapter | null = null;
+  /** 在途的补全请求（issue #101）：新请求先 abort 上一个，插件侧的原生搜索才停得下来。 */
+  private completionAbort: AbortController | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   /** ensureLive/state?wake 与后续首个写命令之间的短暂交接窗口。 */
   private startupHoldTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2567,6 +2569,10 @@ export class SdkSessionHost {
       // 按键永不路由（实测：子代理在跑、widget 已在页面上，空输入框按 ↓ 不激活）。
       // 事件仍照发做增量更新，快照只是让后加载的页面拿到当前真值。
       extensionTerminalInputListenerCount: this.extensionUi?.terminalInputListenerCount ?? 0,
+      // 插件补全的门槛值同理必须能水合：只靠瞬时事件的话，页面在插件注册补全之后才加载就
+      // 永远拿不到真值，门槛恒为 0，补全永不请求（与 terminalInputListeners 同一个坑）。
+      extensionAutocompleteProviderCount: this.extensionUi?.autocompleteProviderCount ?? 0,
+      extensionAutocompleteTriggerCharacters: [...(this.extensionUi?.autocompleteTriggerCharacters ?? [])],
       // 插件自定义的折叠思考标签：与监听器计数同理 —— 插件设一次、页面后加载就丢，
       // 所以必须进水合快照（SSE 事件仍照发，做增量更新）。
       hiddenThinkingLabel: this.extensionUi?.hiddenThinkingLabel ?? null,
@@ -3070,6 +3076,76 @@ export class SdkSessionHost {
         session.setActiveToolsByName(names);
         this.activeToolNames = names;
         return null;
+      }
+
+      /**
+       * 插件自动补全（issue #101）：客户端按触发字符问一次，宿主把输入行交给插件链。
+       *
+       * 为什么在宿主侧做「取消上一次」：插件链里的实现（如 pi-fff）用 `options.signal` 取消
+       * 自己的原生搜索；客户端的 AbortController 只断 HTTP，插件侧的搜索必须由这里叫停。
+       * 每次新请求先 abort 上一个，避免连打时在服务端堆一串没人要的搜索。
+       */
+      case "completion_suggestions": {
+        const lines = Array.isArray(command.lines)
+          ? (command.lines as unknown[]).filter((l): l is string => typeof l === "string")
+          : [];
+        const cursorLine = Number(command.cursorLine);
+        const cursorCol = Number(command.cursorCol);
+        if (!Number.isInteger(cursorLine) || !Number.isInteger(cursorCol)) {
+          return { result: { kind: "invalid-request" } };
+        }
+        if (lines.length === 0 || cursorLine < 0 || cursorLine >= lines.length || cursorCol < 0) {
+          return { result: { kind: "invalid-request" } };
+        }
+        if (cursorCol > (lines[cursorLine] as string).length) {
+          return { result: { kind: "invalid-request" } };
+        }
+        this.completionAbort?.abort();
+        const controller = new AbortController();
+        this.completionAbort = controller;
+        const outcome = this.extensionUi
+          ? await this.extensionUi.suggestCompletions({
+              lines,
+              cursorLine,
+              cursorCol,
+              force: command.force === true,
+              signal: controller.signal,
+            })
+          : { kind: "no-provider" as const };
+        // 已被后来的请求取代：结果丢掉（客户端也按序号丢弃，这里是双保险）。
+        if (this.completionAbort !== controller) return { result: { kind: "superseded" } };
+        return { result: outcome };
+      }
+
+      /** 应用一个候选：替换区间由插件链的 `applyCompletion` 决定（issue #101）。 */
+      case "completion_apply": {
+        const lines = Array.isArray(command.lines)
+          ? (command.lines as unknown[]).filter((l): l is string => typeof l === "string")
+          : [];
+        const cursorLine = Number(command.cursorLine);
+        const cursorCol = Number(command.cursorCol);
+        const item = command.item as { value?: unknown; label?: unknown; description?: unknown } | undefined;
+        const prefix = typeof command.prefix === "string" ? command.prefix : "";
+        if (!Number.isInteger(cursorLine) || !Number.isInteger(cursorCol)) return { result: null };
+        if (lines.length === 0 || cursorLine < 0 || cursorLine >= lines.length || cursorCol < 0) {
+          return { result: null };
+        }
+        if (!item || typeof item.value !== "string" || item.value === "") return { result: null };
+        const normalizedItem = {
+          value: item.value,
+          label: typeof item.label === "string" && item.label !== "" ? item.label : item.value,
+          ...(typeof item.description === "string" && item.description !== ""
+            ? { description: item.description }
+            : {}),
+        };
+        const applied = this.extensionUi?.applyCompletion({
+          lines,
+          cursorLine,
+          cursorCol,
+          item: normalizedItem,
+          prefix,
+        });
+        return { result: applied ?? null };
       }
 
       case "get_command_argument_completions": {

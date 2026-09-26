@@ -214,6 +214,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     handleRecallQueue, handleSendQueueAsSteer,
     handleBuiltinSlashCommand,
     handleThinkingLevelChange, loadSlashCommands, loadCommandArgumentCompletions,
+    loadCompletionSuggestions, applyCompletionSuggestion,
+    extensionAutocompleteProviderCount, extensionAutocompleteTriggerCharacters,
     handleBranchHere, handleBranchFromAssistant,
     handleNewSessionFromHere, handleNewSessionFromAnswer,
   } = useAgentSession({
@@ -646,6 +648,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
       slashCommandsLoading={slashCommandsLoading}
       onLoadSlashCommands={loadSlashCommands}
       onLoadCommandArgumentCompletions={loadCommandArgumentCompletions}
+      autocompleteProviderCount={extensionAutocompleteProviderCount}
+      autocompleteTriggerCharacters={extensionAutocompleteTriggerCharacters}
+      onLoadCompletionSuggestions={loadCompletionSuggestions}
+      onApplyCompletionSuggestion={applyCompletionSuggestion}
       onBuiltinCommand={handleBuiltinSlashCommand}
       soundEnabled={soundEnabled}
       onSoundToggle={onSoundToggle}
