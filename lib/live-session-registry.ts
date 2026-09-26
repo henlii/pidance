@@ -361,6 +361,10 @@ export function notifyRunningChange(): void {
   // 未读改跨端（#65）：run 结束由**服务端**记时刻，这样即使当时没有任何浏览器开着，
   // 未读也是准的；各端只负责写自己的 readAt（未读 ⟺ completedAt > readAt，两侧都是
   // 单调时间戳取并集，不需要 CAS）。写盘挪到事件回调之外，避免拖住运行集广播。
+  // 这里**不为子代理子会话加过滤**：它们的会话是 readOnly，写入口（ensureLive/start/send
+  // 都走 requireWritableSession）拦得住，正常路径下进不了这个集合；唯一窄缝是
+  // recoverFollowUpQueues 在残留队列上绕过 readOnly，真绕过去也会被回收在宽限期后清掉。
+  // 回收的判据就是「侧栏会不会显示它的未读」：见 lib/unread-entry-sweep.ts。
   const finished = lastActuallyRunningIds.filter((id) => !actuallyRunning.includes(id) && !isPlaceholderSessionId(id));
   lastActuallyRunningIds = [...actuallyRunning];
   if (finished.length > 0) {

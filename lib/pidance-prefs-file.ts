@@ -263,6 +263,29 @@ export function mergeAndWritePidancePrefsWithDiff(
 }
 
 /**
+ * 锁内基于**最新**文件内容做一次读-改-写（回调返回 true 才写盘）。
+ *
+ * 与 `updatePidancePref` / `mergeAndWritePidancePrefs` 的区别是：判定逻辑由调用方给，
+ * 但它是在**同一把锁里、对着刚读出来的内容**执行的。这是给「维护类」写入用的：
+ * 调用方通常要先做代价高的事（扫会话目录、列附件）才能算出候选，而**落盘前必须重读** ——
+ * 否则会拿锁外那份旧快照把锁窗口里的并发写入盖掉。
+ *
+ * `unreadSessionState` 是典型受害者：它是**整对象**键，`setByDottedKey` 整体替换而非按 id 合并，
+ * 两个进程（31415/31416 共用 agent dir）各自「读→扫→写」就会互相吃掉对方的未读时钟。
+ */
+export function mutatePidancePrefs(
+  mutate: (prefs: PidancePrefs) => boolean,
+  agentDir: string = getAgentDir(),
+): boolean {
+  return withPrefsLock(agentDir, () => {
+    const prefs = readPidancePrefs(agentDir);
+    if (!mutate(prefs)) return false;
+    writePidancePrefsUnlocked(prefs, agentDir);
+    return true;
+  });
+}
+
+/**
  * 命令语义的原子入口（#66）：在锁内把命令施加到**当前**文件内容上，并返回实际变更的键。
  * 集合类键的并发加/删因此不会互相覆盖（整值 patch 会）。
  */
