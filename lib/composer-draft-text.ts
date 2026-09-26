@@ -87,6 +87,9 @@ export function prependComposerDraftText(sessionId: string, text: string, agentD
         ? (existing as Record<string, unknown>)
         : {};
     const previousValue = typeof current.value === "string" ? current.value : "";
+    // 同一段文本不重复前插：这条兜底可能与客户端回填落在同一次编辑会话里
+    // （卸载交还 + 回填），重复前插会让用户看到两份一模一样的正文。
+    if (previousValue.trim() === value) return false;
     const images = Array.isArray(current.images) ? current.images : [];
     updatePidancePref(
       `drafts.${sessionId}`,

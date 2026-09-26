@@ -22,6 +22,7 @@ import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url);
 const { applyExtensionUiRequest, createEmptyExtensionUiState } = await jiti.import("../lib/extension-ui-bridge.ts");
+const { placeEditorText } = await jiti.import("../lib/extension-editor-takeover.ts");
 const { asBracketedPaste } = await jiti.import("../lib/terminal-input.ts");
 
 /** 抽出 hook 源码里 `const <name> = useCallback((…) => {…}, […])` 的第一个参数（真实函数）。 */
@@ -211,8 +212,12 @@ test("提交：空白文本不发（插件可能在失焦/清空时调）", asyn
 function makeRequestEnv({ takeover, displayed = false, myClientId = "tab-mine" } = {}) {
   const editorInputs = [];
   // 落点分两种记：replaceText 是「编辑器内容变成这段文本」（TUI 的 setText），
-  // insertText 是在光标处插入。三轮审查 阻断 2 要求交还走**替换**，所以断言要能区分。
+  // insertIfEmpty 是「只在输入框为空时落进去」。定向交还走替换、广播只填空框
+  // （四轮审查 阻断 2：广播给本来就有输入框的标签时不能覆盖用户正在打的字），
+  // 所以断言必须能区分这两者。
   const composerWrites = [];
+  // 假输入框按真实语义模拟：`insertIfEmpty` 在已有正文时什么都不做。
+  let composerText = "";
   const submits = [];
   const state = {
     current: takeover
@@ -235,13 +240,22 @@ function makeRequestEnv({ takeover, displayed = false, myClientId = "tab-mine" }
     rememberCapabilityFeature: () => {},
     getClientId: () => myClientId,
     editorSubmitRef: { current: (text) => submits.push(text) },
+    placeEditorText,
     editorInputRef: { current: (request, data) => editorInputs.push({ id: request.id, data }) },
     asBracketedPaste,
     opts: {
       chatInputRef: {
         current: {
           insertText: (text) => composerWrites.push({ kind: "insert", text }),
-          replaceText: (text) => composerWrites.push({ kind: "replace", text }),
+          replaceText: (text) => {
+            composerText = text;
+            composerWrites.push({ kind: "replace", text });
+          },
+          insertIfEmpty: (text) => {
+            if (composerText.trim()) return;
+            composerText = text;
+            composerWrites.push({ kind: "insert-if-empty", text });
+          },
         },
       },
       editorTakeoverDisplayedRef: { current: displayed },
@@ -278,15 +292,26 @@ test("本页没显示接管（手机 / 设置关掉 / 收起过）：文本落�
   assert.deepEqual(env.editorInputs, [], "本页看不到接管面板，送进组件等于字没了");
   assert.deepEqual(
     env.composerWrites,
-    [{ kind: "replace", text: "手机用户要收到的字" }],
-    "必须落进它看得见的输入框，而且是**替换**（组合文本 + insertText 会拼成两份，三轮审查 阻断 2）",
+    [{ kind: "insert-if-empty", text: "手机用户要收到的字" }],
+    "必须落进它看得见的输入框，但**只在空的时候** —— 这条事件是广播的，手机 / 收起过的标签里" +
+      "可能是用户正在打的正文，整段替换等于把他的字静默删掉（四轮审查 阻断 2）",
   );
+});
+
+test("广播的 setEditorText 不覆盖用户正在打的字（四轮审查 阻断 2）", () => {
+  const env = makeRequestEnv({ takeover: { id: "t1", lines: ["L"] }, displayed: false });
+  // 用户先在输入框里打了字
+  env.handleExtensionUiRequest({ type: "extension_ui_request", id: "r0", method: "set_editor_text", text: "我自己打的" });
+  assert.deepEqual(env.composerWrites, [{ kind: "insert-if-empty", text: "我自己打的" }]);
+  // 插件随后又广播一段：输入框非空 ⇒ 什么都不做（插件那段仍在宿主侧的组件里）
+  env.handleExtensionUiRequest({ type: "extension_ui_request", id: "r1", method: "set_editor_text", text: "插件要写的" });
+  assert.deepEqual(env.composerWrites, [{ kind: "insert-if-empty", text: "我自己打的" }], "用户正在打的字不能被覆盖");
 });
 
 test("对照组：没有接管时同一份报文照旧进输入框（确认前面不是恒真）", () => {
   const env = makeRequestEnv({ takeover: null, displayed: false });
   env.handleExtensionUiRequest({ type: "extension_ui_request", id: "r1", method: "set_editor_text", text: "你好世界" });
-  assert.deepEqual(env.composerWrites, [{ kind: "replace", text: "你好世界" }]);
+  assert.deepEqual(env.composerWrites, [{ kind: "insert-if-empty", text: "你好世界" }], "广播同样只填空输入框");
   assert.deepEqual(env.editorInputs, []);
 });
 

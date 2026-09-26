@@ -31,6 +31,14 @@ export async function POST(
         throw error;
       }
     }
+    // 编辑器接管的视图上报是**纯登记**（issue #107 四轮审查 阻断 1）：客户端切走 / 关标签时
+    // 会补一条 shown=false 注销自己在旧会话上的登记，而宿主可能已经把那个会话回收了。
+    // 走 send 会对已经不 live 的会话 ensureLive —— 为了注销一条登记去唤醒旧宿主、让它占上
+    // 写者租约，还会让侧栏把那个会话短暂显示成运行中。没有 live host 时这条登记没有意义，
+    // 直接按成功返回。
+    if (body.type === "editor_takeover_view" && !sessionService.getLive(id)) {
+      return NextResponse.json({ success: true, data: null });
+    }
     const result = await sessionService.send(id, body as { type: string; [key: string]: unknown }, { signal: req.signal });
     return NextResponse.json({ success: true, data: result });
   } catch (error) {

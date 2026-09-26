@@ -124,6 +124,7 @@ import {
 } from "@/lib/attachment-upload";
 import type { QueueItemPayload } from "@/lib/agent-commands";
 import { canApplyProjection } from "@/lib/session-projection";
+import { placeEditorText } from "@/lib/extension-editor-takeover";
 import type { TimelineHydrateMode, TurnMetrics } from "@/lib/browser-session-runtime-registry";
 import {
   closeSelectionOp,
@@ -2218,21 +2219,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (takeoverForInput) {
             editorInputRef.current?.(takeoverForInput, asBracketedPaste(effect.text));
           } else {
-            // 面板刚好被卸下：落进输入框，**替换**而不是插入（见下一条注释）。
-            opts.chatInputRef?.current?.replaceText(effect.text);
+            // 面板刚好被卸下：落进输入框（按定向/广播分流，见下一条注释的分支说明）。
+            placeEditorText(effect, opts.chatInputRef?.current ?? null, getClientId());
           }
         }
       } else if (effect.type === "setEditorText") {
-        // 其余情况落进**可见的**输入框：本页没在显示接管（手机 / 设置关掉 / 收起过），
-        // 或组件漏实现 setText、或提交失败要回填。
-        // 「组件实现了 setText」不该让这些用户收不到字（issue #107 审查 重要 4）。
-        // clientId 定向（「返回输入框」把组件文本交还给发起标签）时不改别的标签。
-        // 落点是**替换**（TUI 的 `editor.setText`），不是插入：这条事件的语义是「编辑器
-        // 的内容变成这段文本」。用插入会把组件全文拼在草稿后面 —— 草稿 `hello` + 组件
-        // `hello world` ⇒ 输入框 `hello hello world`（issue #107 三轮审查 阻断 2）。
-        if (effect.clientId === undefined || effect.clientId === getClientId()) {
-          opts.chatInputRef?.current?.replaceText(effect.text);
-        }
+        // 落点分流见 lib/extension-editor-takeover.ts 的 placeEditorText：定向交还走替换，
+        // 广播只填空输入框（绝不覆盖用户正在打的字，issue #107 四轮审查 阻断 2）。
+        placeEditorText(effect, opts.chatInputRef?.current ?? null, getClientId());
       }
     }
   }, [addNotice, addLiveActivity, claimNoticeHandoff, commitExtensionUiState, opts.chatInputRef, opts.editorTakeoverDisplayedRef, extensionUiStateRef]);
@@ -3761,9 +3755,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * 别的标签不该被塞进一段从没看过的文本）；② 插件**自己**调 onSubmit（没有来源标签）时
    * 挑哪个标签执行 —— 保证恰好一次，而不是每个订阅该会话的标签各发一次。
    */
-  const reportEditorTakeoverView = useCallback((requestId: string, shown: boolean) => {
+  const reportEditorTakeoverView = useCallback((requestId: string, shown: boolean, forSessionId?: string) => {
     if (!capabilities.canSendSessionCommands) return;
-    const sid = sessionIdRef.current;
+    // 显式传入的会话优先：心跳是按「这一次上报属于哪个会话」定格的，晚一拍的心跳不能
+    // 报给刚切过去的新会话（否则旧接管的 id 会被登记到新会话上，issue #107 四轮审查 阻断 1）。
+    const sid = forSessionId ?? sessionIdRef.current;
     if (!sid || !requestId) return;
     void sendAgentCommand(sid, {
       type: "editor_takeover_view",

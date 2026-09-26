@@ -521,6 +521,11 @@ export interface WebExtensionUiOptions {
    * 省略时取默认 agent 目录（与 SDK 的 `getCustomThemesDir` 同源）。
    */
   agentDir?: string;
+  /**
+   * 时钟。视图新鲜度（编辑器接管的提交归属）要按「最近还在心跳」判定，
+   * 测试要能把它推快，所以与 `readComposerText` 一样做成可注入。
+   */
+  now?: () => number;
 }
 
 /**
@@ -544,6 +549,12 @@ export function createWebExtensionUIAdapter(
 
   /** 用户主题目录与壳的亮/暗偏好都按这个 agent 目录解析。 */
   const agentDir = options.agentDir ?? getAgentDir();
+
+  /** 时钟（可注入，见 WebExtensionUiOptions.now）。 */
+  const now = options.now ?? Date.now;
+
+  // 捕获一份引用：`unmountEditorTakeover` 自己的形参也叫 `options`，会遮蔽适配器选项。
+  const writeComposerDraftOption = options.writeComposerDraft;
 
   /**
    * 插件注册的自定义编辑器工厂（`ctx.ui.setEditorComponent`）。
@@ -867,30 +878,53 @@ export function createWebExtensionUIAdapter(
   let editorTakeoverViewSeq = 0;
   const MAX_EDITOR_TAKEOVER_VIEWS = 64;
   const EDITOR_TAKEOVER_VIEW_TTL_MS = 5 * 60 * 1000;
+  /**
+   * 「这个标签最近还在心跳」的窗口（issue #107 四轮审查 阻断 1）。
+   *
+   * 只影响登记表，不进任何下发内容。客户端在显示接管期间每 10s 重报一次（见 ChatWindow 与
+   * `startEditorTakeoverHeartbeat`），所以一个还开着的标签始终在这个窗口内（容两次丢包）；
+   * 而切走 / 关掉 / 崩溃的标签最多 25s 就不再新鲜 —— 归属挑选（插件自己调 onSubmit）与交还
+   * 落点只认新鲜登记，挑不到就走**持久**兜底（写会话草稿），不会把提交定向给一个已经不订阅
+   * 这条流的标签后静默丢掉。
+   *
+   * 残留（已知）：在窗口内的那一小段里，如果恰好挑了那个刚离开、心跳还没过期的标签，这次
+   * 提交仍然没有执行者 —— 要彻底消掉需要一条「执行确认」（客户端执行后再回一帧），
+   * 本轮没做（见 issue #107 四轮审查报告里的说明）。窗口取 25s 是把这段尽量压小。
+   *
+   * 客户端的注销（切会话 / 换接管 / 卸载时发 shown=false）会立刻关掉这个窗口；心跳是第二道
+   * 防线（漏掉注销时也有界）。注销之所以安全：路由对这条纯登记在**会话不 live 时直接返回**、
+   * 不入库也不唤醒（`app/api/agent/[id]/route.ts`）—— 否则为了注销一条登记去 ensureLive 会
+   * 唤醒旧宿主、占上写者租约，还会让侧栏把它短暂显示成运行中。
+   */
+  const EDITOR_TAKEOVER_VIEW_FRESH_MS = 25 * 1000;
 
   const recordEditorTakeoverView = (requestId: string, shown: boolean, clientId: string): void => {
     if (!requestId || !clientId) return;
-    editorTakeoverViews.set(clientId, { requestId, shown, at: Date.now(), seq: ++editorTakeoverViewSeq });
+    editorTakeoverViews.set(clientId, { requestId, shown, at: now(), seq: ++editorTakeoverViewSeq });
     if (editorTakeoverViews.size > MAX_EDITOR_TAKEOVER_VIEWS) {
       // 先丢最旧的（Map 保持插入序，但 at 会被刷新，所以按 at 排序取最旧）
       const oldest = [...editorTakeoverViews.entries()].sort((a, b) => a[1].at - b[1].at)[0];
       if (oldest) editorTakeoverViews.delete(oldest[0]);
     }
     // 连带清掉过期的：否则一个关掉很久的标签会一直参与归属挑选。
-    const cutoff = Date.now() - EDITOR_TAKEOVER_VIEW_TTL_MS;
+    const cutoff = now() - EDITOR_TAKEOVER_VIEW_TTL_MS;
     for (const [id, view] of editorTakeoverViews) if (view.at < cutoff) editorTakeoverViews.delete(id);
   };
 
   /**
-   * 本页知道这个接管、且（shown 为真时）正在显示它的标签，**最近上报的排在前面**。
+   * 本页知道这个接管、且（shown 为真时）正在显示它、**并且最近还在心跳**的标签，
+   * 最近上报的排在前面。
    *
    * 排序按上报序号（不是时间戳）：同毫秒的两次上报也要有确定的先后，否则「最近跟这个
    * 接管打交道的标签」会退化成按 id 排序 —— 还是确定的，但语义不对。
+   *
+   * 新鲜度是**必须**的（issue #107 四轮审查 阻断 1）：不新鲜的登记说明那个标签已经不再
+   * 心跳（切走 / 关掉 / 崩溃），把提交定向过去只会丢；挑不到就让调用方走持久兜底。
    */
   const editorTakeoverViewers = (requestId: string, onlyShown: boolean): string[] => {
-    const cutoff = Date.now() - EDITOR_TAKEOVER_VIEW_TTL_MS;
+    const freshCutoff = now() - EDITOR_TAKEOVER_VIEW_FRESH_MS;
     return [...editorTakeoverViews.entries()]
-      .filter(([, view]) => view.requestId === requestId && view.at >= cutoff && (!onlyShown || view.shown))
+      .filter(([, view]) => view.requestId === requestId && view.at >= freshCutoff && (!onlyShown || view.shown))
       .sort((a, b) => b[1].seq - a[1].seq)
       .map(([id]) => id);
   };
@@ -918,6 +952,10 @@ export function createWebExtensionUIAdapter(
         // 还会和它们正在打的草稿拼在一起。
         const viewers = editorTakeoverViewers(entry.id, true);
         if (viewers.length === 0) {
+          // 没有任何**新鲜**的「正在显示」标签：广播之外再写一份持久副本（会话草稿）。
+          // 这一帧可能与客户端卸载面板 / 挂载输入框同帧，广播未必落得下去（四轮审查 次要）；
+          // 草稿是唯一不依赖投递时机的落点，用户下次打开会话仍能看到这段文本。
+          writeComposerDraftOption?.(carried);
           // 没有任何标签上报过（老客户端 / 刚连上还没渲染）：退回一条广播，别让文本消失。
           emit({
             type: "extension_ui_request",

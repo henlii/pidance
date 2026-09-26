@@ -51,6 +51,8 @@ import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE, CHAT_COLUMN_MAX_WI
  */
 const CHAT_INPUT_SIDE_PADDING = CHAT_GUTTER;
 const CHAT_INPUT_SIDE_PADDING_MOBILE = 16;
+/** 接管视图心跳间隔（宿主的新鲜度窗口 25s = 它的 2.5 倍，容两次丢包）。 */
+const EDITOR_TAKEOVER_VIEW_HEARTBEAT_MS = 10_000;
 /** 本轮没有写入文件时的稳定空数组：保持引用不变，MessageView 的 memo 才不会被打破。 */
 const NO_WRITTEN_FILES: string[] = [];
 import { ExtensionDialog } from "./ExtensionDialog";
@@ -68,7 +70,7 @@ import { useExtensionTerminalInput } from "@/hooks/useExtensionTerminalInput";
 import { shouldReturnComposerFocus, type KeyTargetLike } from "@/lib/extension-panel-keys";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { loadEditorTakeoverEnabled, EDITOR_TAKEOVER_CHANGED_EVENT } from "@/lib/ui-preferences";
-import { shouldShowEditorTakeover, shouldShowEditorTakeoverBar } from "@/lib/extension-editor-takeover";
+import { editorTakeoverViewCleanup, shouldShowEditorTakeover, shouldShowEditorTakeoverBar, startEditorTakeoverHeartbeat } from "@/lib/extension-editor-takeover";
 import { useMessageJump, type MessageJumpRailHandle } from "@/hooks/useMessageJump";
 import { useRenderSize } from "@/hooks/useRenderSize";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -309,10 +311,41 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   // 上报给宿主（issue #107 三轮审查）：卸下工厂时组件文本只交给刚才在显示接管的标签；
   // 插件自己调 onSubmit 时宿主据此挑一个归属标签。**手机 / 已收起也要报**（shown=false）——
   // 否则宿主只能退回广播，把文本插进这些标签的输入框。
+  //
+  // 状态变了立刻报一次（shown 的实时性）。
+  const reportedTakeoverViewRef = useRef<{ sessionId: string; requestId: string } | null>(null);
   useEffect(() => {
-    if (!editorTakeoverId) return;
-    reportEditorTakeoverView?.(editorTakeoverId, editorTakeoverActive);
-  }, [editorTakeoverId, editorTakeoverActive, reportEditorTakeoverView]);
+    const viewSessionId = session?.id ?? null;
+    const reported = viewSessionId && editorTakeoverId ? { sessionId: viewSessionId, requestId: editorTakeoverId } : null;
+    const cleanupTarget = editorTakeoverViewCleanup(reportedTakeoverViewRef.current, reported);
+    reportedTakeoverViewRef.current = reported;
+    // 换接管 / 切会话 / 卸载：向**旧的那条**注销。宿主那边「谁最近还在心跳」只认新鲜登记，
+    // 不注销就要等新鲜度窗口过期；注销把窗口立刻关掉（四轮审查 阻断 1）。
+    // 会话已经不 live 时，宿主侧的路由对这条纯登记不入库、也不唤醒（见 app/api/agent/[id]/route.ts），
+    // 所以这里不必先探活。
+    if (cleanupTarget) {
+      reportEditorTakeoverView?.(cleanupTarget.requestId, false, cleanupTarget.sessionId);
+    }
+    if (reported) reportEditorTakeoverView?.(reported.requestId, editorTakeoverActive, reported.sessionId);
+  }, [editorTakeoverId, editorTakeoverActive, session?.id, reportEditorTakeoverView]);
+  // 心跳（issue #107 四轮审查 阻断 1）：宿主只把「最近还在心跳」的登记当有效归属者
+  // （`EDITOR_TAKEOVER_VIEW_FRESH_MS`）。这里每 10s 重报一次，并且**钉住这一次心跳属于
+  // 哪个会话** —— 不钉的话，切走之后残留的一拍会把旧接管的 id 登记到新会话上。
+  //
+  // 两条防线：上面那条 effect 在切会话 / 换接管 / 卸载时向旧登记发 shown=false（立刻关窗），
+  // 心跳让还开着的标签始终新鲜（漏掉注销时也不至于一直有效）。挑不到活着的标签时，宿主走
+  // **持久**兜底（写会话草稿），不会静默丢。
+  useEffect(() => {
+    const beatSessionId = session?.id ?? null;
+    if (!editorTakeoverId || !beatSessionId) return;
+    return startEditorTakeoverHeartbeat({
+      // 读渲染期那个 ref（shown 的最新值），不把它放进依赖：否则每次收起/展开
+      // 都要重挂计时器。
+      readShown: () => editorTakeoverDisplayedRef.current === true,
+      report: (shown) => reportEditorTakeoverView?.(editorTakeoverId, shown, beatSessionId),
+      intervalMs: EDITOR_TAKEOVER_VIEW_HEARTBEAT_MS,
+    });
+  }, [editorTakeoverId, session?.id, reportEditorTakeoverView]);
   // 接管面板真的拿着键盘时（没有插件浮层抢焦点），窗口 ① 的**捕获式**预抢必须让位：
   // 接管面板里的按键走 `editor_component_input`，适配器**先**过插件的全局监听器（pi-tui 顺序）
   // 再进被接管的组件 —— 被窗口 ① 抢先吃掉的话，「未被消费的键仍然到达聚焦组件」这半截就没了。
