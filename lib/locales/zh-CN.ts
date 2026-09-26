@@ -262,6 +262,12 @@ export const zhCN: Record<TranslationKey, string> = {
   chat_readOnlySessionDescription: "仅可浏览：发送、引导、追问、压缩、分叉与设置修改均已禁用；消息、文件与会话统计仍可查看。",
   chat_extensionRequest: '扩展请求',
   chat_extensionPanel: '扩展面板',
+  /** 插件自定义编辑器（setEditorComponent）接管输入框时的标题与退出入口。 */
+  chat_editorTakeover: '插件编辑器',
+  chat_editorTakeoverExit: '返回输入框',
+  chat_editorTakeoverHint: '按键交给插件编辑器。想用普通输入框时点「返回输入框」。',
+  chat_editorTakeoverCollapsed: '插件编辑器已收起，当前用普通输入框。',
+  chat_editorTakeoverReenter: '回到插件编辑器',
 
   // 消息撤回坞（OpenChamber 风格）
   retracted_messagesTitle: '已撤回 {count} 条消息',
@@ -811,6 +817,9 @@ export const zhCN: Record<TranslationKey, string> = {
   defaults_streamingEnterQueue: "队列（完成后发送）",
   defaults_streamingEnterSteer: "引导（立即中断注入）",
   defaults_streamingEnterHint: "桌面：Enter 执行默认动作，Ctrl/Cmd+Enter 执行相反动作。发送按钮始终排队。手机：回车换行，点发送按钮提交。",
+  /** 设置里关掉插件编辑器接管（issue #107）。 */
+  defaults_editorTakeover: '允许插件接管输入框（自定义编辑器）',
+  defaults_editorTakeoverHint: '插件注册了自己的编辑器（如 Vim 模式）时，在输入区显示它。关掉就始终用内置输入框。手机不接管。',
   defaults_completionSound: "完成提示音",
   defaults_completionSoundHint: "Agent 完成一轮回复时播放提示音。", defaults_queueFlushAsOne: '队列消息一次性投递', defaults_queueFlushAsOneHint: '开启后，上一轮结束自动投递时把所有队列消息合并为一条发送；关闭则逐条发送。',
   input_sendQueueTooltip: "排队到当前运行结束后发送",

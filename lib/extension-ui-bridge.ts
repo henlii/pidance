@@ -8,6 +8,13 @@ import type {
 export type ExtensionUiDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" }>;
 export type ExtensionUiBlockingRequest = ExtensionUiDialogRequest;
 export type ExtensionUiCustomRequest = Extract<ExtensionUiRequest, { method: "custom" }>;
+/**
+ * 插件自定义编辑器的接管帧（issue #107）。
+ *
+ * 与 custom 面板同形（渲染行 + 图片），但它是**输入框本体**：客户端在输入框位置渲染它，
+ * 把按键转给插件组件的 `handleInput`，并按 `onSubmit` 的提交走既有发送管线。
+ */
+export type ExtensionUiEditorComponentRequest = Extract<ExtensionUiRequest, { method: "editorComponent" }>;
 export type ExtensionUiNoticeType = "info" | "success" | "warning" | "error";
 
 import type { ExtensionShortcutEntry } from "./extension-shortcuts";
@@ -16,6 +23,13 @@ export interface ExtensionUiState {
   /** 队首投影：阻塞请求（select/confirm/input/editor）弹窗承载（对齐 TUI modal） */
   dialog: ExtensionUiDialogRequest | null;
   customUi: ExtensionUiCustomRequest | null;
+  /**
+   * 插件自定义编辑器的接管内容（setEditorComponent）；null = 没有接管，用我们自己的输入框。
+   *
+   * 与 customUi 分开存：接管时**输入框本体**要让位（不是叠一层浮层），
+   * 且它有自己的键入口与提交路径，混进 customUi 会让 overlay 的焦点/几何语义跟着乱。
+   */
+  editorTakeover: ExtensionUiEditorComponentRequest | null;
   statuses: ExtensionStatusItem[];
   widgets: ExtensionWidgetItem[];
   /**
@@ -76,6 +90,7 @@ export function createEmptyExtensionUiState(  partial?: Partial<Pick<ExtensionUi
   return {
     dialog: null,
     customUi: partial?.customUi ?? null,
+    editorTakeover: null,
     statuses: partial?.statuses ?? [],
     widgets: partial?.widgets ?? [],
     header: null,
@@ -305,6 +320,8 @@ export function resetExtensionUiForSession(state: ExtensionUiState): ExtensionUi
   return {
     ...clearAllExtensionUiBlocking(state),
     customUi: null,
+    // 接管也是**这个会话**的宿主装的：新会话由它自己的水合填回，不继承上一个的。
+    editorTakeover: null,
     statuses: [],
     widgets: [],
     // 页头 / 页脚是插件给**这个会话**设的：新会话不继承（它自己的水合会补回来）。
@@ -337,6 +354,21 @@ export function sameSlotLines(a: string[] | null, b: string[] | null): boolean {
   return a.length === b.length && a.every((line, index) => line === b[index]);
 }
 
+/** 两帧编辑器接管内容是否等价（按内容比：适配器每帧都新建数组）。 */
+export function sameEditorComponent(
+  a: ExtensionUiEditorComponentRequest | null,
+  b: ExtensionUiEditorComponentRequest | null,
+): boolean {
+  if (a === null || b === null) return a === b;
+  if (a.id !== b.id) return false;
+  if (!sameSlotLines(a.lines ?? null, b.lines ?? null)) return false;
+  const images = (items: unknown) => (Array.isArray(items) ? items.length : 0);
+  return images(a.images) === images(b.images)
+    && images(a.imageFallbacks) === images(b.imageFallbacks)
+    && JSON.stringify(a.images ?? null) === JSON.stringify(b.images ?? null)
+    && JSON.stringify(a.imageFallbacks ?? null) === JSON.stringify(b.imageFallbacks ?? null);
+}
+
 export type ExtensionUiEffect =
   | { type: "notice"; id: string; message: string; noticeType: ExtensionUiNoticeType; activityRecord: boolean }
   | { type: "setTitle"; title: string }
@@ -349,7 +381,14 @@ export type ExtensionUiEffect =
    * 而输入框的句柄只有 useAgentSession 拿得到。
    */
   | { type: "focusEditor" }
-  | { type: "insertText"; text: string };
+  | { type: "insertText"; text: string }
+  /**
+   * 插件编辑器提交了一段文本（组件声明的 `onSubmit(text)`）。
+   *
+   * 由客户端交给既有发送入口，**不**直连服务端：队列、写者所有权、只读判定
+   * 都在那条管线里，绕过去会让这些语义各说各话。
+   */
+  | { type: "editorSubmit"; text: string };
 
 export function applyExtensionUiRequest(
   state: ExtensionUiState,
@@ -369,6 +408,37 @@ export function applyExtensionUiRequest(
       const nextQueue = [...queue, request as ExtensionUiBlockingRequest];
       return { state: withProjectedQueue(state, nextQueue), effects: [] };
     }
+    case "editorComponent": {
+      // closed = 接管结束（插件卸下工厂 / 组件渲染失败降级）：恢复我们自己的输入框。
+      if (request.closed) {
+        return state.editorTakeover === null ? { state, effects: [] } : { state: { ...state, editorTakeover: null }, effects: [] };
+      }
+      if (!Array.isArray(request.lines)) return { state, effects: [] };
+      const previous = state.editorTakeover?.id === request.id ? state.editorTakeover : null;
+      // 图片缺省 = 「与上一帧相同」（服务端图片没变时省略 base64）；显式空数组 = 图没了。
+      const images = Array.isArray(request.images)
+        ? (request.images.length > 0 ? request.images : undefined)
+        : previous?.images;
+      const imageFallbacks = Array.isArray(request.imageFallbacks)
+        ? (request.imageFallbacks.length > 0 ? request.imageFallbacks : undefined)
+        : previous?.imageFallbacks;
+      // 逐字段构造（不能直接展开 request）：显式空数组要能真的清空图片，
+      // 展开 request 会把原始的 images: [] 带回来，反而覆盖掉「清空」这个决定。
+      const next = {
+        type: "extension_ui_request",
+        id: request.id,
+        method: "editorComponent",
+        lines: request.lines,
+        ...(images ? { images } : {}),
+        ...(imageFallbacks ? { imageFallbacks } : {}),
+      } as ExtensionUiEditorComponentRequest;
+      // 内容没变就不换对象：适配器每次重渲都会发一帧（宽度/主题/按键都会触发），
+      // 不比较的话每次都写 state，整棵聊天界面跟着重渲染。
+      if (previous && sameEditorComponent(previous, next)) return { state, effects: [] };
+      return { state: { ...state, editorTakeover: next }, effects: [] };
+    }
+    case "editorComponentSubmit":
+      return { state, effects: [{ type: "editorSubmit", text: request.text }] };
     case "notify":
       return {
         state,

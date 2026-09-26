@@ -6,6 +6,8 @@ import type {
   ExtensionStatusItem,
   ExtensionUiCustomLayout,
   ExtensionUiRequest,
+  ExtensionRenderedImage,
+  ExtensionRenderedImageFallback,
   ExtensionWidgetItem,
   SessionInfo,
   SessionTreeNode,
@@ -53,8 +55,9 @@ import {
   restoreCustomUi,
   sameSlotLines,
 } from "@/lib/extension-ui-bridge";
-import type { ExtensionUiBlockingRequest } from "@/lib/extension-ui-bridge";
+import type { ExtensionUiBlockingRequest, ExtensionUiEditorComponentRequest } from "@/lib/extension-ui-bridge";
 import type { CompletionOutcome } from "@/lib/completion-request";
+import { asBracketedPaste } from "@/lib/terminal-input";
 import { useExtensionUiState, type ExtensionUiDialogRequest, type ExtensionUiCustomRequest } from "@/hooks/useExtensionUiState";
 import { useNoticeState } from "@/hooks/useNoticeState";
 import { parseLatestTodoSnapshot } from "@/lib/todo-parser";
@@ -276,6 +279,19 @@ type AgentStateResponse = {
    * custom 只有 SSE 事件、没有重放，刷新/切回后靠它恢复面板内容与输入入口。
    */
   activeCustomUi?: { id?: string; lines?: string[]; layout?: ExtensionUiCustomLayout } | null;
+  /**
+   * 插件自定义编辑器的接管内容（setEditorComponent，issue #107）。
+   *
+   * 与 activeCustomUi 同一类：工厂在扩展加载时设好，那一刻浏览器常还没订阅，
+   * 后加载的页面只能靠这份快照拿到接管内容。
+   * 缺字段 = 旧 Host：保持本地现状；null = 宿主明确表示「没有接管」。
+   */
+  extensionEditorComponent?: {
+    id?: string;
+    lines?: string[];
+    images?: ExtensionRenderedImage[];
+    imageFallbacks?: ExtensionRenderedImageFallback[];
+  } | null;
   /**
    * 宿主自己发出的能力提示快照（"Web 端不支持/只部分支持某能力"）。
    * 它们只有一次性 SSE 事件，而 host 启动、扩展加载都发生在浏览器订阅之前，
@@ -642,7 +658,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
   // extension UI 展示状态（#17 D5c）：5 state + ref + 3 更新回调已抽至 useExtensionUiState。
   const {
-    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets,
+    extensionDialog, extensionCustomUi, extensionEditorTakeover, extensionStatuses, extensionWidgets,
     extensionHeader, extensionFooter,
     extensionTerminalInputListenerCount, extensionShortcuts,
     extensionAutocompleteProviderCount,
@@ -733,6 +749,43 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       patchExtensionUiState({ [key]: lines });
     }
   }, [extensionUiStateRef, patchExtensionUiState]);
+
+  /**
+   * 水合插件编辑器接管（ctx.ui.setEditorComponent，issue #107）。
+   *
+   * 口径与其它投影字段一致：
+   * - **缺字段不写**（旧 Host 不该把刚由 SSE 拿到的接管清掉）；
+   * - `null` 是宿主明确表示「没有接管」→ 恢复我们自己的输入框；
+   * - 同一个 id 不覆盖：快照可能比刚到的 SSE 帧旧，用旧行覆盖新行会让插件编辑器「倒退几帧」。
+   */
+  const applyExtensionEditorTakeover = useCallback((state?: AgentStateResponse | null) => {
+    if (!state || state.extensionEditorComponent === undefined) return;
+    const active = state.extensionEditorComponent;
+    const current = extensionUiStateRef.current.editorTakeover;
+    if (active === null) {
+      if (current) patchExtensionUiState({ editorTakeover: null });
+      return;
+    }
+    const id = typeof active.id === "string" && active.id ? active.id : null;
+    if (!id) return;
+    if (current?.id === id) return;
+    const lines = Array.isArray(active.lines)
+      ? active.lines.filter((line): line is string => typeof line === "string")
+      : [];
+    const result = applyExtensionUiRequest(extensionUiStateRef.current, {
+      type: "extension_ui_request",
+      id,
+      method: "editorComponent",
+      lines,
+      ...(Array.isArray(active.images) && active.images.length > 0
+        ? { images: active.images as NonNullable<typeof active.images> }
+        : {}),
+      ...(Array.isArray(active.imageFallbacks) && active.imageFallbacks.length > 0
+        ? { imageFallbacks: active.imageFallbacks as NonNullable<typeof active.imageFallbacks> }
+        : {}),
+    } as ExtensionUiRequest);
+    commitExtensionUiState(result.state);
+  }, [commitExtensionUiState, extensionUiStateRef, patchExtensionUiState]);
 
   /**
    * 应用 host 状态里的插件快捷键清单（issue #105）。
@@ -834,6 +887,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     applyExtensionListenerCount(state);
     applyExtensionShortcuts(state);
     applyExtensionAutocomplete(state);
+    applyExtensionEditorTakeover(state);
     applyExtensionHiddenThinkingLabel(state);
     applyExtensionSlots(state);
     applyCapabilityNotices(state);
@@ -856,7 +910,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       patchExtensionUiState({ blockingQueue: [], dialog: null });
     }
     applyActiveCustomUi(state.activeCustomUi);
-  }, [applyActiveCustomUi, applyCapabilityNotices, applyExtensionHiddenThinkingLabel, applyExtensionListenerCount, applyExtensionSlots, extensionUiStateRef, patchExtensionUiState, settledRequestIdsRef]);
+  }, [applyActiveCustomUi, applyCapabilityNotices, applyExtensionEditorTakeover, applyExtensionHiddenThinkingLabel, applyExtensionListenerCount, applyExtensionSlots, extensionUiStateRef, patchExtensionUiState, settledRequestIdsRef]);
 
   /**
    * 宿主结算了一个阻塞请求（`extension_ui_settled`）：收起面板，**不回响应**。
@@ -1005,6 +1059,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const bashRecoveryIdRef = useRef(0);
   const handleAgentEventRef = useRef<((event: AgentEvent, eventRunId?: number) => void) | null>(null);
   const handleFollowUpRef = useRef<(message: string, images?: AttachedImage[]) => Promise<void>>(async () => {});
+  /** 插件编辑器提交用的两个入口 ref（真实现定义在文件后段，与 handleFollowUpRef 同一理由）。 */
+  const handleSendEntryRef = useRef<((message: string) => Promise<unknown>) | null>(null);
+  const handlePromptWithStreamingBehaviorEntryRef = useRef<
+    ((message: string, behavior: "steer" | "followUp", images?: AttachedImage[]) => Promise<unknown>) | null
+  >(null);
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<boolean> | undefined>(undefined);
   const {
     scrollContainerRef,
@@ -2059,6 +2118,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     onSessionForked,
   });
 
+  /**
+   * 插件编辑器提交的落点（`onSubmit(text)`）。
+   *
+   * 用 ref 晚绑：真正的实现要复用 `handleSend` / `handlePromptWithStreamingBehavior`，
+   * 两者在文件后面才定义，而事件分发在这里——同一手法见 `handleAgentEventRef`
+   * （事件只在挂载后到达，那时 ref 早就绑好了）。
+   */
+  const editorSubmitRef = useRef<(text: string) => void>(() => {});
+
+  /**
+   * 接管期间「把文本放进编辑器」的落点（插件调 `setEditorText` / `pasteToEditor`）。
+   *
+   * 同一个晚绑理由：实现 `sendExtensionEditorInput` 在文件后段。接管时输入框整块让位、
+   * `chatInputRef.current` 是 null —— 直接走下面那条 composer 分支就会被静默丢掉。
+   */
+  const editorInputRef = useRef<((request: ExtensionUiEditorComponentRequest, data: string) => void) | null>(null);
+
   const handleExtensionUiRequest = useCallback((request: ExtensionUiRequest) => {
     const result = applyExtensionUiRequest(extensionUiStateRef.current, request);
     commitExtensionUiState(result.state);
@@ -2104,6 +2180,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // 插件把焦点从面板交回来（overlay 句柄的 unfocus）：Web 上唯一能程序化聚焦的
         // 另一面就是输入框。面板自己的 keytrap 由组件按 request.focus 让出。
         opts.chatInputRef?.current?.focus();
+      } else if (effect.type === "editorSubmit") {
+        // 插件编辑器提交了一段文本：交给**既有发送入口**（见 submitEditorComponentText），
+        // 不在这里直连服务端 —— 队列 / 写者所有权 / 只读判定都住在那条管线里。
+        editorSubmitRef.current(effect.text);
+      } else if (effect.type === "insertText" && extensionUiStateRef.current.editorTakeover) {
+        // 插件把文本放进编辑器：接管期间我们自己的输入框不存在（`chatInputRef.current` 是 null），
+        // 所以按「粘贴」送进被接管的插件编辑器 —— 终端里这段文本进的也正是当前编辑器。
+        // 这是**兜底**：组件实现了 `setText` 时走的是适配器那条（`set_editor_text` 根本不会发出来），
+        // 只有组件漏实现 setText 才落到这里。两条都不是静默丢。
+        editorInputRef.current?.(extensionUiStateRef.current.editorTakeover, asBracketedPaste(effect.text));
       } else {
         opts.chatInputRef?.current?.insertText(effect.text);
       }
@@ -2158,6 +2244,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     applyExtensionAutocomplete(state);
     applyExtensionHiddenThinkingLabel(state);
     applyExtensionSlots(state);
+    applyExtensionEditorTakeover(state);
     // 能力提示：宿主在浏览器订阅之前发出的那条（host 启动时的扩展加载）靠快照补回来。
     applyCapabilityNotices(state);
     if (state.queuedMessages !== undefined) {
@@ -2165,7 +2252,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     // 活动 custom 面板：刷新/重连后从状态恢复内容与输入入口（#34）。
     applyActiveCustomUi(state.activeCustomUi);
-  }, [applyActiveCustomUi, applyExtensionHiddenThinkingLabel, applyExtensionListenerCount, applyExtensionSlots, applyProjectedQueues, applyRemoteThinking, patchExtensionUiState, seedTurnMetricsFromState, setLastKnownModel]);
+  }, [applyActiveCustomUi, applyExtensionEditorTakeover, applyExtensionHiddenThinkingLabel, applyExtensionListenerCount, applyExtensionSlots, applyProjectedQueues, applyRemoteThinking, patchExtensionUiState, seedTurnMetricsFromState, setLastKnownModel]);
 
   /**
    * 统一 agent run 结束路径（P2）：agent_end / prompt_done / reconcile idle 三路合一。
@@ -3542,6 +3629,47 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return t("chat_sendFailed");
   }, [queueRejectionMessage, t]);
 
+  /**
+   * 插件编辑器（setEditorComponent 的组件）里的按键 → 服务端的组件 `handleInput`。
+   *
+   * 与 custom 面板同一手法：带着请求 id，接管已经换掉/结束后旧输入不再写入
+   * （见 `extensionUiStateRef.current.editorTakeover`）。
+   */
+  const sendExtensionEditorInput = useCallback(async (
+    request: ExtensionUiEditorComponentRequest,
+    data: string,
+  ) => {
+    if (!capabilities.canSendSessionCommands) return;
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    if (extensionUiStateRef.current.editorTakeover?.id !== request.id) return;
+    try {
+      await sendAgentCommand(sid, { type: "editor_component_input", data });
+    } catch (e) {
+      console.error("Failed to send extension editor component input:", e);
+    }
+  }, [capabilities.canSendSessionCommands, extensionUiStateRef]);
+
+  /**
+   * 插件编辑器提交的文本 → **既有发送管线**。
+   *
+   * 路由与输入框的纯文本提交一致（ChatInput 的 handleSend）：
+   * 运行中入本地 follow-up 队列（与队列取回、引导合并消费），空闲走正常发送入口。
+   * 只读 / 被对端持有 / 分支切换中由 `handleSend` 自己拦（这里不再判一遍，
+   * 免得两条判断口径跑偏）。
+   */
+  const submitEditorComponentText = useCallback((text: string) => {
+    const message = typeof text === "string" ? text : "";
+    if (!message.trim()) return;
+    if (getRuntimeAgentRunning() || bashRunningRef.current) {
+      void handlePromptWithStreamingBehaviorEntryRef.current?.(message, "followUp", undefined);
+      return;
+    }
+    void handleSendEntryRef.current?.(message);
+  }, []);
+  editorSubmitRef.current = submitEditorComponentText;
+  editorInputRef.current = sendExtensionEditorInput;
+
   const handlePromptWithStreamingBehavior = useCallback(async (
     message: string,
     behavior: "steer" | "followUp",
@@ -3732,6 +3860,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   // 供 handlePromptWithStreamingBehavior（定义在前）引用最新 handleFollowUp
   handleFollowUpRef.current = handleFollowUp;
+  // 插件编辑器提交（setEditorComponent 的 onSubmit）用的两个入口：实现要复用发送管线，
+  // 而事件分发在文件前段 —— 与上面同一条理由，晚绑。
+  handleSendEntryRef.current = handleSend;
+  handlePromptWithStreamingBehaviorEntryRef.current = handlePromptWithStreamingBehavior;
 
   const handleAbortCompaction = useCallback(async () => {
     if (isReadOnly || !isCompacting) return;
@@ -4241,7 +4373,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     liveNoticeActivities,
     dismissNotice,
     toggleNoticePin,
-    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionHeader, extensionFooter, extensionTerminalInputListenerCount, extensionShortcuts, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel: extensionHiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse, sendExtensionCustomBounds, sendExtensionWidgetMouse, runExtensionShortcut,
+    extensionDialog, extensionCustomUi, extensionEditorTakeover, extensionStatuses, extensionWidgets, extensionHeader, extensionFooter, extensionTerminalInputListenerCount, extensionShortcuts, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel: extensionHiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse, sendExtensionCustomBounds, sendExtensionWidgetMouse, sendExtensionEditorInput, runExtensionShortcut,
     todos,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,

@@ -2835,6 +2835,9 @@ export class SdkSessionHost {
       // 状态，页面后加载只能靠快照补回来（否则刷新后插件页头页脚消失）。
       extensionHeader: this.extensionUi?.headerLines ?? null,
       extensionFooter: this.extensionUi?.footerLines ?? null,
+      // 插件编辑器的接管内容（issue #107）：工厂在扩展加载时设好，那一刻浏览器常还没订阅，
+      // 所以和后加载页面要看到的 widget / 槽位一样，靠状态投影补回来。
+      extensionEditorComponent: this.extensionUi?.editorTakeoverSnapshot ?? null,
       pendingExtensionRequests: Array.from(
         this.extensionUi?.pendingSnapshot.values() ?? [],
       ),
@@ -3578,6 +3581,15 @@ export class SdkSessionHost {
         const data = typeof command.data === "string" ? command.data : "";
         if (id) this.extensionUi?.inputCustom(id, data);
         return null;
+      }
+
+      case "editor_component_input": {
+        // 插件编辑器接管的按键（issue #107）：进被接管的编辑器组件。
+        // 顺序对齐 pi-tui —— 适配器内部先过全局监听器（可 consume / 改写），
+        // 未被消费才进组件；所以这里不另外调 dispatchTerminalInput。
+        const data = typeof command.data === "string" ? command.data : "";
+        if (!data) return { consumed: false };
+        return this.extensionUi?.dispatchEditorComponentInput(data) ?? { consumed: false };
       }
 
       case "terminal_input": {

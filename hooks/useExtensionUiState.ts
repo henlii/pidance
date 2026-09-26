@@ -7,13 +7,14 @@ import {
   rememberSettledRequestId,
   type ExtensionUiDialogRequest,
   type ExtensionUiCustomRequest,
+  type ExtensionUiEditorComponentRequest,
   type ExtensionUiState,
 } from "@/lib/extension-ui-bridge";
 import type { ExtensionShortcutEntry } from "@/lib/extension-shortcuts";
 import type { ExtensionStatusItem, ExtensionWidgetItem } from "@/lib/types";
 
 // 兼容 re-export：useAgentSession 与其消费方沿用既有类型名。
-export type { ExtensionUiDialogRequest, ExtensionUiCustomRequest } from "@/lib/extension-ui-bridge";
+export type { ExtensionUiDialogRequest, ExtensionUiCustomRequest, ExtensionUiEditorComponentRequest } from "@/lib/extension-ui-bridge";
 
 /**
  * extension UI 展示状态（#17 D5c 自 useAgentSession 抽出的第一刀，纯移动）。
@@ -26,6 +27,8 @@ export type { ExtensionUiDialogRequest, ExtensionUiCustomRequest } from "@/lib/e
 export function useExtensionUiState() {
   const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
+  /** 插件自定义编辑器的接管内容（issue #107）；null = 用我们自己的输入框。 */
+  const [extensionEditorTakeover, setExtensionEditorTakeover] = useState<ExtensionUiEditorComponentRequest | null>(null);
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
   const [extensionTerminalInputListenerCount, setExtensionTerminalInputListenerCount] = useState(0);
@@ -65,6 +68,7 @@ export function useExtensionUiState() {
     extensionUiStateRef.current = next;
     setExtensionDialog(next.dialog);
     setExtensionCustomUi(next.customUi);
+    setExtensionEditorTakeover(next.editorTakeover);
     setExtensionStatuses(next.statuses);
     setExtensionWidgets(next.widgets);
     setExtensionTerminalInputListenerCount(next.terminalInputListenerCount);
@@ -110,6 +114,7 @@ export function useExtensionUiState() {
   return {
     extensionDialog,
     extensionCustomUi,
+    extensionEditorTakeover,
     extensionStatuses,
     extensionWidgets,
     extensionTerminalInputListenerCount,

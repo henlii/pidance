@@ -32,6 +32,7 @@ import { MessageView, ToolExpansionRequestProvider } from "./MessageView";
 import { collectTurnWrittenFiles, shouldRenderTurnWrittenFiles } from "@/lib/turn-written-files";
 import { ImagePreviewOverlay } from "./MessageImage";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
+import { ExtensionEditorTakeover, ExtensionEditorTakeoverBar } from "./ExtensionEditorTakeover";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { MessageNavRail } from "./MessageNavRail";
 import type { UserMessageOutlineItem } from "@/lib/session-outline";
@@ -66,6 +67,8 @@ import { useExtensionShortcuts } from "@/hooks/useExtensionShortcuts";
 import { useExtensionTerminalInput } from "@/hooks/useExtensionTerminalInput";
 import { shouldReturnComposerFocus, type KeyTargetLike } from "@/lib/extension-panel-keys";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { loadEditorTakeoverEnabled, EDITOR_TAKEOVER_CHANGED_EVENT } from "@/lib/ui-preferences";
+import { shouldShowEditorTakeover, shouldShowEditorTakeoverBar } from "@/lib/extension-editor-takeover";
 import { useMessageJump, type MessageJumpRailHandle } from "@/hooks/useMessageJump";
 import { useRenderSize } from "@/hooks/useRenderSize";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -200,7 +203,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, defaultThinkingLevel,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionHeader, extensionFooter, extensionTerminalInputListenerCount, extensionShortcuts, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, sendExtensionCustomInput, sendExtensionCustomMouse, sendExtensionCustomBounds, sendExtensionWidgetMouse, runExtensionShortcut,
+    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionEditorTakeover, extensionStatuses, extensionWidgets, extensionHeader, extensionFooter, extensionTerminalInputListenerCount, extensionShortcuts, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, sendExtensionCustomInput, sendExtensionCustomMouse, sendExtensionCustomBounds, sendExtensionWidgetMouse, sendExtensionEditorInput, runExtensionShortcut,
     todos,
     isAutoModelSelection,
     agentPhase, toolExecutionSnapshots,
@@ -236,15 +239,61 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     || Boolean(extensionCustomUi && !extensionCustomUi.hidden);
 
   /**
+   * 插件编辑器接管（issue #107）：在**输入框位置**渲染插件组件（`setEditorComponent`）。
+   *
+   * 三处门槛，缺一不可：
+   * - **手机不接管**：插件画的是终端界面，窄视口下没法用（保持我们自己的真输入框）；
+   * - **设置里可关**：用户只想用自己的输入框时（`pidance.editorTakeover`，默认开）；
+   * - 用户点了「返回输入框」后收起（同一页面内不再自动弹回，见下面的复位规则）。
+   * 只读 / 被对端持有的会话本来就被提示条占着输入区，走不到这里。
+   */
+  const [editorTakeoverEnabled, setEditorTakeoverEnabled] = useState(true);
+  const [editorTakeoverDismissed, setEditorTakeoverDismissed] = useState(false);
+  useEffect(() => {
+    setEditorTakeoverEnabled(loadEditorTakeoverEnabled());
+    const onChange = () => setEditorTakeoverEnabled(loadEditorTakeoverEnabled());
+    window.addEventListener(EDITOR_TAKEOVER_CHANGED_EVENT, onChange);
+    window.addEventListener("storage", onChange);
+    return () => {
+      window.removeEventListener(EDITOR_TAKEOVER_CHANGED_EVENT, onChange);
+      window.removeEventListener("storage", onChange);
+    };
+  }, []);
+  // 插件换了一个接管（重设工厂）时复位收起状态：新接管该显示出来。
+  const editorTakeoverId = extensionEditorTakeover?.id ?? null;
+  useEffect(() => {
+    setEditorTakeoverDismissed(false);
+  }, [editorTakeoverId]);
+  // 显示判据抽在 lib/extension-editor-takeover.ts（手机 / 设置 / 收起 / 只读 / 被锁 / 对话框），
+  // 那里是纯函数、有单测；这里只组装输入。
+  const editorTakeoverGate = {
+    hasTakeover: Boolean(extensionEditorTakeover),
+    enabled: editorTakeoverEnabled,
+    dismissed: editorTakeoverDismissed,
+    isMobile,
+    isReadOnly,
+    lockedByOther,
+    hasDialog: Boolean(extensionDialog),
+  };
+  const editorTakeoverActive = shouldShowEditorTakeover(editorTakeoverGate);
+  const editorTakeoverBarVisible = shouldShowEditorTakeoverBar(editorTakeoverGate);
+  // 接管面板真的拿着键盘时（没有插件浮层抢焦点），窗口 ① 的**捕获式**预抢必须让位：
+  // 接管面板里的按键走 `editor_component_input`，适配器**先**过插件的全局监听器（pi-tui 顺序）
+  // 再进被接管的组件 —— 被窗口 ① 抢先吃掉的话，「未被消费的键仍然到达聚焦组件」这半截就没了。
+  const editorTakeoverHoldsKeys = editorTakeoverActive && !extensionSurfaceActive;
+
+  /**
    * 插件快捷键（issue #105）：服务端解析好的清单 + Web 可用性（`extensionShortcuts`），
    * 命中后只把**键名**发回服务端执行（handler 要的是那边的完整扩展 ctx）。
    *
    * 插件界面显示时（`extensionSurfaceActive`）不绑：那时按键归面板自己（窗口 ③），
    * TUI 里快捷键挂在编辑器上、焦点被 overlay 拿走时同样收不到。
    */
+
   useExtensionShortcuts({
     shortcuts: extensionShortcuts,
-    enabled: !isReadOnly && !extensionSurfaceActive && Boolean(sessionIdRef.current),
+    // 插件编辑器接管时按键归它（与 TUI 里快捷键挂在编辑器上一致），不绑快捷键。
+    enabled: !isReadOnly && !extensionSurfaceActive && !editorTakeoverActive && Boolean(sessionIdRef.current),
     onRun: runExtensionShortcut,
   });
 
@@ -252,7 +301,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     sessionId: sessionIdRef.current,
     // 窗口 ①：插件把 custom 面板收起后，白名单按键仍要能到达它的全局监听器
     // （ctx.ui.onTerminalInput；如 rpiv-ask-user 的折叠键重新展开面板）。
-    hiddenPanelRouting: Boolean(extensionCustomUi?.hidden) && extensionTerminalInputListenerCount > 0,
+    hiddenPanelRouting: Boolean(extensionCustomUi?.hidden) && extensionTerminalInputListenerCount > 0
+      && !editorTakeoverHoldsKeys,
     // 窗口 ③：插件界面显示中。面板自己的 keytrap 仍然优先（判定里按「事件目标有没有
     // DOM 归属者」让位），只读会话没有可写的宿主，不做无谓往返。
     surfaceRouting: extensionSurfaceActive
@@ -604,6 +654,13 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
 
   const chatInputElement = (
     <>
+      {/*
+        收起后的细条：插件编辑器还在，但用户选择了我们自己的输入框。
+        只读/被锁与面板打开时显示没有意义（那时输入区本来就换了别的东西）。
+      */}
+      {editorTakeoverBarVisible ? (
+        <ExtensionEditorTakeoverBar onReenter={() => setEditorTakeoverDismissed(false)} />
+      ) : null}
       {extensionDialog ? (
         // 面板打开时独占输入区（与输入框同内边距/同宽）：输入栏（含队列、模型选择）与底栏
         // 一并让位，否则面板与输入栏上下挤在一起、键盘归属也不清楚。
@@ -629,6 +686,16 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
         <ReadOnlySessionBar session={session} isMobile={isMobile} />
       ) : lockedByOther ? (
         <LockedSessionBar isMobile={isMobile} />
+      ) : editorTakeoverActive && extensionEditorTakeover ? (
+        // 插件编辑器接管：在输入框位置渲染它的界面，我们的输入框整块让位
+        //（两处收键会让按键归属说不清，见 components/ExtensionEditorTakeover.tsx）。
+        <ExtensionEditorTakeover
+          request={extensionEditorTakeover}
+          onInput={sendExtensionEditorInput}
+          onExit={() => setEditorTakeoverDismissed(true)}
+          // 插件浮层/对话框在显示时键盘归它们（TUI 里 overlay 会从编辑器拿走焦点）。
+          autoFocus={editorTakeoverHoldsKeys}
+        />
       ) : (
         <ChatInput
       ref={chatInputRef}

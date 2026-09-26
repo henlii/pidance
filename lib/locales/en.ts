@@ -268,6 +268,12 @@ export const en = {
   retracted_restoreTooltip: 'Restore this message and its replies (workspace state restores via extension if installed)',
   retracted_noText: '(no text)',
   chat_extensionPanel: 'Extension panel',
+  /** 插件自定义编辑器（setEditorComponent）接管输入框时的标题与退出入口。 */
+  chat_editorTakeover: 'Plugin editor',
+  chat_editorTakeoverExit: 'Back to input box',
+  chat_editorTakeoverHint: 'Keys go to the plugin editor. Press "Back to input box" to use the normal composer again.',
+  chat_editorTakeoverCollapsed: 'Plugin editor is hidden; using the normal input box.',
+  chat_editorTakeoverReenter: 'Use plugin editor',
   chat_confirm: 'Confirm',
   chat_submit: 'Submit',
   chat_cancel: 'Cancel',
@@ -813,6 +819,9 @@ export const en = {
   defaults_streamingEnterQueue: "Queue (send after finish)",
   defaults_streamingEnterSteer: "Steer (inject immediately)",
   defaults_streamingEnterHint: "Desktop: Enter runs the default action; Ctrl/Cmd+Enter runs the opposite. The Send button always queues. Mobile: Enter inserts a newline; tap Send to submit.",
+  /** 设置里关掉插件编辑器接管（issue #107）。 */
+  defaults_editorTakeover: 'Let plugins take over the input box (custom editors)',
+  defaults_editorTakeoverHint: 'When an extension registers its own editor (e.g. vim mode), show it in the input area. Turn off to always use the built-in composer. Never applies on phones.',
   defaults_completionSound: "Completion sound",
   defaults_completionSoundHint: "Play a tone when the agent finishes a turn.", defaults_queueFlushAsOne: 'Flush queue as one message', defaults_queueFlushAsOneHint: 'When enabled, queued messages are merged into one prompt on auto-flush; otherwise sent one by one.',
   input_sendQueueTooltip: "Queue this message after the current run finishes",

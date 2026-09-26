@@ -115,6 +115,8 @@ function makeEnv(initialQueue = []) {
       // 合并 #105 后这个回调里多了一句「应用插件快捷键清单」；它只改展示数据，
       // 与这里断言的队列过滤无关，所以给个空实现（少了它整段回调会 ReferenceError）。
       applyExtensionShortcuts: () => {},
+      // issue #107：多了一句「水合插件编辑器接管」，同样与队列过滤无关。
+      applyExtensionEditorTakeover: () => {},
       extensionUiStateRef,
       filterSettledBlockingRequests,
       patchExtensionUiState,

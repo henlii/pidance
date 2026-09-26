@@ -20,6 +20,11 @@ import { DesktopSettingsPage } from "./DesktopSettingsPage";
 import { useDesktopBridge } from "@/hooks/useDesktopBridge";
 import { loadAutoUpdateCheck, saveAutoUpdateCheck } from "@/lib/ui-preferences";
 import {
+  EDITOR_TAKEOVER_CHANGED_EVENT,
+  loadEditorTakeoverEnabled,
+  saveEditorTakeoverEnabled,
+} from "@/lib/ui-preferences";
+import {
   SETTINGS_PAGE_STORAGE_KEY,
   getSettingsPages,
   loadStoredSettingsPage,
@@ -344,6 +349,14 @@ function GeneralPage({ onClose }: { onClose?: () => void }) {
   const [soundEnabled, setSoundEnabled] = useState(true);
   useEffect(() => {
     setSoundEnabled(readSoundEnabled());
+  }, []);
+  /**
+   * 插件编辑器接管开关（issue #107）：改的是**本浏览器**的偏好，
+   * 所以改完要广播一个同页事件（storage 事件不跨同一页面的组件）。
+   */
+  const [editorTakeoverEnabled, setEditorTakeoverEnabled] = useState(true);
+  useEffect(() => {
+    setEditorTakeoverEnabled(loadEditorTakeoverEnabled());
   }, []);
   const serverPrefs = useServerPreferences();
   // 本地 state 优先：不受 serverPrefs 同步延迟/覆盖影响，点击立即生效
@@ -727,6 +740,23 @@ function GeneralPage({ onClose }: { onClose?: () => void }) {
           </label>
           <div style={{ marginTop: -6, fontSize: 11, color: "var(--text-dim)", maxWidth: 420, lineHeight: 1.45 }}>
             {t("defaults_completionSoundHint")}
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text)", cursor: "pointer", userSelect: "none" }}>
+            <input
+              type="checkbox"
+              checked={editorTakeoverEnabled}
+              onChange={(e) => {
+                const next = e.target.checked;
+                setEditorTakeoverEnabled(next);
+                saveEditorTakeoverEnabled(next);
+                window.dispatchEvent(new Event(EDITOR_TAKEOVER_CHANGED_EVENT));
+              }}
+              style={{ width: 16, height: 16, accentColor: "var(--accent)" }}
+            />
+            {t("defaults_editorTakeover")}
+          </label>
+          <div style={{ marginTop: -6, fontSize: 11, color: "var(--text-dim)", maxWidth: 420, lineHeight: 1.45 }}>
+            {t("defaults_editorTakeoverHint")}
           </div>
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text)", cursor: "pointer", userSelect: "none" }}>
             <input

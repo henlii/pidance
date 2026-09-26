@@ -115,6 +115,21 @@ test("#102：插件界面显示中时按键归插件，关闭后焦点还给输�
   assert.ok(hookCall.includes("extensionTerminalInputListenerCount > 0"), "没有监听器时不该发请求");
   assert.ok(hookCall.includes("!isReadOnly"), "只读会话没有可写宿主，不该往返");
 
+  // #107：接管面板拿着键盘时，窗口 ① 的捕获式预抢必须让位 —— 接管面板的按键走
+  // editor_component_input，适配器先过插件全局监听器（pi-tui 顺序）再进被接管的组件；
+  // 被窗口 ① 抢先吃掉的话，未被消费的键就永远到不了插件编辑器。
+  assert.match(
+    hookCall,
+    /hiddenPanelRouting:[\s\S]{0,240}!editorTakeoverHoldsKeys/,
+    "接管面板拿键盘时窗口 ① 未让位（捕获阶段会吞掉未被消费的键）",
+  );
+  assert.match(
+    source,
+    /const editorTakeoverHoldsKeys = editorTakeoverActive && !extensionSurfaceActive;/,
+    "「接管面板拿着键盘」必须是同一个概念（autoFocus 与窗口让位共用它）",
+  );
+  assert.match(source, /autoFocus=\{editorTakeoverHoldsKeys\}/, "接管面板的 autoFocus 必须用同一个判定");
+
   // 与窗口 ② 互斥：widget 选择态要求「没有 custom 面板」，窗口 ③ 要求「插件界面显示中」。
   const widgetGate = source.slice(source.indexOf("extensionWidgetKeysEnabled={"), source.indexOf("blocked={Boolean(extensionDialog)}"));
   assert.ok(widgetGate.includes("!extensionCustomUi"), "窗口 ② 的门槛必须排除有面板的情形");
