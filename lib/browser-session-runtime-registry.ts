@@ -31,7 +31,8 @@ import {
   optimisticRecord,
   prependOlderRecords,
   applyHydratePending,
-  replaceRenderedLinesByEntryId,
+  applyRenderedLinesByEntryId,
+  collectRenderedLinesByEntryId,
   resolveHydratePendingPolicy,
   submissionKey,
   timelineEntryIds,
@@ -271,6 +272,21 @@ type RuntimeSlot = {
   hydrateSeq: number;
   /** 最近一次已应用 hydrate 的请求号 */
   hydrateAppliedSeq: number;
+  /**
+   * 主题换色（issue #109）产出的行：entryId → renderedLines。
+   *
+   * 为什么要记住：换色不递增 `timelineSeq`（递增会让在途 hydrate 被判 stale、丢掉还没合并的磁盘消息），
+   * 代价是**先于换色发出、后于换色落地**的 hydrate 会把重叠段换回旧主题的行
+   * （`preserveCustomRenderedLines` 只会保留服务端这次给的行）。落地时按 entryId 重套这份记忆即可。
+   * 只保留时间线里还存在的 entryId（见 pruneThemeLines），所以不会无界增长。
+   */
+  themeLines: Map<string, string[]>;
+  /**
+   * 换色在 `hydrateSeq` 这条单调号上的位点：`hydrateRequestSeq < recolorSeq` 的响应是
+   * 「换色之前发出的」，行比记忆旧 → 套回记忆；不小于的响应比记忆新（例如 context_edit 之后重取）
+   * → 让磁盘赢，并顺手把记忆刷成这批行。
+   */
+  recolorSeq: number;
   /** 无视图且空闲时延迟关闭 SSE 的兜底定时器 */
   idleCloseTimer: TimerHandle | null;
   /** 页面隐藏超阈值时关闭本标签 SSE 的定时器（见 HIDDEN_TAB_SSE_CLOSE_DELAY_MS） */
@@ -424,12 +440,26 @@ function createSlot(sessionId: string): RuntimeSlot {
     localKeySeq: 0,
     hydrateSeq: 0,
     hydrateAppliedSeq: 0,
+    themeLines: new Map(),
+    recolorSeq: 0,
     idleCloseTimer: null,
     hiddenCloseTimer: null,
     sseRetryTimer: null,
     sseRetryAttempt: 0,
     metrics: {},
   };
+}
+
+/**
+ * 换色记忆只保留时间线里还存在的 entryId：`replace` 型 hydrate（冷加载 / 跳读）会把窗口整段换掉，
+ * 留在记忆里的旧 id 既没用又是无界增长的来源。
+ */
+function pruneThemeLines(slot: RuntimeSlot) {
+  if (slot.themeLines.size === 0) return;
+  const present = new Set(timelineEntryIds(slot.timeline));
+  for (const entryId of [...slot.themeLines.keys()]) {
+    if (!present.has(entryId)) slot.themeLines.delete(entryId);
+  }
 }
 
 function userMessageFromSubmit(
@@ -1463,7 +1493,24 @@ export function createBrowserSessionRuntimeRegistry(
           ? mergeTailRecords(previous, messages, entryIds)
           : timelineFromDisk(messages, entryIds);
       const pending = resolveHydratePendingPolicy(mode, options?.pending);
-      slot.timeline = [...applyHydratePending(previous, merged, pending)];
+      const applied = applyHydratePending(previous, merged, pending);
+      // 换色记忆要在合并之后重新生效（见 themeLines / recolorSeq 的注释）。
+      const fromBeforeRecolor = options?.hydrateRequestSeq !== undefined
+        && options.hydrateRequestSeq < slot.recolorSeq;
+      let timeline = applied;
+      if (slot.themeLines.size > 0) {
+        if (fromBeforeRecolor) {
+          timeline = applyRenderedLinesByEntryId(applied, slot.themeLines);
+        } else {
+          // 这份响应比换色新（或是调用方没给请求号）：它的行就是当前主题的，让磁盘赢，
+          // 同时把记忆刷成这批行 —— 否则记忆会把 context_edit 之后的旧渲染又盖回去。
+          for (const [entryId, lines] of collectRenderedLinesByEntryId(messages, entryIds)) {
+            slot.themeLines.set(entryId, lines);
+          }
+        }
+      }
+      slot.timeline = [...timeline];
+      pruneThemeLines(slot);
       for (const entryId of timelineEntryIds(slot.timeline)) {
         if (entryId) slot.consumedEntryIds.add(entryId);
       }
@@ -1473,7 +1520,13 @@ export function createBrowserSessionRuntimeRegistry(
     refreshRenderedLines(sessionId, messages, entryIds = []) {
       const slot = getSlot(sessionId, false);
       if (!slot) return false;
-      const next = replaceRenderedLinesByEntryId(slot.timeline, messages, entryIds);
+      const fresh = collectRenderedLinesByEntryId(messages, entryIds);
+      if (fresh.size === 0) return false;
+      for (const [entryId, lines] of fresh) slot.themeLines.set(entryId, lines);
+      // 位点要在合并之前推进：它标记「这批行比更早发出的 hydrate 新」。
+      slot.recolorSeq = ++slot.hydrateSeq;
+      const next = applyRenderedLinesByEntryId(slot.timeline, slot.themeLines);
+      pruneThemeLines(slot);
       if (next === slot.timeline) return false;
       slot.timeline = [...next];
       publish(slot);

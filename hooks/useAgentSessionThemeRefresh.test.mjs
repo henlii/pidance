@@ -61,6 +61,10 @@ function makeEnv(options = {}) {
     messages = [custom(["old"])],
     responses = [{ context: { messages: [custom(["new-1"]), custom(["new-2"])], entryIds: ["e1", "e2"] } }],
     fetchThrows = false,
+    snapshotEntryIds = null,
+    snapshotMissing = false,
+    hasMoreAfter = false,
+    onFetch = null,
   } = options;
   const calls = { fetch: [], refresh: [], loadSession: [] };
   let responseIndex = 0;
@@ -69,7 +73,8 @@ function makeEnv(options = {}) {
     entryIdsRef: { current: entryIds },
     activeLeafIdRef: { current: null },
     themeRefreshAbortRef: { current: null },
-    themeRefreshPendingRef: { current: false },
+    // 待办是按会话的集合（见 useAgentSession 的注释）
+    themeRefreshPendingRef: { current: new Set() },
     document: { visibilityState: visibility },
     // 注入的是真实模块里的常量；两个局部常量在源码模块作用域，测试只能给同值替身。
     DEFAULT_SESSION_HISTORY_PAGE,
@@ -77,7 +82,8 @@ function makeEnv(options = {}) {
     THEME_REFRESH_MAX_HOPS: 4,
     isAbortError: () => false,
     getOrCreateBrowserSessionRuntimeRegistry: () => ({
-      getSnapshot: () => ({ messages }),
+      // 默认不给 entryIds（退回到 entryIdsRef）；snapshotEntryIds/snapshotMissing 用来验「按 slot 取数」。
+      getSnapshot: (id) => (snapshotMissing ? null : { messages, ...(snapshotEntryIds ? { entryIds: snapshotEntryIds } : {}) }),
       // syncOnTabReturn 还要读写事件源；这里给「没有流」的最小替身。
       getEventSource: () => null,
       refreshRenderedLines: (sid, msgs, ids) => {
@@ -85,8 +91,10 @@ function makeEnv(options = {}) {
         return true;
       },
     }),
+    hasMoreAfterRef: { current: hasMoreAfter },
     fetch: async (url) => {
       calls.fetch.push(String(url));
+      if (onFetch) onFetch(url);
       if (fetchThrows) throw new Error("boom");
       const body = responses[Math.min(responseIndex, responses.length - 1)];
       responseIndex += 1;
@@ -137,7 +145,7 @@ test("隐藏标签：不拉（后台标签不该改自己的阅读窗口），�
 
   assert.deepEqual(calls.fetch, [], "隐藏时不发请求");
   assert.equal(calls.refresh.length, 0);
-  assert.equal(env.themeRefreshPendingRef.current, true, "记下待办，等回前台补");
+  assert.deepEqual([...env.themeRefreshPendingRef.current], ["s1"], "记下**该会话**的待办，等回前台补");
 });
 
 test("隐藏期间记下的待办：回前台（syncOnTabReturn）补一次换色，且只补一次", async () => {
@@ -153,13 +161,35 @@ test("隐藏期间记下的待办：回前台（syncOnTabReturn）补一次换�
   await sync();
   assert.equal(refreshed, 0, "没有待办时不补（回前台的重拉尾页不算换色）");
 
-  env.themeRefreshPendingRef.current = true;
+  env.themeRefreshPendingRef.current.add("s1");
   await sync();
   assert.equal(refreshed, 1, "有待办时补一次");
-  assert.equal(env.themeRefreshPendingRef.current, false, "补过就清掉待办");
+  assert.deepEqual([...env.themeRefreshPendingRef.current], [], "补过就清掉待办");
 
   await sync();
   assert.equal(refreshed, 1, "不得重复补");
+});
+
+test("隐藏期间换主题 + 切了会话：回前台补的是被切走那个会话（待办按会话记）", async () => {
+  const { env } = makeEnv();
+  const refreshed = [];
+  env.refreshRenderedLinesForTheme = (sid) => {
+    refreshed.push(sid);
+  };
+  env.ensureEventsConnected = () => {};
+  env.reconcileAgentState = async () => {};
+  const refresh = extractCallback(env, "refreshProjectionForTheme");
+  const sync = extractCallback(env, "syncOnTabReturn");
+
+  env.document.visibilityState = "hidden";
+  refresh("light");
+  assert.deepEqual([...env.themeRefreshPendingRef.current], ["s1"], "隐藏时待办记在当时的当前会话上");
+
+  // 用户切到 s2 之后才回前台
+  env.sessionIdRef.current = "s2";
+  env.document.visibilityState = "visible";
+  await sync();
+  assert.deepEqual(refreshed, ["s1"], "补的是被切走的 s1 的 slot，不是现在的 s2");
 });
 
 test("没有当前会话 / 没有已加载条 / 会话没有 custom 投影行时不发请求", async () => {
@@ -209,6 +239,57 @@ test("已加载窗口装不下时用 after 续跳，直到覆盖到尾部", asyn
   assert.match(calls.fetch[1], /after=e5/, "第二跳从上一屏的末条之后继续");
   assert.doesNotMatch(calls.fetch[1], /around=/);
   assert.deepEqual(calls.refresh.map((call) => call.ids), [["e1", "e5"], ["e9"]]);
+});
+
+test("跳读窗口（hasMoreAfter）：第一跳不带 toEnd（否则会把窗口之后的几千条一起拉下来）", async () => {
+  const { env, calls } = makeEnv({
+    hasMoreAfter: true,
+    entryIds: ["e1", "e5", "e9"],
+    responses: [{ context: { messages: [custom(["new-1"])], entryIds: ["e1"] } }],
+  });
+  withRealRefresh(env);
+  const refresh = extractCallback(env, "refreshProjectionForTheme");
+
+  refresh("dark");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.match(calls.fetch[0], /around=e1/, "仍从最早已加载条起");
+  assert.doesNotMatch(calls.fetch[0], /toEnd=1/, "跳读窗口不得带 toEnd（否则会拉下窗口之后的几千条）");
+  assert.ok(calls.fetch.length >= 2, "没覆盖到窗口末条就继续跳");
+  assert.match(calls.fetch[1], /after=e1/, "续跳仍用 after 有界向前");
+  assert.doesNotMatch(calls.fetch[1], /toEnd=1/);
+});
+
+test("取数走该会话 slot 的已加载条，而不是当前视图（回前台补被切走会话的前提）", async () => {
+  const { env, calls } = makeEnv({
+    sessionId: "s2",
+    entryIds: ["e1", "e2"],
+    snapshotEntryIds: ["x1", "x2"],
+    responses: [{ context: { messages: [custom(["new-1"])], entryIds: ["x1"] } }],
+  });
+  withRealRefresh(env);
+  await env.refreshRenderedLinesForTheme("s1");
+  assert.match(calls.fetch[0], /sessions\/s1\/context/, "请求发给目标会话");
+  assert.match(calls.fetch[0], /around=x1/, "锚点取该会话 slot 的最早已加载条，不是当前视图的 e1");
+  assert.doesNotMatch(calls.fetch[0], /leafId=/, "非当前会话不带 leafId（该用服务端自己的活动叶）");
+});
+
+test("视图切走仍写进该会话 slot，并把剩余跳数记成它的待办（不静默丢）", async () => {
+  const { env, calls } = makeEnv({
+    entryIds: ["e1", "e5", "e9"],
+    responses: [{ context: { messages: [custom(["new-1"])], entryIds: ["e1"] } }],
+    // 响应回来的那一刻用户已经切到别的会话
+    onFetch: () => {
+      env.sessionIdRef.current = "s2";
+    },
+  });
+  withRealRefresh(env);
+  await env.refreshRenderedLinesForTheme("s1");
+
+  assert.equal(calls.refresh.length, 1, "这次响应仍要写进 s1 的 slot");
+  assert.equal(calls.refresh[0].sid, "s1");
+  assert.deepEqual([...env.themeRefreshPendingRef.current], ["s1"], "没覆盖完，记成 s1 的待办");
+  assert.equal(calls.fetch.length, 1, "视图不在了就不再续跳（剩下交给待办）");
 });
 
 test("换色请求失败不抛、不置错误态（颜色停在旧档位是可见的既有内容）", async () => {

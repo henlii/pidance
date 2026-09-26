@@ -235,7 +235,9 @@ export function mergeTailRecords(
  * 本函数只认 entryId、只换 `renderedLines`：
  * - 不动顺序、长度、key、pending 与 duringStreamingStep；
  * - 服务端这次没给出合法行（插件没有渲染器 / 渲染为空 / 该条不在这一页）时**保持原样**，
- *   宁可留着旧色，也不把已有的覆盖层清掉（清掉会从 ANSI 渲染退回纯文本，是可见的功能倒退）；
+ *   宁可留着旧色，也不把已有的覆盖层清掉（清掉会从 ANSI 渲染退回纯文本，是可见的功能倒退）。
+ *   代价要说清：这一层分不清「这次没带到」和「渲染器就是没有行」，所以那种记录会**一直**是旧色，
+ *   直到下一次主题切换，或某次整段 replace（冷加载 / 跳读）重新渲染它；期间没有提示；
  * - 没有任何记录被替换时返回原引用，调用方据此跳过多余的 publish。
  */
 export function replaceRenderedLinesByEntryId(
@@ -243,6 +245,20 @@ export function replaceRenderedLinesByEntryId(
   nextMessages: readonly AgentMessage[],
   nextEntryIds: readonly string[],
 ): Timeline {
+  const fresh = collectRenderedLinesByEntryId(nextMessages, nextEntryIds);
+  if (fresh.size === 0) return timeline;
+  return applyRenderedLinesByEntryId(timeline, fresh);
+}
+
+/**
+ * 从一页响应里收集 entryId → 合法 renderedLines（同 id 只取第一条）。
+ * 与 {@link applyRenderedLinesByEntryId} 拆开，是为了让调用方能把结果**记住**
+ * （主题换色要能在后续 hydrate 之后重新套回，见 registry 的 themeLines）。
+ */
+export function collectRenderedLinesByEntryId(
+  nextMessages: readonly AgentMessage[],
+  nextEntryIds: readonly string[],
+): Map<string, string[]> {
   const fresh = new Map<string, string[]>();
   nextMessages.forEach((message, index) => {
     const entryId = nextEntryIds[index];
@@ -250,6 +266,17 @@ export function replaceRenderedLinesByEntryId(
     const lines = validRenderedLines(message);
     if (lines) fresh.set(entryId, lines);
   });
+  return fresh;
+}
+
+/**
+ * 按 entryId 把给定行套回时间线（只换 renderedLines，结构与窗口不动）。
+ * 没有任何记录被替换时返回原引用，调用方据此跳过多余的 publish。
+ */
+export function applyRenderedLinesByEntryId(
+  timeline: Timeline,
+  fresh: ReadonlyMap<string, readonly string[]>,
+): Timeline {
   if (fresh.size === 0) return timeline;
   let changed = false;
   const next = timeline.map((record) => {
