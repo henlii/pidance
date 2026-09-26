@@ -791,6 +791,11 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
           // 插件浮层/对话框在显示时键盘归它们（TUI 里 overlay 会从编辑器拿走焦点）。
           autoFocus={editorTakeoverHoldsKeys}
         />
+      ) : extensionCustomUi && !extensionCustomUi.hidden ? (
+        // 插件面板（ctx.ui.custom 的浮层/问卷）显示时也独占输入区：与对话框同理，
+        // 输入栏（含队列、模型选择）与底栏一并让位 —— TUI 里 overlay 拿到焦点后编辑器
+        // 就不在输入链路上了，面板的键盘捕获元素才是唯一的输入落点。
+        null
       ) : (
         <ChatInput
       ref={chatInputRef}
