@@ -111,6 +111,14 @@ export function setPiThemeConstructor(base: PiThemeConstructor | null): void {
     strikethrough(text: string): string {
       return wrapTextStyle("\x1b[9m", "\x1b[29m", text);
     }
+    /**
+     * pi-tui 的 `Image` 组件在**拿不到图片能力**时用它给降级说明上色；SDK 的 `Theme` 上
+     * 没有这个成员（实测 `Theme.prototype` 不含它）。缺了它那个分支会 `TypeError`，而渲染桥的
+     * catch 会把**整段渲染**吞掉 —— 表现是插件画了图却什么都没有。原样返回文本即可（不上色）。
+     */
+    fallbackColor(text: string): string {
+      return text;
+    }
   };
 }
 /** 固定渲染宽度；前端按 pre-wrap 展示。 */
