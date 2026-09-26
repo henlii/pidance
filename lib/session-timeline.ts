@@ -1,3 +1,4 @@
+import { validRenderedLines } from "./custom-rendered-lines";
 import type { AgentMessage } from "./types";
 
 /**
@@ -222,6 +223,50 @@ export function mergeTailRecords(
   const index = firstNew ? previousEntryIds.indexOf(firstNew) : -1;
   if (index <= 0) return next;
   return [...timeline.slice(0, index), ...next];
+}
+
+/**
+ * 主题刷新（issue #109）：把**新渲染好的行**按 entryId 套回已有时间线。
+ *
+ * 为什么不能复用 mergeTailRecords：那条路会把窗口换成尾页 ——
+ * 已 prepend 的更早页换不到色，而 around（跳读历史）窗口还会被整段替换，
+ * 把用户的阅读位置拽回最新一屏，并打断正在进行的翻页。
+ *
+ * 本函数只认 entryId、只换 `renderedLines`：
+ * - 不动顺序、长度、key、pending 与 duringStreamingStep；
+ * - 服务端这次没给出合法行（插件没有渲染器 / 渲染为空 / 该条不在这一页）时**保持原样**，
+ *   宁可留着旧色，也不把已有的覆盖层清掉（清掉会从 ANSI 渲染退回纯文本，是可见的功能倒退）；
+ * - 没有任何记录被替换时返回原引用，调用方据此跳过多余的 publish。
+ */
+export function replaceRenderedLinesByEntryId(
+  timeline: Timeline,
+  nextMessages: readonly AgentMessage[],
+  nextEntryIds: readonly string[],
+): Timeline {
+  const fresh = new Map<string, string[]>();
+  nextMessages.forEach((message, index) => {
+    const entryId = nextEntryIds[index];
+    if (!entryId || fresh.has(entryId)) return;
+    const lines = validRenderedLines(message);
+    if (lines) fresh.set(entryId, lines);
+  });
+  if (fresh.size === 0) return timeline;
+  let changed = false;
+  const next = timeline.map((record) => {
+    const lines = record.entryId ? fresh.get(record.entryId) : undefined;
+    if (!lines) return record;
+    const current = (record.message as { renderedLines?: unknown }).renderedLines;
+    if (sameLines(current, lines)) return record;
+    changed = true;
+    return { ...record, message: { ...record.message, renderedLines: [...lines] } as AgentMessage };
+  });
+  return changed ? next : timeline;
+}
+
+function sameLines(current: unknown, next: readonly string[]): boolean {
+  return Array.isArray(current)
+    && current.length === next.length
+    && current.every((line, index) => line === next[index]);
 }
 
 /**

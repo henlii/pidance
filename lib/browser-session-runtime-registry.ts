@@ -31,6 +31,7 @@ import {
   optimisticRecord,
   prependOlderRecords,
   applyHydratePending,
+  replaceRenderedLinesByEntryId,
   resolveHydratePendingPolicy,
   submissionKey,
   timelineEntryIds,
@@ -342,6 +343,17 @@ export type BrowserSessionRuntimeRegistry = {
       pending?: "retain" | "drop";
     },
   ): HydrateOutcome;
+  /**
+   * 主题刷新（issue #109）：只把**新渲染好的行**按 entryId 套回已有时间线。
+   *
+   * 为什么不用 hydrate：那条路会把窗口换成磁盘尾页 —— 已 prepend 的更早页换不到色，
+   * around（跳读历史）窗口还会被整段替换成尾页。这里不动结构，只换 `renderedLines`。
+   *
+   * 刻意**不**递增 timelineSeq：那个门禁的语义是「有新的内存内容，磁盘快照不得覆盖」，
+   * 递增会让并发落地的 tail hydrate 被判 stale 而丢掉刚持久化的消息。主题换色是
+   * 派生显示数据，不值得换来一次消息丢失。返回是否有记录被替换。
+   */
+  refreshRenderedLines(sessionId: string, messages: AgentMessage[], entryIds?: string[]): boolean;
   /**
    * 追加本地乐观消息（引导/合并队列）。返回生成的稳定 key，后续用它原子回滚，
    * 不依赖数组下标，也不依赖正文（同文两条引导必须能各自回滚）。
@@ -1457,6 +1469,15 @@ export function createBrowserSessionRuntimeRegistry(
       }
       publish(slot);
       return "applied";
+    },
+    refreshRenderedLines(sessionId, messages, entryIds = []) {
+      const slot = getSlot(sessionId, false);
+      if (!slot) return false;
+      const next = replaceRenderedLinesByEntryId(slot.timeline, messages, entryIds);
+      if (next === slot.timeline) return false;
+      slot.timeline = [...next];
+      publish(slot);
+      return true;
     },
     appendLocal(sessionId, message) {
       const slot = getSlot(sessionId, true)!;

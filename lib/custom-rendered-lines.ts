@@ -1,6 +1,11 @@
 import type { AgentMessage, CustomMessage } from "./types";
 
-function validRenderedLines(message: AgentMessage): string[] | null {
+/** custom 消息上的合法 ANSI 行（非 custom / 空 / 畸形 → null）。
+ *
+ * 主题刷新（issue #109）与磁盘重载合并共用这一条判据：两者都要回答
+ * 「这条消息现在有没有可显示的行」，判据分叉会让其中一条路把另一条的覆盖层丢掉。
+ */
+export function validRenderedLines(message: AgentMessage): string[] | null {
   if (message.role !== "custom") return null;
   const lines = (message as CustomMessage).renderedLines;
   return Array.isArray(lines) && lines.length > 0 && lines.every((line) => typeof line === "string") ? lines : null;
