@@ -56,6 +56,40 @@ function requestWorkerShutdown(child) {
   }
 }
 
+/** 请 worker 自己收尾之后等它退出的上限（Windows 上必须等：见 disposeWorkerChild）。 */
+const WORKER_SHUTDOWN_GRACE_MS = 2000;
+
+/**
+ * 关掉一条终端时收尾 pty-worker。
+ *
+ * Linux：worker 收到 SIGTERM 会跑自己的 shutdown（killPtyProcess + exit），所以直接发信号。
+ * Windows：`child.kill` 会**忽略信号种类、强制结束**（Node 文档：similar to SIGKILL），
+ * 同一次同步调用里就把 worker 结束了 —— 它下一次事件循环才会读到 stdin，所以先写 bye 帧再立刻
+ * 强杀等于 bye 从来没送到，worker 里的 node-pty 真实清理也跑不到。因此 win32 上先发 bye，
+ * 让它自己退出；只有超时未退才强杀。
+ */
+function disposeWorkerChild(child, options = {}) {
+  const platform = options.platform ?? process.platform;
+  const graceMs = options.graceMs ?? WORKER_SHUTDOWN_GRACE_MS;
+  const setTimer = options.setTimer ?? setTimeout;
+  const clearTimer = options.clearTimer ?? clearTimeout;
+  const kill = () => {
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      /* 已退出 */
+    }
+  };
+  // 只在真的要等它的平台上发 bye 帧：非 win32 的路径与改动前逐字一致（就一次 SIGTERM）。
+  if (platform === "win32" && requestWorkerShutdown(child)) {
+    const timer = setTimer(kill, graceMs);
+    if (timer && typeof timer.unref === "function") timer.unref();
+    if (typeof child.once === "function") child.once("exit", () => clearTimer(timer));
+    return;
+  }
+  kill();
+}
+
 const PARENT_WATCH_MS = 5000;
 /** 连续探不到父进程几次才收尾（见 startParentWatchdog）。 */
 const PARENT_WATCH_MISSES = 2;
@@ -98,4 +132,4 @@ function startParentWatchdog(options = {}) {
   return () => clearIntervalFn(timer);
 }
 
-module.exports = { killPtyProcess, startParentWatchdog, requestWorkerShutdown };
+module.exports = { killPtyProcess, startParentWatchdog, requestWorkerShutdown, disposeWorkerChild };

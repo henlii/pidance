@@ -63,11 +63,15 @@ test("mock pty 写入/缩放/dispose 会杀进程组语义", () => {
   session.resize(80, 24);
   session.dispose();
   session.dispose();
-  assert.deepEqual(calls.filter((c) => c[0] !== "kill").concat(calls.filter((c) => c[0] === "kill").slice(0, 1)), [
+  assert.deepEqual(calls.filter((c) => c[0] === "write" || c[0] === "resize"), [
     ["write", "ls\n"],
     ["resize", 80, 24],
-    ["kill", "SIGTERM"],
   ]);
+  const killCalls = calls.filter((c) => c[0] === "kill");
+  assert.equal(killCalls.length, 1, "重复 dispose 只应收尾一次");
+  // win32 上不能给 node-pty 传 signal（见 bin/pty-process.cjs 的文件头）。
+  if (process.platform === "win32") assert.equal(killCalls[0][1], undefined, "win32 不传 signal");
+  else assert.equal(killCalls[0][1], "SIGTERM", "其它平台发 SIGTERM");
 });
 
 test("tryLoadNodePty 在本机返回 spawn 或 null", () => {

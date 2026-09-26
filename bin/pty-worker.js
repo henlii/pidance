@@ -55,7 +55,8 @@ process.stdin.on("data", (chunk) => {
   }
 });
 
-// 收尾：正常路径由父进程的 SIGTERM / SIGINT 触发，异常路径由下面的父进程看护兜底。
+// 收尾：Linux 走父进程的 SIGTERM / SIGINT，Windows 走父进程发来的 bye 帧
+// （那边 child.kill 会忽略信号种类直接强杀，信号处理跑不到）；异常路径由下面的父进程看护兜底。
 let exiting = false;
 const shutdown = () => {
   if (exiting) return;

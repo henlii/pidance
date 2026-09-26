@@ -4,7 +4,7 @@
 const { existsSync, realpathSync } = require("fs");
 const { WebSocketServer } = require("ws");
 const { resolveShell } = require("./pty-shell.cjs");
-const { killPtyProcess, requestWorkerShutdown } = require("./pty-process.cjs");
+const { killPtyProcess, disposeWorkerChild } = require("./pty-process.cjs");
 const ptyWss = new WebSocketServer({ noServer: true });
 
 function sanitizeEnv(env) {
@@ -127,6 +127,7 @@ function attachPtyToWebSocket(ws, cwd) {
   const { spawn } = require("child_process");
   const path = require("path");
   const workerPath = path.join(__dirname, "pty-worker.js");
+  let disposed = false;
   const child = spawn(process.execPath, [workerPath, cwd, "80", "24"], {
     stdio: ["pipe", "pipe", "pipe"],
     env: process.env,
@@ -141,11 +142,10 @@ function attachPtyToWebSocket(ws, cwd) {
     write: (data) => child.stdin.write(`${JSON.stringify({ type: "in", d: data })}\n`),
     resize: (cols, rows) => child.stdin.write(`${JSON.stringify({ type: "rs", cols, rows })}\n`),
     dispose: () => {
-      // 先请 worker 自己收尾（Windows 上这一步才有用：child.kill 会忽略信号种类、
-      // 直接强杀 worker，JS 的信号处理跑不到，于是 node-pty 的真实清理也跑不到）。
-      requestWorkerShutdown(child);
-      // 兜底强杀：Linux 上走 SIGTERM（worker 会照常收尾），Windows 上等价于 taskkill。
-      try { child.kill("SIGTERM"); } catch { /* ignore */ }
+      if (disposed) return;
+      disposed = true;
+      // 先请 worker 自己收尾，再按平台决定强杀时机（Windows 上不能同拍强杀，见 disposeWorkerChild）。
+      disposeWorkerChild(child);
     },
   };
   child.stdout.setEncoding("utf8");
