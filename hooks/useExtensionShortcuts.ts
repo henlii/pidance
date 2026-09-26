@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { matchesExtensionShortcut, type ExtensionShortcutEntry } from "@/lib/extension-shortcuts";
+import { pickBoundShortcut, type ExtensionShortcutEntry } from "@/lib/extension-shortcuts";
 
 /**
  * 把插件注册的快捷键（`pi.registerShortcut`）绑到 Web 的键盘上（issue #105）。
@@ -18,7 +18,13 @@ import { matchesExtensionShortcut, type ExtensionShortcutEntry } from "@/lib/ext
  *   焦点被 overlay 拿走时同样收不到 —— 那时按键归面板自己（窗口 ③）。
  *
  * 监听放在**冒泡**阶段：壳自己的监听器先跑，它们 `preventDefault` 过的键这里直接跳过，
- * 于是「壳赢」不依赖两个监听器的注册顺序。
+ * 于是「壳赢」不依赖两个监听器的注册顺序。这与「收起面板的键窗口」（窗口 ①，捕获阶段
+ * `stopPropagation`）的优先关系也由此确定：面板窗口赢。那是 TUI 的顺序 —— pi-tui 的
+ * `handleTuiInput` 先把输入交给 `addInputListener`（扩展的全局按键监听），消费掉才轮到
+ * 聚焦组件（编辑器上的快捷键）。设置清单里用一句提示说明这个状态。
+ *
+ * 命中判定在 `pickBoundShortcut` 里（纯函数、有行为测试）：长按重复、输入法合成、
+ * 已被别人处理过的键都不算「用户按下了这个快捷键」。
  */
 export function useExtensionShortcuts(options: {
   shortcuts: readonly ExtensionShortcutEntry[];
@@ -35,9 +41,7 @@ export function useExtensionShortcuts(options: {
     if (bound.length === 0) return;
 
     const handler = (event: KeyboardEvent) => {
-      // 壳/面板已经处理过（preventDefault）→ 让给它们。
-      if (event.defaultPrevented) return;
-      const match = bound.find((shortcut) => matchesExtensionShortcut(shortcut.key, event));
+      const match = pickBoundShortcut(bound, event);
       if (!match) return;
       // 命中就拦下：不拦的话浏览器可能同时执行自己的默认动作（滚动、焦点移动）。
       event.preventDefault();

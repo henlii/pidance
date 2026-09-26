@@ -769,6 +769,8 @@ export function PluginsConfig({
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const [data, setData] = useState<PluginsResponse | null>(null);
+  /** 插件装卸 / reload 的修订号：插件快捷键清单跟着扩展注册走，要重新取一次。 */
+  const [pluginsRevision, setPluginsRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -892,6 +894,7 @@ export function PluginsConfig({
         setSelected(next.packages[0] ? packageKey(next.packages[0]) : null);
         if (next.packages.length === 0) setAddMode(true);
         setActionMessage(t("plugins_removed"));
+        setPluginsRevision((prev) => prev + 1);
       } else {
         const messages: Record<Exclude<PluginAction, "remove">, string> = {
           install: t("plugins_installed"),
@@ -949,6 +952,7 @@ export function PluginsConfig({
       setAddMode(false);
       setInstallSource("");
       setActionMessage(t("plugins_installed"));
+      setPluginsRevision((prev) => prev + 1);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -966,6 +970,7 @@ export function PluginsConfig({
       onReloaded?.();
       await loadPlugins();
       setActionMessage(t("plugins_reloaded"));
+      setPluginsRevision((prev) => prev + 1);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1174,8 +1179,9 @@ export function PluginsConfig({
                 ))
               )}
             </div>
-            {/* 插件快捷键（issue #105）：注册集合跟着扩展加载走，这里只读呈现服务端的解析结果。 */}
-            <ExtensionShortcutsList sessionId={sessionId} />
+            {/* 插件快捷键（issue #105）：注册集合跟着扩展加载走，这里只读呈现服务端的解析结果；
+                装卸 / reload 后注册集合会变，所以带上修订号让它重取。 */}
+            <ExtensionShortcutsList sessionId={sessionId} refreshKey={pluginsRevision} />
             <div style={{ padding: "8px 6px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
               <div style={{ display: "flex", gap: 6 }}>
                 <button

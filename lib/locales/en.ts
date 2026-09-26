@@ -714,6 +714,13 @@ export const en = {
   plugins_shortcutsReasonBrowser: "reserved by the browser",
   plugins_shortcutsReasonShell: "used by Pidance itself",
   plugins_shortcutsReasonTyping: "conflicts with typing",
+  // Mirrors the SDK `getShortcuts` diagnostics (reserved keybinding conflict → registration skipped).
+  plugins_shortcutsReasonSdkConflict: "conflicts with a reserved pi shortcut (skipped in the TUI too)",
+  // No state (read-only / no live session) is not the same as "no plugin registers a shortcut":
+  // the extensions were never loaded in that case.
+  plugins_shortcutsNoState: "The session is not running (read-only or no live session), so plugin shortcuts are unknown",
+  plugins_shortcutsPanelWindowHint: "While a plugin panel is collapsed its key window takes priority (same order as the TUI); F5, F11, F12 and Ctrl+digit/plus/minus stay with the browser.",
+  plugins_shortcutsDiagnostics: "Resolution notes (the same lines the terminal prints)",
   input_compactionResultWithReason: "{reason}: compacted {before} → {after}; saved {saved}.",
   input_compactionReason_auto: "Auto",
   input_compactionReason_threshold: "Threshold reached",

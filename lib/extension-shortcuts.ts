@@ -15,10 +15,27 @@
  *
  * 表本身只应该有一份：`BROWSER_RESERVED_CTRL_KEYS` / `SHELL_RESERVED_CTRL_KEYS` 直接复用
  * `lib/extension-panel-keys.ts` 的既有常量（复制一份必然漂移）。
+ *
+ * **与「收起面板的键窗口」的重叠**（窗口 ①，`lib/extension-panel-keys.ts` 的
+ * `shouldRouteKeyToExtensionListener`）：那个窗口会拿走 Escape、F1–F12、Alt/Ctrl+单字符，
+ * 而这里可绑的只剩 F 键与部分带修饰键的组合。两者重叠时**面板窗口优先**（它在捕获阶段
+ * `stopPropagation`）——这与 TUI 一致：pi-tui 的 `handleTuiInput` 先把输入给
+ * `addInputListener`（扩展的全局按键监听），消费掉才轮到聚焦组件（编辑器上的快捷键）。
+ * 取舍写在这里是因为它没法静态表达（只在「面板被收起且插件注册了监听器」时发生），
+ * 设置清单里也用一句提示说明。
  */
 import { BROWSER_RESERVED_CTRL_KEYS, SHELL_RESERVED_CTRL_KEYS } from "./extension-panel-keys";
 
-export type ShortcutUnavailableReason = "browser-reserved" | "shell-reserved" | "typing-conflict";
+/** pi 的 `KeybindingsConfig`：键位 id → 一个或多个键。 */
+export type KeybindingsConfig = Record<string, string | string[] | undefined>;
+
+
+export type ShortcutUnavailableReason =
+  | "browser-reserved"
+  | "shell-reserved"
+  | "typing-conflict"
+  /** 被 SDK 的冲突判定跳过（保留键位冲突）——只有在宿主侧才判得出来，见 sdk-session-host。 */
+  | "sdk-conflict";
 
 export interface ShortcutAvailability {
   available: boolean;
@@ -43,6 +60,21 @@ export const SHORTCUT_RESERVED_BROWSER_CTRL_KEYS: ReadonlySet<string> = new Set(
   "b", "d", "e", "g", "h", "i", "j", "q", "u", "m",
 ]);
 const FUNCTION_KEY_PATTERN = /^f([1-9]|1[0-2])$/;
+
+/**
+ * 浏览器自己占用、绑了就会 `preventDefault` 掉的功能键与数字组合（issue #105 审查）。
+ *
+ * - F5 刷新、F11 全屏、F12 开发者工具：这三个在 Web 上给插件会直接破坏用户的浏览器操作；
+ * - Ctrl/Cmd + 1–9 / 0：切标签与回到默认缩放；
+ * - Ctrl/Cmd + `+` / `-` / `=`：缩放。
+ * 其余 F 键（F1–F4、F6–F10）保持可绑：它们在浏览器里没有默认动作，是插件最自然的落点之一。
+ */
+const BROWSER_RESERVED_FUNCTION_KEYS: ReadonlySet<string> = new Set(["f5", "f11", "f12"]);
+const BROWSER_RESERVED_DIGIT_KEYS: ReadonlySet<string> = new Set([
+  "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+]);
+const BROWSER_RESERVED_ZOOM_KEYS: ReadonlySet<string> = new Set(["+", "-", "=", "_"]);
+
 
 /**
  * 编辑/滚动键：Web 上**无论加什么修饰符**都不给插件（TUI 里这些键也归编辑器）。
@@ -99,6 +131,7 @@ export function shortcutAvailability(raw: string): ShortcutAvailability {
   const parts = key.split("+");
   const base = parts[parts.length - 1];
   const hasCtrl = parts.includes("ctrl");
+  const hasShift = parts.includes("shift");
   const hasAlt = parts.includes("alt");
   const hasSuper = parts.includes("super");
 
@@ -116,10 +149,25 @@ export function shortcutAvailability(raw: string): ShortcutAvailability {
   if (hasAlt && !hasCtrl && !hasSuper && base.length === 1 && base >= "a" && base <= "z") {
     return { available: false, reason: "browser-reserved" };
   }
+  // F5 / F11 / F12：刷新、全屏、开发者工具。
+  if (BROWSER_RESERVED_FUNCTION_KEYS.has(base)) return { available: false, reason: "browser-reserved" };
+  // Ctrl/Cmd + 数字：切标签（1–9）与回到默认缩放（0）。
+  // 带 Shift 的变体不禁：那里没有浏览器默认动作，而「连 Shift 一起砍掉」会白白缩小可绑集。
+  if ((hasCtrl || hasSuper) && !hasAlt && !hasShift && BROWSER_RESERVED_DIGIT_KEYS.has(base)) {
+    return { available: false, reason: "browser-reserved" };
+  }
+  // Ctrl/Cmd + `+` / `-`：缩放。
+  if ((hasCtrl || hasSuper) && !hasAlt && BROWSER_RESERVED_ZOOM_KEYS.has(base)) {
+    return { available: false, reason: "browser-reserved" };
+  }
   // 壳自己：Ctrl/Cmd + K（命令面板）；Escape（中止运行，输入框里还有菜单语义）。
   if ((hasCtrl || hasSuper) && SHELL_RESERVED_CTRL_KEYS.has(base)) {
     return { available: false, reason: "shell-reserved" };
   }
+  // Ctrl+Alt+N（新建会话，`hooks/useKeyboardShortcuts.ts`）。壳只在有活动项目时处理它，
+  // 但那个条件**没法静态表达**，而两个监听都在 window 上、注册顺序又由组件树决定：
+  // 与其依赖顺序，不如直接不让插件绑它（可见降级：清单里写明原因）。
+  if (key === "ctrl+alt+n") return { available: false, reason: "shell-reserved" };
   if (base === "escape" || base === "esc") return { available: false, reason: "shell-reserved" };
   // 壳的快捷键有**两层**保护，这里只是静态的一层：
   // - 静态（本函数）：壳无论什么状态都该占住的键（命令面板 Ctrl/Cmd+K、Escape）。
@@ -164,6 +212,9 @@ const NAMED_FROM_EVENT: Record<string, string> = {
  *
  * 不这么做的话插件绑的 `ctrl+shift+1` 在浏览器里是 `ctrl+shift+!`，永远匹配不上。
  * 只覆盖数字行：字母的 shift 结果就是大写（`toLowerCase` 已经还原）。
+ *
+ * 为什么不做成按物理键位（`event.code`）识别：TUI 里按键也是**字符**语义（终端送什么就是什么），
+ * 不是扫描码。按字符匹配才与 TUI 一致；非 US 布局上同一个物理键产出的字符不同，两边都会不匹配。
  */
 const SHIFTED_DIGITS: Record<string, string> = {
   "!": "1", "@": "2", "#": "3", "$": "4", "%": "5",
@@ -234,6 +285,155 @@ export interface ExtensionShortcutEntry extends ResolvedExtensionShortcut {
   available: boolean;
   reason?: ShortcutUnavailableReason;
 }
+
+/**
+ * 保留键位里、pi 早期版本用过的旧名（`KEYBINDING_NAME_MIGRATIONS` 里属于保留集的那部分）。
+ *
+ * 为什么只搬这一小撮：用户的 `keybindings.json` 可能是旧名写的，而**保留集**的旧名会直接
+ * 影响判定结果（旧名认不出来 → 本该「跳过插件注册」的键会被当成空闲键让插件绑上）。
+ * 非保留 id 的旧名只影响诊断文案的准确性，不值得为此复制整张 59 条的表（会漂移）。
+ * 这 17 条由 `lib/extension-shortcuts.test.mjs` 的防漂移用例对着 SDK 源码校验。
+ */
+export const RESERVED_LEGACY_KEYBINDING_NAMES: Readonly<Record<string, string>> = {
+  interrupt: "app.interrupt",
+  clear: "app.clear",
+  exit: "app.exit",
+  suspend: "app.suspend",
+  cycleThinkingLevel: "app.thinking.cycle",
+  cycleModelForward: "app.model.cycleForward",
+  cycleModelBackward: "app.model.cycleBackward",
+  selectModel: "app.model.select",
+  expandTools: "app.tools.expand",
+  toggleThinking: "app.thinking.toggle",
+  externalEditor: "app.editor.external",
+  followUp: "app.message.followUp",
+  submit: "tui.input.submit",
+  copy: "tui.input.copy",
+  selectConfirm: "tui.select.confirm",
+  selectCancel: "tui.select.cancel",
+  deleteToLineEnd: "tui.editor.deleteToLineEnd",
+};
+
+/** 一个键位值是不是可用的形状（字符串，或非空字符串数组）。不是就单项跳过。 */
+function sanitizeShortcutValue(value: unknown): string | string[] | null {
+  if (typeof value === "string") return value.length > 0 ? value : null;
+  if (!Array.isArray(value)) return null;
+  const keys = value.filter((item): item is string => typeof item === "string" && item.length > 0);
+  return keys.length > 0 ? keys : null;
+}
+
+/**
+ * 拼出交给 SDK `getShortcuts` 的**有效键位**（默认键 + 用户覆盖）。
+ *
+ * 为什么需要这一层：SDK 的 `buildBuiltinKeybindings` 只遍历传进去的这份配置，空对象下内置表
+ * 为空、18 个保留 id 一个都不会触发「跳过插件注册」。TUI 传的是
+ * `KeybindingsManager.getEffectiveConfig()`，但那个类**没有从包入口导出**（子路径也被 exports
+ * 挡住），所以宿主用 pi-tui 的 manager 解析 `TUI_KEYBINDINGS` 得到默认键位，再叠上用户覆盖。
+ *
+ * 与 SDK 的差异（有意，且由测试兜住）：
+ * - SDK 的 app.* 默认键位不在 pi-tui 的表里，这里不复制（平台条件值复制必然漂移）。
+ *   它们的默认键已全部被本项目自己的表拒掉（`shortcutAvailability`），防漂移用例会检查这一点，
+ *   所以插件仍然绑不到；差别只在设置清单里显示的原因文案（「浏览器/壳保留」而不是「与内置冲突」）。
+ * - 旧名只搬保留集那 17 条（见 RESERVED_LEGACY_KEYBINDING_NAMES）。
+ * - 坏值（非字符串/空）单项跳过，不让一条坏值把整张表清空（SDK 的 `toKeybindingsConfig` 会整表丢弃）。
+ */
+export function buildEffectiveKeybindings(input: {
+  /** 解析好的默认键位（宿主用 pi-tui 的 KeybindingsManager 解析 TUI_KEYBINDINGS 得到）。 */
+  defaults: KeybindingsConfig;
+  /** 用户 `keybindings.json` 的原文（未迁移、未校验）。 */
+  userBindings?: Record<string, unknown> | null;
+}): KeybindingsConfig {
+  const raw = input.userBindings ?? {};
+  const overrides: KeybindingsConfig = {};
+  for (const [name, value] of Object.entries(raw)) {
+    const keys = sanitizeShortcutValue(value);
+    if (keys === null) continue;
+    const id = RESERVED_LEGACY_KEYBINDING_NAMES[name] ?? name;
+    // 与 SDK 同一规则：现代 id 也在用户文件里时，旧名那条让位。
+    if (id !== name && Object.hasOwn(raw, id)) continue;
+    overrides[id] = keys;
+  }
+  return { ...input.defaults, ...overrides };
+}
+
+/**
+ * 这一条键盘事件该跑哪个插件快捷键（没有就是 null）。
+ *
+ * 纯函数是为了能真跑行为测试（钩子本身要 React 环境，只能做源码断言）。
+ * 三条忽略规则与编辑器的口径一致：
+ * - `defaultPrevented`：壳/面板已经处理过，让给它们（钩子仍在冒泡阶段监听）；
+ * - `repeat`：长按不是「按一次」，否则按住不放会反复触发 handler；
+ * - `isComposing`：输入法合成期间的按键不是用户的快捷键意图。
+ */
+export function pickBoundShortcut(
+  shortcuts: readonly ExtensionShortcutEntry[],
+  event: {
+    key: string;
+    ctrlKey: boolean;
+    altKey: boolean;
+    shiftKey: boolean;
+    metaKey: boolean;
+    repeat?: boolean;
+    isComposing?: boolean;
+    defaultPrevented?: boolean;
+  },
+): ExtensionShortcutEntry | null {
+  if (event.defaultPrevented) return null;
+  if (event.repeat) return null;
+  if (event.isComposing) return null;
+  for (const shortcut of shortcuts) {
+    if (!shortcut.available) continue;
+    if (matchesExtensionShortcut(shortcut.key, event)) return shortcut;
+  }
+  return null;
+}
+/** 会话状态里与快捷键有关的那两个字段（旧 Host 可能一个都没有）。 */
+export interface ShortcutListPayload {
+  state?: {
+    extensionShortcuts?: unknown;
+    extensionShortcutDiagnostics?: unknown;
+  };
+}
+
+/** SDK 的冲突诊断原文（英文，与 TUI 打印的是同一句）。 */
+export interface ShortcutDiagnostic {
+  message: string;
+  path?: string;
+}
+
+/**
+ * 设置清单该显示哪一种状态。
+ *
+ * 为什么值得单独一个纯函数：**「拿不到状态」与「没有插件注册」不是一回事**
+ * （issue #105 审查 P2）。只读会话或没有 live host 时状态里根本没有 `state` 字段，
+ * 那时说「没有插件注册」是假的 —— 扩展压根没被加载。这条判据以前埋在组件的 effect 里，
+ * 只有 DOM 环境才能测；提出来之后可以用行为测试锁住。
+ */
+export type ShortcutListState =
+  | { kind: "no-session" }
+  | { kind: "failed" }
+  | { kind: "no-state" }
+  | { kind: "ready"; entries: ExtensionShortcutEntry[]; diagnostics: ShortcutDiagnostic[] };
+
+export function shortcutListState(input: {
+  sessionId: string | null;
+  /** 请求成功时的响应体；失败时给 null。 */
+  payload?: ShortcutListPayload | null;
+  failed?: boolean;
+}): ShortcutListState {
+  if (!input.sessionId) return { kind: "no-session" };
+  if (input.failed) return { kind: "failed" };
+  const state = input.payload?.state;
+  if (!state) return { kind: "no-state" };
+  const entries = Array.isArray(state.extensionShortcuts)
+    ? (state.extensionShortcuts as ExtensionShortcutEntry[])
+    : [];
+  const diagnostics = Array.isArray(state.extensionShortcutDiagnostics)
+    ? (state.extensionShortcutDiagnostics as ShortcutDiagnostic[])
+    : [];
+  return { kind: "ready", entries, diagnostics };
+}
+
 
 /**
  * 给「设置 → 插件 → 插件快捷键」清单用：给每个已解析的快捷键补上可用性。
