@@ -21,7 +21,7 @@ import {
   renderMountedComponentOutput,
   renderWidgetComponentLines,
 } from "./tui-render-bridge";
-import { sameImageFallbacks, sameRenderedImages, type RenderedImage, type RenderedImageFallback , extractKittyImages } from "./kitty-image";
+import { sameImageFallbacks, sameRenderedImages, type RenderedImage, type RenderedImageFallback, extractKittyImages } from "./kitty-image";
 import type {
   CustomPanelBounds,
   CustomPanelFocus,
