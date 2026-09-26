@@ -54,6 +54,10 @@ export function useGlobalKeyboardShortcuts(
   useEffect(() => {
     if (!shouldRunGlobalKeyboardShortcuts(disabled)) return;
     const handler = (e: KeyboardEvent): void => {
+      // 别的监听器（插件快捷键、扩展面板）已经处理过这个键：不重复执行。
+      // 两个监听都在 window 冒泡阶段，而 React effect 是子组件先注册 —— ChatWindow 里的
+      // 插件监听其实**先**跑，所以「插件先拦、壳再执行一次」是真实可能的顺序。
+      if (e.defaultPrevented) return;
       // ---- Esc: stop agent ----
       if (e.key === "Escape") {
         if (!globalAbortHandler) return;

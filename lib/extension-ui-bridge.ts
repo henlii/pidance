@@ -10,6 +10,8 @@ export type ExtensionUiBlockingRequest = ExtensionUiDialogRequest;
 export type ExtensionUiCustomRequest = Extract<ExtensionUiRequest, { method: "custom" }>;
 export type ExtensionUiNoticeType = "info" | "success" | "warning" | "error";
 
+import type { ExtensionShortcutEntry } from "./extension-shortcuts";
+
 export interface ExtensionUiState {
   /** 队首投影：阻塞请求（select/confirm/input/editor）弹窗承载（对齐 TUI modal） */
   dialog: ExtensionUiDialogRequest | null;
@@ -25,6 +27,13 @@ export interface ExtensionUiState {
   footer: string[] | null;
   /** 注册了全局按键监听的插件监听器数量（>0 时前端才需要把按键拿去问）。 */
   terminalInputListenerCount: number;
+  /**
+   * 插件快捷键（`pi.registerShortcut`）的解析结果与 **Web 可用性**（issue #105）。
+   *
+   * 空数组 = 没有插件注册快捷键。不可用的键也在里面（带 reason），设置里要如实列出来 ——
+   * 静默丢弃会让插件作者以为是自己写错了键。
+   */
+  shortcuts: ExtensionShortcutEntry[];
   /** 扩展定制的运行提示：文案（setWorkingMessage）。 */
   workingMessage: string | null;
   /** 扩展是否允许显示运行提示行（setWorkingVisible，默认 true）。 */
@@ -53,7 +62,7 @@ export interface ExtensionUiState {
   blockingQueue: ExtensionUiBlockingRequest[];
 }
 
-export function createEmptyExtensionUiState(  partial?: Partial<Pick<ExtensionUiState, "statuses" | "widgets" | "customUi" | "terminalInputListenerCount">>,
+export function createEmptyExtensionUiState(  partial?: Partial<Pick<ExtensionUiState, "statuses" | "widgets" | "customUi" | "terminalInputListenerCount" | "shortcuts">>,
 ): ExtensionUiState {
   return {
     dialog: null,
@@ -63,6 +72,7 @@ export function createEmptyExtensionUiState(  partial?: Partial<Pick<ExtensionUi
     header: null,
     footer: null,
     terminalInputListenerCount: partial?.terminalInputListenerCount ?? 0,
+    shortcuts: partial?.shortcuts ?? [],
     workingMessage: null,
     workingVisible: true,
     workingIndicator: null,

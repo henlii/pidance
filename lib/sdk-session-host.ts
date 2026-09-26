@@ -3,6 +3,11 @@
  * 浏览器协议字段与外部 RPC 时代对齐，前端契约不变。
  */
 import { randomUUID } from "node:crypto";
+// pi-tui 的默认键位表 + 解析器：SDK 的 `KeybindingsManager` 没有从包入口导出（子路径也被 exports
+// 挡住），而它的默认键位就是 pi-tui 这套定义、解析语义也由这个类负责。
+import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   createAgentSessionFromServices,
   createAgentSessionRuntime,
@@ -96,6 +101,14 @@ import {
 import type { NavigationActions } from "./live-session-registry";
 import { resolveSessionModel } from "./resolve-session-model";
 import { isImmediateSlashPrompt } from "./slash-prompt";
+import {
+  buildEffectiveKeybindings,
+  classifyExtensionShortcuts,
+  normalizeShortcutKey,
+  shortcutAvailability,
+  type ExtensionShortcutEntry,
+  type KeybindingsConfig,
+} from "./extension-shortcuts";
 import {
   applyPassThroughExtendedThinkingInPlace,
   withPassThroughExtendedThinking,
@@ -307,6 +320,9 @@ export function openSessionManagerForHost(
   if (sessionFile) return openSessionManager(sessionFile);
   return createSessionManager(cwd);
 }
+
+/** pi-tui 默认键位的解析结果（与进程无关，解析一次即可）。 */
+let tuiDefaultKeybindingsCache: KeybindingsConfig | null = null;
 
 export class SdkSessionHost {
   private listeners: SdkEventListener[] = [];
@@ -2614,8 +2630,103 @@ export class SdkSessionHost {
     }
   }
 
+  /**
+   * pi-tui 的默认键位（进程内解析一次）。
+   *
+   * 只有 tui.*：SDK 在它之上又加了 app.* 的定义，那份没从包入口导出。缺的那部分**由本项目自己的
+   * 表兜住** —— app.* 的默认键全部落在 `shortcutAvailability` 的不可用集合里（防漂移用例对着
+   * SDK 源码校验），差别只在设置清单里显示的原因文案（「浏览器/壳保留」而不是「与内置冲突」）。
+   */
+  private tuiDefaultKeybindings(): KeybindingsConfig {
+    if (!tuiDefaultKeybindingsCache) {
+      tuiDefaultKeybindingsCache = new TuiKeybindingsManager(TUI_KEYBINDINGS, {}).getResolvedBindings();
+    }
+    return tuiDefaultKeybindingsCache;
+  }
+
+  /** 交给 SDK 的有效键位（默认键 + 用户覆盖），口径见 lib/extension-shortcuts.ts。 */
+  private effectiveKeybindings(): KeybindingsConfig {
+    return buildEffectiveKeybindings({
+      defaults: this.tuiDefaultKeybindings(),
+      userBindings: this.readUserKeybindings(),
+    });
+  }
+
+  /**
+   * 插件快捷键的解析结果：Web 可用性清单 + 被 SDK 跳过的注册 + SDK 诊断原文。
+   *
+   * 冲突语义直接复用 SDK 的 `getShortcuts`（TUI 用的同一个函数）：保留的内置键位让扩展注册被跳过、
+   * 非保留的内置键位被插件覆盖、两个插件同键后者胜。重写一遍必然漂移，所以一个字都不重写。
+   *
+   * 「被跳过的注册」怎么找出来的：先用**空配置**调一次 —— 没有内置键位表，就没有任何注册会被跳过，
+   * 于是这次的结果就是全部注册；再用**有效键位**调一次，两次之差即被跳过的那些。这样只用公开 API，
+   * 也不需要去解析 SDK 的诊断文案（文案是给人看的，形状没有保证）。被跳过的项仍然进清单：
+   * 设置里要如实说「注册了但被跳过」，不能让它悄无声息地消失。
+   *
+   * 注意调用顺序：`getShortcuts` 每次进来都会清空诊断列表，所以**读诊断必须在最后一次调用之后**。
+   */
+  private resolveExtensionShortcutState(): {
+    entries: ExtensionShortcutEntry[];
+    diagnostics: { message: string; path?: string }[];
+  } {
+    try {
+      const runner = this.session.extensionRunner;
+      // KeybindingsConfig 的 KeyId 是 pi 的品牌类型，包入口没导出：按函数签名取参类型。
+      const typeOf = (config: KeybindingsConfig) =>
+        config as Parameters<typeof runner.getShortcuts>[0];
+      const all = runner.getShortcuts(typeOf({}));
+      const resolved = runner.getShortcuts(typeOf(this.effectiveKeybindings()));
+      const diagnostics = runner
+        .getShortcutDiagnostics()
+        .map((diagnostic) => ({ message: diagnostic.message, path: diagnostic.path }));
+
+      const entries: ExtensionShortcutEntry[] = [...resolved.values()].map((shortcut) => {
+        const key = String(shortcut.shortcut);
+        return classifyExtensionShortcuts([{
+          key,
+          description: shortcut.description,
+          extensionPath: shortcut.extensionPath,
+        }])[0];
+      });
+
+      const resolvedKeys = new Set(entries.map((entry) => entry.key));
+      for (const shortcut of all.values()) {
+        const key = normalizeShortcutKey(String(shortcut.shortcut)) ?? String(shortcut.shortcut);
+        if (resolvedKeys.has(key)) continue;
+        resolvedKeys.add(key);
+        entries.push({
+          key,
+          description: shortcut.description,
+          extensionPath: shortcut.extensionPath,
+          available: false,
+          reason: "sdk-conflict",
+        });
+      }
+      return { entries, diagnostics };
+    } catch (error) {
+      // 快捷键清单是**展示**用：解析失败不该影响状态投影（只读投影失败要返回安全空态）。
+      console.error("[pidance] failed to resolve extension shortcuts:", error);
+      return { entries: [], diagnostics: [] };
+    }
+  }
+
+  /** 读用户键位覆盖（`<agentDir>/keybindings.json`）；任何失败都当「没有覆盖」。 */
+  private readUserKeybindings(): Record<string, string | string[] | undefined> {
+    try {
+      const path = join(this.agentDir, "keybindings.json");
+      if (!existsSync(path)) return {};
+      const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+      return raw as Record<string, string | string[] | undefined>;
+    } catch {
+      return {};
+    }
+  }
+
   private projectState(): Record<string, unknown> {
     const session = this.session;
+    // 一次调用同时拿到清单与诊断（`getShortcuts` 每次进来都会清空诊断列表）。
+    const shortcutState = this.resolveExtensionShortcutState();
     const model = session.model;
     const projected: Record<string, unknown> = {
       stateSources: {
@@ -2678,6 +2789,11 @@ export class SdkSessionHost {
       // 按键永不路由（实测：子代理在跑、widget 已在页面上，空输入框按 ↓ 不激活）。
       // 事件仍照发做增量更新，快照只是让后加载的页面拿到当前真值。
       extensionTerminalInputListenerCount: this.extensionUi?.terminalInputListenerCount ?? 0,
+      // 插件快捷键（pi.registerShortcut）：注册集合跟着扩展加载走，页面后加载只能靠快照补回来；
+      // 冲突解析与诊断由 SDK 的 getShortcuts 负责（见 resolveExtensionShortcutState）。
+      extensionShortcuts: shortcutState.entries,
+      // SDK 的诊断原文（与 TUI 打印的是同一句英文）：设置里照抄给用户对照，不做二次翻译。
+      extensionShortcutDiagnostics: shortcutState.diagnostics,
       // 插件自定义的折叠思考标签：与监听器计数同理 —— 插件设一次、页面后加载就丢，
       // 所以必须进水合快照（SSE 事件仍照发，做增量更新）。
       hiddenThinkingLabel: this.extensionUi?.hiddenThinkingLabel ?? null,
@@ -3199,6 +3315,35 @@ export class SdkSessionHost {
         } catch {
           // 插件补全抛错不能影响输入：当作没有候选
           return { items: [] };
+        }
+      }
+
+      case "run_extension_shortcut": {
+        // 插件快捷键的执行口（`pi.registerShortcut` 的 handler）。
+        //
+        // 为什么不让前端直接按键里跑逻辑：handler 要的是**完整扩展 ctx**（会话控制、
+        // 模型、abort …），只有服务端有。这与斜杠命令走同一套：SDK 的
+        // `createCommandContext()` 就是命令 handler 拿到的那个上下文。
+        const requested = normalizeShortcutKey(command.key);
+        if (!requested) return { ok: false, error: "invalid-shortcut" };
+        // 守卫：客户端只该发可用的键，但服务端不能靠调用方自觉 —— 清单里的不可用项也在协议里
+        // 出现，任何人都能直接发这条命令。
+        if (!shortcutAvailability(requested).available) {
+          return { ok: false, error: "unavailable-shortcut" };
+        }
+        const resolved = session.extensionRunner.getShortcuts(
+          this.effectiveKeybindings() as Parameters<typeof session.extensionRunner.getShortcuts>[0],
+        );
+        const entry = [...resolved.entries()].find(
+          ([key]) => normalizeShortcutKey(String(key)) === requested,
+        );
+        // 没命中就如实回报：被 SDK 跳过（保留键位冲突）与压根没注册都会走到这里。
+        if (!entry) return { ok: false, error: "unknown-shortcut" };
+        try {
+          await entry[1].handler(session.extensionRunner.createCommandContext());
+          return { ok: true };
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
         }
       }
 

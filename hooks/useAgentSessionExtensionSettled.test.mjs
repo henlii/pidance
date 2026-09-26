@@ -109,6 +109,9 @@ function makeEnv(initialQueue = []) {
       // 同理（issue #98）：这个回调里还多了一句「水合页头/页脚槽位」，与队列过滤无关。
       applyExtensionSlots: () => {},
       applyExtensionListenerCount: () => {},
+      // 合并 #105 后这个回调里多了一句「应用插件快捷键清单」；它只改展示数据，
+      // 与这里断言的队列过滤无关，所以给个空实现（少了它整段回调会 ReferenceError）。
+      applyExtensionShortcuts: () => {},
       extensionUiStateRef,
       filterSettledBlockingRequests,
       patchExtensionUiState,
