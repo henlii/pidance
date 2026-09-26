@@ -184,7 +184,10 @@ export function buildCompletionChain(wrappers: readonly CompletionProviderFactor
     }
   }
   if (triggerCharacters.length > 0) {
-    provider = { ...provider, triggerCharacters: [...new Set(triggerCharacters)] };
+    // **原地**写回并集（SDK 的 setupAutocompleteProvider 也是 `provider.triggerCharacters = [...]`）：
+    // 用对象展开会造出一个新对象，而类实例的 getSuggestions / applyCompletion 在**原型**上，
+    // 展开后就丢了，调用会抛错并被收成 error 回退本地。
+    provider.triggerCharacters = [...new Set(triggerCharacters)];
   }
   return { provider, triggerCharacters: [...new Set(triggerCharacters)], skipped };
 }

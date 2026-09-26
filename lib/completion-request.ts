@@ -8,6 +8,17 @@
 import type { CompletionItem } from "./autocomplete-providers";
 import { extractAtQuery } from "./file-fuzzy";
 
+/**
+ * 词边界（触发字符开启的是「一个词」，词首那个字符决定要不要问插件）。
+ *
+ * 与 pi-tui 的 `autocompleteSeparatorRegex` 同一套口径（`@earendil-works/pi-tui` 的 utils.js）：
+ * 空白，或**CJK 标点**（CJK 文字范围内的标点字符，外加常见全角标点）。只认空格和 Tab 的话
+ * `你好，#foo` 这种在 TUI 会触发的输入，在 Web 上词首会被算成 `你` 而永远不触发。
+ */
+const CJK_BREAK = "[\\p{Script_Extensions=Han}\\p{Script_Extensions=Hiragana}\\p{Script_Extensions=Katakana}\\p{Script_Extensions=Hangul}\\p{Script_Extensions=Bopomofo}]";
+const CJK_PUNCTUATION = `(?:(?=\\p{Punctuation})${CJK_BREAK}|[，．：；！？（）［］｛｝“”‘’…—])`;
+export const AUTOCOMPLETE_SEPARATOR = new RegExp(`(?:\\s|${CJK_PUNCTUATION})`, "u");
+
 /** 宿主 `completion_suggestions` 返回的结果形状（与适配器的四态一致）。 */
 export type CompletionOutcome =
   | { kind: "items"; items: CompletionItem[]; prefix: string }
@@ -16,6 +27,8 @@ export type CompletionOutcome =
   | { kind: "invalid" }
   | { kind: "no-provider" }
   | { kind: "error" }
+  /** 超时：把插件的搜索叫停，并按失败回退本地（计划里「没注册 / 失败 / 超时」同一档）。 */
+  | { kind: "timeout" }
   | { kind: "unavailable" }
   | { kind: "superseded" }
   | { kind: "invalid-request" };
@@ -41,6 +54,52 @@ export function decideCompletionDisplay(outcome: CompletionOutcome): {
   }
   if (outcome.kind === "empty") return { source: "none", items: [], prefix: "" };
   return { source: "local", items: [], prefix: "" };
+}
+
+/**
+ * 插件补全在输入区的状态。
+ *
+ * `pending` 必须与 `local` 分开：在途期间既不能显示插件的候选（还没有），
+ * **也不能**显示我们自己的文件列表 —— 插件明确回 `{ items: [] }` 时那几百毫秒里，
+ * 用户会选中并提交一个插件本意要挡掉的候选（issue #101 审查阻断 2）。
+ */
+export type PluginCompletionState =
+  | { status: "local" }
+  | { status: "pending" }
+  | { status: "none" }
+  | { status: "plugin"; items: CompletionItem[]; prefix: string };
+
+/** 初始态：没有插件结果，用我们自己的文件补全（与「没注册 provider」同一表现）。 */
+export const LOCAL_PLUGIN_COMPLETION: PluginCompletionState = { status: "local" };
+
+/** 一次结果 → 状态（纯函数，单测覆盖）。 */
+export function pluginCompletionStateForOutcome(outcome: CompletionOutcome): PluginCompletionState {
+  const display = decideCompletionDisplay(outcome);
+  if (display.source === "plugin") {
+    return { status: "plugin", items: display.items, prefix: display.prefix };
+  }
+  if (display.source === "none") return { status: "none" };
+  return LOCAL_PLUGIN_COMPLETION;
+}
+
+export type CompletionMenuEntry<TFile> =
+  | { kind: "plugin"; item: CompletionItem }
+  | { kind: "file"; entry: TFile };
+
+/**
+ * 菜单里该出现哪些条目。
+ *
+ * 只有 `plugin`（插件的候选）与 `local`（明确回退到我们自己的文件补全）才给条目；
+ * `pending` / `none` 一律为空 —— `none` 是插件**明确**说没有候选，`pending` 是还不知道，
+ * 两者都不该让用户提交本地文件项。
+ */
+export function buildCompletionMenuEntries<TFile>(
+  state: PluginCompletionState,
+  fileMatches: readonly TFile[],
+): CompletionMenuEntry<TFile>[] {
+  if (state.status === "plugin") return state.items.map((item) => ({ kind: "plugin" as const, item }));
+  if (state.status === "local") return fileMatches.map((entry) => ({ kind: "file" as const, entry }));
+  return [];
 }
 
 /**
@@ -70,7 +129,7 @@ export function buildCompletionRequest(input: {
   let tokenStart = lineStart;
   for (let index = cursor - 1; index >= lineStart; index -= 1) {
     const char = input.text[index] ?? "";
-    if (char === " " || char === "\t") break;
+    if (AUTOCOMPLETE_SEPARATOR.test(char)) break;
     tokenStart = index;
   }
   const triggerChar = tokenStart < cursor ? input.text[tokenStart] ?? "" : "";
@@ -83,6 +142,11 @@ export function buildCompletionRequest(input: {
 export interface CompletionSchedulerOptions<TInput> {
   /** 连续输入时的合并窗口（毫秒）。 */
   debounceMs: number;
+  /**
+   * 单次请求的超时（毫秒）：到点 abort 插件的搜索并回 `{ kind: "timeout" }`。
+   * 不设的话慢请求会一直停在「在途」态 —— 而计划里超时是要回退本地补全的。
+   */
+  timeoutMs?: number;
   request: (input: TInput, signal: AbortSignal) => Promise<CompletionOutcome>;
   /** 结果回调：`stale` 为真表示它已被更晚的一次请求取代（调用方应丢弃）。 */
   onOutcome: (outcome: CompletionOutcome, input: TInput, stale: boolean) => void;
@@ -112,6 +176,7 @@ export function createCompletionScheduler<TInput>(
     clearTimeout: (handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>),
   };
   let timer: unknown = null;
+  let timeoutTimer: unknown = null;
   let controller: AbortController | null = null;
   let seq = 0;
   let inflight = 0;
@@ -124,8 +189,16 @@ export function createCompletionScheduler<TInput>(
     }
   };
 
+  const clearTimeoutTimer = () => {
+    if (timeoutTimer !== null) {
+      timers.clearTimeout(timeoutTimer);
+      timeoutTimer = null;
+    }
+  };
+
   const cancel = () => {
     clearTimer();
+    clearTimeoutTimer();
     // 作废在途请求：晚到的响应用序号挡住，同时把插件的搜索真的叫停。
     seq += 1;
     controller?.abort();
@@ -136,6 +209,7 @@ export function createCompletionScheduler<TInput>(
   return {
     schedule(input) {
       clearTimer();
+      clearTimeoutTimer();
       // 新的一次排进来就作废上一次：避免旧候选在新输入上闪一下。
       seq += 1;
       controller?.abort();
@@ -147,14 +221,30 @@ export function createCompletionScheduler<TInput>(
         controller = myController;
         inflight += 1;
         sent += 1;
+        // 一次请求只结算一次：超时先 abort，随后 request 的 rejection 不能再报一遍。
+        let settled = false;
+        const settle = (outcome: CompletionOutcome) => {
+          if (settled) return;
+          settled = true;
+          clearTimeoutTimer();
+          options.onOutcome(outcome, input, mySeq !== seq);
+        };
+        const timeoutMs = options.timeoutMs ?? 0;
+        if (timeoutMs > 0) {
+          timeoutTimer = timers.setTimeout(() => {
+            timeoutTimer = null;
+            myController.abort();
+            settle({ kind: "timeout" });
+          }, timeoutMs);
+        }
         void options
           .request(input, myController.signal)
           .then((outcome) => {
-            options.onOutcome(outcome, input, mySeq !== seq);
+            settle(outcome);
           })
           .catch(() => {
             // 请求本身失败（含 abort）→ 当作「没有插件结果」，调用方回退本地补全。
-            options.onOutcome({ kind: "error" }, input, mySeq !== seq);
+            settle({ kind: "error" });
           })
           .finally(() => {
             inflight -= 1;

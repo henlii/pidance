@@ -341,7 +341,15 @@ export type SessionService = {
     cwd: string,
     toolNames?: string[],
   ): Promise<{ session: LiveAgentSession; realSessionId: string }>;
-  send(sessionId: string, command: SessionCommand): Promise<unknown>;
+  /**
+   * 发一条命令。`options.signal` 是这次命令所属的 HTTP 请求：取消语义（补全要停下插件的
+   * 搜索）挂在它上面，见 SdkSessionHost.send。
+   */
+  send(
+    sessionId: string,
+    command: SessionCommand,
+    options?: { signal?: AbortSignal },
+  ): Promise<unknown>;
   submitPrompt(
     sessionId: string,
     command: PromptCommand,
@@ -993,9 +1001,9 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       return deps.startRpcSession(sessionId, sessionFile, cwd, toolNames, navigationActions);
     },
 
-    async send(sessionId, command) {
+    async send(sessionId, command, options?: { signal?: AbortSignal }) {
       const session = await service.ensureLive(sessionId);
-      return session.send(command);
+      return session.send(command, undefined, options);
     },
 
     async submitPrompt(sessionId, command) {

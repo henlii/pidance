@@ -573,11 +573,20 @@ export function createWebExtensionUIAdapter(
   let completionWrappers: CompletionProviderFactory[] = [];
   let completionProvider: CompletionProvider | null = null;
   let completionTriggerCharacters: string[] = [];
+  /**
+   * **有效**的工厂数：抛错或返回非对象的工厂不算（`buildCompletionChain` 会跳过它们）。
+   *
+   * 门槛用的是这个而不是 `completionWrappers.length`：唯一一个工厂坏掉时，链只剩基础
+   * provider（`getSuggestions` 恒 null），客户端每次输入都要白付一次往返，结果永远是
+   * `none` 再回退本地 —— 不如一开始就说「没有 provider」。
+   */
+  let completionEffectiveCount = 0;
 
   const rebuildCompletionChain = () => {
     const built = buildCompletionChain(completionWrappers);
     completionProvider = built.provider;
     completionTriggerCharacters = built.triggerCharacters;
+    completionEffectiveCount = completionWrappers.length - built.skipped;
   };
 
   /**
@@ -591,7 +600,7 @@ export function createWebExtensionUIAdapter(
       type: "extension_ui_request",
       id: randomUUID(),
       method: "autocompleteProviders",
-      count: completionWrappers.length,
+      count: completionEffectiveCount,
       triggerCharacters: [...completionTriggerCharacters],
     });
   };
@@ -1606,7 +1615,7 @@ export function createWebExtensionUIAdapter(
     },
     /** 已注册的自动补全 provider 工厂数量（只读）：客户端据此决定要不要发补全请求。 */
     get autocompleteProviderCount() {
-      return completionWrappers.length;
+      return completionEffectiveCount;
     },
     /** 链最终 provider 声明的触发字符（并集）。 */
     get autocompleteTriggerCharacters() {
@@ -1621,7 +1630,7 @@ export function createWebExtensionUIAdapter(
      */
     async suggestCompletions(input) {
       const provider = completionProvider;
-      if (!provider || completionWrappers.length === 0) return { kind: "no-provider" } as const;
+      if (!provider || completionEffectiveCount === 0) return { kind: "no-provider" } as const;
       try {
         const result = await provider.getSuggestions(
           input.lines,
@@ -1641,7 +1650,7 @@ export function createWebExtensionUIAdapter(
      */
     applyCompletion(input) {
       const provider = completionProvider;
-      if (!provider || completionWrappers.length === 0) return null;
+      if (!provider || completionEffectiveCount === 0) return null;
       try {
         return normalizeAppliedCompletion(
           provider.applyCompletion(input.lines, input.cursorLine, input.cursorCol, input.item, input.prefix),

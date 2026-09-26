@@ -171,15 +171,24 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
 （headless `render(width)` → ANSI 行），页头常驻在转写区之上、页脚在我们自己的状态条之上；替换时先 `dispose()` 旧组件
 （对齐 TUI 的 `setExtensionFooter`），`setFooter(undefined)` / `setHeader(undefined)` 恢复内置（页脚回到我们自己的状态条）。
 槽位限高内滚（移动端约 4 行 / 桌面约 6 行），组件抛错或渲染不出行就隐藏槽位并**每种槽位只提示一次**，异常文本不进界面。
+两处**有意分叉**：① TUI 是「替换」整个内置页脚，我们保留状态 chip —— 状态是独立机制，而页脚数据（git 分支等）我们没有等价物，
+真替换会把 `setStatus` 的信息整块吞掉；② 页脚工厂的第三个参数（`ReadonlyFooterDataProvider`）按 SDK 契约给全四个成员
+（`getGitBranch` 恒 `null`、`getAvailableProviderCount` 恒 `0` —— 都没有同步来源）：**不传**会让按官方示例写的页脚
+（工厂里无条件调 `footerData.onBranchChange(...)`）直接抛错、整槽消失。
 
 **`addAutocompleteProvider` 也已实现**（2026-09-26，issue #101）：插件按注册顺序**依次包裹**补全 provider（与 SDK 的 `setupAutocompleteProvider` 同语义），
-`triggerCharacters` 取并集。输入区在**触发字符**（`@` token，或插件声明的触发字符所在的词）时才问服务端，防抖 120ms、只认最新一次、
-被取代的请求会 `abort`（插件侧的原生搜索随之停下）。三种结果区别明确：**插件给了候选**用插件的（选中后用插件的 `applyCompletion` 决定替换区间）、
-**插件明确返回空数组**则不显示（不回退），**链没给结果/抛错/没注册**才回退到 Pidance 自己的 `@` 文件补全 —— 这与 TUI 里「包装 provider 返回 null 时落到基础 provider」一致。
-没有插件注册 provider 时**一次往返都不发**（门槛随状态下发，页面后加载也能拿到）。
-两处**有意分叉**：① TUI 是「替换」整个内置页脚，我们保留状态 chip —— 状态是独立机制，而页脚数据（git 分支等）我们没有等价物，
-真替换会把 `setStatus` 的信息整块吞掉；② 页脚工厂的第三个参数（`ReadonlyFooterDataProvider`）**不传**（宁可不传也不塞缺成员的假对象，
-插件真依赖它会走到「可见失败」而不是静默假数据）。
+`triggerCharacters` **原地**写并集（对象展开会丢掉类实例挂在原型上的方法）。输入区在**触发字符**（`@` token，或插件声明的触发字符所在的词；
+词边界与 pi-tui 的 `autocompleteSeparatorRegex` 同口径 —— 空白与 CJK 标点都算）时才问服务端，防抖 120ms、只认最新一次、单次请求 800ms 超时。
+四种结果区别明确：**插件给了候选**用插件的（选中后用插件的 `applyCompletion` 决定替换区间，替换期间用户改了输入就丢弃这次应用，
+不覆盖新输入）、**插件明确返回空数组**则不显示（不回退）、**在途**同样什么都不显示（不能让用户在这几百毫秒里提交我们自己的文件项，
+那会把插件刻意的「没有候选」盖掉）、**链没给结果/抛错/超时/没注册**才回退到 Pidance 自己的 `@` 文件补全 ——「链没给结果时落到基础 provider」与 TUI 一致。
+没有插件注册 provider 时**一次往返都不发**（门槛是**有效**工厂数：坏工厂不计入，否则每次输入都白付一次注定 `none` 的往返；
+门槛随状态下发，后加载的页面/刚注册的插件拿到后会**立刻用当前输入补问一次**）。
+菜单可见性与「有东西可显示」用同一个判据：插件声明的非 `@` 触发字符不会出现「列表挂进 DOM 却不可见、按键却作用在它上面」。
+**取消挂在这一次请求上**（客户端 AbortSignal → HTTP → 宿主交给插件的 `getSuggestions`）：换输入、关菜单（Esc 也作废在途那次，
+不会自己再弹回来）、开始输入法合成、卸载都会叫停插件侧的原生搜索；不用 host 级共享锁，多标签不会互相取消。
+一处**有意分叉**：`getSuggestions(..., { force })` 恒收到 `false` —— TUI 的 `force` 来自 Tab（显式请求补全），
+而 Web 的 Tab 是**焦点遍历**（刻意留给浏览器，见 `lib/extension-panel-keys.ts`），没有等价的显式入口；正常输入照常给候选。
 **`setHiddenThinkingLabel` 也已实现**（2026-09-25，issue #96）：折叠态思考块的那一行改用插件给的标签
 （TUI 语义就是「收起时只画这个标签，展开才画正文」，依据 `assistant-message.js` 的
 `hidden ? new Text(...hiddenThinkingLabel...) : new Markdown(正文)`），未设置 / 空串 / 纯空白恢复既有的 i18n 摘要；

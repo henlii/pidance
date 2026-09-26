@@ -299,7 +299,6 @@ export class SdkSessionHost {
   private unsubscribe: (() => void) | null = null;
   private extensionUi: WebExtensionUIAdapter | null = null;
   /** 在途的补全请求（issue #101）：新请求先 abort 上一个，插件侧的原生搜索才停得下来。 */
-  private completionAbort: AbortController | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   /** ensureLive/state?wake 与后续首个写命令之间的短暂交接窗口。 */
   private startupHoldTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2678,7 +2677,12 @@ export class SdkSessionHost {
     return { entryId, binary };
   }
 
-  async send(command: Record<string, unknown>, ticket?: symbol): Promise<unknown> {
+  async send(
+    command: Record<string, unknown>,
+    ticket?: symbol,
+    /** 这次命令所属的 HTTP 请求。取消语义（例如补全要停下插件的搜索）挂在它上面。 */
+    options?: { signal?: AbortSignal },
+  ): Promise<unknown> {
     if (!this.runtime) throw new Error("SDK session is not alive");
     const type = command.type as string;
     // get_state / ensure_session 都是只读预检（浏览器「新建会话占位」会先 ensure
@@ -3081,9 +3085,11 @@ export class SdkSessionHost {
       /**
        * 插件自动补全（issue #101）：客户端按触发字符问一次，宿主把输入行交给插件链。
        *
-       * 为什么在宿主侧做「取消上一次」：插件链里的实现（如 pi-fff）用 `options.signal` 取消
-       * 自己的原生搜索；客户端的 AbortController 只断 HTTP，插件侧的搜索必须由这里叫停。
-       * 每次新请求先 abort 上一个，避免连打时在服务端堆一串没人要的搜索。
+       * 取消挂在**这一次请求**的 signal 上：插件链里的实现（如 pi-fff）用 `options.signal` 取消
+       * 自己的原生搜索，而客户端的 AbortController 只断 HTTP —— 于是「客户端不再想要这次结果」
+       * （换输入、关菜单、开始输入法合成、卸载）就等于 `req.signal` 触发，宿主据此叫停插件的搜索。
+       * 早期实现用的是一把 host 级共享的锁，多标签下会互相取消：另一个标签的补全会把这一次
+       * 打成 superseded，本该显示插件候选的一方被换成本地文件列表。
        */
       case "completion_suggestions": {
         const lines = Array.isArray(command.lines)
@@ -3100,20 +3106,16 @@ export class SdkSessionHost {
         if (cursorCol > (lines[cursorLine] as string).length) {
           return { result: { kind: "invalid-request" } };
         }
-        this.completionAbort?.abort();
-        const controller = new AbortController();
-        this.completionAbort = controller;
+        const signal = options?.signal ?? new AbortController().signal;
         const outcome = this.extensionUi
           ? await this.extensionUi.suggestCompletions({
               lines,
               cursorLine,
               cursorCol,
               force: command.force === true,
-              signal: controller.signal,
+              signal,
             })
           : { kind: "no-provider" as const };
-        // 已被后来的请求取代：结果丢掉（客户端也按序号丢弃，这里是双保险）。
-        if (this.completionAbort !== controller) return { result: { kind: "superseded" } };
         return { result: outcome };
       }
 

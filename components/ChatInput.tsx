@@ -16,7 +16,12 @@ import {
 } from "@/lib/file-fuzzy";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import type { CompletionItem } from "@/lib/autocomplete-providers";
-import { buildCompletionRequest, type CompletionOutcome } from "@/lib/completion-request";
+import {
+  buildCompletionMenuEntries,
+  buildCompletionRequest,
+  type CompletionMenuEntry,
+  type CompletionOutcome,
+} from "@/lib/completion-request";
 import { usePluginCompletion } from "@/hooks/usePluginCompletion";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useAnchoredOverlay } from "@/hooks/useAnchoredOverlay";
@@ -1306,7 +1311,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     [pluginTriggerKey],
   );
   const pluginCompletionEnabled = (autocompleteProviderCount ?? 0) > 0 && Boolean(onLoadCompletionSuggestions);
-  const { result: pluginCompletion, schedule: schedulePluginCompletion } = usePluginCompletion({
+  const {
+    state: pluginCompletion,
+    schedule: schedulePluginCompletion,
+    cancel: cancelPluginCompletion,
+  } = usePluginCompletion({
     enabled: pluginCompletionEnabled,
     onLoad: onLoadCompletionSuggestions ?? (() => Promise.resolve({ kind: "no-provider" as const })),
   });
@@ -1391,17 +1400,22 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
  * 本地那套的替换区间由我们算（token 起点 + 是否带引号）；插件那套的替换区间由插件的
  * `applyCompletion` 决定（它拿到的 `prefix` 就是它要替换掉的光标前那段文本）。
  */
-type AtMenuItem =
-  | { kind: "file"; entry: FileIndexEntry }
-  | { kind: "plugin"; item: CompletionItem };
+type AtMenuItem = CompletionMenuEntry<FileIndexEntry>;
 
-  // 插件有结果就用插件的（`none` 是插件**明确**说没有候选：不回退到文件补全，
-  // 否则我们会把它的意图盖掉）。没有结果（没注册 / 在途 / 失败）时照旧显示文件补全。
-  const atMenuItems: AtMenuItem[] = pluginCompletion
-    ? pluginCompletion.items.map((item) => ({ kind: "plugin" as const, item }))
-    : atMatches.map((entry) => ({ kind: "file" as const, entry }));
-  // 非 `@` 的触发字符（插件声明的）没有 atQuery，靠插件结果把菜单打开。
-  const atMenuActive = atMenuOpen && (atQuery !== null || pluginCompletion !== null);
+  // 菜单条目由状态决定（纯函数，单测在 lib/completion-request.test.mjs）：
+  // 只有 `plugin`（插件候选）与 `local`（明确回退我们自己的文件补全）才给条目；
+  // `pending` / `none` 一律为空 —— 在途期间让用户提交本地文件项，会把插件
+  // 刻意给出的「没有候选」盖掉（issue #101 审查阻断 2）。
+  const atMenuItems: AtMenuItem[] = buildCompletionMenuEntries(pluginCompletion, atMatches);
+  /**
+   * 菜单可见性：`@` token 或**有东西可显示**的插件状态。
+   *
+   * 这里必须与浮层的 `open` 用同一个判据。原来是 `atMenuOpen && atQuery !== null`，
+   * 于是插件声明的非 `@` 触发字符（`atQuery` 恒 null）会把列表挂进 DOM 却
+   * `visibility: hidden`，而 handleKeyDown 照旧拦方向键并对当前项执行 Tab/Enter ——
+   * 用户看不见候选，按键却作用在这份隐藏列表上（issue #101 审查阻断 1）。
+   */
+  const atMenuVisible = atMenuOpen && (atQuery !== null || pluginCompletion.status !== "local");
 
   // Open/reset the menu whenever the @token appears or changes (mirrors the
   // slash menu: Escape closes it, the next keystroke re-opens it).
@@ -1494,7 +1508,10 @@ type AtMenuItem =
     const before = value.slice(0, cursor);
     const cursorLine = before.split("\n").length - 1;
     const cursorCol = cursor - (before.lastIndexOf("\n") + 1);
-    const prefix = pluginCompletion?.prefix ?? "";
+    const prefix = pluginCompletion.status === "plugin" ? pluginCompletion.prefix : "";
+    // 这次应用要替换的文本。TUI 的 applyCompletion 是**同步**的，而这里是一次往返，
+    // 往返期间用户可能继续打字 —— 回来时输入区已经变了就整条丢弃，否则会把新输入盖掉。
+    const sentText = ta?.value ?? value;
     void (async () => {
       const applied = await onApplyCompletionSuggestion?.({
         lines: value.split("\n"),
@@ -1504,6 +1521,7 @@ type AtMenuItem =
         prefix,
       });
       if (!applied) return;
+      if ((textareaRef.current?.value ?? value) !== sentText) return;
       const nextValue = applied.lines.join("\n");
       const nextPos = applied.lines
         .slice(0, applied.cursorLine)
@@ -1520,14 +1538,29 @@ type AtMenuItem =
         el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
       });
     })();
-  }, [applyAtCompletion, onApplyCompletionSuggestion, pluginCompletion?.prefix, updateAtQuery, value]);
+  }, [applyAtCompletion, onApplyCompletionSuggestion, pluginCompletion, updateAtQuery, value]);
 
   // 非 `@` 触发字符拿到插件候选时把菜单打开（`@` 那条路仍由 tokenKey 管）。
+  // 只在**确实有候选**时打开：在途/空结果把菜单弹出来只会让人以为坏了。
   useEffect(() => {
-    if (pluginCompletion === null || atQuery !== null) return;
+    if (atQuery !== null) return;
+    if (pluginCompletion.status !== "plugin" || pluginCompletion.items.length === 0) return;
     setAtMenuOpen(true);
     setAtActiveIndex(0);
   }, [pluginCompletion, atQuery]);
+
+  /**
+   * 门槛从 0 变成 1（页面后加载、插件注册、状态水合）时，用**当前**输入重跑一次触发判定。
+   *
+   * 不补这一次的话，用户已经打好的 `@` 只会一直显示本地文件，直到下一次光标事件 ——
+   * 那正是「后加载拿不到真值」的另一半（前半是状态投影的下发）。
+   */
+  useEffect(() => {
+    const el = textareaRef.current;
+    updateAtQuery(el?.value ?? value, el?.selectionStart ?? null);
+    // 只在门槛/触发字符变化时重跑；value 不进依赖，避免每次输入重复排一次请求。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pluginCompletionEnabled, pluginTriggerKey, updateAtQuery]);
 
   useEffect(() => {
     if (atActiveIndex >= atMenuItems.length) {
@@ -1730,7 +1763,7 @@ type AtMenuItem =
 
       // @ file menu — skip while composing so IME candidate navigation
       // (arrows/Enter/Tab) is never intercepted.
-      if (atMenuActive && !isComposing) {
+      if (atMenuVisible && !isComposing) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
           setAtActiveIndex((i) => Math.min(Math.max(0, atMenuItems.length - 1), i + 1));
@@ -1744,6 +1777,9 @@ type AtMenuItem =
         if (e.key === "Escape") {
           e.preventDefault();
           setAtMenuOpen(false);
+          // 作废在途请求：否则响应回来时非 @ 那条 effect 会再把菜单打开，
+          // 用户「关掉了又自己弹出来」。同时也把插件侧的搜索真的叫停。
+          cancelPluginCompletion();
           return;
         }
         if ((e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) && atMenuItems[atActiveIndex]) {
@@ -1794,7 +1830,7 @@ type AtMenuItem =
     },
     // argMenuOpen / argItems / argActiveIndex / applyArgCompletion 必须在这里：少了它们，
     // 闭包停留在「候选还没到」的那一帧，Tab/Enter 拦不住 —— Enter 会把没补全的正文直接发出去。
-    [isStreaming, isMobile, streamingEnterDefault, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, argMenuOpen, argItems, argActiveIndex, applyArgCompletion, sendQueued, handleSend, getNextSlashIndex, atMenuActive, atMenuOpen, atQuery, atMenuItems, atActiveIndex, applyMenuItem, queuedMessages, onSendQueueAsSteer, flushQueueAsSteer]
+    [isStreaming, isMobile, streamingEnterDefault, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, argMenuOpen, argItems, argActiveIndex, applyArgCompletion, sendQueued, handleSend, getNextSlashIndex, atMenuVisible, atMenuOpen, atQuery, atMenuItems, atActiveIndex, applyMenuItem, cancelPluginCompletion, queuedMessages, onSendQueueAsSteer, flushQueueAsSteer]
   );
 
   const handleInput = useCallback(() => {
@@ -1946,7 +1982,7 @@ type AtMenuItem =
     width: "anchor",
   });
   const atOverlay = useAnchoredOverlay({
-    open: atMenuOpen && atQuery !== null,
+    open: atMenuVisible,
     anchorRef: inputContainerRef,
     overlayRef: atOverlayRef,
     preferredPlacement: "above",
@@ -1967,7 +2003,6 @@ type AtMenuItem =
   });
 
   const slashMenuVisible = slashMenuOpen && slashQuery !== null;
-  const atMenuVisible = atMenuActive;
   const inputActiveDescendant = slashMenuVisible && filteredSlashCommands.length > 0
     ? `${slashListboxId}-opt-${slashActiveIndex}`
     : atMenuVisible && atMenuItems.length > 0
@@ -2579,7 +2614,8 @@ type AtMenuItem =
           {atMenuVisible && (() => {
             const indexLoading = fileIndexLoading && (!fileIndex || fileIndex.cwd !== cwd);
             // 插件有结果时这一栏是「插件的候选」，不是文件列表（计数口径也跟着换）。
-            const pluginSource = pluginCompletion !== null;
+            const pluginSource = pluginCompletion.status === "plugin" || pluginCompletion.status === "none";
+            const pluginSearching = pluginCompletion.status === "pending";
             const matchCountLabel = atMenuItems.length === 1
               ? t("input_matchCountOne")
               : t("input_matchCount", { count: atMenuItems.length });
@@ -2626,11 +2662,13 @@ type AtMenuItem =
                   <span style={{ fontFamily: "var(--font-mono)" }}>{t("input_tabEnter")}</span>
                 </div>
                 <div id={atListboxId} role="listbox" aria-label={pluginSource ? t("input_suggestions") : t("input_files")} style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 4 }}>
-                  {!indexLoading && atMenuItems.length === 0 ? (
+                  {(!indexLoading || pluginSource || pluginSearching) && atMenuItems.length === 0 ? (
                     <div style={{ padding: "6px 8px", fontSize: 12, color: "var(--text-dim)" }}>
-                      {pluginSource
-                        ? t("input_noMatchingSuggestions")
-                        : needsServerSearch && !serverResultInUse ? t("input_searching") : t("input_noMatchingFiles")}
+                      {pluginSearching
+                        ? t("input_searching")
+                        : pluginSource
+                          ? t("input_noMatchingSuggestions")
+                          : needsServerSearch && !serverResultInUse ? t("input_searching") : t("input_noMatchingFiles")}
                     </div>
                   ) : (
                     atMenuItems.map((item, index) => {
@@ -2773,6 +2811,9 @@ type AtMenuItem =
             onKeyDown={handleKeyDown}
             onCompositionStart={() => {
               isComposingRef.current = true;
+              // 合成期间不问插件（文本还会变）：顺手把在途那次也取消掉，
+              // 否则它回来时会把菜单又打开一次。
+              cancelPluginCompletion();
             }}
             onCompositionEnd={(e) => {
               isComposingRef.current = false;
