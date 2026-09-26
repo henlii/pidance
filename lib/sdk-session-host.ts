@@ -3,11 +3,15 @@
  * 浏览器协议字段与外部 RPC 时代对齐，前端契约不变。
  */
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 // pi-tui 的默认键位表 + 解析器：SDK 的 `KeybindingsManager` 没有从包入口导出（子路径也被 exports
 // 挡住），而它的默认键位就是 pi-tui 这套定义、解析语义也由这个类负责。
-import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import * as topLevelPiTui from "@earendil-works/pi-tui";
+
+const TuiKeybindingsManager = topLevelPiTui.KeybindingsManager;
+const TUI_KEYBINDINGS = topLevelPiTui.TUI_KEYBINDINGS;
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
   createAgentSessionFromServices,
   createAgentSessionRuntime,
@@ -21,6 +25,7 @@ import {
   type AgentSessionServices,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { mergeWidgetFrame, projectWidgetEntries } from "./extension-widget-state";
 import { getAgentDir } from "./pi-paths";
 import { alignPiThemeWithShellPreferenceOnStartup } from "./theme-preference-sync";
 import { hasActiveSubagentRunForSession, listSubagentRuns } from "./subagent-runs";
@@ -166,6 +171,7 @@ import {
   renderToolCallLines,
   renderToolResultLines,
   setPiThemeConstructor,
+  setPiImageCapabilityHooks,
   setRenderBridgeWarningSink,
   setSdkThemeProbe,
   verifySdkGlobalTheme,
@@ -181,6 +187,66 @@ import { createToolRenderScheduler, pickChangedSlots } from "./tool-render-sched
  * 主题实例必须由这里（allowlist 里的 server adapter）注入 —— 见 issue #97。
  */
 setPiThemeConstructor(SdkTheme as unknown as PiThemeConstructor);
+
+/**
+ * 解析「扩展实际使用的那一份 pi-tui」（issue #104 审查 P0）。
+ *
+ * 为什么不能直接用本模块静态 import 的那份：pi-tui 的能力缓存（`getCapabilities` /
+ * `setCapabilities`）是**模块级**状态，而磁盘上可能同时存在两份 pi-tui —— 顶层一份
+ * （Pidance 自己依赖的）与 SDK 自带的一份
+ * （`node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui`）。
+ * 扩展由 SDK 的 loader 加载，它的 pi-tui 别名解析到 **SDK 那份**；我们在顶层那份上置位，
+ * 插件里的 `Image` 读不到（实测：两份是不同模块实例，置位后嵌套那份仍为 null，Image 只出降级文本）。
+ *
+ * 解析方式与 SDK loader 一致：**以 SDK 的 package.json 为基准**做 require 解析 —— 有自带的那份就先命中它，
+ * 去重后的安装布局里只有顶层一份时则按 Node 规则向上找到同一份。
+ * 不用 `import.meta.url` / `__dirname`：产物不得嵌入构建机绝对路径（见 lib/tui-render-bridge.ts 的说明），
+ * 这里从 `process.cwd()` 向上找（与 lib/pi-subagent-bridge.ts 同一做法）。
+ * 解析失败退回静态 import 的那份：能力开关退化为旧行为，但宿主不该因此起不来。
+ */
+export function resolveExtensionPiTui(startDir: string = process.cwd()): typeof topLevelPiTui {
+  let dir = startDir;
+  for (let i = 0; i < 12; i += 1) {
+    const sdkRoot = join(dir, "node_modules", "@earendil-works", "pi-coding-agent");
+    let hasSdk = false;
+    try {
+      hasSdk = statSync(join(sdkRoot, "package.json")).isFile();
+    } catch {
+      hasSdk = false;
+    }
+    if (hasSdk) {
+      try {
+        const requireFromSdk = createRequire(join(sdkRoot, "package.json"));
+        return requireFromSdk("@earendil-works/pi-tui") as typeof topLevelPiTui;
+      } catch {
+        return topLevelPiTui;
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return topLevelPiTui;
+}
+
+/** 扩展那份 pi-tui 的能力读写（进程内解析一次）。 */
+export const extensionPiTui = resolveExtensionPiTui();
+
+/**
+ * 把 pi-tui 的**图片能力**读写钩子交给渲染桥（issue #104）。
+ *
+ * 为什么不直接置位：能力是进程全局的，长期开成 kitty 会让别的渲染路径也以为有图片能力。
+ * 渲染桥只在单次 render 期间打开、渲染完立刻还原（见 withKittyImages）。
+ * 用的是**扩展那份**实例（见 resolveExtensionPiTui），否则插件里的 `Image` 读不到置位、
+ * 永远只会渲染成一句降级说明。
+ */
+setPiImageCapabilityHooks({
+  getImages: () => extensionPiTui.getCapabilities().images,
+  setImages: (value) => {
+    const current = extensionPiTui.getCapabilities();
+    extensionPiTui.setCapabilities({ ...current, images: value });
+  },
+});
 
 export type SdkAgentEvent = {
   type: string;
@@ -1793,16 +1859,18 @@ export class SdkSessionHost {
     if (method === "setWidget") {
       const key = asString(event.widgetKey) ?? asString(event.key) ?? "default";
       const lines = event.widgetLines ?? event.content;
-      if (lines == null) this.extensionUi?.widgets.delete(key);
-      else {
-        // 这条镜像写的是**同一个** widgets 表，字段少了会把适配器刚写进去的
-        // `interactive` 抹掉（前端于是永远点不动实现了 handleMouse 的组件）。
-        this.extensionUi?.widgets.set(key, {
-          lines,
-          placement: event.widgetPlacement,
-          interactive: event.widgetInteractive === true,
-        });
-      }
+      // 合并语义（缺省 = 沿用已有、显式空数组 = 清空）见 lib/extension-widget-state.ts。
+      // 这条镜像写的是**同一张** widgets 表，字段少了会把适配器刚写进去的 `interactive` /
+      // `images` / `imageFallbacks` 抹掉（图片表现为对账后图消失、只剩被摘空的那一行）。
+      const merged = mergeWidgetFrame(this.extensionUi?.widgets.get(key), {
+        lines,
+        images: event.widgetImages,
+        imageFallbacks: event.widgetImageFallbacks,
+        placement: event.widgetPlacement,
+        interactive: event.widgetInteractive,
+      });
+      if (merged) this.extensionUi?.widgets.set(key, merged);
+      else this.extensionUi?.widgets.delete(key);
     }
     this.notifyRunning();
   }
@@ -2762,22 +2830,7 @@ export class SdkSessionHost {
         this.extensionUi?.statuses.entries() ?? [],
         ([key, text]) => ({ key, text }),
       ),
-      extensionWidgets: Array.from(
-        this.extensionUi?.widgets.entries() ?? [],
-        ([key, content]) => {
-          // 热 state 投影与 SSE setWidget 事件对齐（{key, lines, placement}）；
-          // adapter 内部 Map value 为 {lines, placement}，含未知类型，逐字段窄化。
-          const widget = content as { lines?: unknown; placement?: string; interactive?: unknown } | null;
-          return {
-            key,
-            lines: Array.isArray(widget?.lines) ? (widget.lines as string[]) : [],
-            placement: widget?.placement === "belowEditor" ? "belowEditor" : "aboveEditor",
-            // 组件实现了 handleMouse 才为 true：前端据此决定点击要不要转发
-            // （水合路径必须带上，否则刷新后的页面点不动 widget）。
-            interactive: widget?.interactive === true,
-          };
-        },
-      ),
+      extensionWidgets: projectWidgetEntries(this.extensionUi?.widgets.entries() ?? []),
       // 插件页头 / 页脚槽位（setHeader / setFooter）：与 widget 同一类「设一次就不动」的
       // 状态，页面后加载只能靠快照补回来（否则刷新后插件页头页脚消失）。
       extensionHeader: this.extensionUi?.headerLines ?? null,

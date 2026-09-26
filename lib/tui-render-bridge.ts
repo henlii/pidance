@@ -23,6 +23,12 @@
  */
 
 import darkThemeJson from "./pi-themes/dark.json" with { type: "json" };
+import {
+  extractKittyImages,
+  withImageFallbackLines,
+  type RenderedImage,
+  type RenderedImageFallback,
+} from "./kitty-image";
 import lightThemeJson from "./pi-themes/light.json" with { type: "json" };
 
 /**
@@ -105,6 +111,14 @@ export function setPiThemeConstructor(base: PiThemeConstructor | null): void {
     strikethrough(text: string): string {
       return wrapTextStyle("\x1b[9m", "\x1b[29m", text);
     }
+    /**
+     * pi-tui 的 `Image` 组件在**拿不到图片能力**时用它给降级说明上色；SDK 的 `Theme` 上
+     * 没有这个成员（实测 `Theme.prototype` 不含它）。缺了它那个分支会 `TypeError`，而渲染桥的
+     * catch 会把**整段渲染**吞掉 —— 表现是插件画了图却什么都没有。原样返回文本即可（不上色）。
+     */
+    fallbackColor(text: string): string {
+      return text;
+    }
   };
 }
 /** 固定渲染宽度；前端按 pre-wrap 展示。 */
@@ -114,6 +128,55 @@ export const RENDER_WIDTH = 100;
 export const RENDER_MAX_LINES = 500;
 export const RENDER_MAX_LINE_LENGTH = 4000;
 export const RENDER_MAX_TOTAL_CHARS = 200 * 1024;
+
+/** 一次渲染的完整产物：文本行 + 图片（issue #104）。 */
+export interface RenderedOutput {
+  lines: string[];
+  images: RenderedImage[];
+  /** 摘不出图片的位置（客户端按 i18n 文案渲染可见说明）。 */
+  fallbacks: RenderedImageFallback[];
+}
+
+/**
+ * 图片能力的读写钩子（宿主注入；渲染桥自己不 import SDK/pi-tui）。
+ *
+ * 为什么要在渲染前**临时**打开：pi-tui 的 `Image` 组件只有在
+ * `getCapabilities().images` 有值时才编码 Kitty 序列，否则退回一句文本说明。
+ * 而能力是**进程全局**的 —— 长期置位会污染别的渲染路径，所以只在单次 render 期间开、
+ * 渲染完立刻还原（见 withKittyImages）。
+ */
+export interface PiImageCapabilityHooks {
+  getImages: () => string | null | undefined;
+  setImages: (value: "kitty" | null) => void;
+}
+
+let imageCapabilityHooks: PiImageCapabilityHooks | null = null;
+
+export function setPiImageCapabilityHooks(hooks: PiImageCapabilityHooks | null): void {
+  imageCapabilityHooks = hooks;
+}
+
+/** 测试/宿主注入用：读出当前生效的图片能力（未注入时 null）。 */
+export function getPiImageCapabilityForTests(): string | null | undefined {
+  return imageCapabilityHooks?.getImages();
+}
+
+/**
+ * 在**单次渲染**期间把图片能力置成 kitty，渲染后立刻还原。
+ *
+ * 没有注入钩子（单测 / 非宿主路径）时直接跑：此时插件自己会退回文本说明，行为与旧版一致。
+ */
+function withKittyImages<T>(run: () => T): T {
+  const hooks = imageCapabilityHooks;
+  if (!hooks) return run();
+  const previous = hooks.getImages();
+  hooks.setImages("kitty");
+  try {
+    return run();
+  } finally {
+    hooks.setImages(previous === "kitty" ? "kitty" : (previous as never) ?? null);
+  }
+}
 
 export type RenderedToolRender = { lines: string[] } | null;
 
@@ -525,22 +588,40 @@ function isValidRenderOutput(
  * 返回非对象 / 无 render 方法 / render 抛错 / 输出非法或超限 → null（安全回退，
  * 超限返回 null 走原始回退，不做截断——截断会掩盖渲染器 bug）。
  */
+export function renderComponentOutput(
+  component: unknown,
+  width: number = RENDER_WIDTH,
+  options?: { allowEmpty?: boolean },
+): RenderedOutput | null {
+  if (!component || typeof component !== "object") return null;
+  const c = component as { render?: unknown };
+  if (typeof c.render !== "function") return null;
+  try {
+    // 渲染期间**临时**打开图片能力（见 withKittyImages）：不做这一步，插件用 pi-tui 的
+    // Image 组件时只会拿到一句文本说明，Web 永远看不到图。
+    const lines = withKittyImages(() => (c as RenderableComponent).render(width));
+    if (!Array.isArray(lines) || !lines.every((line) => typeof line === "string")) return null;
+    // 顺序是硬要求：**先摘图、再过文本上限**。一张图的 base64 轻易超过「单行 4000 字符 /
+    // 合计 200KB」，先校验的话整段渲染（连旁边的正常文本）会被一起判超限丢掉。
+    const extracted = extractKittyImages(lines as string[]);
+    if (!isValidRenderOutput(extracted.lines, options)) return null;
+    return { lines: extracted.lines, images: extracted.images, fallbacks: extracted.fallbacks };
+  } catch (error) {
+    reportIfSdkThemeError(error);
+    return null;
+  }
+}
+
+/**
+ * 只支持文本的消费方：图片位置换成**可见**说明（旧接口的行为保持不变，返回值仍是 string[]）。
+ */
 function renderToLines(
   component: unknown,
   width: number = RENDER_WIDTH,
   options?: { allowEmpty?: boolean },
 ): string[] | null {
-  if (!component || typeof component !== "object") return null;
-  const c = component as { render?: unknown };
-  if (typeof c.render !== "function") return null;
-  try {
-    const lines = (c as RenderableComponent).render(width);
-    if (!isValidRenderOutput(lines, options)) return null;
-    return lines;
-  } catch (error) {
-    reportIfSdkThemeError(error);
-    return null;
-  }
+  const output = renderComponentOutput(component, width, options);
+  return output ? withImageFallbackLines(output) : null;
 }
 
 /**
@@ -549,6 +630,29 @@ function renderToLines(
  * onComponent：渲染器返回组件（非空对象）时回调，供上层记录「上一组件」
  * （镜像 pi tool-renderer 的 renderedResultComponents 更新语义）。
  */
+export function renderToolResultOutput(
+  def: unknown,
+  result: unknown,
+  options: { expanded: boolean; isPartial: boolean },
+  context: Record<string, unknown>,
+  onComponent?: (component: unknown) => void,
+  width: number = RENDER_WIDTH,
+): RenderedOutput | null {
+  const renderer = getToolRenderResultRenderer(def);
+  if (!renderer) return null;
+  const theme = loadPiTheme();
+  if (!theme) return null;
+  try {
+    const component = renderer(result, options, theme, context);
+    if (component && typeof component === "object") onComponent?.(component);
+    return renderComponentOutput(component, width);
+  } catch (error) {
+    reportIfSdkThemeError(error);
+    return null;
+  }
+}
+
+/** 只支持文本的调用方（返回值仍是 string[]，图片位置是可见说明）。 */
 export function renderToolResultLines(
   def: unknown,
   result: unknown,
@@ -557,31 +661,21 @@ export function renderToolResultLines(
   onComponent?: (component: unknown) => void,
   width: number = RENDER_WIDTH,
 ): string[] | null {
-  const renderer = getToolRenderResultRenderer(def);
-  if (!renderer) return null;
-  const theme = loadPiTheme();
-  if (!theme) return null;
-  try {
-    const component = renderer(result, options, theme, context);
-    if (component && typeof component === "object") onComponent?.(component);
-    return renderToLines(component, width);
-  } catch (error) {
-    reportIfSdkThemeError(error);
-    return null;
-  }
+  const output = renderToolResultOutput(def, result, options, context, onComponent, width);
+  return output ? withImageFallbackLines(output) : null;
 }
 
 /**
  * 渲染工具调用：调用 renderCall 渲染器 → Component → ANSI 行。
  * 失败路径同 renderToolResultLines；onComponent 语义同上（renderCall 槽）。
  */
-export function renderToolCallLines(
+export function renderToolCallOutput(
   def: unknown,
   args: unknown,
   context: Record<string, unknown>,
   onComponent?: (component: unknown) => void,
   width: number = RENDER_WIDTH,
-): string[] | null {
+): RenderedOutput | null {
   const renderer = getToolRenderCallRenderer(def);
   if (!renderer) return null;
   const theme = loadPiTheme();
@@ -589,11 +683,23 @@ export function renderToolCallLines(
   try {
     const component = renderer(args, theme, context);
     if (component && typeof component === "object") onComponent?.(component);
-    return renderToLines(component, width);
+    return renderComponentOutput(component, width);
   } catch (error) {
     reportIfSdkThemeError(error);
     return null;
   }
+}
+
+/** 只支持文本的调用方（返回值仍是 string[]，图片位置是可见说明）。 */
+export function renderToolCallLines(
+  def: unknown,
+  args: unknown,
+  context: Record<string, unknown>,
+  onComponent?: (component: unknown) => void,
+  width: number = RENDER_WIDTH,
+): string[] | null {
+  const output = renderToolCallOutput(def, args, context, onComponent, width);
+  return output ? withImageFallbackLines(output) : null;
 }
 
 /**
@@ -639,6 +745,15 @@ export function renderComponentLines(
   options?: { allowEmpty?: boolean },
 ): string[] | null {
   return renderToLines(component, width, options);
+}
+
+/** 已存在的组件实例 → 完整产物（含图片）；给插件界面用。 */
+export function renderMountedComponentOutput(
+  component: unknown,
+  width: number = RENDER_WIDTH,
+  options?: { allowEmpty?: boolean },
+): RenderedOutput | null {
+  return renderComponentOutput(component, width, options);
 }
 
 /**

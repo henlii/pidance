@@ -1,9 +1,12 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
+import { imageFallbackReasonKey } from "@/lib/kitty-image";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentMessage, BashExecutionMessage, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import type { BranchActions } from "@/lib/branch-bookmarks";
 import { parseAnsiLine } from "@/lib/ansi";
+import { RenderedLineBlocks } from "./RenderedLines";
+import type { ExtensionRenderedImage, ExtensionRenderedImageFallback } from "@/lib/types";
 import {
   buildWidgetClickEvent,
   consumeTapClick,
@@ -1371,14 +1374,20 @@ function ExtensionStatusBar({ statuses }: { statuses: Array<{ key: string; text:
 function ExtensionWidgetBody({
   widgetKey,
   lines,
+  images,
+  imageFallbacks,
   bodyMaxHeight,
   onWidgetMouse,
 }: {
   widgetKey: string;
   lines: string[];
+  /** 组件里的终端图片（issue #104）；按 lineIndex 摆回文本行之间。 */
+  images?: ExtensionRenderedImage[];
+  imageFallbacks?: ExtensionRenderedImageFallback[];
   bodyMaxHeight: number | string;
   onWidgetMouse?: (key: string, event: Record<string, unknown>) => void;
 }) {
+  const { t } = useI18n();
   // 触摸：tap 走浏览器合成的 click；长按自己计时并映射成右键，且吃掉随后那次 click。
   const touchRef = useRef<WidgetTouchState>(INITIAL_WIDGET_TOUCH_STATE);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1511,18 +1520,27 @@ function ExtensionWidgetBody({
         cursor: onWidgetMouse ? "pointer" : undefined,
       }}
     >
-      {(Array.isArray(lines) ? lines : []).map((line, index, lines) => (
-        <Fragment key={index}>
-          {renderAnsiLine(line, `widget-${widgetKey}-line-${index}`)}
-          {index < lines.length - 1 ? "\n" : null}
-        </Fragment>
-      ))}
+      <RenderedLineBlocks
+        lines={Array.isArray(lines) ? lines : []}
+        images={images}
+        imageFallbacks={imageFallbacks}
+        keyPrefix={`widget-${widgetKey}-line`}
+        renderLine={renderAnsiLine}
+        imageAlt={t("message_imageAlt")}
+        fallbackLabel={(reason) => { const key = imageFallbackReasonKey(reason); return t("message_imageUnavailable", { reason: key ? t(key) : reason }); }}
+      />
     </pre>
   );
 }
 
 function ExtensionWidgets({ widgets, onWidgetMouse }: {
-  widgets: Array<{ key: string; lines: string[]; interactive?: boolean }>;
+  widgets: Array<{
+    key: string;
+    lines: string[];
+    images?: ExtensionRenderedImage[];
+    imageFallbacks?: ExtensionRenderedImageFallback[];
+    interactive?: boolean;
+  }>;
   onWidgetMouse?: (key: string, event: Record<string, unknown>) => void;
 }) {
   // 扩展可能发「机器载荷」widget（pi-subagents 的 subagent-async 在 rpc 模式下就是一整行
@@ -1645,6 +1663,8 @@ function ExtensionWidgets({ widgets, onWidgetMouse }: {
                 <ExtensionWidgetBody
                   widgetKey={widget.key}
                   lines={widget.lines}
+                  images={widget.images}
+                  imageFallbacks={widget.imageFallbacks}
                   bodyMaxHeight={bodyMaxHeight}
                   onWidgetMouse={widget.interactive === true ? onWidgetMouse : undefined}
                 />

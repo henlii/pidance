@@ -85,16 +85,45 @@ function trimEndVisibleSpaces(text: string): string {
   }
 }
 
-export function normalizeCustomPanelLines(lines: unknown): string[] {
-  if (!Array.isArray(lines)) return [];
+/** 归一化时的可选约束。 */
+export interface NormalizeCustomPanelLinesOptions {
+  /**
+   * 这些**原文行号不能被丢掉**（图片锚点与它占的行）。
+   *
+   * 为什么需要：摘图后锚点那行是空行，而面板会裁掉首尾空白行 —— 锚点被丢掉的话
+   * 图与降级说明都画不出来（issue #104 审查 P0-3）。
+   */
+  keep?: ReadonlySet<number>;
+}
+
+/** 归一化结果：行 + 「这行来自原文哪一行」的映射。 */
+export interface NormalizedCustomPanelLines {
+  lines: string[];
+  /** 与 `lines` 等长：第 i 行来自原文 `sourceIndex[i]`（图片按原文行号标注，靠它重新对齐）。 */
+  sourceIndex: number[];
+}
+
+/**
+ * 自定义面板的行归一化（删框线、去左右竖边、裁首尾空白），**带索引映射**。
+ *
+ * 按原文行号标注的图片与降级说明必须能跟着重排，否则「删了一行」就会让后面所有
+ * 图片错位、甚至把正文行当占位行吞掉（issue #104 审查 P0-3）。
+ */
+export function normalizeCustomPanelLinesWithIndex(
+  lines: unknown,
+  options?: NormalizeCustomPanelLinesOptions,
+): NormalizedCustomPanelLines {
+  if (!Array.isArray(lines)) return { lines: [], sourceIndex: [] };
   const stringLines = lines.filter((line): line is string => typeof line === "string");
+  const keep = options?.keep;
   const horizontalFrameLine = /^[┌├└╭╰][─┬┴┼]+[┐┤┘╮╯]$/;
   const normalized: string[] = [];
+  const sourceIndex: number[] = [];
 
-  for (const rawLine of stringLines) {
+  stringLines.forEach((rawLine, index) => {
     const lineWithoutCursor = rawLine.replace(TUI_CURSOR_MARKER_RE, "");
     const plain = stripAnsi(lineWithoutCursor).trimEnd();
-    if (horizontalFrameLine.test(plain)) continue;
+    if (horizontalFrameLine.test(plain) && !keep?.has(index)) return;
 
     let line = lineWithoutCursor;
     const first = firstVisibleChar(line);
@@ -110,11 +139,28 @@ export function normalizeCustomPanelLines(lines: unknown): string[] {
     }
 
     normalized.push(trimEndVisibleSpaces(line));
-  }
+    sourceIndex.push(index);
+  });
 
-  while (normalized.length > 0 && stripAnsi(normalized[0]).trim() === "") normalized.shift();
-  while (normalized.length > 0 && stripAnsi(normalized[normalized.length - 1]).trim() === "") normalized.pop();
-  return normalized.length ? normalized : stringLines;
+  const isBlankAt = (position: number) => stripAnsi(normalized[position]).trim() === "";
+  const isKept = (position: number) => keep?.has(sourceIndex[position] as number) === true;
+  while (normalized.length > 0 && isBlankAt(0) && !isKept(0)) {
+    normalized.shift();
+    sourceIndex.shift();
+  }
+  while (normalized.length > 0 && isBlankAt(normalized.length - 1) && !isKept(normalized.length - 1)) {
+    normalized.pop();
+    sourceIndex.pop();
+  }
+  // 全空时退回原文（与旧行为一致）：那时索引就是恒等映射。
+  if (normalized.length === 0) {
+    return { lines: stringLines, sourceIndex: stringLines.map((_line, index) => index) };
+  }
+  return { lines: normalized, sourceIndex };
+}
+
+export function normalizeCustomPanelLines(lines: unknown): string[] {
+  return normalizeCustomPanelLinesWithIndex(lines).lines;
 }
 
 export function ansi256Color(index: number): string | undefined {
