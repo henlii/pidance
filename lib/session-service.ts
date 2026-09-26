@@ -30,6 +30,13 @@ import { invalidateSessionReadCache } from "./session-read-manager-cache";
 import { resolveEntryLinesProvider, resolveMessageLinesProvider } from "./extension-entry-renderers";
 import { resolveToolMetaProvider } from "./tool-display-meta";
 import {
+  transformMarkdownOnce,
+  resolveMarkdownTransformerChain,
+  transformContextMarkdown as applyContextMarkdownTransform,
+  type MarkdownTransformerChain,
+} from "./extension-markdown-transformers";
+import { RENDER_WIDTH } from "./tui-render-bridge";
+import {
   getRpcSession,
   waitForSessionStart,
   getRunningRpcSessionIds,
@@ -268,6 +275,14 @@ export type SessionServiceDeps = {
     cwd: string;
     agentDir?: string;
   }) => Promise<ToolMetaResolver | null>;
+  /**
+   * 插件 markdown 转换器链的解析（issue #106）。
+   * 缺省走扩展加载（与 entry 渲染器共用缓存）；测试注入以避免加载真实扩展。
+   */
+  resolveMarkdownTransformers?: (options: {
+    cwd: string;
+    agentDir?: string;
+  }) => Promise<MarkdownTransformerChain | null>;
 };
 
 const defaultDeps: SessionServiceDeps = {
@@ -405,6 +420,11 @@ export type SessionService = {
   ): Promise<{ thinking: string } | null>;
   /** 只读：toolResult entry 的 details/content；未命中返回 null。 */
   getToolResultDetails(sessionId: string, toolCallId: string): Promise<{ details: unknown; content?: unknown[] } | null>;
+  /**
+   * 只读：对**已经切片好的**消息投影应用插件的 markdown 转换器（issue #106）。
+   * 没有插件注册转换器时原样返回（零成本）。首屏路由自己切尾页，切完调这里。
+   */
+  transformContextMarkdown(sessionId: string, context: unknown): Promise<unknown>;
   /**
    * 类型安全的持久活动写入。
    * 单写者：仅当 live 暴露 in-process SessionManager（inner.sessionManager）时走 live.appendActivity；
@@ -582,6 +602,59 @@ async function resolveForeignMessageLines(
   } catch {
     return null;
   }
+}
+
+/**
+ * 解析本会话的 markdown 转换器链（issue #106）。
+ *
+ * **一律按会话头的 cwd 从磁盘加载扩展**（与 entry 渲染器、工具显示元数据同一条来源与同一份
+ * 缓存），**不看活宿主手里的那批函数对象**。理由（审查 P1）：
+ * - 插件安装/卸载只会失效模块缓存（`invalidateMarkdownTransformCache()`），**不会重建**活会话的
+ *   extension runner。以宿主为准的话，卸载插件后这个会话会一直用旧插件的转换器改写下文，
+ *   直到宿主销毁；而同一页里的 entry 渲染器已经换成新插件集 —— 一页里混两代插件。
+ * - 磁盘这份由 `invalidateMarkdownTransformCache()` 正确失效，卸载后立即不再应用旧转换器。
+ * 任何失败 → null：调用方原样返回投影，绝不让会话读取整体失败。
+ */
+async function resolveMarkdownChainForSession(
+  filePath: string | null,
+  deps: Pick<SessionServiceDeps, "archiveAgentDir" | "resolveMarkdownTransformers">,
+): Promise<MarkdownTransformerChain | null> {
+  try {
+    if (!filePath) return null;
+    const cwd = readSessionHeader(filePath)?.cwd;
+    if (!cwd) return null;
+    const resolve = deps.resolveMarkdownTransformers ?? resolveMarkdownTransformerChain;
+    return await resolve({ cwd, agentDir: deps.archiveAgentDir?.() ?? getAgentDir() });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 对**已经切片好的**投影窗口应用 markdown 转换器（issue #106 的渲染边界）。
+ *
+ * 只在这个窗口内工作（不再扫盘、不碰 leaf 之外的 entry）；没有链时原样返回同一对象。
+ * `availableWidth` 用客户端上报的渲染列数（没上报过就是桥的默认宽度）。
+ *
+ * **不声称任何一条在流式输出**：宿主暴露的 `isStreaming()` 是**整轮 run** 的标记
+ * （SDK 的 `_isAgentRunActive`），而进行中的那条助手消息还没入库、不在窗口里 ——
+ * 拿它去标窗口末尾会把刚落盘的用户消息或上一条已结束的助手消息错标成流式。
+ * 真正的流式正文由 SSE 那条渲染边界负责（见 sdk-session-host 的 withTransformedMessage）。
+ */
+async function applyMarkdownTransformToContext(
+  context: unknown,
+  options: {
+    live: { getRenderWidth?: () => number } | undefined;
+    filePath: string | null;
+    deps: Pick<SessionServiceDeps, "archiveAgentDir" | "resolveMarkdownTransformers">;
+  },
+): Promise<unknown> {
+  const chain = await resolveMarkdownChainForSession(options.filePath, options.deps);
+  if (!chain) return context;
+  return applyContextMarkdownTransform(context, {
+    chain,
+    availableWidth: options.live?.getRenderWidth?.() ?? RENDER_WIDTH,
+  });
 }
 
 export function projectAgentState(
@@ -1230,7 +1303,23 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
           totalMessageCount: full.messages.length,
         };
       }
-      return { context };
+      // 渲染边界（issue #106）：**切片之后**才应用插件 markdown 转换器，所以只处理这一页，
+      // 不会为了渲染去扫整条 leaf。进行中的那条助手消息不在这里（它还没入库），
+      // 走 SSE 那条边界。
+      const transformed = await applyMarkdownTransformToContext(context, {
+        live: service.getLive(sessionId),
+        filePath: view.filePath,
+        deps,
+      });
+      return { context: transformed };
+    },
+
+    async transformContextMarkdown(sessionId, context) {
+      return applyMarkdownTransformToContext(context, {
+        live: service.getLive(sessionId),
+        filePath: service.getLive(sessionId)?.sessionFile ?? await service.resolvePath(sessionId),
+        deps,
+      });
     },
 
     async getEntryThinking(sessionId, entryId, blockIndex) {
@@ -1245,7 +1334,25 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       if (!block || !isThinkingLikeType(block.type)) {
         return null;
       }
-      return { thinking: getThinkingText(block) };
+      const text = getThinkingText(block);
+      // 思考正文的 markdown 渲染入口（issue #106）：首屏 deferThinking 之后正文是按需取回的，
+      // 转换器必须在这里补齐，否则带思考块的插件转换在那条路径上永远看不到（投影里正文是空的）。
+      // `isStreaming` 恒 false：会走到这里的都是**已落盘的历史块**；正在流式输出的正文不 defer、
+      // 也还没入库，它走 SSE 那条渲染边界（sdk-session-host 的 withTransformedMessage）。
+      const chain = await resolveMarkdownChainForSession(view.filePath, deps);
+      if (!chain) return { thinking: text };
+      return {
+        thinking: transformMarkdownOnce({
+          chain,
+          messageId: `${entryId}#${blockIndex}`,
+          markdown: text,
+          context: {
+            messageType: "assistant-thinking",
+            isStreaming: false,
+            availableWidth: service.getLive(sessionId)?.getRenderWidth?.() ?? RENDER_WIDTH,
+          },
+        }),
+      };
     },
 
     async getToolResultDetails(sessionId, toolCallId) {

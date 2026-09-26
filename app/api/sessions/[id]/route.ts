@@ -27,13 +27,16 @@ export async function GET(
       totalMessageCount?: number;
       hasMoreBefore?: boolean;
     };
-    const context = tailLimit !== null
+    const slicedContext = tailLimit !== null
       ? sliceContextTail(fullContext as never, tailLimit)
       : {
           ...fullContext,
           hasMoreBefore: false,
           totalMessageCount: fullContext.messages.length,
         };
+    // 插件 markdown 转换器（issue #106）在**切完尾页之后**应用：只处理这一屏，不扫整条 leaf。
+    // 没有插件注册转换器时原样返回。
+    const context = await sessionService.transformContextMarkdown(id, slicedContext);
 
     return NextResponse.json({
       sessionId: id,
