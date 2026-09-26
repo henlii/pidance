@@ -61,7 +61,7 @@ const FIELD_PROBES = [
   { field: "extensionHiddenThinkingLabel", apply: "applyHiddenThinkingLabel", value: "检索记忆…" },
   { field: "extensionHeader", apply: "applySlots", value: [] },
   { field: "extensionCapabilityNotices", apply: "applyCapabilityNotices", value: [{ id: "n1", message: "x" }] },
-  { field: "pendingExtensionRequests", apply: "applyQueue", value: [] },
+  { field: "pendingExtensionRequests", apply: "applyQueue", value: [{ id: "req-1", method: "input" }] },
   { field: "activeCustomUi", apply: "applyActiveCustomUi", value: null },
 ];
 
@@ -79,8 +79,13 @@ function makeEnv() {
     applied,
     patchExtensionUiState: (patch) => {
       for (const key of Object.keys(patch)) {
-        // statuses / widgets 走同一个 patch 入口，按 key 区分。
-        applied.push(key === "statuses" ? "applyStatuses" : key === "widgets" ? "applyWidgets" : "applyQueue");
+        // statuses / widgets / 阻塞队列走同一个 patch 入口，按 key 区分；其它 key 记为
+        // `applyPatch:<key>`——新字段如果只走 patch 而没进投影函数/探针表，会被下面那条
+        // 「投影覆盖每个字段」的断言抓住（否则它会混进 applyQueue 里悄悄通过）。
+        if (key === "statuses") applied.push("applyStatuses");
+        else if (key === "widgets") applied.push("applyWidgets");
+        else if (key === "blockingQueue" || key === "dialog") applied.push("applyQueue");
+        else applied.push("applyPatch:" + key);
       }
     },
     applyExtensionListenerCount: () => applied.push("applyListenerCount"),
@@ -138,6 +143,24 @@ test("两条状态应用路径对同一份快照应用同一组扩展 UI 字段�
     [],
     "run 结束/reconcile 路径没有应用这些扩展 UI 字段：" + missing.join(", "),
   );
+});
+
+test("投影函数覆盖探针表里的每个字段（把某个字段从投影里删掉就红）", () => {
+  const env = makeEnv();
+  const projection = extractCallback(env, "applyExtensionUiProjection");
+  projection(fullState());
+  const applied = new Set(env.applied);
+  const expected = [...new Set(FIELD_PROBES.map((probe) => probe.apply))];
+  const missing = expected.filter((name) => !applied.has(name));
+  assert.deepEqual(
+    missing,
+    [],
+    "applyExtensionUiProjection 没有应用这些扩展 UI 字段：" + missing.join(", "),
+  );
+  // 未登记的 patch key（例如有人加了字段只走 patchExtensionUiState）：单独失败，
+  // 提示把字段补进投影函数与 FIELD_PROBES。
+  const unknownPatchKeys = [...applied].filter((name) => name.startsWith("applyPatch:"));
+  assert.deepEqual(unknownPatchKeys, [], "投影写了未登记的 patch key：" + unknownPatchKeys.join(", "));
 });
 
 test("run 结束路径会应用插件快捷键清单（#110：Ctrl+Alt+7 要等刷新才生效）", () => {
