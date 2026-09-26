@@ -63,6 +63,7 @@ import { getSessionCapabilities } from "@/components/session-capabilities";
 import { useSessionCommands } from "@/hooks/useSessionCommands";
 import { useChatAutoFollow } from "@/hooks/useChatAutoFollow";
 import { ensureServerPrefsLoaded, setServerPref, useServerPreferences } from "@/lib/server-preferences";
+import { subscribePiThemeApplied } from "@/lib/pi-theme-signal";
 import { resolveDisplayModel, settleModelOverride } from "@/lib/model-selection";
 import { useI18n } from "@/lib/i18n";
 import { LoadFailedError, loadWithBoundedRetry } from "@/lib/load-retry";
@@ -141,6 +142,8 @@ export interface SessionData {
     thinkingLevel: string;
     model: { provider: string; modelId: string } | null;
     hasMoreBefore?: boolean;
+    /** 窗口之后是否还有消息：主题刷新按它决定取数档位（跳读窗口必须显式 toEnd=0）。 */
+    hasMoreAfter?: boolean;
     totalMessageCount?: number;
   };
 }
@@ -462,6 +465,24 @@ type SteerOptimisticMessage = AgentMessage;
 const DETAIL_LOAD_TIMEOUT_MS = 12_000;
 const DETAIL_LOAD_MAX_RETRIES = 2;
 const DETAIL_LOAD_RETRY_DELAY_MS = 1_500;
+/**
+ * 主题刷新（issue #109）的读法：从最早的已加载条起按 entryId 重取 renderedLines。
+ *
+ * 单次请求行数上限与服务端 clampLimit 同为 500，续跳最多这么多跳。两档取数口径见
+ * refreshRenderedLinesForTheme：尾部窗口用 around+toEnd（返回量受已加载窗口长度约束），
+ * 跳读窗口只带 around、后面用 after 有界向前 —— 预算用尽时优先保证锚点这一段
+ * （跳读时那是用户正看着的窗口），更靠后的部分留旧色，等下一次整段 replace。
+ */
+const THEME_REFRESH_MAX_ROWS = 500;
+const THEME_REFRESH_MAX_HOPS = 4;
+/**
+ * 待补色的会话上限。
+ *
+ * 待办只在回前台消费（syncOnTabReturn），那里会剪掉 slot 已回收 / 已删除的会话；
+ * 但「隐藏期间看过、之后被删、又一直没回前台」的 id 会滞留在集合里，所以要给个上界
+ * （超出丢最旧的：它对应的 slot 多半也没了，丢了由下一次整段 replace 兜住）。
+ */
+const THEME_REFRESH_MAX_PENDING = 8;
 
 /**
  * 请求被取消（切换会话 / 新的加载取代了本次）—— 不是失败，不得写 error。
@@ -546,6 +567,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * 之后才被 sessionId 守卫丢弃——白花流量与内存。
    */
   const loadAbortRef = useRef<AbortController | null>(null);
+  /** 主题刷新的在途请求：新的换色取消旧的（与 loadAbortRef 分开，互不干扰翻页）。 */
+  // 换色请求**按会话**各自可取消：回前台可能一次补多个会话（待办是个集合），
+  // 共用一个 controller 会让后一个把前一个 abort 掉，被取消的会话永远换不上色。
+  const themeRefreshAbortRef = useRef<Map<string, AbortController>>(new Map());
+  /**
+   * 隐藏标签期间发生过主题切换：按**会话**记待办，回前台按各自会话补（见 syncOnTabReturn）。
+   * 用集合而不是一个布尔：隐藏期间可能切过会话，只补「当时的当前会话」会把被切走那个的旧色留下。
+   */
+  const themeRefreshPendingRef = useRef<Set<string>>(new Set());
+  /** 记下「这个会话需要补色」（按会话去重，并给集合一个上界，见常量注释）。 */
+  const markThemeRefreshPending = useCallback((sid: string) => {
+    const pending = themeRefreshPendingRef.current;
+    // 重新插入以刷新它「最近用过」的位置（Set 保插入序）。
+    pending.delete(sid);
+    pending.add(sid);
+    while (pending.size > THEME_REFRESH_MAX_PENDING) {
+      const oldest = pending.values().next().value;
+      if (oldest === undefined) break;
+      pending.delete(oldest);
+    }
+  }, []);
   const beginLoadRequest = useCallback((): AbortSignal => {
     loadAbortRef.current?.abort();
     const controller = new AbortController();
@@ -1241,7 +1283,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         sid,
         hydratedMessages,
         tailEntryIds,
-        { sinceSeq: hydrateSinceSeq, hydrateRequestSeq, mode, pending: "retain" },
+        {
+          sinceSeq: hydrateSinceSeq,
+          hydrateRequestSeq,
+          mode,
+          pending: "retain",
+          // 这次窗口之后还有没有消息（尾部窗口为 false）：主题刷新按它选取数档位。
+          hasMoreAfter: d.context.hasMoreAfter === true,
+        },
       );
       if (outcome === "superseded") return null;
       // 只有分支导航成功拿到整体会话、即将应用新 context 时才重置跟随；
@@ -1403,6 +1452,169 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setError(null);
     void loadSession(sid, true, true);
   }, [loadSession]);
+
+  /**
+   * 插件 ANSI 主题变了 → 把手里那份**已投影行**重新渲染一遍（issue #109）。
+   *
+   * 为什么必须重渲染：`renderedLines` 是**服务端按当时的主题**渲染好的行，浏览器手里那份
+   * 不会随主题切换自己变（widget / custom 面板 / 状态条 / 工具行由宿主重渲并经 SSE 覆盖，
+   * 已投影的消息行没有这条通路）。
+   *
+   * 为什么不走 `loadSession`：它按尾页归并（`mergeTailRecords`）—— 已 prepend 的更早页
+   * 换不到色，而在跳读历史（`jumpToEntry` 的 around 窗口）时新尾页的首条不在时间线里，
+   * 归并会**整段换成尾页**把用户从阅读位置拽回最新一屏，还会打断正在进行的翻页。
+   * 这里改成：按当前时间线的 entryId 只换 `renderedLines`，结构/窗口/滚动一概不动。
+   *
+   * 请求仍走既有读接口：服务端每次请求就地取当前主题重渲染（只读视图缓存存的是 entries，
+   * 不含颜色），所以重取回来就是新色。
+   */
+  const refreshRenderedLinesForTheme = useCallback(async (sid: string) => {
+    const registry = getOrCreateBrowserSessionRuntimeRegistry();
+    const snapshot = registry.getSnapshot(sid);
+    // 已加载条以**该会话 slot** 为准，而不是「当前视图」：切走之后仍要给它的 slot 换色
+    // （见下面的写入分支），回前台补待办时也要按各自会话的窗口取数。
+    // 没有 slot（还没 hydrate 过）时才退回当前视图的记录。
+    const loadedIds = snapshot?.entryIds ?? (sid === sessionIdRef.current ? entryIdsRef.current ?? [] : []);
+    // 首位可能是刚发出的本地乐观气泡（entryId 为空），取数只认有 entryId 的那些。
+    const present = loadedIds.filter((id) => !!id);
+    const firstLoadedId = present[0];
+    const lastLoadedId = present[present.length - 1];
+    if (!firstLoadedId || !lastLoadedId) return;
+    // 没有任何 custom 投影行的会话不必发请求（多数会话属于这一类）。
+    const hasProjectedLines = (snapshot?.messages ?? []).some(
+      (message) => message.role === "custom" && Array.isArray((message as { renderedLines?: unknown }).renderedLines),
+    );
+    if (!hasProjectedLines) return;
+    // 同一个会话的上一次请求作废；别的会话的请求不动（见 themeRefreshAbortRef 的注释）。
+    const controllers = themeRefreshAbortRef.current;
+    controllers.get(sid)?.abort();
+    const controller = new AbortController();
+    controllers.set(sid, controller);
+    // 窗口形态取**该会话 slot** 上的（不是视图 ref）：后台会话补待办时，视图 ref 说的是
+    // 当前会话的形态，会取错档位。
+    const inHistoryWindow = snapshot?.hasMoreAfter === true;
+    const limit = Math.min(THEME_REFRESH_MAX_ROWS, Math.max(present.length, DEFAULT_SESSION_HISTORY_PAGE));
+    const leafId = sid === sessionIdRef.current ? activeLeafIdRef.current : null;
+    const buildUrl = (params: URLSearchParams) => {
+      const query = new URLSearchParams({ deferThinking: "1", deferMedia: "1", limit: String(limit) });
+      for (const [key, value] of params) query.set(key, value);
+      if (leafId) query.set("leafId", leafId);
+      return `/api/sessions/${encodeURIComponent(sid)}/context?${query}`;
+    };
+    /*
+     * 取数口径（两档，见 lib/session-context-window.ts 的 sliceContextAround）：
+     *
+     * - **尾部窗口**（默认）：锚点是**最早已加载条**，配 `toEnd=1` 一次覆盖
+     *   「窗口之前半页 → 叶尾」。这条路径的返回量受已加载窗口长度约束（clamp 500 只砍锚点
+     *   前面那半页），不会把整段历史拉下来。
+     * - **跳读窗口**（该会话 slot 的 hasMoreAfter 为真）：窗口之后到叶尾还有几千条，
+     *   带 toEnd 会把它们整段拉下来（jumpToEntry 自己就避开了这件事）。所以这里锚点取
+     *   **窗口正中**并**显式写 `toEnd=0`** —— 路由判断是 `get("toEnd") !== "0"`，
+     *   **缺省就等于取到叶尾**，只「不写 toEnd=1」是没有用的（第二轮审查的教训）。
+     *   正中锚点在 `limit ≥ 已加载条数` 时一跳就覆盖整个 around 窗口（前后各 limit/2），
+     *   这正好是用户跳过去要看的那段。
+     *
+     * 覆盖计划：先取锚点那段，再向**后**（更新方向、用户更可能在看的那半）续跳，预算还有余
+     * 才向**前**（更早方向）补 —— 这样覆盖率是连续的，不会在中间留缝。
+     * 取舍要说清：`clampLimit` 一次最多 500 行，所以已加载窗口 > 500×跳数时，
+     * **中间会留一段旧色**（没有提示），等下一次整段 replace（冷加载 / 跳读）才补上。
+     * 反过来，「一个都换不到」是不会发生的：锚点那段一定在预算内。
+     */
+    let afterCursor: string | null = null;
+    let beforeCursor: string | null = null;
+    let forwardDone = false;
+    let backwardDone = false;
+    try {
+      for (let hop = 0; hop < THEME_REFRESH_MAX_HOPS; hop++) {
+        if (hop > 0 && forwardDone && backwardDone) return;
+        const params = new URLSearchParams();
+        if (hop === 0) {
+          if (inHistoryWindow) {
+            params.set("around", present[Math.floor(present.length / 2)]);
+            params.set("toEnd", "0");
+          } else {
+            params.set("around", firstLoadedId);
+            params.set("toEnd", "1");
+          }
+        } else if (!forwardDone && afterCursor) {
+          params.set("after", afterCursor);
+        } else if (!backwardDone && beforeCursor) {
+          params.set("before", beforeCursor);
+        } else {
+          return;
+        }
+        const res = await fetch(buildUrl(params), { signal: controller.signal, cache: "no-store" });
+        if (!res.ok) return;
+        const d = await res.json() as {
+          context?: { messages?: AgentMessage[]; entryIds?: string[] };
+        };
+        const messages = d.context?.messages ?? [];
+        const ids = d.context?.entryIds ?? [];
+        if (messages.length === 0 || ids.length === 0) return;
+        // 换色只动该会话 slot 的行色，与「现在看的是哪个会话」无关：所以即使视图已经切走也照写，
+        // 并把没覆盖到的部分记成那个会话的待办（切回来补），不要静默丢掉这次写入。
+        registry.refreshRenderedLines(sid, messages, ids);
+        if (sessionIdRef.current !== sid) {
+          const covered = ids.includes(lastLoadedId) && ids.includes(firstLoadedId);
+          if (!covered) markThemeRefreshPending(sid);
+          return;
+        }
+        // 第一个决定方向的游标来自第一跳这一页的两端。
+        if (hop === 0) {
+          afterCursor = ids[ids.length - 1] ?? null;
+          beforeCursor = ids[0] ?? null;
+          forwardDone = ids.includes(lastLoadedId);
+          backwardDone = ids.includes(firstLoadedId);
+          // 尾部窗口：toEnd=1 本该一次覆盖到叶尾（锚点本身也一定在这页里），到位就收。
+          // 万一响应被截断（或锚点落在别处），仍按 after 有界向前补，别留下半新半旧。
+          if (!inHistoryWindow && forwardDone) return;
+          if (forwardDone && backwardDone) return;
+          continue;
+        }
+        if (!forwardDone && afterCursor && params.get("after") === afterCursor) {
+          if (ids.includes(lastLoadedId)) {
+            forwardDone = true;
+            continue;
+          }
+          const next = ids[ids.length - 1] ?? null;
+          // 没有进展（返回里没有更靠后的条）就收掉这个方向，别在原地打转烧预算。
+          if (!next || next === afterCursor) forwardDone = true;
+          else afterCursor = next;
+          continue;
+        }
+        if (ids.includes(firstLoadedId)) {
+          backwardDone = true;
+          continue;
+        }
+        const next = ids[0] ?? null;
+        if (!next || next === beforeCursor) backwardDone = true;
+        else beforeCursor = next;
+      }
+    } catch (e) {
+      // 换色失败只是颜色暂时停在旧档位（可见的既有内容），不打扰用户，也不置错误态。
+      if (!isAbortError(e)) console.debug("theme refresh failed:", e);
+    } finally {
+      if (controllers.get(sid) === controller) controllers.delete(sid);
+    }
+  }, [markThemeRefreshPending]);
+
+  /**
+   * 主题信号入口：当前会话有投影行就换色。
+   *
+   * 隐藏标签**不拉**：后台标签不该改自己的阅读窗口，而回前台已经会走
+   * `syncOnTabReturn`（重连 + 对账 + 重拉尾页）。这里只记一个（按会话的）待办，由它补上。
+   */
+  const refreshProjectionForTheme = useCallback(() => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+      markThemeRefreshPending(sid);
+      return;
+    }
+    void refreshRenderedLinesForTheme(sid);
+  }, [refreshRenderedLinesForTheme, markThemeRefreshPending]);
+
+  useEffect(() => subscribePiThemeApplied(refreshProjectionForTheme), [refreshProjectionForTheme]);
 
   /**
    * 向上滚动加载更旧历史（OpenChamber loadOlder 语义）。
@@ -1596,6 +1808,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         hydrateRequestSeq,
         mode: "replace",
         pending: "retain",
+        hasMoreAfter: d.context.hasMoreAfter === true,
       });
       if (outcome !== "applied" || !isCurrent()) return false;
       messagesSessionIdRef.current = sid;
@@ -1654,6 +1867,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         hydrateRequestSeq,
         mode: "replace",
         pending: "retain",
+        hasMoreAfter: d.context.hasMoreAfter === true,
       });
       if (outcome !== "applied") return false;
       hasMoreAfterRef.current = d.context.hasMoreAfter === true;
@@ -2410,7 +2624,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // includeState：漏掉的事件（尤其是扩展提问、custom 面板）只能靠状态快照补回。
     // 本进程不知道那一轮在跑时 reconcile 会直接返回，所以必须走状态这条路。
     void loadSession(sid, false, true);
-  }, [ensureEventsConnected, reconcileAgentState, loadSession]);
+    // 隐藏期间发生过主题切换（那时刻意没拉）：这里**按会话**补上换色。上面那次重拉只覆盖
+    // 当前会话的尾页，已 prepend 的更早页仍要按 entryId 换；隐藏期间切走过的会话也要补
+    // （所以待办是集合，不是「当前会话」一个布尔）。
+    const pending = themeRefreshPendingRef.current;
+    if (pending.size > 0) {
+      themeRefreshPendingRef.current = new Set();
+      // 串行补：多个会话同时补色时，并发会让每个会话各自发一整串请求（还可能互相 abort）。
+      // 顺带剪掉 slot 已经回收 / 会话已删的待办（那些补不回来）。
+      void (async () => {
+        for (const target of pending) {
+          if (!registry.getSnapshot(target)) continue;
+          await refreshRenderedLinesForTheme(target);
+        }
+      })();
+    }
+  }, [ensureEventsConnected, reconcileAgentState, loadSession, refreshRenderedLinesForTheme]);
 
   /**
    * 别的标签/端把本会话的 host 唤醒时，本端可能一直没有有效事件流（打开空闲会话时
@@ -4055,6 +4284,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setActiveLeafId(null);
     hasMoreBeforeRef.current = false;
     setHasMoreBefore(false);
+    // 跳读窗口形态由 registry 按会话记（主题刷新用）；这个视图 ref 只剩 loadNewerHistory 在读，
+    // 不清就会把上一个会话的「后面还有」带过来。
+    hasMoreAfterRef.current = false;
+    setHasMoreAfter(false);
     dispatch({ type: "reset" });
     setTurnMetrics({});
     setLockedByOther(false);

@@ -1,3 +1,4 @@
+import { validRenderedLines } from "./custom-rendered-lines";
 import type { AgentMessage } from "./types";
 
 /**
@@ -222,6 +223,101 @@ export function mergeTailRecords(
   const index = firstNew ? previousEntryIds.indexOf(firstNew) : -1;
   if (index <= 0) return next;
   return [...timeline.slice(0, index), ...next];
+}
+
+/**
+ * 主题刷新（issue #109）：把**新渲染好的行**按 entryId 套回已有时间线。
+ *
+ * 为什么不能复用 mergeTailRecords：那条路会把窗口换成尾页 ——
+ * 已 prepend 的更早页换不到色，而 around（跳读历史）窗口还会被整段替换，
+ * 把用户的阅读位置拽回最新一屏，并打断正在进行的翻页。
+ *
+ * 本函数只认 entryId、只换 `renderedLines`：
+ * - 不动顺序、长度、key、pending 与 duringStreamingStep；
+ * - 服务端这次没给出合法行（插件没有渲染器 / 渲染为空 / 该条不在这一页）时**保持原样**，
+ *   宁可留着旧色，也不把已有的覆盖层清掉（清掉会从 ANSI 渲染退回纯文本，是可见的功能倒退）。
+ *   代价要说清：这一层分不清「这次没带到」和「渲染器就是没有行」，所以那种记录会**一直**是旧色，
+ *   直到下一次主题切换，或某次整段 replace（冷加载 / 跳读）重新渲染它；期间没有提示；
+ * - 没有任何记录被替换时返回原引用，调用方据此跳过多余的 publish。
+ */
+export function replaceRenderedLinesByEntryId(
+  timeline: Timeline,
+  nextMessages: readonly AgentMessage[],
+  nextEntryIds: readonly string[],
+): Timeline {
+  const fresh = collectRenderedLinesByEntryId(nextMessages, nextEntryIds);
+  if (fresh.size === 0) return timeline;
+  return applyRenderedLinesByEntryId(timeline, fresh);
+}
+
+/**
+ * 从一页响应里收集 entryId → 合法 renderedLines（同 id 只取第一条）。
+ * 与 {@link applyRenderedLinesByEntryId} 拆开，是为了让调用方能把结果**记住**
+ * （主题换色要能在后续 hydrate 之后重新套回，见 registry 的 themeLines）。
+ */
+export function collectRenderedLinesByEntryId(
+  nextMessages: readonly AgentMessage[],
+  nextEntryIds: readonly string[],
+): Map<string, string[]> {
+  const fresh = new Map<string, string[]>();
+  nextMessages.forEach((message, index) => {
+    const entryId = nextEntryIds[index];
+    if (!entryId || fresh.has(entryId)) return;
+    const lines = validRenderedLines(message);
+    if (lines) fresh.set(entryId, lines);
+  });
+  return fresh;
+}
+
+/**
+ * 时间线里每个 entryId **当前**的 renderedLines（只收有合法行的记录，同 id 取第一条）。
+ *
+ * 换色前先记一份：hydrate 落地时要用它判断「这份响应带回来的行 == 换色前的行」
+ * （同一内容在旧主题下重渲染 ⇒ 套回新色），不一致则说明内容变了（⇒ 让磁盘赢）。
+ */
+export function collectTimelineRenderedLines(timeline: Timeline): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const record of timeline) {
+    if (!record.entryId || out.has(record.entryId)) continue;
+    const lines = validRenderedLines(record.message);
+    if (lines) out.set(record.entryId, lines);
+  }
+  return out;
+}
+
+/**
+ * 按 entryId 把给定行套回时间线（只换 renderedLines，结构与窗口不动）。
+ * 没有任何记录被替换时返回原引用，调用方据此跳过多余的 publish。
+ */
+export function applyRenderedLinesByEntryId(
+  timeline: Timeline,
+  fresh: ReadonlyMap<string, readonly string[]>,
+): Timeline {
+  if (fresh.size === 0) return timeline;
+  let changed = false;
+  const next = timeline.map((record) => {
+    const lines = record.entryId ? fresh.get(record.entryId) : undefined;
+    if (!lines) return record;
+    const current = (record.message as { renderedLines?: unknown }).renderedLines;
+    if (sameRenderedLines(current, lines)) return record;
+    changed = true;
+    return { ...record, message: { ...record.message, renderedLines: [...lines] } as AgentMessage };
+  });
+  return changed ? next : timeline;
+}
+
+/**
+ * 两份 renderedLines 是否逐行相同。
+ *
+ * 为什么要按**内容**判断（issue #109 第三轮审查）：换色之后落地的 hydrate 可能是
+ * **换色之前发出**的响应（行还是旧主题），也可能内容已经变了。只看请求发出序号
+ * （`hydrateRequestSeq < recolorSeq`）分不清这两者 —— 后者会把旧渲染盖在更新的内容上。
+ * 出口给 registry 用：incoming 与「被替换掉的那批旧行」一致 ⇒ 同一内容在旧主题下的重渲染。
+ */
+export function sameRenderedLines(current: unknown, next: readonly string[]): boolean {
+  return Array.isArray(current)
+    && current.length === next.length
+    && current.every((line, index) => line === next[index]);
 }
 
 /**

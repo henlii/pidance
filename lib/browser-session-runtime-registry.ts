@@ -31,7 +31,11 @@ import {
   optimisticRecord,
   prependOlderRecords,
   applyHydratePending,
+  applyRenderedLinesByEntryId,
+  collectRenderedLinesByEntryId,
+  collectTimelineRenderedLines,
   resolveHydratePendingPolicy,
+  sameRenderedLines,
   submissionKey,
   timelineEntryIds,
   timelineFromDisk,
@@ -101,6 +105,11 @@ export type SessionRuntimeSnapshot = {
   agentRunning: boolean;
   /** 最近一轮 run 的延迟/吞吐读数；run 结束后保留供展示。 */
   turnMetrics: TurnMetrics;
+  /**
+   * 该会话当前是否跳读窗口（窗口之后到叶尾还有消息）。
+   * 主题刷新据此选择取数档位：跳读窗口必须显式 `toEnd=0`，否则会把窗口之后整段拉到叶尾。
+   */
+  hasMoreAfter: boolean;
   /** bash 运行态与 registry 的运行态同一快照发布，避免第三套状态机。 */
   bashRunning: boolean;
   pendingBash: PendingBash | null;
@@ -270,6 +279,33 @@ type RuntimeSlot = {
   hydrateSeq: number;
   /** 最近一次已应用 hydrate 的请求号 */
   hydrateAppliedSeq: number;
+  /**
+   * 主题换色（issue #109）产出的行：entryId → renderedLines。
+   *
+   * 为什么要记住：换色不递增 `timelineSeq`（递增会让在途 hydrate 被判 stale、丢掉还没合并的磁盘消息），
+   * 代价是**先于换色发出、后于换色落地**的 hydrate 会把重叠段换回旧主题的行
+   * （`preserveCustomRenderedLines` 只会保留服务端这次给的行）。落地时按 entryId 重套这份记忆即可。
+   * 只保留时间线里还存在的 entryId（见 pruneThemeLines），所以不会无界增长。
+   */
+  themeLines: Map<string, string[]>;
+  /**
+   * 换色时**被替换掉的旧行**：entryId → 换色前的 renderedLines。
+   *
+   * hydrate 落地时逐条比较：incoming 与这份旧行一致 ⇒ 只是同一内容在旧主题下的重渲染
+   * （先于换色发出、后于换色落地的响应），套回 {@link themeLines}；不一致 ⇒ 内容真的变了
+   * （例如 context_edit 之后重渲染），**让磁盘赢**并把这条的记忆清掉。
+   * 为什么不能只比「请求发出序号」：序号只说明请求发出早于换色落地，服务端完全可能在那之后
+   * 才渲染，此时同 id 的行已经是新内容 —— 只看序号会把旧渲染盖在更新内容上（第三轮审查指出）。
+   */
+  themeSourceLines: Map<string, string[]>;
+  /**
+   * 该会话当前是不是**跳读窗口**（around，窗口之后到叶尾还有消息）。
+   *
+   * 为什么记在 slot 上而不是视图的 ref：主题刷新要按**各自会话**的窗口形态取数
+   * （跳读窗口不能用 toEnd，否则会把窗口之后到叶尾的几千条整段拉下来），而切走再切回、
+   * 或后台会话补待办时，视图上的 ref 说的都是**当前**会话的形态，会用错档位。
+   */
+  hasMoreAfter: boolean;
   /** 无视图且空闲时延迟关闭 SSE 的兜底定时器 */
   idleCloseTimer: TimerHandle | null;
   /** 页面隐藏超阈值时关闭本标签 SSE 的定时器（见 HIDDEN_TAB_SSE_CLOSE_DELAY_MS） */
@@ -340,8 +376,24 @@ export type BrowserSessionRuntimeRegistry = {
       mode?: TimelineHydrateMode;
       /** replace 默认 drop；tail/prepend 默认 retain。loadSession 必须显式 retain。 */
       pending?: "retain" | "drop";
+      /**
+       * 这次窗口之后是否还有消息（`d.context.hasMoreAfter`）。只在明确知道时传：
+       * 省略则沿用 slot 上已有的形态（prepend 不改变窗口尾部，不必传）。
+       */
+      hasMoreAfter?: boolean;
     },
   ): HydrateOutcome;
+  /**
+   * 主题刷新（issue #109）：只把**新渲染好的行**按 entryId 套回已有时间线。
+   *
+   * 为什么不用 hydrate：那条路会把窗口换成磁盘尾页 —— 已 prepend 的更早页换不到色，
+   * around（跳读历史）窗口还会被整段替换成尾页。这里不动结构，只换 `renderedLines`。
+   *
+   * 刻意**不**递增 timelineSeq：那个门禁的语义是「有新的内存内容，磁盘快照不得覆盖」，
+   * 递增会让并发落地的 tail hydrate 被判 stale 而丢掉刚持久化的消息。主题换色是
+   * 派生显示数据，不值得换来一次消息丢失。返回是否有记录被替换。
+   */
+  refreshRenderedLines(sessionId: string, messages: AgentMessage[], entryIds?: string[]): boolean;
   /**
    * 追加本地乐观消息（引导/合并队列）。返回生成的稳定 key，后续用它原子回滚，
    * 不依赖数组下标，也不依赖正文（同文两条引导必须能各自回滚）。
@@ -384,6 +436,7 @@ function createSlot(sessionId: string): RuntimeSlot {
       messages: [],
       entryIds: [],
       messageKeys: [],
+      hasMoreAfter: false,
       streamState: emptyStream(),
       agentRunning: false,
       turnMetrics: {},
@@ -412,12 +465,30 @@ function createSlot(sessionId: string): RuntimeSlot {
     localKeySeq: 0,
     hydrateSeq: 0,
     hydrateAppliedSeq: 0,
+    themeLines: new Map(),
+    themeSourceLines: new Map(),
+    hasMoreAfter: false,
     idleCloseTimer: null,
     hiddenCloseTimer: null,
     sseRetryTimer: null,
     sseRetryAttempt: 0,
     metrics: {},
   };
+}
+
+/**
+ * 换色记忆只保留时间线里还存在的 entryId：`replace` 型 hydrate（冷加载 / 跳读）会把窗口整段换掉，
+ * 留在记忆里的旧 id 既没用又是无界增长的来源。
+ */
+function pruneThemeLines(slot: RuntimeSlot) {
+  if (slot.themeLines.size === 0 && slot.themeSourceLines.size === 0) return;
+  const present = new Set(timelineEntryIds(slot.timeline));
+  for (const entryId of [...slot.themeLines.keys()]) {
+    if (!present.has(entryId)) slot.themeLines.delete(entryId);
+  }
+  for (const entryId of [...slot.themeSourceLines.keys()]) {
+    if (!present.has(entryId) || !slot.themeLines.has(entryId)) slot.themeSourceLines.delete(entryId);
+  }
 }
 
 function userMessageFromSubmit(
@@ -547,6 +618,7 @@ export function createBrowserSessionRuntimeRegistry(
       messages: slot.derived.messages,
       entryIds: slot.derived.entryIds,
       messageKeys: slot.derived.messageKeys,
+      hasMoreAfter: slot.hasMoreAfter,
       turnMetrics: { ...slot.metrics },
       submissions: [...slot.submissions.values()],
       attachCount: slot.attachments.size,
@@ -1441,6 +1513,10 @@ export function createBrowserSessionRuntimeRegistry(
       }
       slot.hydrateSeq = Math.max(slot.hydrateSeq, requestSeq);
       slot.hydrateAppliedSeq = requestSeq;
+      if (options?.hasMoreAfter !== undefined) slot.hasMoreAfter = options.hasMoreAfter;
+      const incomingLines = slot.themeLines.size > 0
+        ? collectRenderedLinesByEntryId(messages, entryIds)
+        : new Map<string, string[]>();
       // 归并一律从 slot 自己的 timeline 计算（调用方不再回传 previous），
       // 杜绝依赖 React updater 同步执行而把空数组写进时间线。
       const mode = options?.mode ?? "replace";
@@ -1451,12 +1527,52 @@ export function createBrowserSessionRuntimeRegistry(
           ? mergeTailRecords(previous, messages, entryIds)
           : timelineFromDisk(messages, entryIds);
       const pending = resolveHydratePendingPolicy(mode, options?.pending);
-      slot.timeline = [...applyHydratePending(previous, merged, pending)];
+      const applied = applyHydratePending(previous, merged, pending);
+      // 换色记忆要在合并之后按**内容**重新生效（见 themeLines / themeSourceLines 的注释）：
+      // 这份响应带回来的行与「换色前那批旧行」一致 ⇒ 只是同一内容在旧主题下的重渲染，套回新色；
+      // 不一致 ⇒ 内容真的变了（context_edit / 插件渲染器输出变了），让磁盘赢并清掉这条记忆。
+      let timeline = applied;
+      if (incomingLines.size > 0) {
+        const restore = new Map<string, string[]>();
+        for (const [entryId, lines] of incomingLines) {
+          const source = slot.themeSourceLines.get(entryId);
+          const fresh = slot.themeLines.get(entryId);
+          if (source && fresh && sameRenderedLines(lines, source)) restore.set(entryId, fresh);
+          else {
+            slot.themeLines.delete(entryId);
+            slot.themeSourceLines.delete(entryId);
+          }
+        }
+        if (restore.size > 0) timeline = applyRenderedLinesByEntryId(applied, restore);
+      }
+      slot.timeline = [...timeline];
+      pruneThemeLines(slot);
       for (const entryId of timelineEntryIds(slot.timeline)) {
         if (entryId) slot.consumedEntryIds.add(entryId);
       }
       publish(slot);
       return "applied";
+    },
+    refreshRenderedLines(sessionId, messages, entryIds = []) {
+      const slot = getSlot(sessionId, false);
+      if (!slot) return false;
+      const fresh = collectRenderedLinesByEntryId(messages, entryIds);
+      if (fresh.size === 0) return false;
+      // 先记下**被替换掉的旧行**（套色前时间线里那份），hydrate 落地时靠它做内容判定。
+      const currentLines = collectTimelineRenderedLines(slot.timeline);
+      for (const [entryId, lines] of fresh) {
+        slot.themeLines.set(entryId, lines);
+        const before = currentLines.get(entryId);
+        // 时间线里本来没有合法行的条目没有「旧行」可比 → 不记 source（后续 hydrate 走磁盘赢）。
+        if (before && !sameRenderedLines(before, lines)) slot.themeSourceLines.set(entryId, before);
+        else slot.themeSourceLines.delete(entryId);
+      }
+      const next = applyRenderedLinesByEntryId(slot.timeline, slot.themeLines);
+      pruneThemeLines(slot);
+      if (next === slot.timeline) return false;
+      slot.timeline = [...next];
+      publish(slot);
+      return true;
     },
     appendLocal(sessionId, message) {
       const slot = getSlot(sessionId, true)!;
