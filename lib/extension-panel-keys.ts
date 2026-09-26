@@ -380,10 +380,13 @@ export function isDomOwnedKeyTarget(
   activeElement: KeyTargetLike | null | undefined,
 ): boolean {
   if (!target && !activeElement) return false;
-  // 插件面板自己的键盘捕获元素（keytrap）不是壳的控件：它拿焦点只是为了让按键有落点，
-  // 判成「DOM 归属」会让插件一个键都收不到（面板无法操作）。这是窗口 ③ 的主场景。
+  // 插件面板自己的键盘捕获元素（keytrap）有它自己的按键通路：它把键转成终端序列后
+  // 经 `extension_ui_input` 直接送进面板组件的 `handleInput`（问卷/选择面板靠这个选）。
+  // 所以它拿焦点时必须算「归 DOM」，让窗口 ③ 不要插进来 —— 否则窗口 ③ 会在捕获阶段把键
+  // 截走并只送给插件的全局 `onTerminalInput`，面板组件一个键都收不到，用户看到的就是
+  // 「面板能显示但方向键/回车全无反应」。窗口 ③ 仍服务于「面板开着但焦点不在它身上」的场景。
   if (isExtensionSurfaceKeytrap(target) || isExtensionSurfaceKeytrap(activeElement)) {
-    return false;
+    return true;
   }
   if (activeElement && !isRootFocus(activeElement) && target && belongsToFocused(target, activeElement)) {
     return true;

@@ -2204,8 +2204,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!capabilities.canSendSessionCommands) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
-    // 关闭或切换到下一次 custom 请求后，旧输入事件不能再写入代理会话。
-    if (extensionUiStateRef.current.customUi?.id !== request.id) return;
+    // 不在这里拿 ref 快照挡 id：那份快照可能与正在渲染的面板不同步（面板明明开着，
+    // 按键却被静默丢掉 —— 用户看到的就是「面板无法操作」）。服务端 inputCustom(id) 按 id
+    // 查表，面板已关闭/被替换时直接返回 false，晚到的输入不会被写进任何会话。
     try {
       await sendAgentCommand(sid, {
         type: "extension_ui_input",
@@ -2229,8 +2230,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!capabilities.canSendSessionCommands) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
-    // 关闭或切换到下一次 custom 请求后，旧鼠标事件不能再写入代理会话。
-    if (extensionUiStateRef.current.customUi?.id !== request.id) return;
+    // 同上：由服务端 inputCustomMouse(id) 按 id 判定，晚到的鼠标事件不会落到新面板。
     try {
       await sendAgentCommand(sid, {
         type: "extension_ui_mouse",
@@ -2256,8 +2256,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!capabilities.canSendSessionCommands) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
-    // 关闭或切换到下一次 custom 请求后，旧几何不能再写入代理会话。
-    if (extensionUiStateRef.current.customUi?.id !== request.id) return;
+    // 同上：由服务端 setCustomBounds(id) 按 id 判定，旧面板的几何不会写进新面板。
     try {
       await sendAgentCommand(sid, {
         type: "custom_panel_bounds",
