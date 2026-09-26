@@ -328,6 +328,15 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     }
     if (reported) reportEditorTakeoverView?.(reported.requestId, editorTakeoverActive, reported.sessionId);
   }, [editorTakeoverId, editorTakeoverActive, session?.id, reportEditorTakeoverView]);
+  // 卸载（页面切走 / 会话视图被换掉）：把最后那条登记也注销掉。上面那条 effect 的正文
+  // 只在依赖变化时跑，卸载时不会重跑，所以这里单独挂一个**只做收尾**的 effect
+  // （依赖是稳定引用，只在卸载时触发清理）。
+  useEffect(() => {
+    return () => {
+      const last = reportedTakeoverViewRef.current;
+      if (last) reportEditorTakeoverView?.(last.requestId, false, last.sessionId);
+    };
+  }, [reportEditorTakeoverView]);
   // 心跳（issue #107 四轮审查 阻断 1）：宿主只把「最近还在心跳」的登记当有效归属者
   // （`EDITOR_TAKEOVER_VIEW_FRESH_MS`）。这里每 10s 重报一次，并且**钉住这一次心跳属于
   // 哪个会话** —— 不钉的话，切走之后残留的一拍会把旧接管的 id 登记到新会话上。
