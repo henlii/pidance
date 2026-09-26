@@ -197,6 +197,16 @@
 - **特殊处理**：图片字节上限；base64 **不进 SSE 重复推送**（随渲染结果一次性下发，或走专用取图端点）；
   mime 由我们按 `f=100` 判 PNG（其他格式码→不支持时走 alt）；无障碍 alt。
 - **验收**：单测（单块/分块/损坏/参数/上限/alt 回退）+ 浏览器看真图与行高。
+- **已落地**（issue #104，2026-09-26）：渲染桥在**渲染期间**临时打开 `getCapabilities().images = "kitty"` 并在 `finally` 还原，
+  **先摘图再过文本上限**（否则一张图的 base64 会把旁边正常文本一起判超限丢掉）；分块按 `i=` 归并、未收到 `m=0` 视为
+  `incomplete` 不出半张图；单图 4MB / 合计 8MB 上限；老接口仍返回 `string[]`（图片位置换成**可见**说明）。
+  客户端新 `RenderedLines`：真 `<img>`（data URL）、按 `rows × 实测行高` 预留、`alt` 无障碍、跳过 pi-tui 补的占位行。
+  **审查抓到三条 P0 都已修**：① 能力开关原本打在了**另一份 pi-tui** 上（本机磁盘上有两份 0.87.0，扩展用的是 SDK 下那份，
+  模块实例不同 → 插件的 `Image` 永远走降级）→ 改为从 SDK 目录解析出**扩展实际使用的那一份**；② widget 的图片被宿主镜像
+  与状态投影抹掉（与当年 `interactive` 同坑）→ 抽 `lib/extension-widget-state.ts` 的 `mergeWidgetFrame`（缺省沿用、显式空数组清空）+ 投影带字段；
+  ③ custom 面板先裁空行再按原行号贴图 → 改成按索引保留图片锚点（`normalizeCustomPanelLinesWithIndex`）。
+  真机验证：widget 渲染出 `<img src="data:image/png;base64,…">`（`alt="图片"`）、无降级文本；强制关能力时显示可见降级
+  `[Image: [image/png] 16x16]`；整页刷新后图仍在（投影路径）。
 
 ### B5. `registerShortcut(shortcut, options)`
 
