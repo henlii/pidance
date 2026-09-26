@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { CircleArrowUp, LoaderCircle, Trash2 } from "lucide-react";
 import { SettingsPageFooter, settingsDangerIconButtonStyle, settingsSecondaryButtonStyle } from "./SettingsPageFooter";
+import { ExtensionShortcutsList } from "./ExtensionShortcutsList";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { PluginPackageInfo, PluginsResponse } from "@/lib/api-types";
 import { shortenPath } from "@/lib/file-paths";
@@ -1173,6 +1174,8 @@ export function PluginsConfig({
                 ))
               )}
             </div>
+            {/* 插件快捷键（issue #105）：注册集合跟着扩展加载走，这里只读呈现服务端的解析结果。 */}
+            <ExtensionShortcutsList sessionId={sessionId} />
             <div style={{ padding: "8px 6px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
               <div style={{ display: "flex", gap: 6 }}>
                 <button

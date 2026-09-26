@@ -9,6 +9,7 @@ import {
   type ExtensionUiCustomRequest,
   type ExtensionUiState,
 } from "@/lib/extension-ui-bridge";
+import type { ExtensionShortcutEntry } from "@/lib/extension-shortcuts";
 import type { ExtensionStatusItem, ExtensionWidgetItem } from "@/lib/types";
 
 // 兼容 re-export：useAgentSession 与其消费方沿用既有类型名。
@@ -28,6 +29,8 @@ export function useExtensionUiState() {
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
   const [extensionTerminalInputListenerCount, setExtensionTerminalInputListenerCount] = useState(0);
+  /** 插件快捷键（issue #105）：宿主解析好的清单 + Web 可用性，只读使用。 */
+  const [extensionShortcuts, setExtensionShortcuts] = useState<ExtensionShortcutEntry[]>([]);
   const [extensionWorkingMessage, setExtensionWorkingMessage] = useState<string | null>(null);
   const [extensionWorkingVisible, setExtensionWorkingVisible] = useState(true);
   const [extensionWorkingIndicator, setExtensionWorkingIndicator] = useState<{ frames: string[]; intervalMs: number } | null>(null);
@@ -61,6 +64,7 @@ export function useExtensionUiState() {
     setExtensionStatuses(next.statuses);
     setExtensionWidgets(next.widgets);
     setExtensionTerminalInputListenerCount(next.terminalInputListenerCount);
+    setExtensionShortcuts(next.shortcuts);
     setExtensionWorkingMessage(next.workingMessage);
     setExtensionWorkingVisible(next.workingVisible);
     setExtensionWorkingIndicator(next.workingIndicator);
@@ -103,6 +107,7 @@ export function useExtensionUiState() {
     extensionStatuses,
     extensionWidgets,
     extensionTerminalInputListenerCount,
+    extensionShortcuts,
     extensionWorkingMessage,
     extensionWorkingVisible,
     extensionWorkingIndicator,

@@ -59,6 +59,7 @@ import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAg
 import { useAudio } from "@/hooks/useAudio";
 import { useI18n } from "@/lib/i18n";
 import { useDragDrop } from "@/hooks/useDragDrop";
+import { useExtensionShortcuts } from "@/hooks/useExtensionShortcuts";
 import { useExtensionTerminalInput } from "@/hooks/useExtensionTerminalInput";
 import { shouldReturnComposerFocus, type KeyTargetLike } from "@/lib/extension-panel-keys";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -196,7 +197,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, defaultThinkingLevel,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionHeader, extensionFooter, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, sendExtensionCustomInput, sendExtensionCustomMouse, sendExtensionCustomBounds, sendExtensionWidgetMouse,
+    notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionHeader, extensionFooter, extensionTerminalInputListenerCount, extensionShortcuts, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, sendExtensionCustomInput, sendExtensionCustomMouse, sendExtensionCustomBounds, sendExtensionWidgetMouse, runExtensionShortcut,
     todos,
     isAutoModelSelection,
     agentPhase, toolExecutionSnapshots,
@@ -228,6 +229,19 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
    */
   const extensionSurfaceActive = Boolean(extensionDialog)
     || Boolean(extensionCustomUi && !extensionCustomUi.hidden);
+
+  /**
+   * 插件快捷键（issue #105）：服务端解析好的清单 + Web 可用性（`extensionShortcuts`），
+   * 命中后只把**键名**发回服务端执行（handler 要的是那边的完整扩展 ctx）。
+   *
+   * 插件界面显示时（`extensionSurfaceActive`）不绑：那时按键归面板自己（窗口 ③），
+   * TUI 里快捷键挂在编辑器上、焦点被 overlay 拿走时同样收不到。
+   */
+  useExtensionShortcuts({
+    shortcuts: extensionShortcuts,
+    enabled: !isReadOnly && !extensionSurfaceActive && Boolean(sessionIdRef.current),
+    onRun: runExtensionShortcut,
+  });
 
   useExtensionTerminalInput({
     sessionId: sessionIdRef.current,

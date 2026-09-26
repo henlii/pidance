@@ -18,6 +18,7 @@ import { capabilityFeatureOf, hasSeenCapabilityFeature, rememberCapabilityFeatur
 import { copyText } from "@/lib/clipboard";
 import { preserveCustomRenderedLines } from "@/lib/custom-rendered-lines";
 import type { SessionActivity } from "@/lib/session-activity";
+import { formatShortcutKey, type ExtensionShortcutEntry } from "@/lib/extension-shortcuts";
 import { isDefinitiveRejection, readAgentLiveFlag, sendAgentCommand } from "@/lib/agent-client";
 import { classifyPromptRejection, generateSubmissionId, isQueueablePromptReason, type PromptReason, type PromptReceipt, type QueueDispatchReceipt } from "@/lib/agent-commands";
 import { clearDraft, forgetDraftIfUnedited, getDraft, setDraft, type ChatDraft } from "@/lib/draft-store";
@@ -237,6 +238,12 @@ type AgentStateResponse = {
    * 缺字段 = 旧 Host：保持本地现状，不要清零（否则会把 SSE 事件刚带来的真值抹掉）。
    */
   extensionTerminalInputListenerCount?: number;
+  /**
+   * 插件快捷键清单（issue #105）。
+   *
+   * 缺字段 = 旧 Host：保持本地现状（不要清零），否则会把已有的清单抹掉。
+   */
+  extensionShortcuts?: ExtensionShortcutEntry[];
   /**
    * 插件自定义的折叠思考标签。
    *
@@ -627,7 +634,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets,
     extensionHeader, extensionFooter,
-    extensionTerminalInputListenerCount,
+    extensionTerminalInputListenerCount, extensionShortcuts,
     extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator,
     extensionHiddenThinkingLabel,
     extensionToolsExpandedRequest,
@@ -697,6 +704,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (sameSlotLines(current[key], lines)) continue;
       patchExtensionUiState({ [key]: lines });
     }
+  }, [extensionUiStateRef, patchExtensionUiState]);
+
+  /**
+   * 应用 host 状态里的插件快捷键清单（issue #105）。
+   *
+   * 与槽位同一口径：**缺字段不写**（旧 Host 不该把已有清单清空），内容相同也不写 ——
+   * 状态投影在运行中每秒回来一次，无条件写会让整棵界面每秒重渲（新数组的身份与旧的不同）。
+   */
+  const applyExtensionShortcuts = useCallback((state?: AgentStateResponse | null) => {
+    const next = state?.extensionShortcuts;
+    if (!Array.isArray(next)) return;
+    const current = extensionUiStateRef.current.shortcuts;
+    const same = current.length === next.length
+      && current.every((entry, index) => {
+        const other = next[index];
+        return entry.key === other?.key
+          && entry.available === other?.available
+          && entry.reason === other?.reason
+          && entry.description === other?.description
+          && entry.extensionPath === other?.extensionPath;
+      });
+    if (same) return;
+    patchExtensionUiState({ shortcuts: next });
   }, [extensionUiStateRef, patchExtensionUiState]);
 
   /**
@@ -774,6 +804,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
     }
     applyExtensionListenerCount(state);
+    applyExtensionShortcuts(state);
     applyExtensionHiddenThinkingLabel(state);
     applyExtensionSlots(state);
     applyCapabilityNotices(state);
@@ -1874,6 +1905,38 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       console.error("Failed to send extension widget mouse event:", e);
     }
   }, [capabilities.canSendSessionCommands]);
+
+  /**
+   * 执行一个插件快捷键（issue #105）。
+   *
+   * 只把**键名**发过去：handler 要的是服务端的完整扩展 ctx（会话控制、模型、abort…），
+   * 客户端拿不到也不该伪造。失败走通知（与别的扩展动作同一口径），不静默。
+   */
+  const runExtensionShortcut = useCallback(async (key: string) => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    const label = formatShortcutKey(key);
+    try {
+      const result = await sendAgentCommand<{ ok?: boolean; error?: string }>(sid, {
+        type: "run_extension_shortcut",
+        key,
+      });
+      if (result?.ok === false) {
+        addNotice({
+          type: "error",
+          message: t("shortcut_runFailed", { key: label, reason: result.error ?? "" }),
+        });
+      }
+    } catch (error) {
+      addNotice({
+        type: "error",
+        message: t("shortcut_runFailed", {
+          key: label,
+          reason: error instanceof Error ? error.message : String(error),
+        }),
+      });
+    }
+  }, [addNotice, sessionIdRef, t]);
 
   // ── P3a：分支 / 新会话命令迁出至 useSessionCommands（纯逻辑见该文件）─────
   // 显式注入依赖；branchBusyRef / branchBusy / setBranchBusy 仍是同一门禁，
@@ -4089,7 +4152,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     liveNoticeActivities,
     dismissNotice,
     toggleNoticePin,
-    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionHeader, extensionFooter, extensionTerminalInputListenerCount, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel: extensionHiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse, sendExtensionCustomBounds, sendExtensionWidgetMouse,
+    extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, extensionHeader, extensionFooter, extensionTerminalInputListenerCount, extensionShortcuts, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel: extensionHiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse, sendExtensionCustomBounds, sendExtensionWidgetMouse, runExtensionShortcut,
     todos,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,

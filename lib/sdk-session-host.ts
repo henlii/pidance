@@ -3,6 +3,8 @@
  * 浏览器协议字段与外部 RPC 时代对齐，前端契约不变。
  */
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   createAgentSessionFromServices,
   createAgentSessionRuntime,
@@ -96,6 +98,11 @@ import {
 import type { NavigationActions } from "./live-session-registry";
 import { resolveSessionModel } from "./resolve-session-model";
 import { isImmediateSlashPrompt } from "./slash-prompt";
+import {
+  classifyExtensionShortcuts,
+  normalizeShortcutKey,
+  type ExtensionShortcutEntry,
+} from "./extension-shortcuts";
 import {
   applyPassThroughExtendedThinkingInPlace,
   withPassThroughExtendedThinking,
@@ -2503,6 +2510,52 @@ export class SdkSessionHost {
     }
   }
 
+  /**
+   * 已解析的插件快捷键（含 Web 可用性判定）。
+   *
+   * 冲突语义**直接复用 SDK 的 `getShortcuts`**：保留的内置键位让扩展注册被跳过、非保留的内置键位
+   * 被插件覆盖、两个插件同键后者胜，诊断可从 `getShortcutDiagnostics()` 取 —— 这些规则重写一遍
+   * 必然与 TUI 漂移（TUI 用的就是同一个函数）。
+   *
+   * 用户键位来自 `<agentDir>/keybindings.json`（SDK 的 KeybindingsManager 也读这个文件）。
+   * 读不到/读坏了就按**默认键位**判定：最坏结果是「本来能绑的键被判成保留」——宁可少绑一个，
+   * 也不能抢走浏览器或壳自己的键。
+   */
+  private resolveExtensionShortcuts(): ExtensionShortcutEntry[] {
+    try {
+      const runner = this.session.extensionRunner;
+      // KeybindingsConfig 的 KeyId 是 pi 的品牌类型，包入口没导出：按函数签名取参类型，
+      // 避免为了一个类型去 import SDK 内部路径。
+      const resolved = runner.getShortcuts(
+        this.readUserKeybindings() as Parameters<typeof runner.getShortcuts>[0],
+      );
+      return classifyExtensionShortcuts(
+        [...resolved.values()].map((shortcut) => ({
+          key: String(shortcut.shortcut),
+          description: shortcut.description,
+          extensionPath: shortcut.extensionPath,
+        })),
+      );
+    } catch (error) {
+      // 快捷键清单是**展示**用：解析失败不该影响状态投影（只读投影失败要返回安全空态）。
+      console.error("[pidance] failed to resolve extension shortcuts:", error);
+      return [];
+    }
+  }
+
+  /** 读用户键位覆盖（`<agentDir>/keybindings.json`）；任何失败都当「没有覆盖」。 */
+  private readUserKeybindings(): Record<string, string | string[] | undefined> {
+    try {
+      const path = join(this.agentDir, "keybindings.json");
+      if (!existsSync(path)) return {};
+      const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+      return raw as Record<string, string | string[] | undefined>;
+    } catch {
+      return {};
+    }
+  }
+
   private projectState(): Record<string, unknown> {
     const session = this.session;
     const model = session.model;
@@ -2567,6 +2620,9 @@ export class SdkSessionHost {
       // 按键永不路由（实测：子代理在跑、widget 已在页面上，空输入框按 ↓ 不激活）。
       // 事件仍照发做增量更新，快照只是让后加载的页面拿到当前真值。
       extensionTerminalInputListenerCount: this.extensionUi?.terminalInputListenerCount ?? 0,
+      // 插件快捷键（pi.registerShortcut）：注册集合跟着扩展加载走，页面后加载只能靠快照补回来；
+      // 冲突解析与诊断由 SDK 的 getShortcuts 负责（见 resolveExtensionShortcuts）。
+      extensionShortcuts: this.resolveExtensionShortcuts(),
       // 插件自定义的折叠思考标签：与监听器计数同理 —— 插件设一次、页面后加载就丢，
       // 所以必须进水合快照（SSE 事件仍照发，做增量更新）。
       hiddenThinkingLabel: this.extensionUi?.hiddenThinkingLabel ?? null,
@@ -3088,6 +3144,30 @@ export class SdkSessionHost {
         } catch {
           // 插件补全抛错不能影响输入：当作没有候选
           return { items: [] };
+        }
+      }
+
+      case "run_extension_shortcut": {
+        // 插件快捷键的执行口（`pi.registerShortcut` 的 handler）。
+        //
+        // 为什么不让前端直接按键里跑逻辑：handler 要的是**完整扩展 ctx**（会话控制、
+        // 模型、abort …），只有服务端有。这与斜杠命令走同一套：SDK 的
+        // `createCommandContext()` 就是命令 handler 拿到的那个上下文。
+        const requested = normalizeShortcutKey(command.key);
+        if (!requested) return { ok: false, error: "invalid-shortcut" };
+        const resolved = session.extensionRunner.getShortcuts(
+          this.readUserKeybindings() as Parameters<typeof session.extensionRunner.getShortcuts>[0],
+        );
+        const entry = [...resolved.entries()].find(
+          ([key]) => normalizeShortcutKey(String(key)) === requested,
+        );
+        // 没命中就如实回报：客户端据此提示，而不是假装跑过了。
+        if (!entry) return { ok: false, error: "unknown-shortcut" };
+        try {
+          await entry[1].handler(session.extensionRunner.createCommandContext());
+          return { ok: true };
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) };
         }
       }
 
