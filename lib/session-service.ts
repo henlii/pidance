@@ -30,6 +30,15 @@ import { invalidateSessionReadCache } from "./session-read-manager-cache";
 import { resolveEntryLinesProvider, resolveMessageLinesProvider } from "./extension-entry-renderers";
 import { resolveToolMetaProvider } from "./tool-display-meta";
 import {
+  createMarkdownTransformerChain,
+  transformMarkdownOnce,
+  resolveMarkdownTransformerChain,
+  transformContextMarkdown as applyContextMarkdownTransform,
+  type MarkdownTransformer,
+  type MarkdownTransformerChain,
+} from "./extension-markdown-transformers";
+import { RENDER_WIDTH } from "./tui-render-bridge";
+import {
   getRpcSession,
   waitForSessionStart,
   getRunningRpcSessionIds,
@@ -268,6 +277,14 @@ export type SessionServiceDeps = {
     cwd: string;
     agentDir?: string;
   }) => Promise<ToolMetaResolver | null>;
+  /**
+   * 插件 markdown 转换器链的解析（issue #106）。
+   * 缺省走扩展加载（与 entry 渲染器共用缓存）；测试注入以避免加载真实扩展。
+   */
+  resolveMarkdownTransformers?: (options: {
+    cwd: string;
+    agentDir?: string;
+  }) => Promise<MarkdownTransformerChain | null>;
 };
 
 const defaultDeps: SessionServiceDeps = {
@@ -405,6 +422,11 @@ export type SessionService = {
   ): Promise<{ thinking: string } | null>;
   /** 只读：toolResult entry 的 details/content；未命中返回 null。 */
   getToolResultDetails(sessionId: string, toolCallId: string): Promise<{ details: unknown; content?: unknown[] } | null>;
+  /**
+   * 只读：对**已经切片好的**消息投影应用插件的 markdown 转换器（issue #106）。
+   * 没有插件注册转换器时原样返回（零成本）。首屏路由自己切尾页，切完调这里。
+   */
+  transformContextMarkdown(sessionId: string, context: unknown): Promise<unknown>;
   /**
    * 类型安全的持久活动写入。
    * 单写者：仅当 live 暴露 in-process SessionManager（inner.sessionManager）时走 live.appendActivity；
@@ -582,6 +604,72 @@ async function resolveForeignMessageLines(
   } catch {
     return null;
   }
+}
+
+/**
+ * 解析本会话的 markdown 转换器链（issue #106）。
+ *
+ * live 会话直接用宿主扩展运行时的那批转换器（与 TUI 同一批**函数对象**，不额外跑一遍扩展工厂）；
+ * 读盘/只读会话按会话头的 cwd 加载扩展（与 entry / 消息渲染器共用加载缓存）。
+ * 任何失败 → null：调用方原样返回投影，绝不让会话读取整体失败。
+ */
+async function resolveMarkdownChainForSession(
+  live: { getMarkdownTransformers?: () => MarkdownTransformer[] } | undefined,
+  filePath: string | null,
+  deps: Pick<SessionServiceDeps, "archiveAgentDir" | "resolveMarkdownTransformers">,
+): Promise<MarkdownTransformerChain | null> {
+  try {
+    const liveTransformers = live?.getMarkdownTransformers?.();
+    // live 会话以运行时为准（哪怕结果是空数组）：不要去磁盘再加载一遍 —— 两边的插件
+    // 可能不是同一份代码，链的内容也会跟着漂。
+    if (Array.isArray(liveTransformers)) return createMarkdownTransformerChain(liveTransformers);
+    if (!filePath) return null;
+    const cwd = readSessionHeader(filePath)?.cwd;
+    if (!cwd) return null;
+    const resolve = deps.resolveMarkdownTransformers ?? resolveMarkdownTransformerChain;
+    return await resolve({ cwd, agentDir: deps.archiveAgentDir?.() ?? getAgentDir() });
+  } catch {
+    return null;
+  }
+}
+
+/** 窗口里最后一条消息的 entryId —— 流式输出中的那条一定在窗口末尾。 */
+function lastWindowEntryId(context: unknown): string | null {
+  if (!context || typeof context !== "object") return null;
+  const ids = (context as { entryIds?: unknown }).entryIds;
+  const messages = (context as { messages?: unknown }).messages;
+  if (!Array.isArray(ids) || !Array.isArray(messages) || messages.length === 0) return null;
+  const id = ids[messages.length - 1];
+  return typeof id === "string" ? id : null;
+}
+
+/**
+ * 对**已经切片好的**投影窗口应用 markdown 转换器（issue #106 的渲染边界）。
+ *
+ * 只在这个窗口内工作（不再扫盘、不碰 leaf 之外的 entry）；没有链时原样返回同一对象。
+ * `availableWidth` 用客户端上报的渲染列数（没上报过就是桥的默认宽度），
+ * `streamingEntryId` 只在宿主正在流式输出时给最后一条消息 —— 与 SDK 的
+ * `createMarkdownTransform("assistant", this.isStreaming, ...)` 同口径。
+ */
+async function applyMarkdownTransformToContext(
+  context: unknown,
+  options: {
+    live: {
+      getMarkdownTransformers?: () => MarkdownTransformer[];
+      getRenderWidth?: () => number;
+      isStreaming?: () => boolean;
+    } | undefined;
+    filePath: string | null;
+    deps: Pick<SessionServiceDeps, "archiveAgentDir" | "resolveMarkdownTransformers">;
+  },
+): Promise<unknown> {
+  const chain = await resolveMarkdownChainForSession(options.live, options.filePath, options.deps);
+  if (!chain) return context;
+  return applyContextMarkdownTransform(context, {
+    chain,
+    availableWidth: options.live?.getRenderWidth?.() ?? RENDER_WIDTH,
+    streamingEntryId: options.live?.isStreaming?.() === true ? lastWindowEntryId(context) : null,
+  });
 }
 
 export function projectAgentState(
@@ -1230,7 +1318,22 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
           totalMessageCount: full.messages.length,
         };
       }
-      return { context };
+      // 渲染边界（issue #106）：**切片之后**才应用插件 markdown 转换器，所以只处理这一页，
+      // 不会为了渲染去扫整条 leaf。
+      const transformed = await applyMarkdownTransformToContext(context, {
+        live: service.getLive(sessionId),
+        filePath: view.filePath,
+        deps,
+      });
+      return { context: transformed };
+    },
+
+    async transformContextMarkdown(sessionId, context) {
+      return applyMarkdownTransformToContext(context, {
+        live: service.getLive(sessionId),
+        filePath: service.getLive(sessionId)?.sessionFile ?? await service.resolvePath(sessionId),
+        deps,
+      });
     },
 
     async getEntryThinking(sessionId, entryId, blockIndex) {
@@ -1245,7 +1348,26 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       if (!block || !isThinkingLikeType(block.type)) {
         return null;
       }
-      return { thinking: getThinkingText(block) };
+      const text = getThinkingText(block);
+      // 思考正文的 markdown 渲染入口（issue #106）：首屏 deferThinking 之后正文是按需取回的，
+      // 转换器必须在这里补齐，否则带思考块的插件转换在那条路径上永远看不到（投影里正文是空的）。
+      // `isStreaming` 恒 false：会走到这里的都是已结束的历史块；正在流式输出的那条正文不 defer，
+      // 走投影路径（那里带真实 isStreaming）。
+      const live = service.getLive(sessionId);
+      const chain = await resolveMarkdownChainForSession(live, view.filePath, deps);
+      if (!chain) return { thinking: text };
+      return {
+        thinking: transformMarkdownOnce({
+          chain,
+          messageId: `${entryId}#${blockIndex}`,
+          markdown: text,
+          context: {
+            messageType: "assistant-thinking",
+            isStreaming: false,
+            availableWidth: live?.getRenderWidth?.() ?? RENDER_WIDTH,
+          },
+        }),
+      };
     },
 
     async getToolResultDetails(sessionId, toolCallId) {

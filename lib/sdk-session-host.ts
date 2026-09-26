@@ -136,6 +136,7 @@ import {
 } from "./send-file-to-user";
 import { DEFAULT_CUSTOM_UI_ROWS } from "./custom-ui-terminal";
 import { readComposerDraftText } from "./composer-draft-text";
+import type { MarkdownTransformer } from "./extension-markdown-transformers";
 import type { BinaryMessageData, BinaryMessageInput } from "./types";
 import {
   loadPiTheme,
@@ -501,6 +502,39 @@ export class SdkSessionHost {
       s.isStreaming ||
       s.isCompacting
     );
+  }
+
+  /**
+   * 模型是否正在流式输出一条消息（与 `isRunning` 有意区分：那个还含 bash / 压缩 / 排队中）。
+   * 只读投影用它决定 markdown 转换器的 `isStreaming`（issue #106）。
+   */
+  isStreaming(): boolean {
+    if (!this._alive || !this.runtime) return false;
+    return this.runtime.session.isStreaming === true;
+  }
+
+  /**
+   * 客户端上报的渲染列数（`set_render_size`）。只读投影用它当 markdown 转换器的
+   * `availableWidth`（issue #106）：没有上报过时就是桥的默认值 `RENDER_WIDTH`。
+   */
+  getRenderWidth(): number {
+    return this.renderWidth;
+  }
+
+  /**
+   * 本会话扩展运行时的 markdown 转换器（issue #106）。
+   *
+   * 为什么 live 走这里而不是重新加载扩展：这些就是**插件注册时的同一批函数对象**
+   * （与 TUI 用的那份同源），不需要跑一遍扩展工厂，也不会出现「live 会话与读盘会话
+   * 拿到不同版本插件代码」的偏差。读盘会话没有宿主，改用按 cwd 加载（见 session-service）。
+   */
+  getMarkdownTransformers(): MarkdownTransformer[] {
+    const runner = this.runtime?.session?.extensionRunner as
+      | { getMarkdownTransformers?: () => unknown }
+      | undefined;
+    const transformers = runner?.getMarkdownTransformers?.();
+    if (!Array.isArray(transformers)) return [];
+    return transformers.filter((item): item is MarkdownTransformer => typeof item === "function");
   }
 
   /**

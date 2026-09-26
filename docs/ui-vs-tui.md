@@ -179,6 +179,20 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
 `hidden ? new Text(...hiddenThinkingLabel...) : new Markdown(正文)`），未设置 / 空串 / 纯空白恢复既有的 i18n 摘要；
 标签**原样显示**（插件文案，不走 i18n），超过 60 个码点从中间截断、全文进 `title`（仅在真的截断时挂）。
 随状态下发（`state.hiddenThinkingLabel`）以便后开的页面补上，切会话与插件 `reload()` 都会重置。
+**`registerMarkdownTransformer` 也已实现**（2026-09-26，issue #106）：插件转换器在**服务端渲染边界**应用 ——
+分页 / 首屏切完窗口之后（`lib/session-service.ts` 的 `getContextPage`，以及首屏路由切完尾页调的
+`transformContextMarkdown`），以及按需加载的思考正文（`getEntryThinking`，首屏 `deferThinking` 之后正文是
+单独取回的，那条路径不接就等于带思考块的转换永远看不到）。语义逐条对齐 SDK 的 `markdown-transform.js`：
+链式传递（后一个拿前一个的输出）、返回非字符串忽略、**抛错只跳过这一个**（不是整条放弃）；
+上下文与 SDK 的调用点一致：用户消息 `"user"`（`isStreaming` 恒 false）、助手正文 `"assistant"`、
+助手思考 `"assistant-thinking"`，`isStreaming` 只对**正在输出的那条**为真，`availableWidth` 取客户端
+上报的渲染列数（没上报过就是渲染桥的默认宽度）。只在**切片后的窗口**内工作（不为了渲染去扫整条 leaf），
+工具结果 / 自定义消息 / bash 输出**不动**；单条消息按 (链指纹, entryId, 内容 hash, 宽度, 流式状态, messageType)
+记忆化，插件安装 / 卸载时随扩展加载缓存一起失效。
+**一处有意分叉**：TUI 的链首还有 SDK 自带的 mermaid 转换器，它把 ```mermaid 代码块换成本地渲染的 **ASCII 图**
+（实测：输入 `graph TD; A-->B;` 的围栏 → 输出 `` ` ┌───┐` `` 这类行内 code span，还按 `availableWidth` 裁剪）。
+Web 端已经有**真正的图形渲染**（`components/MarkdownBody.tsx` 动态 `import("mermaid")` 出 SVG，带预览与代码回退），
+接上链首会把围栏换掉、把更好的渲染路径挡死，所以这里**只跑扩展转换器**。
 
 10. **仍存在的差异**：
    - `subagent-fleet-status`（placement `belowEditor`）是 TUI 组件，经渲染桥转成文本，里面的 `↓/← to inspect` 是终端键位。Web 侧现在改写这行：去掉键位提示段，保留 agent 数与 token 读数（`rewriteFleetStatusLines`）；整行只剩提示时不渲染该 widget。
