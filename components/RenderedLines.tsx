@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
-import { measureCharWidth, measureLineHeight } from "@/lib/render-width";
+import { measureCharWidth, measureLineHeight, measurementHostFor } from "@/lib/render-width";
 import type { RenderedImage, RenderedImageFallback } from "@/lib/kitty-image";
 
 /**
@@ -30,9 +30,13 @@ export function RenderedImageBlock({
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const lineHeight = measureLineHeight(host);
+    // 量**父级**而不是这个包装节点（它带 `lineHeight: 0`，探针会量出 0 而放弃）：
+    // 规则与理由见 lib/render-width.ts 的 measurementHostFor。
+    const measureHost = measurementHostFor(host);
+    if (!measureHost) return;
+    const lineHeight = measureLineHeight(measureHost);
     if (!lineHeight) return;
-    const charWidth = measureCharWidth(host);
+    const charWidth = measureCharWidth(measureHost);
     setSize({
       height: lineHeight * Math.max(1, image.rows),
       width: charWidth ? charWidth * Math.max(1, image.cols) : 0,

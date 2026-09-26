@@ -60,6 +60,57 @@ export interface RenderedImage {
   lineIndex: number;
 }
 
+/**
+ * 图片与降级说明占用的**原文行号集合**（锚点本身 + 它铺开的 `rows-1` 行）。
+ *
+ * 给「会删行的归一化」用：摘图后锚点是空行，而面板会裁掉首尾空白行 ——
+ * 锚点被丢掉的话图和降级说明都画不出来（issue #104 审查 P0-3）。
+ */
+export function collectImageLineIndexes(
+  images: readonly RenderedImage[] | null | undefined,
+  fallbacks: readonly RenderedImageFallback[] | null | undefined,
+): Set<number> {
+  const kept = new Set<number>();
+  const add = (lineIndex: unknown, rows: unknown) => {
+    // 行号会被当成数组下标用，所以只接受非负整数（小数/NaN 一律忽略）。
+    if (typeof lineIndex !== "number" || !Number.isInteger(lineIndex) || lineIndex < 0) return;
+    kept.add(lineIndex);
+    const span = typeof rows === "number" && Number.isInteger(rows) && rows > 1 ? rows : 1;
+    for (let offset = 1; offset < span; offset += 1) kept.add(lineIndex + offset);
+  };
+  for (const image of images ?? []) add(image?.lineIndex, image?.rows);
+  for (const fallback of fallbacks ?? []) add(fallback?.lineIndex, 1);
+  return kept;
+}
+
+/**
+ * 把按**原文行号**标注的图片/降级说明重排到归一化后的行号。
+ *
+ * `sourceIndex[i]` = 归一化后第 i 行来自原文哪一行（见 `normalizeCustomPanelLinesWithIndex`）。
+ * 找不到对应行（真的被丢掉了）的条目**保留但不画**是错的 —— 那时应该由调用方保证
+ * 锚点行被 `keep` 保护；这里对找不到的条目直接丢弃并返回 `dropped` 数量，便于测试与告警。
+ */
+export function remapImageLineIndexes<T extends { lineIndex: number }>(
+  items: readonly T[] | null | undefined,
+  sourceIndex: readonly number[],
+): { items: T[]; dropped: number } {
+  const positionOf = new Map<number, number>();
+  sourceIndex.forEach((original, position) => {
+    if (!positionOf.has(original)) positionOf.set(original, position);
+  });
+  const out: T[] = [];
+  let dropped = 0;
+  for (const item of items ?? []) {
+    const position = typeof item?.lineIndex === "number" ? positionOf.get(item.lineIndex) : undefined;
+    if (position === undefined) {
+      dropped += 1;
+      continue;
+    }
+    out.push({ ...item, lineIndex: position });
+  }
+  return { items: out, dropped };
+}
+
 /** 没还原成图片的那条序列所占的位置（客户端渲染一句本地化说明）。 */
 export interface RenderedImageFallback {
   lineIndex: number;
@@ -84,6 +135,8 @@ interface PendingImage {
   params: Map<string, string>;
   chunks: string[];
   size: number;
+  /** 这个分块出现的行号（未收尾时按它给降级说明）。 */
+  lineIndex?: number;
 }
 
 function parseIntParam(params: Map<string, string>, key: string): number | null {
@@ -96,7 +149,9 @@ function parseIntParam(params: Map<string, string>, key: string): number | null 
 /** `f=100` → PNG；其余格式码（RGB/RGBA 裸数据）在本项目里无法作为 `<img>` 显示。 */
 function mimeFromFormat(params: Map<string, string>): string | null {
   const format = params.get("f");
-  if (format === undefined || format === "100") return "image/png";
+  // Kitty 的 `f=` 默认是 32（RGBA 原始数据），**不是 PNG**：所以缺参不能当成 PNG，
+  // 否则会发下一张解不出来的图（那属于静默给坏数据，应该走可见降级）。
+  if (format === "100") return "image/png";
   return null;
 }
 
@@ -224,6 +279,8 @@ export function extractKittyImages(lines: string[]): ExtractedKittyImages {
         entry.chunks.push(sequence.payload);
         entry.size += sequence.payload.length;
       }
+      // 记下这个分块出现在哪一行：未收尾时要按行给降级说明（见函数末尾）。
+      if (typeof entry.lineIndex !== "number") entry.lineIndex = lineIndex;
       open = hasMore ? entry : null;
       settle(lineIndex, entry, hasMore);
     }
@@ -232,9 +289,11 @@ export function extractKittyImages(lines: string[]): ExtractedKittyImages {
   });
 
   // 渲染结束还没结算的：分块不完整（没有 m=0），不显示半张图。
+  // 说明要记在**该分块自己所在的行**上（不是最后一行）：多张未完成图挤在同一行时，
+  // 客户端按 lineIndex 建 Map 只会留最后一条，其余说明就丢了。
   for (const entry of pending.values()) {
-    const lineIndex = outLines.length - 1;
-    fallbacks.push({ lineIndex: Math.max(0, lineIndex), reason: "incomplete" });
+    const lineIndex = typeof entry.lineIndex === "number" ? entry.lineIndex : Math.max(0, outLines.length - 1);
+    fallbacks.push({ lineIndex, reason: "incomplete" });
   }
 
   return { lines: outLines, images, fallbacks };
@@ -297,7 +356,35 @@ export function withImageFallbackLines(
     if (current === undefined) return;
     lines[lineIndex] = current === "" ? text : `${current} ${text}`;
   };
+  // 标记刻意是**码值**而不是句子：服务端渲染没有 locale 上下文（同一份产物要服务中英界面），
+  // 而这里只在「消费方不支持图片」的窄路径上出现（工具卡/页头页脚/entry 只拿得到 string[]）。
+  // 人类可读的本地化文案在结构化路径：`imageFallbacks` 的 reason 由客户端经 i18n 渲染
+  // （见 components/RenderedLines.tsx 的 fallbackLabel，键为 message_imageUnavailable /
+  // message_imageReason_*）。
   for (const image of output.images) mark(image.lineIndex, `[image: ${image.mime}]`);
-  for (const fallback of output.fallbacks) mark(fallback.lineIndex, `[image unavailable: ${fallback.reason}]`);
+  for (const fallback of output.fallbacks) mark(fallback.lineIndex, `[image: ${fallback.reason}]`);
   return lines;
+}
+
+/** 降级原因 → i18n 键。返回值受 i18n 键联合约束（`t()` 只接受已知键），未知原因返回 null。 */
+export type ImageFallbackReasonKey =
+  | "message_imageReason_tooLarge"
+  | "message_imageReason_unsupportedFormat"
+  | "message_imageReason_incomplete"
+  | "message_imageReason_empty";
+
+export function imageFallbackReasonKey(reason: RenderedImageFallbackReason | string): ImageFallbackReasonKey | null {
+  switch (reason) {
+    case "too-large":
+      return "message_imageReason_tooLarge";
+    case "unsupported-format":
+      return "message_imageReason_unsupportedFormat";
+    case "incomplete":
+      return "message_imageReason_incomplete";
+    case "empty":
+      return "message_imageReason_empty";
+    default:
+      // 未知码值（将来新增的原因）由调用方原样显示：总比显示一个空括号强。
+      return null;
+  }
 }

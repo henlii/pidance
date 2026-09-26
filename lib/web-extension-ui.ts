@@ -21,7 +21,7 @@ import {
   renderMountedComponentOutput,
   renderWidgetComponentLines,
 } from "./tui-render-bridge";
-import { sameImageFallbacks, sameRenderedImages, type RenderedImage, type RenderedImageFallback } from "./kitty-image";
+import { sameImageFallbacks, sameRenderedImages, type RenderedImage, type RenderedImageFallback , extractKittyImages } from "./kitty-image";
 import type {
   CustomPanelBounds,
   CustomPanelFocus,
@@ -1231,25 +1231,44 @@ export function createWebExtensionUIAdapter(
       // 换成字符串数组或清除：先卸载可能存在的工厂实例
       unmountWidgetFactory(key);
       if (content === undefined || Array.isArray(content)) {
-        if (content == null) widgets.delete(key);
-        else {
+        if (content == null) {
+          widgets.delete(key);
+          // 清除也要发一帧（`widgetLines` 缺省 = 客户端移除该 widget）——
+          // 不发的话界面上的旧 widget 会一直留着。
+          emit({
+            type: "extension_ui_request",
+            id: randomUUID(),
+            method: "setWidget",
+            widgetKey: key,
+            widgetLines: undefined,
+            widgetPlacement: options?.placement,
+            widgetInteractive: false,
+          });
+        } else {
+          // 字符串数组也要摘图：插件可以直接塞 Kitty 序列行（不走组件），
+          // 不摘的话 base64 会被当正文显示（ANSI 解析只吃掉 `ESC _` 两个字符）。
+          const extracted = extractKittyImages(content);
           // 字符串数组 widget 没有组件实例，也就没有 handleMouse：显式标非交互，
           // 前端不为它挂点击。
           widgets.set(key, {
-            lines: content,
+            lines: extracted.lines,
+            images: extracted.images,
+            imageFallbacks: extracted.fallbacks,
             placement: options?.placement,
             interactive: false,
           });
+          emit({
+            type: "extension_ui_request",
+            id: randomUUID(),
+            method: "setWidget",
+            widgetKey: key,
+            widgetLines: extracted.lines,
+            ...(extracted.images.length > 0 ? { widgetImages: extracted.images } : {}),
+            ...(extracted.fallbacks.length > 0 ? { widgetImageFallbacks: extracted.fallbacks } : {}),
+            widgetPlacement: options?.placement,
+            widgetInteractive: false,
+          });
         }
-        emit({
-          type: "extension_ui_request",
-          id: randomUUID(),
-          method: "setWidget",
-          widgetKey: key,
-          widgetLines: content,
-          widgetPlacement: options?.placement,
-          widgetInteractive: false,
-        });
       }
     },
     setFooter(factory) {
@@ -1298,6 +1317,10 @@ export function createWebExtensionUIAdapter(
         let lastLines: string[] = [];
         let lastImages: ExtensionRenderedImage[] = [];
         let lastImageFallbacks: ExtensionRenderedImageFallback[] = [];
+        // 上一次**发进 SSE 帧**的图片：图片没变时省略字段（几百 KB 的 base64 不能每帧重发；
+        // 客户端约定「缺省 = 保留上一帧」）。水合快照那份始终是全量 —— 刷新时必须拿得到图。
+        let publishedImages: ExtensionRenderedImage[] = [];
+        let publishedFallbacks: ExtensionRenderedImageFallback[] = [];
         let hidden = false;
         /** 焦点三态（见 CustomPanelFocus）：默认面板持有。 */
         let focusState: CustomPanelFocus = nonCapturing ? "editor" : "panel";
@@ -1310,13 +1333,21 @@ export function createWebExtensionUIAdapter(
         let removed = false;
         const emitCustom = () => {
           if (removed) return;
+          // 图片没变就不带（`undefined` = 客户端保留上一帧）：`emitCustom` 会被
+          // requestRender / focus / unfocus / setHidden 反复触发，每帧重发整段 base64
+          // 会把消息体积放大几个数量级。
+          const imagesChanged = !sameRenderedImages(publishedImages, lastImages);
+          if (imagesChanged) publishedImages = lastImages;
+          const fallbacksChanged = !sameImageFallbacks(publishedFallbacks, lastImageFallbacks);
+          if (fallbacksChanged) publishedFallbacks = lastImageFallbacks;
           emit({
             type: "extension_ui_request",
             id,
             method: "custom",
             lines: lastLines,
-            ...(lastImages.length > 0 ? { images: lastImages } : {}),
-            ...(lastImageFallbacks.length > 0 ? { imageFallbacks: lastImageFallbacks } : {}),
+            // 变了就发（**即使是空数组**：那是「图没了」的显式清空）；没变才省略。
+            ...(imagesChanged ? { images: lastImages } : {}),
+            ...(fallbacksChanged ? { imageFallbacks: lastImageFallbacks } : {}),
             focus: focusState,
             ...(hidden ? { hidden } : {}),
             ...(layout ? { layout } : {}),

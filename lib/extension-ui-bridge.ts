@@ -505,8 +505,15 @@ export function applyExtensionUiRequest(
             ? [{ type: "focusEditor" }]
             : [];
         // images / imageFallbacks 同样收口：只认数组，元素形状交给渲染层兜。
-        const images = Array.isArray(request.images) ? request.images : [];
-        const imageFallbacks = Array.isArray(request.imageFallbacks) ? request.imageFallbacks : [];
+        // **缺省 = 保留上一帧**（服务端图片没变时刻意省略 base64，见 web-extension-ui 的 emitCustom），
+        // 显式空数组才是「图没了」——否则插件每重渲一帧都会把图抹掉。
+        const previous = state.customUi;
+        const images = Array.isArray(request.images)
+          ? request.images
+          : (previous?.images ?? []);
+        const imageFallbacks = Array.isArray(request.imageFallbacks)
+          ? request.imageFallbacks
+          : (previous?.imageFallbacks ?? []);
         return {
           state: {
             ...state,

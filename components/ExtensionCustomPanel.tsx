@@ -1,8 +1,9 @@
 "use client";
 
-import { Fragment, useEffect, useRef, useState } from "react";
-import { normalizeCustomPanelLines, parseAnsiLine, stripAnsi } from "@/lib/ansi";
+import { useEffect, useRef, useState } from "react";
+import { normalizeCustomPanelLinesWithIndex, parseAnsiLine, stripAnsi } from "@/lib/ansi";
 import { RenderedLineBlocks } from "./RenderedLines";
+import { collectImageLineIndexes, remapImageLineIndexes, imageFallbackReasonKey } from "@/lib/kitty-image";
 import { shouldCaptureCustomPanelKey } from "@/lib/extension-panel-keys";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { buildExtensionOverlayStyle } from "@/lib/extension-overlay-layout";
@@ -93,7 +94,20 @@ export function ExtensionCustomPanel({
    */
   const requestRef = useRef(request);
   requestRef.current = request;
-  const displayLines = normalizeCustomPanelLines(request.lines);
+  /**
+   * 图片与降级说明是按**原文行号**标注的，而归一化会删框线、裁掉首尾空白行；
+   * 锚点（摘图后是空行）被丢掉就等于图静默消失，删行还会让后续图片错位、
+   * 甚至把正文行当占位行吞掉（issue #104 审查 P0-3）。所以：先保护锚点行、
+   * 拿到行号映射，再把图片重排到归一化后的行号上。
+   */
+  const imageLineIndexes = collectImageLineIndexes(request.images, request.imageFallbacks);
+  const normalizedLines = normalizeCustomPanelLinesWithIndex(request.lines, { keep: imageLineIndexes });
+  const displayLines = normalizedLines.lines;
+  const displayImages = remapImageLineIndexes(request.images, normalizedLines.sourceIndex).items;
+  const displayImageFallbacks = remapImageLineIndexes(
+    request.imageFallbacks,
+    normalizedLines.sourceIndex,
+  ).items;
   const plainText = displayLines.map((line) => stripAnsi(line)).join("\n");
 
   // overlay 插件给的定位/尺寸：容器按 anchor 对齐、按 margin 留边，面板本体按
@@ -256,12 +270,12 @@ export function ExtensionCustomPanel({
         >
           <RenderedLineBlocks
             lines={displayLines.length ? displayLines : [""]}
-            images={request.images}
-            imageFallbacks={request.imageFallbacks}
+            images={displayImages}
+            imageFallbacks={displayImageFallbacks}
             keyPrefix="panel-line"
             renderLine={renderAnsiLine}
             imageAlt={t("message_imageAlt")}
-            fallbackLabel={(reason) => t("message_imageUnavailable", { reason })}
+            fallbackLabel={(reason) => { const key = imageFallbackReasonKey(reason); return t("message_imageUnavailable", { reason: key ? t(key) : reason }); }}
           />
         </pre>
       </ExtensionPanelChrome>

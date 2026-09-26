@@ -1,5 +1,6 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
+import { imageFallbackReasonKey } from "@/lib/kitty-image";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentMessage, BashExecutionMessage, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import type { BranchActions } from "@/lib/branch-bookmarks";
@@ -1526,7 +1527,7 @@ function ExtensionWidgetBody({
         keyPrefix={`widget-${widgetKey}-line`}
         renderLine={renderAnsiLine}
         imageAlt={t("message_imageAlt")}
-        fallbackLabel={(reason) => t("message_imageUnavailable", { reason })}
+        fallbackLabel={(reason) => { const key = imageFallbackReasonKey(reason); return t("message_imageUnavailable", { reason: key ? t(key) : reason }); }}
       />
     </pre>
   );

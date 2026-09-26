@@ -77,6 +77,19 @@ function measureProbe(host: HTMLElement, text: string, axis: "width" | "height")
 }
 
 /**
+ * 该对哪个节点量行高 / 字符宽。
+ *
+ * 图片块的**包装节点**带 `lineHeight: 0`（避免 inline-block 在行内留基线空隙），
+ * 探针插进它会继承 0、量出 0 而放弃，于是高度只能退化成 `rows em`；而正文行高是 1.5，
+ * 图会比应占的行矮约三分之一，下面的文字被抬上来（issue #104 审查 P1）。
+ * 所以量之前先上跳到父级 —— 那才是承载正文行高的容器。
+ */
+export function measurementHostFor<T extends { parentElement?: T | null }>(host: T | null | undefined): T | null {
+  if (!host) return null;
+  return host.parentElement ?? host;
+}
+
+/**
  * 等宽字符宽度（px）：`ch` 就是等宽字体的字符宽，用探针量一次后按字体上下文缓存。
  * 量不出时返回 null。
  */
