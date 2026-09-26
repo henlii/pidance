@@ -13,13 +13,8 @@ import {
   type WidgetInteractionState,
 } from "@/lib/extension-panel-keys";
 import { toTerminalKeyData } from "@/lib/terminal-input";
+import { getClientId } from "@/lib/client-id";
 
-/** 每个标签页一个客户端 id：服务端按它做「任一标签聚焦即聚焦」的聚合。 */
-function createClientId(): string {
-  const cryptoApi = globalThis.crypto as Crypto | undefined;
-  if (cryptoApi && typeof cryptoApi.randomUUID === "function") return cryptoApi.randomUUID();
-  return `client-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
-}
 
 /**
  * 让插件 widget 的按键交互在 Web 上成立（`ctx.ui.onTerminalInput` 的窄口子）。
@@ -55,7 +50,9 @@ export function useExtensionWidgetKeys(options: {
 }): void {
   const { sessionId, enabled, composerEmpty, composerFocused } = options;
   const clientIdRef = useRef("");
-  if (clientIdRef.current === "") clientIdRef.current = createClientId();
+  // 与「插件编辑器接管」的提交归属共用**同一个** id（lib/client-id.ts）：两个 id 空间
+  // 会让宿主没法把焦点上报与接管上报归到同一个标签上（issue #107 三轮审查 次要 7）。
+  if (clientIdRef.current === "") clientIdRef.current = getClientId();
   const interactionRef = useRef<WidgetInteractionState>(initialState());
   const compositionEndAtRef = useRef(0);
   const lastReportedFocusRef = useRef<boolean | null>(null);

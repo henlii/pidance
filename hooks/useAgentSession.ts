@@ -653,6 +653,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    */
   const lastDiskModelBySessionRef = useRef<Map<string, { provider: string; modelId: string }>>(new Map());
   const [isCompacting, setIsCompacting] = useState(false);
+  /** 渲染时就地镜像（同 sessionIdRef 的写法）：提交判忙要读**同步**值，不能在回调里闭包旧 state。 */
+  const isCompactingRef = useRef(false);
+  isCompactingRef.current = isCompacting;
   const [compactError, setCompactError] = useState<string | null>(null);
   const [compactResult, setCompactResult] = useState<CompactResultInfo | null>(null);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
@@ -2204,7 +2207,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ? opts.editorTakeoverDisplayedRef?.current === true
           : origin === getClientId();
         if (forThisTab) editorSubmitRef.current(effect.text);
-      } else if (effect.type === "insertText" && opts.editorTakeoverDisplayedRef?.current === true) {
+      } else if (effect.type === "setEditorText" && opts.editorTakeoverDisplayedRef?.current === true) {
         // 本页**正在显示**接管面板：编辑器就是插件组件。
         // - appliedToTakeover=false（组件没有 setText，或宿主写失败）：按粘贴送进组件
         //  （与用户在接管面板里粘贴同一条路）；
@@ -2215,16 +2218,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (takeoverForInput) {
             editorInputRef.current?.(takeoverForInput, asBracketedPaste(effect.text));
           } else {
-            opts.chatInputRef?.current?.insertText(effect.text);
+            // 面板刚好被卸下：落进输入框，**替换**而不是插入（见下一条注释）。
+            opts.chatInputRef?.current?.replaceText(effect.text);
           }
         }
-      } else if (effect.type === "insertText") {
+      } else if (effect.type === "setEditorText") {
         // 其余情况落进**可见的**输入框：本页没在显示接管（手机 / 设置关掉 / 收起过），
         // 或组件漏实现 setText、或提交失败要回填。
         // 「组件实现了 setText」不该让这些用户收不到字（issue #107 审查 重要 4）。
         // clientId 定向（「返回输入框」把组件文本交还给发起标签）时不改别的标签。
+        // 落点是**替换**（TUI 的 `editor.setText`），不是插入：这条事件的语义是「编辑器
+        // 的内容变成这段文本」。用插入会把组件全文拼在草稿后面 —— 草稿 `hello` + 组件
+        // `hello world` ⇒ 输入框 `hello hello world`（issue #107 三轮审查 阻断 2）。
         if (effect.clientId === undefined || effect.clientId === getClientId()) {
-          opts.chatInputRef?.current?.insertText(effect.text);
+          opts.chatInputRef?.current?.replaceText(effect.text);
         }
       }
     }
@@ -3418,15 +3425,38 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * 走命令而不是直连服务端：只有宿主知道当前接管是哪一个组件，请求 id 也对得上
    * 才动它（接管可能在这期间换过 / 已被卸下）。
    */
-  const restoreEditorTakeoverText = useCallback((text: string) => {
+  const restoreEditorTakeoverText = useCallback((text: string, options?: { writeDraft?: boolean }) => {
     if (!text) return;
-    if (!capabilities.canSendSessionCommands) return;
-    const takeover = extensionUiStateRef.current.editorTakeover;
     const sid = sessionIdRef.current;
-    if (!takeover || !sid) return;
-    void sendAgentCommand(sid, { type: "editor_component_set_text", requestId: takeover.id, text }).catch(() => {
-      /* 回填失败就不再折腾：草稿那边还有一份（见 restorePayloadToSession） */
-    });
+    if (!sid) return;
+    // 草稿那一份**必须真写**（issue #107 三轮审查 重要 4）：命令可能因为接管换过
+    // (`applied: false`)、组件没有 setText、或 HTTP 失败而没落到组件上；只发命令就
+    // 以为「草稿那边还有一份」是错的，那条路只有 restorePayloadToSession 才会写。
+    // 默认写草稿；`writeDraft: false` 给**已经自己写草稿**的调用方（restorePayloadToSession
+    // 还会带上图片）—— 两边都写会把同一段正文前插两次。
+    const writeDraft = () => {
+      if (options?.writeDraft === false) return;
+      const existing = getDraft(sid) ?? { value: "", images: [] };
+      setDraft(sid, {
+        value: [text, existing.value].filter((part) => part.trim()).join("\n\n"),
+        images: existing.images,
+      });
+    };
+    const takeover = extensionUiStateRef.current.editorTakeover;
+    if (!capabilities.canSendSessionCommands || !takeover) {
+      writeDraft();
+      return;
+    }
+    void sendAgentCommand<{ applied?: boolean }>(sid, {
+      type: "editor_component_set_text",
+      requestId: takeover.id,
+      text,
+    })
+      .then((receipt) => {
+        if (receipt?.applied !== true) writeDraft();
+      })
+      .catch(writeDraft);
+    // setDraft 是模块级导入（取值稳定），不进依赖数组（eslint react-hooks 也是这个口径）。
   }, [capabilities.canSendSessionCommands, extensionUiStateRef]);
 
   /**
@@ -3449,7 +3479,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     // 接管中本页压根没有输入框：草稿照写（收起后能看到），同时把正文交回用户正看着的
     // 插件编辑器 —— 否则失败/召回的文案只落在看不见的草稿里，他眼前那块是空的。
-    if (sid === sessionIdRef.current) restoreEditorTakeoverText(payload.text);
+    // 这条自己写草稿（带图片），所以让回填别再写一遍。
+    if (sid === sessionIdRef.current) restoreEditorTakeoverText(payload.text, { writeDraft: false });
     const existing = getDraft(sid) ?? { value: "", images: [] };
     setDraft(sid, {
       value: [payload.text, existing.value].filter((value) => value.trim()).join("\n\n"),
@@ -3715,12 +3746,34 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const takeover = extensionUiStateRef.current.editorTakeover;
     const sid = sessionIdRef.current;
     if (!takeover || !sid) return;
+    // 空草稿也要发（= setText("")）：用户在输入框里删光再回来时，组件里不该留着旧字
+    // （issue #107 三轮审查 次要 10）。
     const draft = getDraft(sid)?.value ?? "";
-    if (!draft) return;
     void sendAgentCommand(sid, { type: "editor_component_set_text", requestId: takeover.id, text: draft }).catch(() => {
       /* 灌不进去也不阻断重进：组件里仍是它自己那份文本 */
     });
   }, [capabilities.canSendSessionCommands, extensionUiStateRef]);
+
+  /**
+   * 上报「本页知道这个接管、并且**是否正在显示它**」（issue #107 三轮审查）。
+   *
+   * 宿主据此决定两件事：① 卸下工厂时把组件文本交给哪些标签（只给刚才在显示的那个，
+   * 别的标签不该被塞进一段从没看过的文本）；② 插件**自己**调 onSubmit（没有来源标签）时
+   * 挑哪个标签执行 —— 保证恰好一次，而不是每个订阅该会话的标签各发一次。
+   */
+  const reportEditorTakeoverView = useCallback((requestId: string, shown: boolean) => {
+    if (!capabilities.canSendSessionCommands) return;
+    const sid = sessionIdRef.current;
+    if (!sid || !requestId) return;
+    void sendAgentCommand(sid, {
+      type: "editor_takeover_view",
+      requestId,
+      shown,
+      clientId: getClientId(),
+    }).catch(() => {
+      /* 纯登记：失败不影响界面（最坏是退回广播，见宿主侧） */
+    });
+  }, [capabilities.canSendSessionCommands]);
 
   /**
    * 插件编辑器（setEditorComponent 的组件）里的按键 → 服务端的组件 `handleInput`。
@@ -3755,7 +3808,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const submitEditorComponentText = useCallback(async (text: string): Promise<void> => {
     const message = typeof text === "string" ? text : "";
     if (!message.trim()) return;
-    if (getRuntimeAgentRunning() || bashRunningRef.current) {
+    // 忙碌口径与 ChatInput 一致（`components/ChatWindow.tsx` 的 sessionBusy =
+    // agentRunning || bashRunning || isCompacting）：少了压缩这一项时，压缩中提交
+    // `/copy`、`/compact` 会在本地跑内置命令，而输入框走的是 onPromptWithStreamingBehavior
+    // （issue #107 三轮审查 重要 6）。
+    if (getRuntimeAgentRunning() || bashRunningRef.current || isCompactingRef.current) {
       void handlePromptWithStreamingBehaviorEntryRef.current?.(message, "followUp", undefined);
       return;
     }
@@ -3765,7 +3822,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       //（issue #107 审查 重要 3）。扩展斜杠（/mcp 之类）由 handleBuiltinSlashCommand
       // 返回 handled:false，继续走发送管线（SDK 自己会执行扩展命令）。
       const builtin = await handleBuiltinSlashCommandRef.current?.(message);
-      if (builtin?.handled) return;
+      if (builtin?.handled) {
+        // 失败的命令也要把命令原文还给用户 —— ChatInput 在 `result.error` 分支同样
+        // restoreSentDraft（components/ChatInput.tsx）。接管时输入框不在场，回填只能
+        // 落到组件上，否则 /copy 无可复制内容、/name 缺参 这些一失败字就没了
+        // （issue #107 三轮审查 阻断 1）。
+        if (builtin.error) restoreEditorTakeoverText(message);
+        return;
+      }
       const ok = await handleSendEntryRef.current?.(message);
       // handleSend 在只读 / 被对端持有 / 分支切换 / 竞态 running 上直接 return false，
       // 异常路径也返回 false。那条管线里的回填只认 chatInputRef，而接管时输入框整块
@@ -3790,7 +3854,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const piImages = promptImageInputs(images);
     const restore = (reason: PromptReason | undefined, fallback?: string) => {
       // 内容归属原会话：切走后写它的草稿，而不是直接丢弃。
-      opts.chatInputRef?.current?.restoreDraft(message, images, sid);
+      const input = opts.chatInputRef?.current;
+      if (input) {
+        input.restoreDraft(message, images, sid);
+      } else {
+        // 接管中本页**没有**输入框（ref 是 null）：旧写法在这里空操作，正文直接消失。
+        // 走 restorePayloadToSession —— 它写原会话草稿，并把正文交回用户正看的组件
+        // （issue #107 三轮审查 阻断 1 的第二条路径）。
+        restorePayloadToSession(sid, { text: message, images });
+      }
       if (sessionIdRef.current !== sid) return;
       addNotice({ type: "error", message: reason ? queueRejectionMessage(reason) : (fallback ?? t("chat_sendFailed")) });
     };
@@ -3849,7 +3921,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       restore(undefined, e instanceof Error ? e.message : String(e));
       console.error("Failed to steer:", e);
     }
-  }, [acceptQueuedReceipt, addNotice, ensureEventsConnected, isExtensionCommandQueueError, isReadOnly, opts.chatInputRef, queueRejectionMessage, t]);
+  }, [acceptQueuedReceipt, addNotice, ensureEventsConnected, isExtensionCommandQueueError, isReadOnly, opts.chatInputRef, queueRejectionMessage, restorePayloadToSession, t]);
 
   /**
    * follow-up 发送（Codex 风格）：运行中入产品队列（Host 是唯一 owner，不调 SDK
@@ -4504,7 +4576,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue, handleSendQueueAsSteer,
     handleBuiltinSlashCommand,
-    dismissEditorTakeover, reenterEditorTakeover,
+    dismissEditorTakeover, reenterEditorTakeover, reportEditorTakeoverView,
     // REFACTOR-DEAD: handleToolPresetChange 已注释（P0c 工具不收窄）。
     handleThinkingLevelChange, loadTools, loadSlashCommands, loadCommandArgumentCompletions, setActiveLeafId, setData, setMessages,
     loadCompletionSuggestions, applyCompletionSuggestion,

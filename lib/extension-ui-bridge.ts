@@ -382,7 +382,13 @@ export type ExtensionUiEffect =
    */
   | { type: "focusEditor" }
   | {
-    type: "insertText";
+    /**
+     * 把「编辑器内容」设成这段文本（TUI 的 `editor.setText`）。
+     *
+     * 名字是 setEditorText 而不是 insertText：落点必须是**替换**。用插入会把整段文本
+     * 拼在现有草稿后面（issue #107 三轮审查 阻断 2）。
+     */
+    type: "setEditorText";
     text: string;
     /** 宿主是否已把文本喂给接管组件（决定显示接管的标签该不该再送一遍）。 */
     appliedToTakeover: boolean;
@@ -579,7 +585,7 @@ export function applyExtensionUiRequest(
       return {
         state,
         effects: [{
-          type: "insertText",
+          type: "setEditorText",
           text: request.text,
           appliedToTakeover: request.appliedToTakeover === true,
           ...(typeof request.clientId === "string" && request.clientId ? { clientId: request.clientId } : {}),

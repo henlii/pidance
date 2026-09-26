@@ -121,7 +121,20 @@ test("#102：插件界面显示中时按键归插件，关闭后焦点还给输�
   // 窗口 ① 的让位判据（#107 审查 次要 6）：**不再**是「接管显示就整段关掉窗口 ①」——
   // 那样焦点在消息列表时，收起面板的白名单键既不进插件的全局监听器、也不进接管组件。
   // 现在是「事件目标落在接管 keytrap 里才让位」，判据由 hook 侧实现（那里有行为断言）。
-  assert.match(hookCall, /takeoverKeytrap: \(\) => editorTakeoverKeytrapRef\.current/, "窗口 ① 要让位给接管 keytrap");
+  assert.match(hookCall, /takeoverKeytrap: takeoverKeytrapRefCallback/, "窗口 ① 要让位给接管 keytrap");
+  // 回调必须是**稳定引用**（useCallback）：每次渲染换新函数会让 useExtensionTerminalInput
+  // 的 effect 在每个流式 token 上重挂一次 window keydown（三轮审查 次要 8）。
+  assert.match(
+    source,
+    /const takeoverKeytrapRefCallback = useCallback\(\(\) => editorTakeoverKeytrapRef\.current, \[\]\)/,
+    "keytrap 判据回调要用 useCallback 固定引用",
+  );
+  assert.match(
+    source,
+    /const onKeytrapElementCallback = useCallback\(\(element: Element \| null\) => \{/ ,
+    "onKeytrapElement 也要固定引用",
+  );
+  assert.match(source, /onKeytrapElement={onKeytrapElementCallback}/, "面板登记的仍是那个稳定回调");
   assert.ok(!hookCall.includes("editorTakeoverHoldsKeys"), "窗口 ① 不该再看「接管是否显示」整段停手");
   assert.match(source, /const editorTakeoverKeytrapRef = useRef<Element \| null>\(null\)/, "keytrap 定位器要在渲染前备好");
   assert.match(source, /onKeytrapElement=\{/, "接管面板要把自己的 keytrap 元素登记上来");

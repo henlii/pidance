@@ -153,7 +153,7 @@ import {
   type SendFileToUserParams,
 } from "./send-file-to-user";
 import { DEFAULT_CUSTOM_UI_ROWS } from "./custom-ui-terminal";
-import { readComposerDraftText } from "./composer-draft-text";
+import { prependComposerDraftText, readComposerDraftText } from "./composer-draft-text";
 import {
   markdownTransformerGeneration,
   onMarkdownTransformerInvalidate,
@@ -1755,6 +1755,11 @@ export class SdkSessionHost {
       // 服务端偏好的那份镜像（见 lib/composer-draft-text.ts 的语义边界）。
       {
         readComposerText: () => readComposerDraftText(this.realSessionId, this.agentDir),
+        // 兜底（issue #107 三轮审查 重要 3）：插件自己调 onSubmit、而当时一个标签都没上报过时，
+        // 没有客户端能执行这次提交 —— 写进本会话草稿，至少不静默丢。
+        writeComposerDraft: (text: string) => {
+          prependComposerDraftText(this.realSessionId, text, this.agentDir);
+        },
         // 主题：用户主题目录按 agent 目录解析（与 SDK 的 getCustomThemesDir 同源）；
         // 插件切主题时也要把壳的亮/暗偏好写回同一个 agent 目录。
         agentDir: this.agentDir,
@@ -3598,8 +3603,22 @@ export class SdkSessionHost {
         // 把文本放回接管组件：提交失败回填原文 / 用户重新进入接管时灌草稿（issue #107）。
         const requestId = asString(command.requestId) ?? "";
         const text = typeof command.text === "string" ? command.text : "";
-        if (!requestId || !text) return { applied: false };
+        // 空串是**合法**值（用户把输入框删光后重进接管 = TUI 的 setText("")）：
+        // 旧写法把空串当成坏报文拒掉，组件里于是留着旧字（issue #107 三轮审查 次要 10）。
+        if (!requestId) return { applied: false };
         return { applied: this.extensionUi?.applyEditorTakeoverText(requestId, text) ?? false };
+      }
+
+      case "editor_takeover_view": {
+        // 客户端上报「本页知道这个接管、并且是否正在显示它」（issue #107 三轮审查）。
+        // 两处要用：卸下工厂时只把组件文本交给刚才在显示接管的标签；插件自己调 onSubmit
+        // （没有来源标签）时挑**恰好一个**归属者。没有返回值 —— 这是纯登记。
+        const requestId = asString(command.requestId) ?? "";
+        const clientId = asString(command.clientId) ?? "";
+        if (requestId && clientId) {
+          this.extensionUi?.recordEditorTakeoverView(requestId, command.shown === true, clientId);
+        }
+        return null;
       }
 
       case "editor_takeover_dismiss": {

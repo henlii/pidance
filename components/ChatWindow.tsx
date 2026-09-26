@@ -233,7 +233,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     handleThinkingLevelChange, loadSlashCommands, loadCommandArgumentCompletions,
     loadCompletionSuggestions, applyCompletionSuggestion,
     extensionAutocompleteProviderCount, extensionAutocompleteTriggerCharacters,
-    dismissEditorTakeover, reenterEditorTakeover,
+    dismissEditorTakeover, reenterEditorTakeover, reportEditorTakeoverView,
     handleBranchHere, handleBranchFromAssistant,
     handleNewSessionFromHere, handleNewSessionFromAnswer,
   } = useAgentSession({
@@ -296,8 +296,23 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   };
   const editorTakeoverActive = shouldShowEditorTakeover(editorTakeoverGate);
   const editorTakeoverBarVisible = shouldShowEditorTakeoverBar(editorTakeoverGate);
+  // 接管 keytrap 的两个回调必须是**稳定引用**：交给 useExtensionTerminalInput 后它会进
+  // effect 依赖，每次渲染换新函数会让它在每个流式 token 上重挂一次 window keydown
+  // （issue #107 三轮审查 次要 8）。判定本身（contains）不变。
+  const takeoverKeytrapRefCallback = useCallback(() => editorTakeoverKeytrapRef.current, []);
+  const onKeytrapElementCallback = useCallback((element: Element | null) => {
+    editorTakeoverKeytrapRef.current = element;
+  }, []);
+
   // 渲染时就地赋值（同 sessionIdRef 的写法）：hook 里的文本落点与提交兜底要读它。
   editorTakeoverDisplayedRef.current = editorTakeoverActive;
+  // 上报给宿主（issue #107 三轮审查）：卸下工厂时组件文本只交给刚才在显示接管的标签；
+  // 插件自己调 onSubmit 时宿主据此挑一个归属标签。**手机 / 已收起也要报**（shown=false）——
+  // 否则宿主只能退回广播，把文本插进这些标签的输入框。
+  useEffect(() => {
+    if (!editorTakeoverId) return;
+    reportEditorTakeoverView?.(editorTakeoverId, editorTakeoverActive);
+  }, [editorTakeoverId, editorTakeoverActive, reportEditorTakeoverView]);
   // 接管面板真的拿着键盘时（没有插件浮层抢焦点），窗口 ① 的**捕获式**预抢必须让位：
   // 接管面板里的按键走 `editor_component_input`，适配器**先**过插件的全局监听器（pi-tui 顺序）
   // 再进被接管的组件 —— 被窗口 ① 抢先吃掉的话，「未被消费的键仍然到达聚焦组件」这半截就没了。
@@ -324,7 +339,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     // （ctx.ui.onTerminalInput；如 rpiv-ask-user 的折叠键重新展开面板）。
     hiddenPanelRouting: Boolean(extensionCustomUi?.hidden) && extensionTerminalInputListenerCount > 0,
     // 焦点落在接管 keytrap 里时让位给它（不是「接管显示就整段关掉」：见 hook 的注释）。
-    takeoverKeytrap: () => editorTakeoverKeytrapRef.current,
+    takeoverKeytrap: takeoverKeytrapRefCallback,
     // 窗口 ③：插件界面显示中。面板自己的 keytrap 仍然优先（判定里按「事件目标有没有
     // DOM 归属者」让位），只读会话没有可写的宿主，不做无谓往返。
     surfaceRouting: extensionSurfaceActive
@@ -719,7 +734,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
         //（两处收键会让按键归属说不清，见 components/ExtensionEditorTakeover.tsx）。
         <ExtensionEditorTakeover
           request={extensionEditorTakeover}
-          onKeytrapElement={(element) => { editorTakeoverKeytrapRef.current = element; }}
+          onKeytrapElement={onKeytrapElementCallback}
           // 接管期间队列条随输入框一起消失，但入队照旧（handleFollowUp）：
           // 至少让用户知道刚排进去的那条还在。
           // 与输入框的队列条同一份数据（followUpRows 含在途与未知条目，旧服务端回落到 followUp）。

@@ -108,7 +108,7 @@ test("水合：没有 id 的垃圾报文被忽略（不清掉当前接管）", (
   assert.equal(env.state.current.editorTakeover?.id, "t1");
 });
 
-function makeSubmitEnv({ running = false, bashRunning = false, builtinHandled = false, sendResult = true } = {}) {
+function makeSubmitEnv({ running = false, bashRunning = false, isCompacting = false, builtinHandled = false, builtinError = undefined, sendResult = true } = {}) {
   const sends = [];
   const followUps = [];
   const restores = [];
@@ -116,6 +116,8 @@ function makeSubmitEnv({ running = false, bashRunning = false, builtinHandled = 
   const submitEditorComponentText = extractCallback({
     getRuntimeAgentRunning: () => running,
     bashRunningRef: { current: bashRunning },
+    // 忙碌口径要与 ChatWindow 的 sessionBusy 一致（含压缩）：hook 里读的是这个 ref。
+    isCompactingRef: { current: isCompacting },
     // 三个「晚绑」入口：hook 里分别指向真实的 handleSend / handlePromptWithStreamingBehavior /
     // handleBuiltinSlashCommand。
     handleSendEntryRef: { current: async (message) => { sends.push(message); return sendResult; } },
@@ -123,7 +125,7 @@ function makeSubmitEnv({ running = false, bashRunning = false, builtinHandled = 
       current: async (message, behavior, images) => { followUps.push({ message, behavior, images }); },
     },
     handleBuiltinSlashCommandRef: {
-      current: async (text) => { builtins.push(text); return { handled: builtinHandled }; },
+      current: async (text) => { builtins.push(text); return builtinHandled ? { handled: true, error: builtinError } : { handled: false }; },
     },
     restoreEditorTakeoverText: (text) => { restores.push(text); },
   }, "submitEditorComponentText");
@@ -144,6 +146,25 @@ test("提交：空闲时内置斜杠优先，handled 之后不再当普通消息
   await env.submitEditorComponentText("/copy");
   assert.deepEqual(env.builtins, ["/copy"]);
   assert.deepEqual(env.sends, [], "内置斜杠已被处置，不该再发给模型（issue #107 审查 重要 3）");
+});
+
+// 三轮审查 阻断 1 的前半：ChatInput 在 `result.error` 分支会 restoreSentDraft；接管时
+// 输入框不在场，命令原文只能交回组件 —— 否则 /copy 无可复制内容、/name 缺参、
+// /compact 抛错 这些一失败字就没了。
+test("提交：内置斜杠失败（handled && error）也要把命令原文交回插件编辑器", async () => {
+  const env = makeSubmitEnv({ builtinHandled: true, builtinError: "No active session to compact" });
+  await env.submitEditorComponentText("/compact");
+  assert.deepEqual(env.builtins, ["/compact"]);
+  assert.deepEqual(env.sends, [], "失败的内置斜杠不该再当普通消息发出去");
+  assert.deepEqual(env.restores, ["/compact"], "命令失败了，原文必须还给用户（对照 ChatInput 的 result.error 分支）");
+});
+
+test("提交：压缩中也算忙碌（与 ChatWindow 的 sessionBusy 同口径，三轮审查 重要 6）", async () => {
+  const env = makeSubmitEnv({ isCompacting: true });
+  await env.submitEditorComponentText("/copy");
+  assert.deepEqual(env.followUps, [{ message: "/copy", behavior: "followUp", images: undefined }], "压缩中要走运行中那条路（输入框就是这么做的）");
+  assert.deepEqual(env.builtins, [], "压缩中不该在本地跑内置斜杠");
+  assert.deepEqual(env.sends, []);
 });
 
 test("提交：发送入口回绝（只读 / 被锁 / 分支切换 / 竞态）时把正文交回插件编辑器", async () => {
@@ -189,7 +210,9 @@ test("提交：空白文本不发（插件可能在失焦/清空时调）", asyn
  */
 function makeRequestEnv({ takeover, displayed = false, myClientId = "tab-mine" } = {}) {
   const editorInputs = [];
-  const composerInserts = [];
+  // 落点分两种记：replaceText 是「编辑器内容变成这段文本」（TUI 的 setText），
+  // insertText 是在光标处插入。三轮审查 阻断 2 要求交还走**替换**，所以断言要能区分。
+  const composerWrites = [];
   const submits = [];
   const state = {
     current: takeover
@@ -215,11 +238,16 @@ function makeRequestEnv({ takeover, displayed = false, myClientId = "tab-mine" }
     editorInputRef: { current: (request, data) => editorInputs.push({ id: request.id, data }) },
     asBracketedPaste,
     opts: {
-      chatInputRef: { current: { insertText: (text) => composerInserts.push(text) } },
+      chatInputRef: {
+        current: {
+          insertText: (text) => composerWrites.push({ kind: "insert", text }),
+          replaceText: (text) => composerWrites.push({ kind: "replace", text }),
+        },
+      },
       editorTakeoverDisplayedRef: { current: displayed },
     },
   }, "handleExtensionUiRequest");
-  return { handleExtensionUiRequest, editorInputs, composerInserts, submits };
+  return { handleExtensionUiRequest, editorInputs, composerWrites, submits };
 }
 
 test("接管期间插件的 setEditorText：本页显示接管且宿主未写进组件 → 按粘贴送进组件", () => {
@@ -230,7 +258,7 @@ test("接管期间插件的 setEditorText：本页显示接管且宿主未写进
   assert.equal(env.editorInputs.length, 1, "接管时文本必须进插件编辑器（输入框已让位）");
   assert.equal(env.editorInputs[0].id, "t1");
   assert.equal(env.editorInputs[0].data, asBracketedPaste("你好世界"), "按粘贴送（与用户在接管面板里粘贴同一条路）");
-  assert.deepEqual(env.composerInserts, [], "接管时不该写我们自己的输入框");
+  assert.deepEqual(env.composerWrites, [], "接管时不该写我们自己的输入框");
 });
 
 test("接管期间插件的 setEditorText：宿主已经写进组件 → 显示接管的页面不再送一遍（否则两份）", () => {
@@ -239,7 +267,7 @@ test("接管期间插件的 setEditorText：宿主已经写进组件 → 显示�
     type: "extension_ui_request", id: "r1", method: "set_editor_text", text: "已经写进去了", appliedToTakeover: true,
   });
   assert.deepEqual(env.editorInputs, [], "组件已经拿到这份文本，再送一遍会让正文凭空多一份");
-  assert.deepEqual(env.composerInserts, [], "显示接管时输入框也不该收到");
+  assert.deepEqual(env.composerWrites, [], "显示接管时输入框也不该收到");
 });
 
 test("本页没显示接管（手机 / 设置关掉 / 收起过）：文本落进可见输入框，而不是看不见的组件", () => {
@@ -248,13 +276,17 @@ test("本页没显示接管（手机 / 设置关掉 / 收起过）：文本落�
     type: "extension_ui_request", id: "r1", method: "set_editor_text", text: "手机用户要收到的字", appliedToTakeover: true,
   });
   assert.deepEqual(env.editorInputs, [], "本页看不到接管面板，送进组件等于字没了");
-  assert.deepEqual(env.composerInserts, ["手机用户要收到的字"], "必须落进它看得见的输入框");
+  assert.deepEqual(
+    env.composerWrites,
+    [{ kind: "replace", text: "手机用户要收到的字" }],
+    "必须落进它看得见的输入框，而且是**替换**（组合文本 + insertText 会拼成两份，三轮审查 阻断 2）",
+  );
 });
 
 test("对照组：没有接管时同一份报文照旧进输入框（确认前面不是恒真）", () => {
   const env = makeRequestEnv({ takeover: null, displayed: false });
   env.handleExtensionUiRequest({ type: "extension_ui_request", id: "r1", method: "set_editor_text", text: "你好世界" });
-  assert.deepEqual(env.composerInserts, ["你好世界"]);
+  assert.deepEqual(env.composerWrites, [{ kind: "replace", text: "你好世界" }]);
   assert.deepEqual(env.editorInputs, []);
 });
 
@@ -263,12 +295,12 @@ test("定向给别的标签的文本事件不改本标签的输入框（「返�
   env.handleExtensionUiRequest({
     type: "extension_ui_request", id: "r1", method: "set_editor_text", text: "别人的字", appliedToTakeover: false, clientId: "tab-other",
   });
-  assert.deepEqual(env.composerInserts, [], "不是说我，别改我的输入框");
+  assert.deepEqual(env.composerWrites, [], "不是说我，别改我的输入框");
   // 说给自己的照旧落进来（确认上一条不是恒真）
   env.handleExtensionUiRequest({
     type: "extension_ui_request", id: "r2", method: "set_editor_text", text: "我的字", appliedToTakeover: false, clientId: "tab-mine",
   });
-  assert.deepEqual(env.composerInserts, ["我的字"]);
+  assert.deepEqual(env.composerWrites, [{ kind: "replace", text: "我的字" }]);
 });
 
 test("提交归属：来源是本标签才执行；来源是别的标签不执行；没有来源时由显示接管的标签兜底", () => {
@@ -297,4 +329,155 @@ test("接线：onSubmit 的提交事件确实分发到这条实现（防删护�
     "editorSubmit 效果要按归属地落到 submitEditorComponentText 的 ref 上",
   );
   assert.match(source, /editorSubmitRef\.current = submitEditorComponentText;/, "ref 要绑定到实现");
+});
+
+// ---------------------------------------------------------------------------
+// 三轮审查新增：回填的兜底、上报接线、运行中拒绝时的落点
+// ---------------------------------------------------------------------------
+
+/** 抽 `restoreEditorTakeoverText`：回填命令失败 / applied:false 时也必须写草稿。 */
+function makeRestoreEnv({ takeoverId = "t1", sendResult = { applied: true }, failCommand = false } = {}) {
+  const commands = [];
+  const drafts = [];
+  const restoreEditorTakeoverText = extractCallback({
+    capabilities: { canSendSessionCommands: true },
+    sessionIdRef: { current: "sess-1" },
+    extensionUiStateRef: { current: { editorTakeover: takeoverId ? { id: takeoverId } : null } },
+    getDraft: () => ({ value: "原有草稿", images: [] }),
+    setDraft: (sid, draft) => { drafts.push({ sid, draft }); },
+    sendAgentCommand: async (sid, command) => {
+      commands.push({ sid, command });
+      if (failCommand) throw new Error("network");
+      return sendResult;
+    },
+  }, "restoreEditorTakeoverText");
+  return { restoreEditorTakeoverText, commands, drafts };
+}
+
+test("回填：命令确认 applied=true → 只写组件，不再重复写草稿", async () => {
+  const env = makeRestoreEnv({ sendResult: { applied: true } });
+  env.restoreEditorTakeoverText("失败的正文");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(env.commands, [{ sid: "sess-1", command: { type: "editor_component_set_text", requestId: "t1", text: "失败的正文" } }]);
+  assert.deepEqual(env.drafts, [], "组件已经拿到了，不该再往草稿塞一份（两处都有会分叉）");
+});
+
+test("回填：命令回 applied:false（接管换过 / 组件没有 setText）→ 同时写草稿", async () => {
+  const env = makeRestoreEnv({ sendResult: { applied: false } });
+  env.restoreEditorTakeoverText("失败的正文");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(env.drafts.length, 1, "旧实现把回填命令当作已送达，字就没了（三轮审查 重要 4）");
+  assert.equal(env.drafts[0].sid, "sess-1");
+  assert.equal(env.drafts[0].draft.value, "失败的正文\n\n原有草稿", "前插到已有草稿之前（与 restorePayloadToSession 同口径）");
+});
+
+test("回填：命令抛错（HTTP 失败）也要写草稿；没有接管时直接写草稿", async () => {
+  const failed = makeRestoreEnv({ failCommand: true });
+  failed.restoreEditorTakeoverText("网络挂了");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(failed.drafts.map((d) => d.draft.value), ["网络挂了\n\n原有草稿"], "命令失败不能吞掉正文");
+
+  const noTakeover = makeRestoreEnv({ takeoverId: null });
+  noTakeover.restoreEditorTakeoverText("没有接管了");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(noTakeover.commands, [], "没有接管就不发命令");
+  assert.deepEqual(noTakeover.drafts.map((d) => d.draft.value), ["没有接管了\n\n原有草稿"]);
+});
+
+test("上报：reportEditorTakeoverView 带 clientId 与 shown（宿主据此挑提交归属与文本落点）", () => {
+  const commands = [];
+  const reportEditorTakeoverView = extractCallback({
+    capabilities: { canSendSessionCommands: true },
+    sessionIdRef: { current: "sess-1" },
+    getClientId: () => "tab-mine",
+    sendAgentCommand: async (sid, command) => { commands.push({ sid, command }); },
+  }, "reportEditorTakeoverView");
+  reportEditorTakeoverView("t1", true);
+  reportEditorTakeoverView("t1", false);
+  assert.deepEqual(commands, [
+    { sid: "sess-1", command: { type: "editor_takeover_view", requestId: "t1", shown: true, clientId: "tab-mine" } },
+    { sid: "sess-1", command: { type: "editor_takeover_view", requestId: "t1", shown: false, clientId: "tab-mine" } },
+  ]);
+  // 缺 id / 缺会话时不发无意义请求
+  reportEditorTakeoverView("", true);
+  assert.equal(commands.length, 2);
+});
+
+/**
+ * 抽 `handlePromptWithStreamingBehavior`：运行中提交以 `/` 开头、被拒时的落点。
+ *
+ * 三轮审查 阻断 1 的后半：那条路径的 `restore` 只调 `chatInputRef.restoreDraft`，
+ * 而接管时输入框 ref 是 null（`ChatInput` 整块没渲染）→ 可选调用空操作，正文直接消失。
+ */
+function makeStreamingEnv({ hasInput = true, receipt = { status: "rejected", reason: "locked" } } = {}) {
+  const restores = [];
+  const payloadRestores = [];
+  const notices = [];
+  const handlePromptWithStreamingBehavior = extractCallback({
+    isReadOnly: false,
+    sessionIdRef: { current: "sess-1" },
+    promptImageInputs: () => undefined,
+    sendAgentCommand: async () => receipt,
+    acceptQueuedReceipt: () => {},
+    ensureEventsConnected: () => {},
+    isExtensionCommandQueueError: () => false,
+    queueRejectionMessage: (reason) => String(reason),
+    addNotice: (notice) => { notices.push(notice); },
+    t: (key) => key,
+    restorePayloadToSession: (sid, payload) => { payloadRestores.push({ sid, payload }); },
+    handleFollowUpRef: { current: async () => {} },
+    opts: {
+      chatInputRef: {
+        current: hasInput ? { restoreDraft: (...args) => restores.push(args) } : null,
+      },
+    },
+  }, "handlePromptWithStreamingBehavior");
+  return { handlePromptWithStreamingBehavior, restores, payloadRestores, notices };
+}
+
+test("运行中的斜杠被拒：没有输入框（接管中）时走 restorePayloadToSession，正文不消失", async () => {
+  const env = makeStreamingEnv({ hasInput: false });
+  await env.handlePromptWithStreamingBehavior("/copy", "followUp");
+  assert.deepEqual(env.restores, [], "接管时输入框 ref 是 null，写它等于空操作");
+  assert.deepEqual(
+    env.payloadRestores,
+    [{ sid: "sess-1", payload: { text: "/copy", images: undefined } }],
+    "必须走会写草稿 + 交回组件的那条路（三轮审查 阻断 1）",
+  );
+  assert.equal(env.notices.length, 1, "用户仍要看到失败提示");
+});
+
+test("对照组：有输入框时照旧 restoreDraft（确认上一条不是恒真）", async () => {
+  const env = makeStreamingEnv({ hasInput: true });
+  await env.handlePromptWithStreamingBehavior("/copy", "followUp");
+  assert.equal(env.restores.length, 1, "有输入框就走原来的恢复路径");
+  assert.equal(env.restores[0][2], "sess-1", "归属仍是原会话");
+  assert.deepEqual(env.payloadRestores, [], "两条路互斥，不该同时走");
+});
+
+test("归还原会话（接管中）：正文只前插一次 —— 回填不再自己写第二遍草稿", async () => {
+  // 三轮修复里最容易写错的一处：`restorePayloadToSession` 在没有输入框时会
+  // ①调 restoreEditorTakeoverText（那条现在也会写草稿）②自己再写一遍草稿（带图片）。
+  // 两边都写就会把同一段正文前插两次。这里走**真实的两个回调**，断言只写一次。
+  const drafts = [];
+  const env = {
+    sessionIdRef: { current: "sess-1" },
+    getDraft: () => ({ value: "原有草稿", images: [] }),
+    setDraft: (sid, draft) => { drafts.push({ sid, draft }); },
+    capabilities: { canSendSessionCommands: true },
+    extensionUiStateRef: { current: { editorTakeover: { id: "t1" } } },
+    // 宿主说「没落进组件」（接管换过 / 组件没有 setText）→ 回填的兜底会想写草稿。
+    sendAgentCommand: async () => ({ applied: false }),
+    attachmentsFromQueueMedia: () => [],
+    opts: { chatInputRef: { current: null } },
+  };
+  env.restoreEditorTakeoverText = extractCallback(env, "restoreEditorTakeoverText");
+  const restorePayloadToSession = extractCallback(env, "restorePayloadToSession");
+
+  restorePayloadToSession("sess-1", { text: "导回来的正文" });
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(drafts.length, 1, "同一段正文不该被前插两次（两边都写就是 '正文\\n\\n正文\\n\\n原有草稿'）");
+  assert.equal(drafts[0].sid, "sess-1");
+  assert.equal(drafts[0].draft.value, "导回来的正文\n\n原有草稿");
 });

@@ -233,6 +233,14 @@ export type WebExtensionUIAdapter = {
    * 只发给发起标签（clientId 定向）：其它标签还显示着接管面板，不该被动改内容。
    */
   dismissEditorTakeover: (requestId: string, clientId?: string) => boolean;
+  /**
+   * 某个标签上报「本页知道这个接管、并且是否正在显示它」（issue #107 三轮审查）。
+   *
+   * 两处要用：① 卸下工厂时只把组件文本交给**刚才在显示接管**的标签（否则手机、用户
+   * 收起过的标签会被塞进一段它们从没看过的文本）；② 插件**自己**调 onSubmit（没有来源
+   * 标签）时，宿主据此挑**恰好一个**归属者，而不是让每个订阅该会话的标签都执行一次。
+   */
+  recordEditorTakeoverView: (requestId: string, shown: boolean, clientId: string) => void;
 
   /** 按新的可用尺寸重排已挂载的插件界面（custom 面板 + widget 工厂）。 */
   setRenderSize: (size: { width: number; rows: number }) => boolean;
@@ -501,6 +509,13 @@ export interface WebExtensionUiOptions {
    * 测试也能给一个假读取器。省略即恒返回空串（与注入前一致）。
    */
   readComposerText?: () => string;
+  /**
+   * 把文本写进本会话的输入框草稿（issue #107 三轮审查 重要 3 的最后一级兜底）。
+   *
+   * 只在「插件自己调 onSubmit、而当时一个标签都没上报过」时用：那时没有任何客户端在场
+   * 可以执行这次提交，把它写进草稿至少不会静默丢掉（用户下次打开会话就能看到）。
+   */
+  writeComposerDraft?: (text: string) => void;
   /**
    * agent 目录：用户主题目录（`<agentDir>/themes`）与壳的亮/暗偏好都按它解析。
    * 省略时取默认 agent 目录（与 SDK 的 `getCustomThemesDir` 同源）。
@@ -802,12 +817,19 @@ export function createWebExtensionUIAdapter(
 
   /**
    * 取接管组件当前的文本（TUI 的写法：`getExpandedText?.() ?? getText()`）。
-   * 取不到 / 抛错 → 空串（绝不因为一个坏组件把收尾路径炸掉）。
+   *
+   * 返回值分两种**语义不同**的情况（issue #107 三轮审查 重要 5）：
+   * - `null` = 没有组件 / 读不到 / 读抛错 —— 「我不知道内容是什么」；
+   * - `""` = 组件在、内容**就是空的** —— 「我知道，是空的」。
+   *
+   * 旧实现把两者都压成空串，于是 `getEditorText()` 里 `if (carried)` 把「空的编辑器」
+   * 当成「读不到」，回退去读 400ms 防抖的草稿镜像 —— 接管期间那份镜像是陈旧的，
+   * 插件拿它判断「输入框是不是空的」（pi-subagents 的 fleet 就是）会判错。
    */
-  const readEditorTakeoverText = (entry: { component: unknown }): string => {
+  const readEditorTakeoverText = (entry: { component: unknown }): string | null => {
     const component = entry.component as
       { getExpandedText?: () => unknown; getText?: () => unknown } | null | undefined;
-    if (!component) return "";
+    if (!component) return null;
     try {
       const expanded = component.getExpandedText?.();
       if (typeof expanded === "string") return expanded;
@@ -816,7 +838,7 @@ export function createWebExtensionUIAdapter(
     } catch (error) {
       console.warn("[pidance] extension editor component getText failed:", error);
     }
-    return "";
+    return null;
   };
 
   /**
@@ -832,6 +854,46 @@ export function createWebExtensionUIAdapter(
    * 非客户端来源（插件自己调 onSubmit）保持 null，由正在显示接管的标签兜底执行。
    */
   let submitOriginClientId: string | null = null;
+
+  /**
+   * 各标签上报的「本页知道这个接管、是否正在显示它」（clientId → { requestId, shown, at, seq }）。
+   *
+   * 有上限与时效：这是个只影响「文本交给谁」的辅助表，不该随标签数量无限涨；
+   * 超过 TTL 的记录当不存在（标签可以很久不动，但那时它也不该再接收回流）。
+   */
+  const editorTakeoverViews = new Map<string, { requestId: string; shown: boolean; at: number; seq: number }>();
+  // 单调序号：同毫秒内的两次上报也要有确定的「更近」关系（否则归属者会退化成按 id 排序，
+  // 与「最近跟这个接管打交道的标签」的语义不一致）。
+  let editorTakeoverViewSeq = 0;
+  const MAX_EDITOR_TAKEOVER_VIEWS = 64;
+  const EDITOR_TAKEOVER_VIEW_TTL_MS = 5 * 60 * 1000;
+
+  const recordEditorTakeoverView = (requestId: string, shown: boolean, clientId: string): void => {
+    if (!requestId || !clientId) return;
+    editorTakeoverViews.set(clientId, { requestId, shown, at: Date.now(), seq: ++editorTakeoverViewSeq });
+    if (editorTakeoverViews.size > MAX_EDITOR_TAKEOVER_VIEWS) {
+      // 先丢最旧的（Map 保持插入序，但 at 会被刷新，所以按 at 排序取最旧）
+      const oldest = [...editorTakeoverViews.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+      if (oldest) editorTakeoverViews.delete(oldest[0]);
+    }
+    // 连带清掉过期的：否则一个关掉很久的标签会一直参与归属挑选。
+    const cutoff = Date.now() - EDITOR_TAKEOVER_VIEW_TTL_MS;
+    for (const [id, view] of editorTakeoverViews) if (view.at < cutoff) editorTakeoverViews.delete(id);
+  };
+
+  /**
+   * 本页知道这个接管、且（shown 为真时）正在显示它的标签，**最近上报的排在前面**。
+   *
+   * 排序按上报序号（不是时间戳）：同毫秒的两次上报也要有确定的先后，否则「最近跟这个
+   * 接管打交道的标签」会退化成按 id 排序 —— 还是确定的，但语义不对。
+   */
+  const editorTakeoverViewers = (requestId: string, onlyShown: boolean): string[] => {
+    const cutoff = Date.now() - EDITOR_TAKEOVER_VIEW_TTL_MS;
+    return [...editorTakeoverViews.entries()]
+      .filter(([, view]) => view.requestId === requestId && view.at >= cutoff && (!onlyShown || view.shown))
+      .sort((a, b) => b[1].seq - a[1].seq)
+      .map(([id]) => id);
+  };
 
   const unmountEditorTakeover = (options?: { silent?: boolean }) => {
     const entry = editorTakeover;
@@ -851,15 +913,35 @@ export function createWebExtensionUIAdapter(
       // 交还给输入框：`closed` 已经先到，客户端那时不再是「正在显示接管」，
       // 所以这条（appliedToTakeover=false）会落进可见的输入框，而不是又被送进组件。
       if (carried) {
-        emit({
-          type: "extension_ui_request",
-          id: randomUUID(),
-          method: "set_editor_text",
-          text: carried,
-          appliedToTakeover: false,
-        });
+        // **只交给刚才在显示这个接管的标签**（issue #107 三轮审查 阻断 2）：广播给所有
+        // 「没在显示接管」的标签，会把一段它们从没看过的文本插进手机 / 已收起标签的输入框，
+        // 还会和它们正在打的草稿拼在一起。
+        const viewers = editorTakeoverViewers(entry.id, true);
+        if (viewers.length === 0) {
+          // 没有任何标签上报过（老客户端 / 刚连上还没渲染）：退回一条广播，别让文本消失。
+          emit({
+            type: "extension_ui_request",
+            id: randomUUID(),
+            method: "set_editor_text",
+            text: carried,
+            appliedToTakeover: false,
+          });
+        } else {
+          for (const clientId of viewers) {
+            emit({
+              type: "extension_ui_request",
+              id: randomUUID(),
+              method: "set_editor_text",
+              text: carried,
+              appliedToTakeover: false,
+              clientId,
+            });
+          }
+        }
       }
     }
+    // 接管没了，登记一并作废（否则新接管会被旧登记误伤）。
+    for (const [id, view] of editorTakeoverViews) if (view.requestId === entry.id) editorTakeoverViews.delete(id);
   };
 
   /**
@@ -977,14 +1059,27 @@ export function createWebExtensionUIAdapter(
     try {
       (component as { onSubmit?: unknown }).onSubmit = (text: unknown) => {
         if (editorTakeover !== entry) return;
+        const submitted = typeof text === "string" ? text : String(text ?? "");
+        // 归属规则（issue #107 三轮审查 重要 3，保证「恰好一次」）：
+        // ① 按键同步提交用**来源标签**（dispatchEditorComponentInput 里同步捕获的）；
+        // ② 插件自己调 onSubmit（没有来源）时，交给**最近跟这个接管打过交道、且正在显示
+        //    它**的标签；挑不到就退到「知道这个接管」的标签里最近的一个（手机 / 已收起
+        //    的标签也有输入框，能执行）；③ 一个标签都没上报过（没人连着）时落进会话草稿
+        //    —— 不静默丢，用户下次打开会话就能看到这段文本。
+        const owner = submitOriginClientId
+          ?? editorTakeoverViewers(entry.id, true)[0]
+          ?? editorTakeoverViewers(entry.id, false)[0]
+          ?? null;
+        if (!owner) {
+          if (submitted.trim()) options.writeComposerDraft?.(submitted);
+          return;
+        }
         emit({
           type: "extension_ui_request",
           id: entry.id,
           method: "editorComponentSubmit",
-          text: typeof text === "string" ? text : String(text ?? ""),
-          // 提交只该由**敲字的那个标签**执行（见 lib/types.ts）。这个来源在
-          // dispatchEditorComponentInput 里同步捕获 —— onSubmit 就是在它里面被调的。
-          ...(submitOriginClientId ? { clientId: submitOriginClientId } : {}),
+          text: submitted,
+          clientId: owner,
         });
       };
       // onChange 在 TUI 里驱动的是应用自己的记账（默认编辑器那边是「bash 模式」判定）。
@@ -1885,8 +1980,10 @@ export function createWebExtensionUIAdapter(
       // 回传它的文本 —— 否则 pi-subagents 一类插件会拿旧草稿去判断「输入框是否为空」，判断错人。
       const takeoverEntry = editorTakeover;
       if (takeoverEntry) {
+        // 组件在就**以它为准**，哪怕内容是空的（"" ≠ "读不到"）：接管期间那份草稿镜像
+        // 是陈旧的，回退过去会让插件把「空编辑器」判成有字（issue #107 三轮审查 重要 5）。
         const carried = readEditorTakeoverText(takeoverEntry);
-        if (carried) return carried;
+        if (carried !== null) return carried;
       }
       // SDK 契约（core/extensions/types.d.ts:134）："Get the current text from the
       // core input editor." Web 的「core input editor」是浏览器里的 React 输入框，
@@ -2159,6 +2256,10 @@ export function createWebExtensionUIAdapter(
      */
     dispatchEditorComponentInput(data, clientId) {
       return dispatchEditorInput(data, clientId);
+    },
+
+    recordEditorTakeoverView(requestId, shown, clientId) {
+      recordEditorTakeoverView(requestId, shown, clientId);
     },
 
     /**
