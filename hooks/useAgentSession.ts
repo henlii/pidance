@@ -23,6 +23,7 @@ import { isDefinitiveRejection, readAgentLiveFlag, sendAgentCommand } from "@/li
 import { classifyPromptRejection, generateSubmissionId, isQueueablePromptReason, type PromptReason, type PromptReceipt, type QueueDispatchReceipt } from "@/lib/agent-commands";
 import { clearDraft, forgetDraftIfUnedited, getDraft, setDraft, type ChatDraft } from "@/lib/draft-store";
 import { getOrCreateBrowserSessionRuntimeRegistry, type RegistrySubscription } from "@/lib/browser-session-runtime-registry";
+import { subscribeAppEvents } from "@/lib/app-events-stream";
 import { createActivationRecovery } from "@/lib/activation-recovery";
 import { setExtensionWindowTitle } from "@/lib/window-title";
 import {
@@ -414,6 +415,23 @@ const AGENT_STATE_RECONCILE_MS = 15_000;
  * 唤醒」，间隔太长用户就盯着旧内容等。）
  */
 const RECONCILE_IDLE_MS = 120_000;
+/**
+ * 应用级广播（运行集变化）说「本会话刚要跑」之后，短重试对账的间隔与上限（issue #110）。
+ *
+ * 为什么需要重试：那条广播最早的一帧发生在**宿主 start() 里绑定扩展**的时候，而
+ * `registry.set(host)` 在那之后 —— 这一拍 `getLive` 还是 null，状态里根本没有 `state`
+ * （`{ live: false }`），投影是空操作；等 host 真的进了 registry，运行集已经不含本会话，
+ * 不会再有下一帧。所以「立刻对一次账」不够，要在**未 live 时**短重试几次把「刚进 registry」
+ * 那一拍接住。总时长约 9s，之后由定时对账（未连流档 15s）兜底。
+ *
+ * 为什么不是「立刻补连事件流」：`hasActiveEventStream` 一变 true，定时对账就会掉到
+ * `RECONCILE_IDLE_MS`（120s）且**不再对账**（见下面 tick 的两档判据），而那条流拿不到
+ * 一次性事件（`lib/stream-snapshot.ts` 的 default 分支丢掉 `extension_ui_request`）——
+ * 结果是状态更晚才投影，比不补连更慢。连流交给 `registry.reconcile` 里那句
+ * 「live && !isCurrent → connectEvents」（那一次已经先拿到 state，会先投影）。
+ */
+const APP_EVENTS_WAKE_RETRY_MS = 1_500;
+const APP_EVENTS_WAKE_RETRY_MAX = 6;
 /**
  * 未上锁时探测「对端抢锁」的间隔。
  *
@@ -1297,18 +1315,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           lastKnownModelBySessionRef.current.set(sid, { provider: liveState.model.provider, modelId: liveState.model.modelId });
           setLastKnownModel({ provider: liveState.model.provider, modelId: liveState.model.modelId });
         }
-        if (liveState.extensionStatuses !== undefined) {
-          patchExtensionUiState({ statuses: liveState.extensionStatuses ?? [] });
-        }
-        if (liveState.extensionWidgets !== undefined) {
-          patchExtensionUiState({ widgets: liveState.extensionWidgets ?? [] });
-        }
-        applyExtensionHiddenThinkingLabel(liveState);
-        applyExtensionSlots(liveState);
         if (liveState.queuedMessages !== undefined) {
           applyProjectedQueues(sid, liveState.queuedMessages);
         }
-        // 活动 custom 面板：热状态恢复（#34）。
+        // 扩展 UI 字段（status/widget/按键窗口计数/快捷键/补全/思维标签/页头页脚/能力提示/
+        // 阻塞请求/活动 custom 面板）**只在这里应用一次**：`applyExtensionUiProjection` 是
+        // 唯一那份字段清单，别在这条路上再手抄一遍 —— 手抄段漏一个字段就会让「页面打开/
+        // 切会话」以外的路径拿不到它（issue #110 就是这么漏掉快捷键的）。
         applyExtensionUiProjection(liveState);
       };
 
@@ -2152,20 +2165,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setLastKnownModel({ provider: state.model.provider, modelId: state.model.modelId });
     }
     if (state.isCompacting !== undefined) setIsCompacting(state.isCompacting);
-    if (state.extensionStatuses !== undefined) patchExtensionUiState({ statuses: state.extensionStatuses ?? [] });
-    if (state.extensionWidgets !== undefined) patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
-    applyExtensionListenerCount(state);
-    applyExtensionAutocomplete(state);
-    applyExtensionHiddenThinkingLabel(state);
-    applyExtensionSlots(state);
-    // 能力提示：宿主在浏览器订阅之前发出的那条（host 启动时的扩展加载）靠快照补回来。
-    applyCapabilityNotices(state);
+    // 扩展 UI 的字段应用**只此一处**（issue #110）：这里原先逐字段抄了一遍
+    // applyExtensionUiProjection，结果抄漏了 applyExtensionShortcuts —— 而这条路径
+    // 正是 run 结束与 reconcile 两条最常走的，于是插件注册的快捷键要等页面重开才生效。
+    // 收敛到共用实现后，以后新增字段不会再被某一条路径漏掉。
+    applyExtensionUiProjection(state);
     if (state.queuedMessages !== undefined) {
       applyProjectedQueues(sid, state.queuedMessages);
     }
-    // 活动 custom 面板：刷新/重连后从状态恢复内容与输入入口（#34）。
-    applyActiveCustomUi(state.activeCustomUi);
-  }, [applyActiveCustomUi, applyExtensionHiddenThinkingLabel, applyExtensionListenerCount, applyExtensionSlots, applyProjectedQueues, applyRemoteThinking, patchExtensionUiState, seedTurnMetricsFromState, setLastKnownModel]);
+  }, [applyExtensionUiProjection, applyProjectedQueues, applyRemoteThinking, seedTurnMetricsFromState, setLastKnownModel]);
 
   /**
    * 统一 agent run 结束路径（P2）：agent_end / prompt_done / reconcile idle 三路合一。
@@ -2273,7 +2281,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // agent_end never arrives and the UI stays in streaming state forever.
   // If the server reports idle while we still think it's running, finish
   // through the same path as agent_end / prompt_done.
-  const reconcileAgentState = useCallback(async (sid: string) => {
+  const reconcileAgentState = useCallback(async (sid: string): Promise<boolean> => {
     const registry = getOrCreateBrowserSessionRuntimeRegistry();
     // 这里**不能**用「本端 agentRunning」当门槛：本端打开的是空闲会话时它是 false，
     // 而 host 可能刚被别的标签/端唤醒（本端既没连流、也没收到 agent_start）。
@@ -2283,7 +2291,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const contextGenerationAtRequest = contextUsageGenerationRef.current;
     try {
       const result = await registry.reconcile(sid);
-      if (!result || result.stale) return;
+      if (!result || result.stale) return false;
       const state = result.state as AgentStateResponse | undefined;
       // 迟到响应不得写进已切走的会话：压缩态与读数都以「该响应所属会话」为准，
       // 不读「当前会话」推断目标（否则 A 的压缩态会写进 B 的界面）。
@@ -2319,8 +2327,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (result.shouldFinish) {
         await finishAgentRun(sid, result.runId);
       }
+      // 返回值只给「别的端唤醒 host」那条路用：判据是**服务端说 host 已 live**，
+      // 而不是「出现了事件流」——后者会让定时对账掉到 120s 档（issue #110 审查阻断）。
+      return result.live === true;
     } catch {
       // Network still down — the next poll / visibility / online tick retries.
+      return false;
     }
   }, [applyExtensionUiProjection, applyProjectedQueues, finishAgentRun]);
 
@@ -2339,11 +2351,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 注意：**不能**在这里用 sessionIdRef 决定要不要起定时器 —— effect 首次运行时它
     // 往往还是 null，那样定时器根本不会启动（正是「B 端永远收不到消息」的原因）。
     // 一律启动，每次 tick 再按 sessionIdRef/连流状态决定是否真的 reconcile。
-    // 只在**需要**时轮询，间隔分两档：
-    // - 本端在跑：兜住漏掉的收尾事件，SSE 是主路径，30s 足够；
+    // 只在**需要**时轮询，间隔分两档（`AGENT_STATE_RECONCILE_MS` = 15s / `RECONCILE_IDLE_MS` = 120s）：
+    // - 本端在跑：兜住漏掉的收尾事件（SSE 仍是主路径），15s 一次；
     // - 本端没连上事件流：等的是「host 被别的端唤醒」这件事，间隔太长用户就会
-    //   盯着旧内容等（实测 15s 就已经能感到迟滞），所以放短到 4s；
-    // - 空闲且流是活的：不需要轮询，用一个很长的间隔兜「流悄悄死了」这种极端情况。
+    //   盯着旧内容等，所以也是 15s 一次；
+    // - 其余（空闲**且**流是活的）：不再对账，只用一个很长的间隔兜「流悄悄死了」。
+    //
+    // 这两档的判据是「**有没有活动事件流**」，不是「该不该有」：所以任何把
+    // `ensureEventsConnected` 提前叫起来的地方（哪怕那条流还连不上、或连上了但拿不到
+    // 一次性扩展事件）都会让这一档掉到 120s 且不再对账 —— issue #110 审查抓到的正是
+    // 这个（补连后状态反而更晚才投影）。要主动补齐状态，请用 reconcile（它先拿 state、
+    // 再决定连不连流），不要绕过它直接连流。
     let timer: ReturnType<typeof setTimeout> | null = null;
     const tick = () => {
       const sid = sessionIdRef.current;
@@ -2393,6 +2411,63 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 本进程不知道那一轮在跑时 reconcile 会直接返回，所以必须走状态这条路。
     void loadSession(sid, false, true);
   }, [ensureEventsConnected, reconcileAgentState, loadSession]);
+
+  /**
+   * 别的标签/端把本会话的 host 唤醒时，本端可能一直没有有效事件流（打开空闲会话时
+   * attach 既不 wake 也不连流，而 `/api/agent/<id>/events` 对没有 live host 的会话直接
+   * 404），于是只能靠状态投影 —— 插件在**宿主建立那一刻**注册的东西（按键监听器、快捷键、
+   * 补全 provider）也就跟着丢，要等下一次投影（运行中 15s、空闲最长 120s）或整页刷新
+   * （issue #110）。
+   *
+   * 应用级流（`/api/agent/running/events`）在运行集**变化时**就广播一次（心跳是注释帧，
+   * 订阅者收不到），正好是「本会话刚开始被唤醒」的信号：立刻对一次账，未 live 再短重试几次。
+   * 这里不轮询，也不新建连接类型 —— 复用已有的那条应用级流。
+   *
+   * 只读会话不订阅：不是为了避开 `/api/agent/running/events`（它不按会话判可写），而是
+   * 因为只读会话（子代理子会话）永远不会有属于它的 host，随后的 `/api/agent/<id>/events`
+   * 才是 403。**不要**在这里补连事件流：见 APP_EVENTS_WAKE_RETRY_MS 的说明。
+   */
+  useEffect(() => {
+    const sid = session?.id;
+    if (!sid || session?.readOnly) return;
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempts = 0;
+    const clearRetry = () => {
+      if (retryTimer !== null) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+    };
+    const probe = async (): Promise<void> => {
+      const live = await reconcileAgentState(sid);
+      if (cancelled || live) return;
+      if (attempts >= APP_EVENTS_WAKE_RETRY_MAX) return;
+      attempts += 1;
+      clearRetry();
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        void probe();
+      }, APP_EVENTS_WAKE_RETRY_MS);
+    };
+    const unsubscribe = subscribeAppEvents((payload) => {
+      const data = payload as { type?: unknown; runningSessionIds?: unknown };
+      if (data?.type !== "running" || !Array.isArray(data.runningSessionIds)) return;
+      if (!data.runningSessionIds.includes(sid)) return;
+      const registry = getOrCreateBrowserSessionRuntimeRegistry();
+      // 已有有效流就别动（广播是「运行集变化」级的，不是「你该重连」级的）：
+      // 流是活的说明它由「拿到状态之后再连」的路径建的，投影已经补齐。
+      if (registry.hasActiveEventStream(sid)) return;
+      attempts = 0;
+      clearRetry();
+      void probe();
+    });
+    return () => {
+      cancelled = true;
+      clearRetry();
+      unsubscribe();
+    };
+  }, [session?.id, session?.readOnly, reconcileAgentState]);
 
   useEffect(() => {
     const sid = session?.id;
@@ -4147,14 +4222,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
                 source: "live-hydrate",
               });
             }
-            if (stillCurrent && agentState.state.extensionStatuses !== undefined) {
-              patchExtensionUiState({ statuses: agentState.state.extensionStatuses ?? [] });
-            }
-            if (stillCurrent && agentState.state.extensionWidgets !== undefined) {
-              patchExtensionUiState({ widgets: agentState.state.extensionWidgets ?? [] });
-            }
-            if (stillCurrent) applyExtensionHiddenThinkingLabel(agentState.state);
-            if (stillCurrent) applyExtensionSlots(agentState.state);
             if (agentState.state.queuedMessages !== undefined) {
               applyProjectedQueues(session.id, agentState.state.queuedMessages);
             }
