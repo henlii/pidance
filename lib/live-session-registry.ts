@@ -4,6 +4,7 @@
  */
 import { cacheSessionPath, invalidateSessionListCache, resolveSessionPath } from "./session-reader";
 import { isPlaceholderSessionId } from "./session-id";
+import { sweepStaleUnreadEntries } from "./unread-entry-sweep";
 import { openSessionView } from "./pi-session-io";
 import { getPidancePref, readPidancePrefs, updatePidancePref, type PidancePrefs } from "./pidance-prefs-file";
 import { hasQueuedFollowUp } from "./session-queue";
@@ -373,6 +374,16 @@ export function notifyRunningChange(): void {
           console.error("[pidance] failed to record unread completedAt:", error);
         }
       }
+      // 顺手回收不会再被显示的条目（被删的会话、子代理子会话）。内部按 10 分钟节流，
+      // 所以这里 fire-and-forget 不会变成每次 run 结束都扫一遍目录；
+      // 启动时还有一次（instrumentation.ts），覆盖「只是删了会话、之后没再跑过」的情况。
+      void sweepStaleUnreadEntries()
+        .then((result) => {
+          if (result.swept.length > 0) {
+            console.log(`[pidance] 已回收 ${result.swept.length} 条不会再显示的未读条目`);
+          }
+        })
+        .catch(() => undefined);
     }, 0);
   }
   for (const listener of getRunningListeners()) {
