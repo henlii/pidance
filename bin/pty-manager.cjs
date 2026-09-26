@@ -4,6 +4,7 @@
 const { existsSync, realpathSync } = require("fs");
 const { WebSocketServer } = require("ws");
 const { resolveShell } = require("./pty-shell.cjs");
+const { killPtyProcess } = require("./pty-process.cjs");
 const ptyWss = new WebSocketServer({ noServer: true });
 
 function sanitizeEnv(env) {
@@ -68,17 +69,53 @@ function startPtySession(options) {
     dispose: () => {
       if (disposed) return;
       disposed = true;
-      try {
-        if (proc.pid > 0) process.kill(-proc.pid, "SIGTERM");
-      } catch {
-        /* 进程组可能已不在 */
-      }
-      try {
-        proc.kill("SIGTERM");
-      } catch {
-        /* 已退出 */
-      }
+      killPtyProcess(proc);
     },
+  };
+}
+
+const PTY_HEARTBEAT_MS = 30_000;
+const PTY_HEARTBEAT_MAX_MISSED = 2;
+
+/**
+ * 判断这条连接是真死还是只是安静：手机掉网、进程被冻住时 TCP 不会发 FIN，
+ * 服务端会一直攥着 ws 和它背后的 shell（孤儿进程，还占着端口/内存）。
+ * 按 ping/pong 收尾，连续几轮没有 pong 就 terminate（触发 close → dispose）。
+ * 计时器与 readyState 判定可注入，单测用假计时器驱动。
+ */
+function startPtyHeartbeat(ws, options = {}) {
+  const intervalMs = options.intervalMs ?? PTY_HEARTBEAT_MS;
+  const maxMissed = options.maxMissed ?? PTY_HEARTBEAT_MAX_MISSED;
+  const setIntervalFn = options.setIntervalFn ?? setInterval;
+  const clearIntervalFn = options.clearIntervalFn ?? clearInterval;
+  const isOpen = options.isOpen ?? (() => ws.readyState === 1);
+  let missedPongs = 0;
+  const onPong = () => {
+    missedPongs = 0;
+  };
+  ws.on("pong", onPong);
+  const timer = setIntervalFn(() => {
+    if (!isOpen()) return;
+    if (missedPongs >= maxMissed) {
+      try {
+        ws.terminate();
+      } catch {
+        /* 已断开 */
+      }
+      return;
+    }
+    missedPongs += 1;
+    try {
+      ws.ping();
+    } catch {
+      /* 已断开 */
+    }
+  }, intervalMs);
+  // unref：别让心跳计时器把进程吊在退出前。
+  if (timer && typeof timer.unref === "function") timer.unref();
+  return () => {
+    clearIntervalFn(timer);
+    if (typeof ws.off === "function") ws.off("pong", onPong);
   };
 }
 
@@ -135,8 +172,14 @@ function attachPtyToWebSocket(ws, cwd) {
     if (parsed && parsed.type === "in" && typeof parsed.d === "string") session.write(parsed.d);
     if (parsed && parsed.type === "rs" && parsed.cols > 0 && parsed.rows > 0) session.resize(parsed.cols, parsed.rows);
   });
-  ws.on("close", () => session.dispose());
-  ws.on("error", () => session.dispose());
+  // 心跳与 dispose 一起收：连接没了就别再 ping（也避免计时器残留）。
+  const stopHeartbeat = startPtyHeartbeat(ws);
+  const disposeSession = () => {
+    stopHeartbeat();
+    session.dispose();
+  };
+  ws.on("close", disposeSession);
+  ws.on("error", disposeSession);
   try { ws.send(JSON.stringify({ type: "out", d: "\r\n[pidance] terminal ready\r\n" })); } catch { /* ignore */ }
   return session;
 }
@@ -148,4 +191,4 @@ function completePtyUpgrade(req, socket, head, cwd) {
   });
 }
 
-module.exports = { startPtySession, tryLoadNodePty, resolvePtyCwd, attachPtyToWebSocket, completePtyUpgrade };
+module.exports = { startPtySession, tryLoadNodePty, resolvePtyCwd, attachPtyToWebSocket, completePtyUpgrade, startPtyHeartbeat };
