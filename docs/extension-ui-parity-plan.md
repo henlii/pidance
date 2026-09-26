@@ -147,6 +147,10 @@
   - 选中条目走 `applyCompletion(...)` 由插件给出替换区间（不再由我们猜）。
 - **特殊处理**：只读会话不得为了补全去 `ensureLive`（不抢租约）；IME 组合期不请求；迟到响应按序号丢弃。
 - **验收**：单测（链式包裹、`[]` 不回退、失败回退、AbortSignal、无注册零请求）+ 真装 pi-fff 后用浏览器验 `@` 出插件条目。
+- **已落地**（issue #101，2026-09-26）：宿主维护 provider 链、客户端只在触发上下文问一次；**没注册时零往返**；
+  `null`（本层没有 → 回退我们的文件补全）与 `{items: []}`（插件明确没有 → **不回退**）分成三态，
+  在途是独立状态（`pending` 期间不让提交本地文件项）；取消挂在**那一次请求**的 `req.signal` 上（原先一把全局锁会让多标签互相取消）；
+  `applyCompletion` 的往返有世代检查（输入变过就丢弃）。真浏览器验证：`#q` 弹出插件候选（非 `@` 触发、列表可见）→ Tab → 输入框变成 `qalpha`。
 
 ### B2. `onTerminalInput` 窗口扩容
 
@@ -208,6 +212,10 @@
   - 冲突时按上面探针确认的语义处理，并在清单里标注；
   - handler 需要完整 ctx（cwd/model/abort…）→ 复用既有命令通道下发（不能只发一个 key）。
 - **验收**：单测（映射/保留键/冲突）+ 浏览器按一个可绑组合触发动作。
+- **已落地**（issue #105，2026-09-26）：冲突语义**直接复用 SDK 的 `getShortcuts`**（传「pi-tui 默认键位 + 用户覆盖」的有效键位，
+  因为 SDK 自己的 KeybindingsManager 没有从包入口导出）；被跳过的注册用「空配置 vs 有效键位」两次调用的差集列出来；
+  `getShortcutDiagnostics()` 原文进设置清单；命令通道拒绝执行不可用/未命中的键；不可绑的**不改键**，只写原因。
+  真浏览器验证：状态投影里有 `ctrl+alt+7`，按下后插件 handler 触发（`defaultPrevented: true`）。
 
 ### B6. `registerMarkdownTransformer(transformer)`
 
@@ -227,6 +235,10 @@
 - **特殊处理**：只在分页窗口内做（不扫整条 leaf）；安装/卸载插件时失效缓存；
   链首的 mermaid 转换器要一并跑（否则与 TUI 不一致）。
 - **验收**：单测（同步应用/宽度变化失效/流式/抛错原文/链式含 mermaid）+ 浏览器看 mermaid 与自定义转换生效。
+- **已落地**（issue #106，2026-09-26）：**两条渲染边界**都跑转换器 —— 分页/首屏投影，以及**流式**（`message_start`/`message_update`/`message_end`
+  发出前对**副本**转换，思考块按 `assistant-thinking`，绝不写回 SessionManager 以免双应用）；缓存键含宽度与流式状态；
+  失效会通知活宿主重解析。**有意分叉**：不接 SDK 的链首 mermaid 转换器（它把图渲成 ASCII 行内 code span，会顶掉我们客户端已有的真图渲染），
+  文档与护栏测试都写明了。真环境验证（SSE）：243 帧 `assistant:stream` + 269 帧 `assistant-thinking:stream` + 各一条 `:final`。
 
 ### B8. `setEditorComponent(factory)`（编辑器接管）
 
