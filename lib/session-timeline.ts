@@ -270,6 +270,22 @@ export function collectRenderedLinesByEntryId(
 }
 
 /**
+ * 时间线里每个 entryId **当前**的 renderedLines（只收有合法行的记录，同 id 取第一条）。
+ *
+ * 换色前先记一份：hydrate 落地时要用它判断「这份响应带回来的行 == 换色前的行」
+ * （同一内容在旧主题下重渲染 ⇒ 套回新色），不一致则说明内容变了（⇒ 让磁盘赢）。
+ */
+export function collectTimelineRenderedLines(timeline: Timeline): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const record of timeline) {
+    if (!record.entryId || out.has(record.entryId)) continue;
+    const lines = validRenderedLines(record.message);
+    if (lines) out.set(record.entryId, lines);
+  }
+  return out;
+}
+
+/**
  * 按 entryId 把给定行套回时间线（只换 renderedLines，结构与窗口不动）。
  * 没有任何记录被替换时返回原引用，调用方据此跳过多余的 publish。
  */
@@ -283,14 +299,22 @@ export function applyRenderedLinesByEntryId(
     const lines = record.entryId ? fresh.get(record.entryId) : undefined;
     if (!lines) return record;
     const current = (record.message as { renderedLines?: unknown }).renderedLines;
-    if (sameLines(current, lines)) return record;
+    if (sameRenderedLines(current, lines)) return record;
     changed = true;
     return { ...record, message: { ...record.message, renderedLines: [...lines] } as AgentMessage };
   });
   return changed ? next : timeline;
 }
 
-function sameLines(current: unknown, next: readonly string[]): boolean {
+/**
+ * 两份 renderedLines 是否逐行相同。
+ *
+ * 为什么要按**内容**判断（issue #109 第三轮审查）：换色之后落地的 hydrate 可能是
+ * **换色之前发出**的响应（行还是旧主题），也可能内容已经变了。只看请求发出序号
+ * （`hydrateRequestSeq < recolorSeq`）分不清这两者 —— 后者会把旧渲染盖在更新的内容上。
+ * 出口给 registry 用：incoming 与「被替换掉的那批旧行」一致 ⇒ 同一内容在旧主题下的重渲染。
+ */
+export function sameRenderedLines(current: unknown, next: readonly string[]): boolean {
   return Array.isArray(current)
     && current.length === next.length
     && current.every((line, index) => line === next[index]);
