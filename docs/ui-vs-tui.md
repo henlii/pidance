@@ -166,14 +166,29 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
    **注册时会告知覆盖范围**（issue #74）：`onTerminalInput` 落地时发一条只发一次的 warning（`lib/web-extension-ui.ts` 的 `notifyLimitedSupport`），逐字写明三个窗口——① widget 存在且输入框**聚焦且为空**时，`↓`/`←` 开局、之后方向键/`j`/`k`/`Enter`/`Esc` 才会路由；② 存在**已收起**的扩展面板时 `Esc`、`F1`–`F12`、`Alt+<字符>`、`Ctrl+<字符>`（浏览器保留组合与 `Ctrl+Space` 除外）会路由；③ 插件面板 / overlay / 扩展对话框**显示中**时，除 Meta 组合、浏览器保留的 Ctrl 组合、壳自己的 `Ctrl+K`、`Tab`（焦点遍历）以及**已有 DOM 归属者**（焦点所在的那个控件）的按键之外，都路由给插件——以及「普通打字到不了」。否则插件无从区分「用户没按」和「Web 端收不到」，这块交互会静默消失 —— 但也不能写成「不支持」：按键确实会送达，只是覆盖面窄。**这条提示本身也要能水合**（issue #93）：它走一次性 SSE 事件，而扩展加载发生在浏览器订阅之前，那一刻没有订阅者就永久丢掉（实测：服务端日志 5 次、页面 DOM 0 次），所以宿主把它留成只读快照、`extensionCapabilityNotices` 随状态下发，客户端按 id 去重补进通知队列。
 7. **面板内鼠标事件**：`ExtensionCustomPanel` 把点击换算成字符行列后发 `extension_ui_mouse`，服务端调**面板组件**的 `handleMouse`。只转 click，不转 move / drag / wheel。**`setWidget` 的组件同样收得到**（2026-09-26，issue #103）：卡片**正文区**的点击按同一套换算（`lib/extension-widget-mouse.ts`；字符宽/行高量的是正文区自己 —— 与服务端渲染这些行用的是同一套字体上下文，所以列宽一致。事件里的 `width`/`height` 是**可见正文盒**的格数，**不是** `render(width)` 的列数：pi-tui 的 `Container.handleMouse` 正是用 `y >= event.height` 丢掉可见区以下的点击，所以给的必须是「用户能点到的那块区域」）发 `extension_ui_widget_mouse`，服务端按 **widget key** 调该组件的 `handleMouse`（局部字符坐标）；量不出尺寸（未布局）时这一次点击不转发，不给插件送错坐标。仍然只转 click（不转 move / drag / wheel），**滚动不拦**（往返回来再 preventDefault 已经来不及）。**卡片头（折叠按钮）始终归我们的槽位外壳**，插件只拿正文区；坐标原点也在正文区。触摸：tap → 左键、长按 → 右键；**滑动（超过 10px）与被系统取消的手势都不转发 click**（浏览器滑动后通常不补发，但这不是保证 —— 补发的那次若被当成 tap，插件会看成「点了第 0 行」而误切换整块），长按与滑动之后补发的 click 一律吃掉并复位（标记不跨手势存活，不会永久吞点击）。只有组件真的实现了 `handleMouse` 才在状态投影与 `setWidget` 帧里带 `interactive: true`，前端据它决定要不要为点击付一次往返（字符串数组 widget 永远不可交互）。已装插件里只有 pi-subagents 的 fleet widget 用到它（「第 0 行左键」把**整块**在「一行摘要」与「全列表」之间切，`src/tui/render.ts:2837-2845,2887`）—— 与我们的卡片级折叠并存（两个粒度都能用），方向键驱动的 roster 已在 #83 打通。custom 面板的 overlay 句柄也已实现（2026-09-26，issue #99）：`focus()` 把键盘交给面板（面板隐藏或已摘除时是 no-op，对齐 pi-tui —— 不去唤醒不在屏幕上的面板）、`unfocus({target})` 三态（`target: null` = 谁都不聚焦；不给 options = 交回输入框；给具体组件时因 Web 只能程序化聚焦输入框而按同一落点降级，理由写在实现里）、`getBounds()` 返回**客户端上报**的字符单元格矩形（原点取会话滚动区，与面板鼠标坐标同一元素同源；未挂载或量不出时返回 `undefined`，后台标签不上报）；`nonCapturing` 的 overlay 初始焦点留在编辑器。`hide()` 仍按 pi-tui 契约做成**永久移除**（#76）。
 8. **`getToolsExpanded` / `setToolsExpanded` 自洽**：服务端维护布尔并下发事件，插件 set 之后自己 get 得到的是一致的值；界面上的工具块仍按各自的折叠规则（`setToolsExpanded(true)` 不会展开所有块）。
-9. **没有等价语义的能力改成可见失败**：`setEditorComponent` / `addAutocompleteProvider` 会发一条 warning 通知（每种能力只发一次），不再静默 no-op —— 静默会让插件作者以为生效了（例如 `getEditorComponent()` 永远返回 undefined，插件以为包裹链装上了）。`getAllThemes` / `getTheme` / `setTheme`（#97）与 `setFooter` / `setHeader`（#98）**已经实现**，不再走告警。`setEditorComponent` 仍然告警（Web 输入区是自己的 React 组件，**不会**用插件的工厂去渲染），但工厂值会存下来并被 `getEditorComponent()` 如实回传（SDK 契约是「当前**配置的**工厂」，未配置才是 undefined），「拿旧的包一层再设回去」的写法不再断链（issue #74）。传 `undefined` / 无参的「恢复默认」不算降级，不提示。`setWorkingMessage` / `setWorkingVisible` / `setWorkingIndicator` **已经实现**（不再走告警）。
+9. **没有等价语义的能力改成可见失败**：`setEditorComponent` 会发一条 warning 通知（每种能力只发一次），不再静默 no-op —— 静默会让插件作者以为生效了（例如 `getEditorComponent()` 永远返回 undefined，插件以为包裹链装上了）。`getAllThemes` / `getTheme` / `setTheme`（#97）与 `setFooter` / `setHeader`（#98）**已经实现**，不再走告警。`setEditorComponent` 仍然告警（Web 输入区是自己的 React 组件，**不会**用插件的工厂去渲染），但工厂值会存下来并被 `getEditorComponent()` 如实回传（SDK 契约是「当前**配置的**工厂」，未配置才是 undefined），「拿旧的包一层再设回去」的写法不再断链（issue #74）。传 `undefined` / 无参的「恢复默认」不算降级，不提示。`setWorkingMessage` / `setWorkingVisible` / `setWorkingIndicator` **已经实现**（不再走告警）。
 **`setFooter` / `setHeader` 也已实现**（2026-09-26，issue #98）：插件工厂拿到的组件走与 widget 同一条渲染桥
 （headless `render(width)` → ANSI 行），页头常驻在转写区之上、页脚在我们自己的状态条之上；替换时先 `dispose()` 旧组件
 （对齐 TUI 的 `setExtensionFooter`），`setFooter(undefined)` / `setHeader(undefined)` 恢复内置（页脚回到我们自己的状态条）。
 槽位限高内滚（移动端约 4 行 / 桌面约 6 行），组件抛错或渲染不出行就隐藏槽位并**每种槽位只提示一次**，异常文本不进界面。
 两处**有意分叉**：① TUI 是「替换」整个内置页脚，我们保留状态 chip —— 状态是独立机制，而页脚数据（git 分支等）我们没有等价物，
-真替换会把 `setStatus` 的信息整块吞掉；② 页脚工厂的第三个参数（`ReadonlyFooterDataProvider`）**不传**（宁可不传也不塞缺成员的假对象，
-插件真依赖它会走到「可见失败」而不是静默假数据）。
+真替换会把 `setStatus` 的信息整块吞掉；② 页脚工厂的第三个参数（`ReadonlyFooterDataProvider`）按 SDK 契约给全四个成员
+（`getGitBranch` 恒 `null`、`getAvailableProviderCount` 恒 `0` —— 都没有同步来源）：**不传**会让按官方示例写的页脚
+（工厂里无条件调 `footerData.onBranchChange(...)`）直接抛错、整槽消失。
+
+**`addAutocompleteProvider` 也已实现**（2026-09-26，issue #101）：插件按注册顺序**依次包裹**补全 provider（与 SDK 的 `setupAutocompleteProvider` 同语义），
+`triggerCharacters` **原地**写并集（对象展开会丢掉类实例挂在原型上的方法）。输入区在**触发字符**（`@` token，或插件声明的触发字符所在的词；
+词边界与 pi-tui 的 `autocompleteSeparatorRegex` 同口径 —— 空白与 CJK 标点都算）时才问服务端，防抖 120ms、只认最新一次、单次请求 800ms 超时。
+四种结果区别明确：**插件给了候选**用插件的（选中后用插件的 `applyCompletion` 决定替换区间，替换期间用户改了输入就丢弃这次应用，
+不覆盖新输入）、**插件明确返回空数组**则不显示（不回退）、**在途**同样什么都不显示（不能让用户在这几百毫秒里提交我们自己的文件项，
+那会把插件刻意的「没有候选」盖掉）、**链没给结果/抛错/超时/没注册**才回退到 Pidance 自己的 `@` 文件补全 ——「链没给结果时落到基础 provider」与 TUI 一致。
+没有插件注册 provider 时**一次往返都不发**（门槛是**有效**工厂数：坏工厂不计入，否则每次输入都白付一次注定 `none` 的往返；
+门槛随状态下发，后加载的页面/刚注册的插件拿到后会**立刻用当前输入补问一次**）。
+菜单可见性与「有东西可显示」用同一个判据：插件声明的非 `@` 触发字符不会出现「列表挂进 DOM 却不可见、按键却作用在它上面」。
+**取消挂在这一次请求上**（客户端 AbortSignal → HTTP → 宿主交给插件的 `getSuggestions`）：换输入、关菜单（Esc 也作废在途那次，
+不会自己再弹回来）、开始输入法合成、卸载都会叫停插件侧的原生搜索；不用 host 级共享锁，多标签不会互相取消。
+一处**有意分叉**：`getSuggestions(..., { force })` 恒收到 `false` —— TUI 的 `force` 来自 Tab（显式请求补全），
+而 Web 的 Tab 是**焦点遍历**（刻意留给浏览器，见 `lib/extension-panel-keys.ts`），没有等价的显式入口；正常输入照常给候选。
 **`setHiddenThinkingLabel` 也已实现**（2026-09-25，issue #96）：折叠态思考块的那一行改用插件给的标签
 （TUI 语义就是「收起时只画这个标签，展开才画正文」，依据 `assistant-message.js` 的
 `hidden ? new Text(...hiddenThinkingLabel...) : new Markdown(正文)`），未设置 / 空串 / 纯空白恢复既有的 i18n 摘要；

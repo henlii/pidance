@@ -34,6 +34,15 @@ export interface ExtensionUiState {
    * 静默丢弃会让插件作者以为是自己写错了键。
    */
   shortcuts: ExtensionShortcutEntry[];
+  /**
+   * 插件自动补全的 provider 数量（>0 时前端才需要为一次输入付往返）。
+   *
+   * 与 terminalInputListenerCount 同一类：既有瞬时事件（autocompleteProviders），
+   * 也有状态投影水合（extensionAutocompleteProviderCount）。
+   */
+  autocompleteProviderCount: number;
+  /** 补全链声明的触发字符（并集）；前端据此决定何时请求。 */
+  autocompleteTriggerCharacters: string[];
   /** 扩展定制的运行提示：文案（setWorkingMessage）。 */
   workingMessage: string | null;
   /** 扩展是否允许显示运行提示行（setWorkingVisible，默认 true）。 */
@@ -73,6 +82,8 @@ export function createEmptyExtensionUiState(  partial?: Partial<Pick<ExtensionUi
     footer: null,
     terminalInputListenerCount: partial?.terminalInputListenerCount ?? 0,
     shortcuts: partial?.shortcuts ?? [],
+    autocompleteProviderCount: 0,
+    autocompleteTriggerCharacters: [],
     workingMessage: null,
     workingVisible: true,
     workingIndicator: null,
@@ -296,6 +307,9 @@ export function resetExtensionUiForSession(state: ExtensionUiState): ExtensionUi
     header: null,
     footer: null,
     terminalInputListenerCount: 0,
+    // 补全 provider 也是**这个会话**的宿主注册的：新会话由它自己的水合填回。
+    autocompleteProviderCount: 0,
+    autocompleteTriggerCharacters: [],
     workingMessage: null,
     workingVisible: true,
     workingIndicator: null,
@@ -405,6 +419,17 @@ export function applyExtensionUiRequest(
         : { state, effects: [] };
     case "terminalInputListeners":
       return { state: { ...state, terminalInputListenerCount: request.count }, effects: [] };
+    case "autocompleteProviders":
+      return {
+        state: {
+          ...state,
+          autocompleteProviderCount: request.count,
+          autocompleteTriggerCharacters: Array.isArray(request.triggerCharacters)
+            ? request.triggerCharacters.filter((c: unknown): c is string => typeof c === "string" && c !== "")
+            : [],
+        },
+        effects: [],
+      };
     case "setHiddenThinkingLabel":
       return state.hiddenThinkingLabel === request.label
         ? { state, effects: [] }

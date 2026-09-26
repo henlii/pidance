@@ -334,6 +334,7 @@ export class SdkSessionHost {
   private unsubscribeMarkdownInvalidation: (() => void) | null = null;
   private unsubscribe: (() => void) | null = null;
   private extensionUi: WebExtensionUIAdapter | null = null;
+  /** 在途的补全请求（issue #101）：新请求先 abort 上一个，插件侧的原生搜索才停得下来。 */
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   /** ensureLive/state?wake 与后续首个写命令之间的短暂交接窗口。 */
   private startupHoldTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2794,6 +2795,10 @@ export class SdkSessionHost {
       extensionShortcuts: shortcutState.entries,
       // SDK 的诊断原文（与 TUI 打印的是同一句英文）：设置里照抄给用户对照，不做二次翻译。
       extensionShortcutDiagnostics: shortcutState.diagnostics,
+      // 插件补全的门槛值同理必须能水合：只靠瞬时事件的话，页面在插件注册补全之后才加载就
+      // 永远拿不到真值，门槛恒为 0，补全永不请求（与 terminalInputListeners 同一个坑）。
+      extensionAutocompleteProviderCount: this.extensionUi?.autocompleteProviderCount ?? 0,
+      extensionAutocompleteTriggerCharacters: [...(this.extensionUi?.autocompleteTriggerCharacters ?? [])],
       // 插件自定义的折叠思考标签：与监听器计数同理 —— 插件设一次、页面后加载就丢，
       // 所以必须进水合快照（SSE 事件仍照发，做增量更新）。
       hiddenThinkingLabel: this.extensionUi?.hiddenThinkingLabel ?? null,
@@ -2899,7 +2904,12 @@ export class SdkSessionHost {
     return { entryId, binary };
   }
 
-  async send(command: Record<string, unknown>, ticket?: symbol): Promise<unknown> {
+  async send(
+    command: Record<string, unknown>,
+    ticket?: symbol,
+    /** 这次命令所属的 HTTP 请求。取消语义（例如补全要停下插件的搜索）挂在它上面。 */
+    options?: { signal?: AbortSignal },
+  ): Promise<unknown> {
     if (!this.runtime) throw new Error("SDK session is not alive");
     const type = command.type as string;
     // get_state / ensure_session 都是只读预检（浏览器「新建会话占位」会先 ensure
@@ -3297,6 +3307,74 @@ export class SdkSessionHost {
         session.setActiveToolsByName(names);
         this.activeToolNames = names;
         return null;
+      }
+
+      /**
+       * 插件自动补全（issue #101）：客户端按触发字符问一次，宿主把输入行交给插件链。
+       *
+       * 取消挂在**这一次请求**的 signal 上：插件链里的实现（如 pi-fff）用 `options.signal` 取消
+       * 自己的原生搜索，而客户端的 AbortController 只断 HTTP —— 于是「客户端不再想要这次结果」
+       * （换输入、关菜单、开始输入法合成、卸载）就等于 `req.signal` 触发，宿主据此叫停插件的搜索。
+       * 早期实现用的是一把 host 级共享的锁，多标签下会互相取消：另一个标签的补全会把这一次
+       * 打成 superseded，本该显示插件候选的一方被换成本地文件列表。
+       */
+      case "completion_suggestions": {
+        const lines = Array.isArray(command.lines)
+          ? (command.lines as unknown[]).filter((l): l is string => typeof l === "string")
+          : [];
+        const cursorLine = Number(command.cursorLine);
+        const cursorCol = Number(command.cursorCol);
+        if (!Number.isInteger(cursorLine) || !Number.isInteger(cursorCol)) {
+          return { result: { kind: "invalid-request" } };
+        }
+        if (lines.length === 0 || cursorLine < 0 || cursorLine >= lines.length || cursorCol < 0) {
+          return { result: { kind: "invalid-request" } };
+        }
+        if (cursorCol > (lines[cursorLine] as string).length) {
+          return { result: { kind: "invalid-request" } };
+        }
+        const signal = options?.signal ?? new AbortController().signal;
+        const outcome = this.extensionUi
+          ? await this.extensionUi.suggestCompletions({
+              lines,
+              cursorLine,
+              cursorCol,
+              force: command.force === true,
+              signal,
+            })
+          : { kind: "no-provider" as const };
+        return { result: outcome };
+      }
+
+      /** 应用一个候选：替换区间由插件链的 `applyCompletion` 决定（issue #101）。 */
+      case "completion_apply": {
+        const lines = Array.isArray(command.lines)
+          ? (command.lines as unknown[]).filter((l): l is string => typeof l === "string")
+          : [];
+        const cursorLine = Number(command.cursorLine);
+        const cursorCol = Number(command.cursorCol);
+        const item = command.item as { value?: unknown; label?: unknown; description?: unknown } | undefined;
+        const prefix = typeof command.prefix === "string" ? command.prefix : "";
+        if (!Number.isInteger(cursorLine) || !Number.isInteger(cursorCol)) return { result: null };
+        if (lines.length === 0 || cursorLine < 0 || cursorLine >= lines.length || cursorCol < 0) {
+          return { result: null };
+        }
+        if (!item || typeof item.value !== "string" || item.value === "") return { result: null };
+        const normalizedItem = {
+          value: item.value,
+          label: typeof item.label === "string" && item.label !== "" ? item.label : item.value,
+          ...(typeof item.description === "string" && item.description !== ""
+            ? { description: item.description }
+            : {}),
+        };
+        const applied = this.extensionUi?.applyCompletion({
+          lines,
+          cursorLine,
+          cursorCol,
+          item: normalizedItem,
+          prefix,
+        });
+        return { result: applied ?? null };
       }
 
       case "get_command_argument_completions": {

@@ -329,6 +329,18 @@ export type ExtensionUiRequest =
   | {
       type: "extension_ui_request";
       id: string;
+      /**
+       * 插件自动补全（`ctx.ui.addAutocompleteProvider`）的 provider 数量与触发字符。
+       *
+       * count 为 0 时前端**完全不问**（没有插件补全就零往返，用自己的文件补全）。
+       */
+      method: "autocompleteProviders";
+      count: number;
+      triggerCharacters?: string[];
+    }
+  | {
+      type: "extension_ui_request";
+      id: string;
       method: "setWorkingMessage";
       /** null = 恢复默认文案。 */
       message: string | null;

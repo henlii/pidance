@@ -21,7 +21,7 @@ export async function POST(
           const receipt = await sessionService.submitPrompt(id, command);
           return NextResponse.json({ success: true, data: receipt });
         }
-        const result = await sessionService.send(id, command);
+        const result = await sessionService.send(id, command, { signal: req.signal });
         return NextResponse.json({ success: true, data: result });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -31,7 +31,7 @@ export async function POST(
         throw error;
       }
     }
-    const result = await sessionService.send(id, body as { type: string; [key: string]: unknown });
+    const result = await sessionService.send(id, body as { type: string; [key: string]: unknown }, { signal: req.signal });
     return NextResponse.json({ success: true, data: result });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

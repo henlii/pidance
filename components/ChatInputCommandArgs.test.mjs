@@ -93,8 +93,17 @@ function argQueryFor({ value, caret = null, commands = [{ name: "mcp", hasArgume
 }
 
 /** handleKeyDown 的环境：只给参数菜单分支与「会不会发出去」需要的桩。 */
-function keydownEnv({ argMenuOpen = true, argItems = [{ value: "token set ", label: "set" }], argActiveIndex = 0, isMobile = false } = {}) {
-  const calls = { applied: [], prevented: 0, sent: 0, items: [], seq: 0, loading: [] };
+function keydownEnv({
+  argMenuOpen = true,
+  argItems = [{ value: "token set ", label: "set" }],
+  argActiveIndex = 0,
+  isMobile = false,
+  atMenuVisible = false,
+  atQuery = null,
+  atMenuItems = [],
+  atMenuOpen = false,
+} = {}) {
+  const calls = { applied: [], prevented: 0, sent: 0, items: [], seq: 0, loading: [], atMenuOpen: [], cancelled: 0 };
   const env = {
     COMPOSITION_END_ENTER_GRACE_MS: 100,
     isComposingRef: { current: false },
@@ -115,13 +124,17 @@ function keydownEnv({ argMenuOpen = true, argItems = [{ value: "token set ", lab
     getNextSlashIndex: () => 0,
     setSlashActiveIndex: () => {},
     setSlashMenuOpen: () => {},
-    atMenuOpen: false,
-    atQuery: null,
-    atMatches: [],
+    // 菜单可见性由 atMenuVisible 汇总（`@` token 或**有东西可显示**的插件状态），
+    // 候选列表是统一的 atMenuItems（文件项 / 插件项，issue #101）。
+    atMenuVisible,
+    atMenuOpen,
+    atQuery,
+    atMenuItems,
     atActiveIndex: 0,
-    applyAtCompletion: () => {},
+    applyMenuItem: () => {},
     setAtActiveIndex: () => {},
-    setAtMenuOpen: () => {},
+    setAtMenuOpen: (next) => calls.atMenuOpen.push(next),
+    cancelPluginCompletion: () => { calls.cancelled += 1; },
     isStreaming: false,
     isMobile,
     streamingEnterDefault: "send",
@@ -228,4 +241,72 @@ test("源码契约：取候选的 effect 依赖稳定原始值，而不是每次
   const effectStart = source.indexOf("if (argCommandName === null || argPrefix === null");
   const effectBody = source.slice(effectStart, source.indexOf("}, [argCommandName", effectStart));
   assert.ok(!effectBody.includes("argQuery"), "effect 体内不得引用 argQuery 对象（会被 exhaustive-deps 记一条）");
+});
+
+// ---------------------------------------------------------------------------
+// issue #101 审查：插件补全的两条边界
+// ---------------------------------------------------------------------------
+
+test("handleKeyDown：Esc 关掉插件菜单的同时作废在途请求（否则响应回来会把菜单又弹开）", () => {
+  const { handler, calls, event } = keydownEnv({
+    argMenuOpen: false,
+    atMenuVisible: true,
+    atQuery: null,
+    atMenuItems: [{ kind: "plugin", item: { value: "x", label: "x" } }],
+  });
+  handler(event("Escape"));
+  assert.equal(calls.atMenuOpen.at(-1), false, "菜单要关掉");
+  assert.equal(calls.cancelled, 1, "在途请求必须作废（否则 effect 会再把菜单打开）");
+});
+
+/** applyMenuItem 的最小环境：textarea 带 value（世代检查读的就是它）。 */
+function applyEnv() {
+  const state = { written: [], textarea: { value: "@sr", selectionStart: 3, style: {}, focus() {}, setSelectionRange() {} } };
+  let resolveApply = null;
+  const env = {
+    applyAtCompletion: () => {},
+    onApplyCompletionSuggestion: () => new Promise((resolve) => { resolveApply = resolve; }),
+    pluginCompletion: { status: "plugin", items: [{ value: "src/a.ts", label: "src/a.ts" }], prefix: "@sr" },
+    updateAtQuery: () => {},
+    value: "@sr",
+    textareaRef: { current: state.textarea },
+    setValue: (next) => state.written.push(next),
+    requestAnimationFrame: (fn) => fn(),
+  };
+  return { apply: callback("applyMenuItem", env), state, resolve: (value) => resolveApply(value) };
+}
+
+test("applyMenuItem：往返期间用户继续打字，回来的整段文本不得盖掉新输入", async () => {
+  const { apply, state, resolve } = applyEnv();
+  apply({ kind: "plugin", item: { value: "src/a.ts", label: "src/a.ts" } });
+  // 往返期间用户又敲了字：这次应用已经过期
+  state.textarea.value = "@src/";
+  resolve({ lines: ["@src/a.ts"], cursorLine: 0, cursorCol: 9 });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(state.written, [], "输入已变 → 不得写回");
+});
+
+test("applyMenuItem：输入没变时照常写回（世代检查不能把正常路径也挡掉）", async () => {
+  const { apply, state, resolve } = applyEnv();
+  apply({ kind: "plugin", item: { value: "src/a.ts", label: "src/a.ts" } });
+  resolve({ lines: ["@src/a.ts"], cursorLine: 0, cursorCol: 9 });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(state.written, ["@src/a.ts"]);
+});
+
+test("源码契约：浮层的 open 用可见性判据（不能再是 atQuery !== null）", () => {
+  const source = readFileSync(SOURCE, "utf8");
+  const overlayStart = source.indexOf("const atOverlay = useAnchoredOverlay({");
+  assert.ok(overlayStart > 0, "找不到 atOverlay");
+  const block = source.slice(overlayStart, source.indexOf("})", overlayStart));
+  assert.match(block, /open: atMenuVisible/, "open 必须与可见性判据一致（非 @ 触发也要真的可见）");
+  assert.ok(!block.includes("atQuery !== null"), "不能再按 atQuery 判断——那正是「隐藏却吃键」的来源");
+});
+
+test("源码契约：门槛/触发字符变化时用当前输入重跑一次判定（后加载的插件不必等到下一次按键）", () => {
+  const source = readFileSync(SOURCE, "utf8");
+  const effect = source.indexOf("updateAtQuery(el?.value ?? value");
+  assert.ok(effect > 0, "找不到补发触发判定的 effect");
+  const depsEnd = source.indexOf("[pluginCompletionEnabled, pluginTriggerKey, updateAtQuery]");
+  assert.ok(depsEnd > effect, "effect 依赖必须是门槛与触发字符（否则不会在它们变化时重跑）");
 });

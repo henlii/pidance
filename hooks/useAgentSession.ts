@@ -54,6 +54,7 @@ import {
   sameSlotLines,
 } from "@/lib/extension-ui-bridge";
 import type { ExtensionUiBlockingRequest } from "@/lib/extension-ui-bridge";
+import type { CompletionOutcome } from "@/lib/completion-request";
 import { useExtensionUiState, type ExtensionUiDialogRequest, type ExtensionUiCustomRequest } from "@/hooks/useExtensionUiState";
 import { useNoticeState } from "@/hooks/useNoticeState";
 import { parseLatestTodoSnapshot } from "@/lib/todo-parser";
@@ -244,6 +245,15 @@ type AgentStateResponse = {
    * 缺字段 = 旧 Host：保持本地现状（不要清零），否则会把已有的清单抹掉。
    */
   extensionShortcuts?: ExtensionShortcutEntry[];
+  /**
+   * 插件自动补全 provider 数量（issue #101）。
+   *
+   * 缺字段 = 旧 Host：保持本地现状（不要清零，否则会把 SSE 事件刚带来的真值抹掉）。
+   * 0 = 没有插件补全，前端不请求、直接用我们自己的文件补全。
+   */
+  extensionAutocompleteProviderCount?: number;
+  /** 补全链声明的触发字符（并集）。 */
+  extensionAutocompleteTriggerCharacters?: string[];
   /**
    * 插件自定义的折叠思考标签。
    *
@@ -635,6 +645,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets,
     extensionHeader, extensionFooter,
     extensionTerminalInputListenerCount, extensionShortcuts,
+    extensionAutocompleteProviderCount,
+    extensionAutocompleteTriggerCharacters,
     extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator,
     extensionHiddenThinkingLabel,
     extensionToolsExpandedRequest,
@@ -674,6 +686,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * 常常还没订阅（SSE 事件直接丢）。所以凡是从服务端拿状态的地方都用快照补齐；
    * 字段缺失（旧 Host）时保持本地现状，不要清成 null。
    */
+  /**
+   * 应用状态里的插件补全能力（数量 + 触发字符）。
+   *
+   * 与按键监听器计数同一个坑：只靠瞬时事件的话，页面在插件注册补全之后才加载就永远
+   * 拿不到真值，门槛恒为 0（补全永不请求）。缺字段（旧 Host）保持本地现状。
+   */
+  const applyExtensionAutocomplete = useCallback((state?: AgentStateResponse | null) => {
+    if (state?.extensionAutocompleteProviderCount === undefined) return;
+    patchExtensionUiState({
+      autocompleteProviderCount: state.extensionAutocompleteProviderCount,
+      autocompleteTriggerCharacters: Array.isArray(state.extensionAutocompleteTriggerCharacters)
+        ? state.extensionAutocompleteTriggerCharacters.filter((c): c is string => typeof c === "string" && c !== "")
+        : [],
+    });
+  }, [patchExtensionUiState]);
+
   const applyExtensionHiddenThinkingLabel = useCallback(
     (state?: AgentStateResponse | null) => {
       if (state?.hiddenThinkingLabel === undefined) return;
@@ -805,6 +833,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     applyExtensionListenerCount(state);
     applyExtensionShortcuts(state);
+    applyExtensionAutocomplete(state);
     applyExtensionHiddenThinkingLabel(state);
     applyExtensionSlots(state);
     applyCapabilityNotices(state);
@@ -1769,6 +1798,65 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isReadOnly, session?.id, sendAgentCommand]);
 
+  /**
+   * 问插件补全链要候选（issue #101）。
+   *
+   * 与命令参数补全同一套：失败一律当「没有插件结果」返回 error，由调用方回退到我们自己的
+   * `@` 文件补全 —— 补全坏了不该让输入框变哑。
+   * `signal` 由调用方（调度器）持有：被取代的请求会被 abort，插件的原生搜索随之停下。
+   */
+  const loadCompletionSuggestions = useCallback(async (input: {
+    lines: string[];
+    cursorLine: number;
+    cursorCol: number;
+    force?: boolean;
+    signal: AbortSignal;
+  }): Promise<CompletionOutcome> => {
+    const sid = sessionIdRef.current ?? session?.id ?? null;
+    // 只读会话：不为了补全去启动/唤醒宿主（那会抢 writer 租约）。
+    if (!sid || isReadOnly) return { kind: "unavailable" };
+    try {
+      const data = await sendAgentCommand<{ result?: CompletionOutcome }>(sid, {
+        type: "completion_suggestions",
+        lines: input.lines,
+        cursorLine: input.cursorLine,
+        cursorCol: input.cursorCol,
+        ...(input.force === true ? { force: true } : {}),
+      }, { signal: input.signal });
+      return data?.result ?? { kind: "error" };
+    } catch {
+      return { kind: "error" };
+    }
+  }, [isReadOnly, session?.id, sendAgentCommand]);
+
+  /**
+   * 应用一个**插件**候选：替换区间由插件链的 `applyCompletion` 决定（issue #101）。
+   * 返回 null 表示链没给出可应用的结果，调用方保持文本不变。
+   */
+  const applyCompletionSuggestion = useCallback(async (input: {
+    lines: string[];
+    cursorLine: number;
+    cursorCol: number;
+    item: { value: string; label: string; description?: string };
+    prefix: string;
+  }): Promise<{ lines: string[]; cursorLine: number; cursorCol: number } | null> => {
+    const sid = sessionIdRef.current ?? session?.id ?? null;
+    if (!sid || isReadOnly) return null;
+    try {
+      const data = await sendAgentCommand<{ result?: { lines: string[]; cursorLine: number; cursorCol: number } | null }>(sid, {
+        type: "completion_apply",
+        lines: input.lines,
+        cursorLine: input.cursorLine,
+        cursorCol: input.cursorCol,
+        item: input.item,
+        prefix: input.prefix,
+      });
+      return data?.result ?? null;
+    } catch {
+      return null;
+    }
+  }, [isReadOnly, session?.id, sendAgentCommand]);
+
   const ensureEventsConnected = useCallback((sid: string) => {
     if (!capabilities.canConnectEvents) return;
     const registry = getOrCreateBrowserSessionRuntimeRegistry();
@@ -2067,6 +2155,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (state.extensionStatuses !== undefined) patchExtensionUiState({ statuses: state.extensionStatuses ?? [] });
     if (state.extensionWidgets !== undefined) patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
     applyExtensionListenerCount(state);
+    applyExtensionAutocomplete(state);
     applyExtensionHiddenThinkingLabel(state);
     applyExtensionSlots(state);
     // 能力提示：宿主在浏览器订阅之前发出的那条（host 启动时的扩展加载）靠快照补回来。
@@ -4177,6 +4266,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleBuiltinSlashCommand,
     // REFACTOR-DEAD: handleToolPresetChange 已注释（P0c 工具不收窄）。
     handleThinkingLevelChange, loadTools, loadSlashCommands, loadCommandArgumentCompletions, setActiveLeafId, setData, setMessages,
+    loadCompletionSuggestions, applyCompletionSuggestion,
+    extensionAutocompleteProviderCount, extensionAutocompleteTriggerCharacters,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
     // Workspace History（仅 type:prompt 派发到扩展）
