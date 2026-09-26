@@ -23,6 +23,7 @@ import { isDefinitiveRejection, readAgentLiveFlag, sendAgentCommand } from "@/li
 import { classifyPromptRejection, generateSubmissionId, isQueueablePromptReason, type PromptReason, type PromptReceipt, type QueueDispatchReceipt } from "@/lib/agent-commands";
 import { clearDraft, forgetDraftIfUnedited, getDraft, setDraft, type ChatDraft } from "@/lib/draft-store";
 import { getOrCreateBrowserSessionRuntimeRegistry, type RegistrySubscription } from "@/lib/browser-session-runtime-registry";
+import { subscribeAppEvents } from "@/lib/app-events-stream";
 import { createActivationRecovery } from "@/lib/activation-recovery";
 import { setExtensionWindowTitle } from "@/lib/window-title";
 import {
@@ -2152,20 +2153,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setLastKnownModel({ provider: state.model.provider, modelId: state.model.modelId });
     }
     if (state.isCompacting !== undefined) setIsCompacting(state.isCompacting);
-    if (state.extensionStatuses !== undefined) patchExtensionUiState({ statuses: state.extensionStatuses ?? [] });
-    if (state.extensionWidgets !== undefined) patchExtensionUiState({ widgets: state.extensionWidgets ?? [] });
-    applyExtensionListenerCount(state);
-    applyExtensionAutocomplete(state);
-    applyExtensionHiddenThinkingLabel(state);
-    applyExtensionSlots(state);
-    // 能力提示：宿主在浏览器订阅之前发出的那条（host 启动时的扩展加载）靠快照补回来。
-    applyCapabilityNotices(state);
+    // 扩展 UI 的字段应用**只此一处**（issue #110）：这里原先逐字段抄了一遍
+    // applyExtensionUiProjection，结果抄漏了 applyExtensionShortcuts —— 而这条路径
+    // 正是 run 结束与 reconcile 两条最常走的，于是插件注册的快捷键要等页面重开才生效。
+    // 收敛到共用实现后，以后新增字段不会再被某一条路径漏掉。
+    applyExtensionUiProjection(state);
     if (state.queuedMessages !== undefined) {
       applyProjectedQueues(sid, state.queuedMessages);
     }
-    // 活动 custom 面板：刷新/重连后从状态恢复内容与输入入口（#34）。
-    applyActiveCustomUi(state.activeCustomUi);
-  }, [applyActiveCustomUi, applyExtensionHiddenThinkingLabel, applyExtensionListenerCount, applyExtensionSlots, applyProjectedQueues, applyRemoteThinking, patchExtensionUiState, seedTurnMetricsFromState, setLastKnownModel]);
+  }, [applyExtensionUiProjection, applyProjectedQueues, applyRemoteThinking, seedTurnMetricsFromState, setLastKnownModel]);
 
   /**
    * 统一 agent run 结束路径（P2）：agent_end / prompt_done / reconcile idle 三路合一。
@@ -2393,6 +2389,32 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 本进程不知道那一轮在跑时 reconcile 会直接返回，所以必须走状态这条路。
     void loadSession(sid, false, true);
   }, [ensureEventsConnected, reconcileAgentState, loadSession]);
+
+  /**
+   * 别的标签/端把本会话的 host 唤醒时，本端可能一直没有有效事件流（打开空闲会话时
+   * attach 既不 wake 也不连流，而 `/api/agent/<id>/events` 对没有 live host 的会话直接
+   * 404），于是只能靠状态投影 —— 插件在**宿主建立那一刻**注册的东西（按键监听器、快捷键、
+   * 补全 provider）也就跟着丢，要等下一次投影（运行中 15s、空闲最长 120s）或整页刷新
+   * （issue #110）。
+   *
+   * 应用级流（`/api/agent/running/events`）在运行集**变化时**就广播一次（心跳是注释帧，
+   * 订阅者收不到），正好是「本会话刚刚开始跑」的信号：补连一次事件流并把状态补齐。
+   * 这里不轮询，也不新建连接类型 —— 复用已有的那条应用级流。
+   */
+  useEffect(() => {
+    const sid = session?.id;
+    if (!sid || session?.readOnly) return;
+    return subscribeAppEvents((payload) => {
+      const data = payload as { type?: unknown; runningSessionIds?: unknown };
+      if (data?.type !== "running" || !Array.isArray(data.runningSessionIds)) return;
+      if (!data.runningSessionIds.includes(sid)) return;
+      const registry = getOrCreateBrowserSessionRuntimeRegistry();
+      // 已有有效流就别动（广播是「运行集变化」级的，不是「你该重连」级的）。
+      if (registry.hasActiveEventStream(sid)) return;
+      ensureEventsConnected(sid);
+      void reconcileAgentState(sid);
+    });
+  }, [session?.id, session?.readOnly, ensureEventsConnected, reconcileAgentState]);
 
   useEffect(() => {
     const sid = session?.id;

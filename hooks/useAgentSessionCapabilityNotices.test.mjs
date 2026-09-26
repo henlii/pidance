@@ -241,8 +241,14 @@ test("两条 hydration 路径都要补能力提示（否则冷挂载那条仍然
   visit(tree);
   for (const [name, body] of Object.entries(bodies)) {
     assert.ok(body.length > 0, "Missing " + name + " in useAgentSession.ts");
-    assert.match(body, /applyCapabilityNotices\(state\)/, name + " 必须补能力提示（冷挂载与热状态各一条路径）");
+    void body;
   }
+  // #110 之后两条路径**共用同一份投影**：热状态那条自己应用字段，
+  // run 结束/reconcile 那条委托过去。断言委托存在（并禁止它再逐字段抄一遍），
+  // 否则又会退化成「漏抄一个字段」。
+  assert.match(bodies.applyExtensionUiProjection, /applyCapabilityNotices\(state\)/, "统一投影必须补能力提示（冷挂载那条路径）");
+  assert.match(bodies.applyAgentStateSnapshot, /applyExtensionUiProjection\(state\)/, "run 结束/reconcile 路径必须委托给统一投影");
+  assert.doesNotMatch(bodies.applyAgentStateSnapshot, /applyCapabilityNotices\(state\)/, "不要在单条路径里再逐字段抄一遍扩展 UI 投影");
 });
 
 test("SSE 那条通知分支必须认领（否则页面已订阅时发出的提示仍然关不掉）", () => {
