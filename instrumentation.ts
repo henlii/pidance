@@ -39,6 +39,20 @@ export async function register(): Promise<void> {
     console.error("[pidance] 回收运行租约失败（已忽略）:", error);
   }
 
+  // 未读条目兜底回收：被删掉的会话、以及恒不显示未读的子代理子会话（侧栏只对
+  // 非 subagent 会话显示未读）会在 unreadSessionState 里留下永远清不掉的条目。
+  // run 结束时也会惰性触发一次；这里是「只是删了会话、之后没再跑过」的兜底。
+  try {
+    const { sweepStaleUnreadEntries } = await import("@/lib/unread-entry-sweep");
+    const swept = await sweepStaleUnreadEntries();
+    if (swept.swept.length > 0) {
+      console.log(`[pidance] 已回收 ${swept.swept.length} 条不会再显示的未读条目`);
+    }
+  } catch (error) {
+    // 回收失败不得影响服务启动（下次启动再清）。
+    console.error("[pidance] 回收未读条目失败（已忽略）:", error);
+  }
+
   // 附件兜底回收：超过保留期且已被任何队列/会话引用不到的文件才会删（引用集合
   // 读不完整时自身会放弃）。主要针对崩溃残留与已投递消息的模型副本：
   // 「删除附件即回收」走客户端主动 DELETE，这里是长尾兜底。

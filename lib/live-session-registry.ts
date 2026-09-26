@@ -4,6 +4,7 @@
  */
 import { cacheSessionPath, invalidateSessionListCache, resolveSessionPath } from "./session-reader";
 import { isPlaceholderSessionId } from "./session-id";
+import { sweepStaleUnreadEntries } from "./unread-entry-sweep";
 import { openSessionView } from "./pi-session-io";
 import { getPidancePref, readPidancePrefs, updatePidancePref, type PidancePrefs } from "./pidance-prefs-file";
 import { hasQueuedFollowUp } from "./session-queue";
@@ -360,6 +361,10 @@ export function notifyRunningChange(): void {
   // 未读改跨端（#65）：run 结束由**服务端**记时刻，这样即使当时没有任何浏览器开着，
   // 未读也是准的；各端只负责写自己的 readAt（未读 ⟺ completedAt > readAt，两侧都是
   // 单调时间戳取并集，不需要 CAS）。写盘挪到事件回调之外，避免拖住运行集广播。
+  // 这里**不为子代理子会话加过滤**：它们的会话是 readOnly，写入口（ensureLive/start/send
+  // 都走 requireWritableSession）拦得住，正常路径下进不了这个集合；唯一窄缝是
+  // recoverFollowUpQueues 在残留队列上绕过 readOnly，真绕过去也会被回收在宽限期后清掉。
+  // 回收的判据就是「侧栏会不会显示它的未读」：见 lib/unread-entry-sweep.ts。
   const finished = lastActuallyRunningIds.filter((id) => !actuallyRunning.includes(id) && !isPlaceholderSessionId(id));
   lastActuallyRunningIds = [...actuallyRunning];
   if (finished.length > 0) {
@@ -373,6 +378,16 @@ export function notifyRunningChange(): void {
           console.error("[pidance] failed to record unread completedAt:", error);
         }
       }
+      // 顺手回收不会再被显示的条目（被删的会话、子代理子会话）。内部按 10 分钟节流，
+      // 所以这里 fire-and-forget 不会变成每次 run 结束都扫一遍目录；
+      // 启动时还有一次（instrumentation.ts），覆盖「只是删了会话、之后没再跑过」的情况。
+      void sweepStaleUnreadEntries()
+        .then((result) => {
+          if (result.swept.length > 0) {
+            console.log(`[pidance] 已回收 ${result.swept.length} 条不会再显示的未读条目`);
+          }
+        })
+        .catch(() => undefined);
     }, 0);
   }
   for (const listener of getRunningListeners()) {
