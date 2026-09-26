@@ -29,6 +29,22 @@ function waitExit(child, timeoutMs) {
   });
 }
 
+test("worker 收到父进程的 bye 帧会退出（Windows 上信号不可达，正常关闭走这条）", { skip: !hasPty }, async () => {
+  const child = startWorker();
+  try {
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.equal(child.exitCode, null, "worker 起来后应仍在运行");
+    child.stdin.write(`${JSON.stringify({ type: "bye" })}\n`);
+    assert.equal(await waitExit(child, 4000), true, "bye 帧后 worker 应退出");
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      /* 已退出 */
+    }
+  }
+});
+
 test("worker 收到 SIGTERM 会退出", { skip: !hasPty }, async () => {
   const child = startWorker();
   try {

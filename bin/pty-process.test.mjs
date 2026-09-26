@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn } from "node:child_process";
-const { killPtyProcess, startParentWatchdog } = await import("./pty-process.cjs");
+const { killPtyProcess, startParentWatchdog, requestWorkerShutdown } = await import("./pty-process.cjs");
 
 const isAlive = (pid) => {
   try {
@@ -34,11 +34,30 @@ test("非法 pid 时什么都不做", () => {
 test("进程组不存在时仍会按 pid 收尾（两步都容错）", () => {
   const calls = [];
   // 用一个几乎不可能存在的 pgid：-pid 那一刀必然抛错，必须被吞掉并继续 proc.kill。
-  killPtyProcess({ pid: 999999, kill: (sig) => calls.push(sig) }, "SIGTERM");
-  assert.deepEqual(calls, ["SIGTERM"]);
+  killPtyProcess({ pid: 999999, kill: (...args) => calls.push(args) }, "SIGTERM", "linux");
+  assert.deepEqual(calls, [["SIGTERM"]]);
 });
 
-test("killPtyProcess 连带收掉进程组里的后代（模拟 forkpty 的组长语义）", async () => {
+test("win32 上不能给 node-pty 传 signal（否则真正的清理会被吞掉）", () => {
+  const calls = [];
+  killPtyProcess({ pid: 999999, kill: (...args) => calls.push(args) }, "SIGTERM", "win32");
+  assert.deepEqual(calls, [[]], "win32 必须不传参调用 kill()");
+});
+
+test("requestWorkerShutdown：写得出就发 bye 帧，写不出就不抛", () => {
+  const written = [];
+  assert.equal(requestWorkerShutdown({ stdin: { writable: true, write: (d) => written.push(d) } }), true);
+  assert.equal(written.length, 1);
+  assert.equal(JSON.parse(written[0]).type, "bye");
+
+  // 已经关了 / 没有 stdin：返回 false，绝不抛（拆连接时不能崩服务端）。
+  assert.equal(requestWorkerShutdown({ stdin: { writable: false, write: () => { throw new Error("EPIPE"); } } }), false);
+  assert.equal(requestWorkerShutdown({ stdin: { writable: true, write: () => { throw new Error("EPIPE"); } } }), false);
+  assert.equal(requestWorkerShutdown({}), false);
+  assert.equal(requestWorkerShutdown(null), false);
+});
+
+test("killPtyProcess 连带收掉进程组里的后代（模拟 forkpty 的组长语义）", { skip: process.platform === "win32" ? "win32 不支持负 pid 杀进程组" : false }, async () => {
   // detached 让子进程成为进程组/会话组长，与 forkpty 后的 shell 同形；
   // 它再起一个后代 —— 正是「只杀 shell 会把后台进程留成孤儿」那条。
   const script = [
@@ -99,22 +118,45 @@ test("父进程看护：还在就不动，没了才收尾，stop 会停表", () 
   assert.deepEqual(gone, [], "父进程还在时不该收尾");
   aliveFlag = false;
   tick();
-  assert.equal(gone.length, 1, "父进程没了应收尾");
+  assert.deepEqual(gone, [], "只探到一次不收尾：一次抖动不该拆掉用户终端");
+  tick();
+  assert.equal(gone.length, 1, "连续探不到才收尾");
   stop();
   assert.equal(cleared, 1, "stop 应停表");
 });
 
-test("父进程看护：默认实现拿 pid 1（init）当存活探针", () => {
-  // 只验证默认探针本身不抛：真实语义（父进程被 SIGKILL → 探针失败）由
-  // 报告里的改前/改后实测对照覆盖，这里守住「默认实现可用」。
+test("父进程看护：默认探针把「存在但没权限」当活着，把「不存在」当死亡", () => {
+  // 这条守的是危险方向：探针一次异常就把活着的父进程判死 → 5 秒后拆掉用户终端。
+  // pid 1 一定存在，非 root 下 process.kill(1, 0) 抛 EPERM —— 旧实现（catch → false）会误判成死亡。
   const seen = [];
+  const gone = [];
   const stop = startParentWatchdog({
-    parentPid: process.pid,
+    parentPid: 1,
     intervalMs: 1,
     setIntervalFn: (fn) => { seen.push(fn); return { unref() {} }; },
     clearIntervalFn: () => {},
+    onGone: () => gone.push(1),
   });
-  assert.equal(seen.length, 1);
-  assert.doesNotThrow(() => seen[0]());
+  const tick1 = seen.pop();
+  tick1();
+  tick1();
+  assert.deepEqual(gone, [], "存在但 EPERM 的父进程不该被当成死亡");
   stop();
+
+  // 反过来：一个不存在的 pid 必须（连续 missThreshold 次后）收尾。
+  const gone2 = [];
+  const seen2 = [];
+  const stop2 = startParentWatchdog({
+    parentPid: 999999,
+    intervalMs: 1,
+    setIntervalFn: (fn) => { seen2.push(fn); return { unref() {} }; },
+    clearIntervalFn: () => {},
+    onGone: () => gone2.push(1),
+  });
+  const tick2 = seen2.pop();
+  tick2();
+  assert.deepEqual(gone2, [], "只探到一次不收尾（避免一次抖动就拆终端）");
+  tick2();
+  assert.deepEqual(gone2, [1], "连续探不到才收尾");
+  stop2();
 });

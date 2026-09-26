@@ -4,7 +4,7 @@
 const { existsSync, realpathSync } = require("fs");
 const { WebSocketServer } = require("ws");
 const { resolveShell } = require("./pty-shell.cjs");
-const { killPtyProcess } = require("./pty-process.cjs");
+const { killPtyProcess, requestWorkerShutdown } = require("./pty-process.cjs");
 const ptyWss = new WebSocketServer({ noServer: true });
 
 function sanitizeEnv(env) {
@@ -76,6 +76,10 @@ function startPtySession(options) {
 
 const PTY_HEARTBEAT_MS = 30_000;
 const PTY_HEARTBEAT_MAX_MISSED = 2;
+// 取舍：看的是 WebSocket 协议级 ping/pong（浏览器自动回 pong），**不是**终端有没有输出，
+// 所以前台跑 `sleep 600` 之类不会因为「没输出」被判死。代价是：手机锁屏后网络栈不再回 pong，
+// 连续 3 拍（约 90 秒）没有任何 pong 就会 terminate → 面板重连时是**新** shell。
+// 要更宽松就调大这两个常量；不要改成按终端输出判活（那会杀掉长任务）。
 
 /**
  * 判断这条连接是真死还是只是安静：手机掉网、进程被冻住时 TCP 不会发 FIN，
@@ -127,6 +131,8 @@ function attachPtyToWebSocket(ws, cwd) {
     stdio: ["pipe", "pipe", "pipe"],
     env: process.env,
   });
+  // stdin 在子进程已退出后写入会异步抛 EPIPE：这里吞掉，避免拆连接时崩服务端。
+  child.stdin.on("error", () => {});
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (data) => console.warn("[pidance] pty-worker stderr", data));
   child.on("error", (error) => console.warn("[pidance] pty-worker spawn", error.message));
@@ -135,6 +141,10 @@ function attachPtyToWebSocket(ws, cwd) {
     write: (data) => child.stdin.write(`${JSON.stringify({ type: "in", d: data })}\n`),
     resize: (cols, rows) => child.stdin.write(`${JSON.stringify({ type: "rs", cols, rows })}\n`),
     dispose: () => {
+      // 先请 worker 自己收尾（Windows 上这一步才有用：child.kill 会忽略信号种类、
+      // 直接强杀 worker，JS 的信号处理跑不到，于是 node-pty 的真实清理也跑不到）。
+      requestWorkerShutdown(child);
+      // 兜底强杀：Linux 上走 SIGTERM（worker 会照常收尾），Windows 上等价于 taskkill。
       try { child.kill("SIGTERM"); } catch { /* ignore */ }
     },
   };

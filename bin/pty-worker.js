@@ -49,6 +49,9 @@ process.stdin.on("data", (chunk) => {
     try { msg = JSON.parse(line); } catch { continue; }
     if (msg.type === "in" && typeof msg.d === "string") proc.write(msg.d);
     if (msg.type === "rs" && msg.cols > 0 && msg.rows > 0) proc.resize(msg.cols, msg.rows);
+    // 父进程请求收尾：Windows 上 child.kill 会忽略信号种类直接强杀 worker，
+    // worker 侧的信号处理跑不到，所以正常关闭走这条显式请求。
+    if (msg.type === "bye") shutdown();
   }
 });
 
