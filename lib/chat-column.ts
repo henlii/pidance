@@ -112,11 +112,11 @@ export const CHAT_CONTENT_SIDE_GAP = 16;
 /** 调宽手柄宽度（与 app/globals.css 的 .chat-column-resize-handle 保持一致）。 */
 export const CHAT_RESIZE_HANDLE_WIDTH = 6;
 /**
- * 每侧保留的带宽 = 竖条 + 手柄 + 间距（18 + 6 + 16 = 40）：列取到最大时手柄正好贴住竖条（间距 0），
+ * 每侧保留的带宽 = 手柄 + 间距（6 + 16 = 22）。**不含竖条**：三段自己的内边距已经让出了竖条，
  * 列变窄时多出的空白落在「竖条 ↔ 手柄」之间。压缩窗口先吃掉这段空白，再压会话区。
  */
 export const CHAT_SIDE_BAND =
-  CHAT_GUTTER + CHAT_RESIZE_HANDLE_WIDTH + CHAT_CONTENT_SIDE_GAP;
+  CHAT_RESIZE_HANDLE_WIDTH + CHAT_CONTENT_SIDE_GAP;
 
 /** 可用宽度下会话区能取到的最大宽度（保证两侧带宽完整）。 */
 export function maxChatColumnWidthFor(availableWidth: number): number {
