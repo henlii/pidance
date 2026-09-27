@@ -13,7 +13,7 @@ export type ProjectSortMode = "recent" | "az" | "za" | "fixed";
 export type ProjectAliases = Record<string, string>;
 
 /** 桌面侧栏可调宽边界：与右侧工作区同档，避免过窄挤压会话或过宽占屏。 */
-import { CHAT_COLUMN_WIDTH_DEFAULT_RATIO, clampChatColumnRatio } from "./chat-column";
+import { CHAT_COLUMN_WIDTH_REFERENCE, clampChatColumnWidth } from "./chat-column";
 
 export const SIDEBAR_WIDTH_MIN = 240;
 export const SIDEBAR_WIDTH_MAX = 520;
@@ -134,7 +134,7 @@ export interface SidebarPreferences {
   /** Git 变更侧栏宽度（px）。 */
   changesPanelWidth: number;
   /**
-   * 会话内容区宽度**比例**（内容宽 / 视口宽）。
+   * 会话内容区宽度**像素**（旧数据是比例，读取时按参照宽度换算一次）。
    * 存比例而不是像素：窗口大小变了自动自适应（见 lib/chat-column.ts 的宽度模型）。
    */
   chatColumnWidthRatio: number;
@@ -166,7 +166,7 @@ export const DEFAULT_SIDEBAR_PREFERENCES: SidebarPreferences = {
   rightPanelWidth: RIGHT_PANEL_WIDTH_DEFAULT,
   changesPanelOpen: true,
   changesPanelWidth: CHANGES_PANEL_WIDTH_DEFAULT,
-  chatColumnWidthRatio: CHAT_COLUMN_WIDTH_DEFAULT_RATIO,
+  chatColumnWidthRatio: CHAT_COLUMN_WIDTH_REFERENCE,
   showRecentSessions: true,
   pinnedSessionIds: [],
   ungroupedSessionIds: [],
@@ -271,7 +271,7 @@ export function parseSidebarPreferences(raw: unknown): SidebarPreferences {
     rightPanelOpen: parseRightPanelOpen(record.rightPanelOpen),
     rightPanelWidth: clampRightPanelWidth(record.rightPanelWidth),
     changesPanelOpen: parseChangesPanelOpen(record.changesPanelOpen),
-    chatColumnWidthRatio: clampChatColumnRatio(record.chatColumnWidthRatio),
+    chatColumnWidthRatio: sanitizeChatColumnWidth(record.chatColumnWidthRatio),
     changesPanelWidth: clampChangesPanelWidth(record.changesPanelWidth),
     // 旧数据无最近会话字段：默认开启（仅显式 false 关闭）。
     showRecentSessions: parseShowRecentSessions(record.showRecentSessions),
@@ -368,7 +368,7 @@ export function serializeSidebarPreferences(prefs: SidebarPreferences): string {
     rightPanelWidth: clampRightPanelWidth(prefs.rightPanelWidth),
     changesPanelOpen: parseChangesPanelOpen(prefs.changesPanelOpen),
     changesPanelWidth: clampChangesPanelWidth(prefs.changesPanelWidth),
-    chatColumnWidthRatio: clampChatColumnRatio(prefs.chatColumnWidthRatio),
+    chatColumnWidthRatio: sanitizeChatColumnWidth(prefs.chatColumnWidthRatio),
     showRecentSessions: parseShowRecentSessions(prefs.showRecentSessions),
     pinnedSessionIds: parsePathList(prefs.pinnedSessionIds),
     ungroupedSessionIds: parseUngroupedSessionIds(prefs.ungroupedSessionIds),
@@ -490,12 +490,21 @@ export function saveSidebarWidthToStorage(storage: StorageLike, width: number): 
  * 只更新存储中的 chatColumnWidthRatio（read-modify-write），其余字段原样保留。
  * 这个量的唯一 owner 是 AppShell（布局 owner）。
  */
+/**
+ * 会话区宽度**像素**（字段名沿用历史的 ...WidthRatio，语义已改为 px）。
+ * 兼容旧数据：值 ≤ 1 视为旧的比例，按参照宽度换算一次，用户设置不丢。
+ */
+function sanitizeChatColumnWidth(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return CHAT_COLUMN_WIDTH_REFERENCE;
+  return clampChatColumnWidth(value > 1 ? value : value * CHAT_COLUMN_WIDTH_REFERENCE);
+}
+
 export function saveChatColumnWidthRatioToStorage(storage: StorageLike, ratio: number): void {
   try {
     const current = loadSidebarPreferencesFromStorage(storage);
     storage.setItem(STORAGE_KEY, serializeSidebarPreferences({
       ...current,
-      chatColumnWidthRatio: clampChatColumnRatio(ratio),
+      chatColumnWidthRatio: sanitizeChatColumnWidth(ratio),
     }));
   } catch {
     // 忽略存储配额 / 隐私模式错误
