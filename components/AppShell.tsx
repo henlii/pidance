@@ -77,7 +77,7 @@ import {
 import { useI18n } from "@/lib/i18n";
 import {
   CHAT_COLUMN_MAX_WIDTH_CSS,
-  CHAT_GUTTER,
+  CHAT_GUTTER, CHAT_RESIZE_HANDLE_GAP,
   CHAT_COLUMN_WIDTH_CSS_VAR,
   CHAT_COLUMN_WIDTH_DEFAULT_RATIO,
   CHAT_COLUMN_WIDTH_MAX,
@@ -1536,7 +1536,10 @@ function AppShellInner() {
           <div style={{ height: "100%", minHeight: 0, overflow: "hidden", position: "relative" }}>
             {/* 内容区宽度拖拽把手：贴着内容列左右缘（列居中，拖任一侧对称改宽）。 */}
             {showChat && !isMobile && (
-              <div className="chat-column-resize-layer" style={{ left: CHAT_GUTTER, right: CHAT_GUTTER }}>
+              <div
+                className="chat-column-resize-layer"
+                style={{ left: CHAT_GUTTER + CHAT_RESIZE_HANDLE_GAP, right: CHAT_GUTTER + CHAT_RESIZE_HANDLE_GAP }}
+              >
                 {(["left", "right"] as const).map((side) => (
                   <div
                     key={side}

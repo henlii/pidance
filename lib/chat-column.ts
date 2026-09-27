@@ -89,6 +89,12 @@ export const CHAT_COLUMN_MAX_WIDTH_CSS = `min(var(${CHAT_COLUMN_WIDTH_CSS_VAR}, 
 /** 两侧竖条（左侧用户消息导航条 / 右侧消息概览条）宽度。 */
 export const CHAT_GUTTER = 18;
 
+/**
+ * 宽度调节条与内容列之间的额外间距（issue #115：只加大与内容区的间距，
+ * 纵向范围保持不变 —— 手柄仍只覆盖会话内容区，不延伸到输入区与扩展区）。
+ */
+export const CHAT_RESIZE_HANDLE_GAP = 6;
+
 /** 移动端会话列左右内边距（与 ChatWindow 的 CHAT_INPUT_SIDE_PADDING_MOBILE 同口径）。 */
 export const CHAT_COLUMN_MOBILE_SIDE_PADDING = 16;
 
