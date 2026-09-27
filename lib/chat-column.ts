@@ -93,6 +93,11 @@ export const CHAT_GUTTER = 18;
  * 宽度调节条与内容列之间的额外间距（issue #115：只加大与内容区的间距，
  * 纵向范围保持不变 —— 手柄仍只覆盖会话内容区，不延伸到输入区与扩展区）。
  */
+/**
+ * 会话内容与两侧竖条（用户消息导航条 / minimap）以及占位滚动条之间的额外间距。
+ * 没有它时内容的内边距正好等于竖条宽度，文字会贴着竖条（issue #115）。
+ */
+export const CHAT_CONTENT_SIDE_GAP = 8;
 export const CHAT_RESIZE_HANDLE_GAP = 6;
 
 /** 移动端会话列左右内边距（与 ChatWindow 的 CHAT_INPUT_SIDE_PADDING_MOBILE 同口径）。 */
