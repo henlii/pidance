@@ -80,7 +80,7 @@ import {
   CHAT_GUTTER, CHAT_RESIZE_HANDLE_GAP,
   CHAT_COLUMN_WIDTH_CSS_VAR,
   CHAT_COLUMN_WIDTH_DEFAULT_RATIO,
-  CHAT_COLUMN_WIDTH_MAX,
+  CHAT_COLUMN_WIDTH_REFERENCE,
   CHAT_COLUMN_WIDTH_MIN,
   chatColumnAvailableWidth,
   chatColumnRatioFromWidth,
@@ -278,7 +278,8 @@ function AppShellInner() {
    * 手柄因此横跨输入区与扩展区。这里改成量 [data-chat-scroller] 的实际盒子：
    * 面板弹出、输入区高度变化、窗口缩放都跟着重量；量不到就不渲染这一层。
    */
-  const [chatResizeLayerBox, setChatResizeLayerBox] = useState<{ top: number; bottom: number } | null>(null);
+  const [chatResizeLayerBox, setChatResizeLayerBox] = useState<{ top: number; bottom: number; maxWidth: number } | null>(null);
+  const chatResizeMaxWidth = chatResizeLayerBox?.maxWidth ?? null;
   useLayoutEffect(() => {
     if (typeof window === "undefined") return undefined;
     const area = chatAreaRef.current;
@@ -291,7 +292,7 @@ function AppShellInner() {
       if (!(b.height > 0) || !(a.height > 0)) { setChatResizeLayerBox(null); return; }
       // 会话区比可调节的最小宽度还窄时不渲染手柄：拖也拖不到、拖了也没意义（用户要求）。
       if (a.width < CHAT_COLUMN_WIDTH_MIN) { setChatResizeLayerBox(null); return; }
-      setChatResizeLayerBox({ top: Math.round(b.top - a.top), bottom: Math.round(a.bottom - b.bottom) });
+      setChatResizeLayerBox({ top: Math.round(b.top - a.top), bottom: Math.round(a.bottom - b.bottom), maxWidth: Math.round(a.width) });
     };
     measure();
     const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
@@ -375,7 +376,7 @@ function AppShellInner() {
       applyChatColumnWidth(CHAT_COLUMN_WIDTH_MIN);
     } else if (e.key === "End") {
       e.preventDefault();
-      applyChatColumnWidth(CHAT_COLUMN_WIDTH_MAX);
+      applyChatColumnWidth(CHAT_COLUMN_WIDTH_REFERENCE);
     }
   }, [applyChatColumnWidth]);
 
@@ -1589,7 +1590,7 @@ function AppShellInner() {
                     aria-label={t("app_chatColumnResizeHandle")}
                     aria-valuenow={chatColumnWidth}
                     aria-valuemin={CHAT_COLUMN_WIDTH_MIN}
-                    aria-valuemax={CHAT_COLUMN_WIDTH_MAX}
+                    aria-valuemax={chatResizeMaxWidth ?? CHAT_COLUMN_WIDTH_REFERENCE}
                     style={{
                       left: side === "left"
                         ? `calc(50% - ${CHAT_COLUMN_MAX_WIDTH_CSS} / 2 - 6px)`

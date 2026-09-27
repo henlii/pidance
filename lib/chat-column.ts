@@ -33,17 +33,18 @@ export const CHAT_COLUMN_MAX_WIDTH = 1100;
  *
  * 存**比例**而不是像素：窗口大小变了自动自适应（这是这条产品要求的初衷）。
  */
-export const CHAT_COLUMN_WIDTH_MIN = 667;
-export const CHAT_COLUMN_WIDTH_MAX = 1600;
+export const CHAT_COLUMN_WIDTH_MIN = 600;
+/** 只作默认比例的参照（1920 视口下的默认宽度）：可调上限已取消，宽度只受窗口可用宽度限制。 */
+export const CHAT_COLUMN_WIDTH_REFERENCE = 1600;
 /** 默认比例 5/6：1920 视口恰好落在上限 1600（与上表一致）。 */
-export const CHAT_COLUMN_WIDTH_DEFAULT_RATIO = CHAT_COLUMN_WIDTH_MAX / 1920;
+export const CHAT_COLUMN_WIDTH_DEFAULT_RATIO = CHAT_COLUMN_WIDTH_REFERENCE / 1920;
 /** 比例下限：再小也只会被 MIN 夹住，留个下界避免退化成 0。 */
 export const CHAT_COLUMN_WIDTH_MIN_RATIO = 0.2;
 
 /** 夹到 [MIN, MAX]；非法值回落默认上限。 */
 export function clampChatColumnWidth(value: unknown): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) return CHAT_COLUMN_WIDTH_MAX;
-  return Math.min(CHAT_COLUMN_WIDTH_MAX, Math.max(CHAT_COLUMN_WIDTH_MIN, Math.round(value)));
+  if (typeof value !== "number" || !Number.isFinite(value)) return CHAT_COLUMN_WIDTH_REFERENCE;
+  return Math.max(CHAT_COLUMN_WIDTH_MIN, Math.round(value));
 }
 
 /** 夹到 [MIN_RATIO, 1]；非法值回落默认比例。 */
@@ -66,7 +67,7 @@ export function chatColumnAvailableWidth(containerWidth: number, isMobile: boole
 export function resolveChatColumnWidth(input: { availableWidth: number; ratio: number }): number {
   const ratio = clampChatColumnRatio(input.ratio);
   const availableWidth = input.availableWidth;
-  if (!Number.isFinite(availableWidth) || availableWidth <= 0) return CHAT_COLUMN_WIDTH_MAX;
+  if (!Number.isFinite(availableWidth) || availableWidth <= 0) return CHAT_COLUMN_WIDTH_REFERENCE;
   return clampChatColumnWidth(availableWidth * ratio);
 }
 
