@@ -289,6 +289,8 @@ function AppShellInner() {
       const a = area.getBoundingClientRect();
       const b = scroller.getBoundingClientRect();
       if (!(b.height > 0) || !(a.height > 0)) { setChatResizeLayerBox(null); return; }
+      // 会话区比可调节的最小宽度还窄时不渲染手柄：拖也拖不到、拖了也没意义（用户要求）。
+      if (a.width < CHAT_COLUMN_WIDTH_MIN) { setChatResizeLayerBox(null); return; }
       setChatResizeLayerBox({ top: Math.round(b.top - a.top), bottom: Math.round(a.bottom - b.bottom) });
     };
     measure();

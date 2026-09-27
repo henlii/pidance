@@ -33,7 +33,7 @@ export const CHAT_COLUMN_MAX_WIDTH = 1100;
  *
  * 存**比例**而不是像素：窗口大小变了自动自适应（这是这条产品要求的初衷）。
  */
-export const CHAT_COLUMN_WIDTH_MIN = 1000;
+export const CHAT_COLUMN_WIDTH_MIN = 667;
 export const CHAT_COLUMN_WIDTH_MAX = 1600;
 /** 默认比例 5/6：1920 视口恰好落在上限 1600（与上表一致）。 */
 export const CHAT_COLUMN_WIDTH_DEFAULT_RATIO = CHAT_COLUMN_WIDTH_MAX / 1920;
@@ -97,7 +97,7 @@ export const CHAT_GUTTER = 18;
  * 会话内容与两侧竖条（用户消息导航条 / minimap）以及占位滚动条之间的额外间距。
  * 没有它时内容的内边距正好等于竖条宽度，文字会贴着竖条（issue #115）。
  */
-export const CHAT_CONTENT_SIDE_GAP = 8;
+export const CHAT_CONTENT_SIDE_GAP = 16;
 export const CHAT_RESIZE_HANDLE_GAP = 6;
 
 /** 移动端会话列左右内边距（与 ChatWindow 的 CHAT_INPUT_SIDE_PADDING_MOBILE 同口径）。 */
