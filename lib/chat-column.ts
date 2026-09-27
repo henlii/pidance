@@ -108,6 +108,21 @@ export const CHAT_GUTTER = 18;
  * 没有它时内容的内边距正好等于竖条宽度，文字会贴着竖条（issue #115）。
  */
 export const CHAT_CONTENT_SIDE_GAP = 16;
+
+/** 调宽手柄宽度（与 app/globals.css 的 .chat-column-resize-handle 保持一致）。 */
+export const CHAT_RESIZE_HANDLE_WIDTH = 6;
+/**
+ * 每侧保留的带宽 = 竖条 + 间距 + 手柄 + 间距（issue #115 草图：导航条 | 16 | 手柄 | 16 | 会话区）。
+ * 压缩窗口时先吃掉会话区两侧的空白；这条带宽永远不被吃掉，会话区因此不会贴住竖条或手柄。
+ */
+export const CHAT_SIDE_BAND =
+  CHAT_GUTTER + CHAT_CONTENT_SIDE_GAP + CHAT_RESIZE_HANDLE_WIDTH + CHAT_CONTENT_SIDE_GAP;
+
+/** 可用宽度下会话区能取到的最大宽度（保证两侧带宽完整）。 */
+export function maxChatColumnWidthFor(availableWidth: number): number {
+  if (!Number.isFinite(availableWidth) || availableWidth <= 0) return CHAT_COLUMN_WIDTH_REFERENCE;
+  return Math.max(0, Math.round(availableWidth - CHAT_SIDE_BAND * 2));
+}
 export const CHAT_RESIZE_HANDLE_GAP = 6;
 
 /** 移动端会话列左右内边距（与 ChatWindow 的 CHAT_INPUT_SIDE_PADDING_MOBILE 同口径）。 */

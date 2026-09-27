@@ -81,6 +81,10 @@ import {
   CHAT_COLUMN_WIDTH_CSS_VAR,
   CHAT_COLUMN_WIDTH_DEFAULT_RATIO,
   CHAT_COLUMN_WIDTH_REFERENCE,
+  CHAT_SIDE_BAND,
+  CHAT_CONTENT_SIDE_GAP,
+  CHAT_RESIZE_HANDLE_WIDTH,
+  maxChatColumnWidthFor,
   CHAT_COLUMN_WIDTH_MIN,
   chatColumnAvailableWidth,
   chatColumnRatioFromWidth,
@@ -272,38 +276,6 @@ function AppShellInner() {
    */
   const chatAreaRef = useRef<HTMLDivElement | null>(null);
 
-  /**
-   * 调宽手柄的纵向范围：只覆盖**消息滚动区**（issue #115）。
-   * 之前用父容器的 top/bottom: 0，而 ChatWindow（含输入区、扩展区）也是它的子节点，
-   * 手柄因此横跨输入区与扩展区。这里改成量 [data-chat-scroller] 的实际盒子：
-   * 面板弹出、输入区高度变化、窗口缩放都跟着重量；量不到就不渲染这一层。
-   */
-  const [chatResizeLayerBox, setChatResizeLayerBox] = useState<{ top: number; bottom: number; maxWidth: number } | null>(null);
-  const chatResizeMaxWidth = chatResizeLayerBox?.maxWidth ?? null;
-  useLayoutEffect(() => {
-    if (typeof window === "undefined") return undefined;
-    const area = chatAreaRef.current;
-    if (!area) { setChatResizeLayerBox(null); return undefined; }
-    const measure = () => {
-      const scroller = area.querySelector('[data-chat-scroller="true"]');
-      if (!scroller) { setChatResizeLayerBox(null); return; }
-      const a = area.getBoundingClientRect();
-      const b = scroller.getBoundingClientRect();
-      if (!(b.height > 0) || !(a.height > 0)) { setChatResizeLayerBox(null); return; }
-      // 会话区比可调节的最小宽度还窄时不渲染手柄：拖也拖不到、拖了也没意义（用户要求）。
-      if (a.width < CHAT_COLUMN_WIDTH_MIN) { setChatResizeLayerBox(null); return; }
-      setChatResizeLayerBox({ top: Math.round(b.top - a.top), bottom: Math.round(a.bottom - b.bottom), maxWidth: Math.round(a.width) });
-    };
-    measure();
-    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
-    observer?.observe(area);
-    const scroller = area.querySelector('[data-chat-scroller="true"]');
-    if (scroller && observer) observer.observe(scroller);
-    const mutations = new MutationObserver(measure);
-    mutations.observe(area, { childList: true, subtree: true });
-    window.addEventListener("resize", measure);
-    return () => { observer?.disconnect(); mutations.disconnect(); window.removeEventListener("resize", measure); };
-  }, [chatAreaRef]);
   const [chatColumnRatio, setChatColumnRatio] = useState(CHAT_COLUMN_WIDTH_DEFAULT_RATIO);
   /** 会话区可用宽度（容器宽 - 两侧竖条）；由 ResizeObserver 维护，窗口/侧栏变化都会到。 */
   const [chatColumnAvailable, setChatColumnAvailable] = useState(0);
@@ -312,7 +284,10 @@ function AppShellInner() {
 
   // 宽度由「可用宽度 × 比例」导出：窗口或侧栏尺寸变了自动跟着变（存的是比例）。
   const chatColumnWidth = useMemo(
-    () => resolveChatColumnWidth({ availableWidth: chatColumnAvailable, ratio: chatColumnRatio }),
+    () => Math.min(
+      resolveChatColumnWidth({ availableWidth: chatColumnAvailable, ratio: chatColumnRatio }),
+      maxChatColumnWidthFor(chatColumnAvailable),
+    ),
     [chatColumnAvailable, chatColumnRatio],
   );
   const chatColumnWidthRef = useRef(chatColumnWidth);
@@ -1570,14 +1545,14 @@ function AppShellInner() {
         >
           <div style={{ height: "100%", minHeight: 0, overflow: "hidden", position: "relative" }}>
             {/* 内容区宽度拖拽把手：贴着内容列左右缘（列居中，拖任一侧对称改宽）。 */}
-            {showChat && !isMobile && chatResizeLayerBox && (
+{showChat && !isMobile && chatColumnAvailable - CHAT_SIDE_BAND * 2 >= CHAT_COLUMN_WIDTH_MIN && (
               <div
                 className="chat-column-resize-layer"
                 style={{
-                  left: CHAT_GUTTER + CHAT_RESIZE_HANDLE_GAP,
-                  right: CHAT_GUTTER + CHAT_RESIZE_HANDLE_GAP,
-                  top: chatResizeLayerBox.top,
-                  bottom: chatResizeLayerBox.bottom,
+                  left: 0,
+                  right: 0,
+                  top: 0,
+                  bottom: 0,
                 }}
               >
                 {(["left", "right"] as const).map((side) => (
@@ -1590,13 +1565,13 @@ function AppShellInner() {
                     tabIndex={0}
                     title={t("app_chatColumnResizeHandle")}
                     aria-label={t("app_chatColumnResizeHandle")}
-                    aria-valuenow={Math.min(chatColumnWidth, chatColumnAvailable)}
+aria-valuenow={Math.round(chatColumnWidth)}
                     aria-valuemin={CHAT_COLUMN_WIDTH_MIN}
-                    aria-valuemax={chatResizeMaxWidth ?? CHAT_COLUMN_WIDTH_REFERENCE}
+aria-valuemax={Math.round(chatColumnAvailable)}
                     style={{
                       left: side === "left"
-                        ? `calc(50% - ${CHAT_COLUMN_MAX_WIDTH_CSS} / 2 - 6px)`
-                        : `calc(50% + ${CHAT_COLUMN_MAX_WIDTH_CSS} / 2)`,
+? `calc(50% - ${CHAT_COLUMN_MAX_WIDTH_CSS} / 2 - ${CHAT_CONTENT_SIDE_GAP + CHAT_RESIZE_HANDLE_WIDTH}px)`
+: `calc(50% + ${CHAT_COLUMN_MAX_WIDTH_CSS} / 2 + ${CHAT_CONTENT_SIDE_GAP}px)`
                     }}
                     onPointerDown={handleChatColumnResizeStart}
                     onPointerMove={handleChatColumnResizeMove}
