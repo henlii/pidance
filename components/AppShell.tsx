@@ -333,9 +333,11 @@ function AppShellInner() {
 
   const applyChatColumnWidth = useCallback((width: number) => {
     const clamped = clampChatColumnWidth(width);
-    const ratio = chatColumnRatioFromWidth({ width: clamped, availableWidth: chatColumnAvailableRef.current });
-    setChatColumnRatio(ratio);
-    saveChatColumnWidthRatio(ratio);
+    // 显式操作（拖拽/键盘/复位）才写设定值：写像素，并夹到当前可用宽度（不会超出可视区）。
+    const available = chatColumnAvailableRef.current;
+    const next = Number.isFinite(available) && available > 0 ? Math.min(clamped, Math.round(available)) : clamped;
+    setChatColumnRatio(next);
+    saveChatColumnWidthRatio(next);
   }, []);
 
   const handleChatColumnResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
@@ -1588,7 +1590,7 @@ function AppShellInner() {
                     tabIndex={0}
                     title={t("app_chatColumnResizeHandle")}
                     aria-label={t("app_chatColumnResizeHandle")}
-                    aria-valuenow={chatColumnWidth}
+                    aria-valuenow={Math.min(chatColumnWidth, chatColumnAvailable)}
                     aria-valuemin={CHAT_COLUMN_WIDTH_MIN}
                     aria-valuemax={chatResizeMaxWidth ?? CHAT_COLUMN_WIDTH_REFERENCE}
                     style={{

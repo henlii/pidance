@@ -64,9 +64,18 @@ export function chatColumnAvailableWidth(containerWidth: number, isMobile: boole
 }
 
 /** 由可用宽度与比例算出内容区宽度（px）。 */
+/**
+ * 由「设定值」算出内容区宽度（px）。
+ *
+ * 设定值现在存**像素**：空间不足时只由 CSS 的 `min(var, 100%)` 收缩显示，
+ * 设定值本身不被改写 —— 窗口缩小时会话区显示变窄，窗口回来后恢复原设定（issue #115）。
+ * 旧的「比例」存储（值 ≤ 1）在这里按当前可用宽度换算一次，用户设置不丢。
+ */
 export function resolveChatColumnWidth(input: { availableWidth: number; ratio: number }): number {
-  const ratio = clampChatColumnRatio(input.ratio);
+  const stored = input.ratio;
   const availableWidth = input.availableWidth;
+  if (Number.isFinite(stored) && stored > 1) return clampChatColumnWidth(stored);
+  const ratio = clampChatColumnRatio(stored);
   if (!Number.isFinite(availableWidth) || availableWidth <= 0) return CHAT_COLUMN_WIDTH_REFERENCE;
   return clampChatColumnWidth(availableWidth * ratio);
 }
