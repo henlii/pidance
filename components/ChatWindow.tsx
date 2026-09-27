@@ -49,8 +49,9 @@ import { CHAT_BLOCK_MAX_HEIGHT, CHAT_BLOCK_MAX_HEIGHT_MOBILE, CHAT_COLUMN_MAX_WI
  * 消息列的左右边距由两侧竖条（MessageNavRail / ChatMinimap，各 CHAT_GUTTER px）
  * 充当，所以输入区也要退同样宽度，否则两者左右边缘会差一个竖条。
  */
-const CHAT_INPUT_SIDE_PADDING = CHAT_GUTTER + CHAT_CONTENT_SIDE_GAP;
-const CHAT_INPUT_SIDE_PADDING_MOBILE = CHAT_COLUMN_MOBILE_SIDE_PADDING + CHAT_CONTENT_SIDE_GAP;
+// 只让出两侧竖条；内容列与竖条/手柄之间的 16 由列宽夹取（CHAT_SIDE_BAND）保证。
+const CHAT_INPUT_SIDE_PADDING = CHAT_GUTTER;
+const CHAT_INPUT_SIDE_PADDING_MOBILE = CHAT_COLUMN_MOBILE_SIDE_PADDING;
 /** 接管视图心跳间隔（宿主的新鲜度窗口 25s = 它的 2.5 倍，容两次丢包）。 */
 const EDITOR_TAKEOVER_VIEW_HEARTBEAT_MS = 10_000;
 /** 本轮没有写入文件时的稳定空数组：保持引用不变，MessageView 的 memo 才不会被打破。 */
