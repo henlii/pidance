@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useMemo, useReducer, type CSSProperties } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useReducer, type CSSProperties } from "react";
 import { useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
@@ -271,6 +271,36 @@ function AppShellInner() {
    * （见 lib/chat-column.ts 的宽度模型）。
    */
   const chatAreaRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * 调宽手柄的纵向范围：只覆盖**消息滚动区**（issue #115）。
+   * 之前用父容器的 top/bottom: 0，而 ChatWindow（含输入区、扩展区）也是它的子节点，
+   * 手柄因此横跨输入区与扩展区。这里改成量 [data-chat-scroller] 的实际盒子：
+   * 面板弹出、输入区高度变化、窗口缩放都跟着重量；量不到就不渲染这一层。
+   */
+  const [chatResizeLayerBox, setChatResizeLayerBox] = useState<{ top: number; bottom: number } | null>(null);
+  useLayoutEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const area = chatAreaRef.current;
+    if (!area) { setChatResizeLayerBox(null); return undefined; }
+    const measure = () => {
+      const scroller = area.querySelector('[data-chat-scroller="true"]');
+      if (!scroller) { setChatResizeLayerBox(null); return; }
+      const a = area.getBoundingClientRect();
+      const b = scroller.getBoundingClientRect();
+      if (!(b.height > 0) || !(a.height > 0)) { setChatResizeLayerBox(null); return; }
+      setChatResizeLayerBox({ top: Math.round(b.top - a.top), bottom: Math.round(a.bottom - b.bottom) });
+    };
+    measure();
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    observer?.observe(area);
+    const scroller = area.querySelector('[data-chat-scroller="true"]');
+    if (scroller && observer) observer.observe(scroller);
+    const mutations = new MutationObserver(measure);
+    mutations.observe(area, { childList: true, subtree: true });
+    window.addEventListener("resize", measure);
+    return () => { observer?.disconnect(); mutations.disconnect(); window.removeEventListener("resize", measure); };
+  }, [chatAreaRef]);
   const [chatColumnRatio, setChatColumnRatio] = useState(CHAT_COLUMN_WIDTH_DEFAULT_RATIO);
   /** 会话区可用宽度（容器宽 - 两侧竖条）；由 ResizeObserver 维护，窗口/侧栏变化都会到。 */
   const [chatColumnAvailable, setChatColumnAvailable] = useState(0);
@@ -1535,10 +1565,15 @@ function AppShellInner() {
         >
           <div style={{ height: "100%", minHeight: 0, overflow: "hidden", position: "relative" }}>
             {/* 内容区宽度拖拽把手：贴着内容列左右缘（列居中，拖任一侧对称改宽）。 */}
-            {showChat && !isMobile && (
+            {showChat && !isMobile && chatResizeLayerBox && (
               <div
                 className="chat-column-resize-layer"
-                style={{ left: CHAT_GUTTER + CHAT_RESIZE_HANDLE_GAP, right: CHAT_GUTTER + CHAT_RESIZE_HANDLE_GAP }}
+                style={{
+                  left: CHAT_GUTTER + CHAT_RESIZE_HANDLE_GAP,
+                  right: CHAT_GUTTER + CHAT_RESIZE_HANDLE_GAP,
+                  top: chatResizeLayerBox.top,
+                  bottom: chatResizeLayerBox.bottom,
+                }}
               >
                 {(["left", "right"] as const).map((side) => (
                   <div
