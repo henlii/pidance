@@ -1831,8 +1831,19 @@ export function createWebExtensionUIAdapter(
           let lines: string[] = [];
           let images: ExtensionRenderedImage[] = [];
           let imageFallbacks: ExtensionRenderedImageFallback[] = [];
+            /**
+             * overlay 面板按**自己声明的宽度**（layout.width，字符格）排版（issue #112）：
+             * 用全局列宽渲会排得比盒子宽，面板里就出现横向滚动条（内容还是全的，但要拖）。
+             * 没声明宽度的面板照旧用全局列宽。
+             */
+            const customPanelRenderWidth = () => {
+              const declared = layout && typeof layout.width === "number" ? layout.width : null;
+              if (!declared || !Number.isFinite(declared) || declared <= 0) return renderWidth;
+              return Math.max(10, Math.min(200, Math.round(declared)));
+            };
+
           try {
-            const output = component ? renderMountedComponentOutput(component, renderWidth) : null;
+            const output = component ? renderMountedComponentOutput(component, customPanelRenderWidth()) : null;
             if (output) {
               lines = output.lines;
               images = output.images;
