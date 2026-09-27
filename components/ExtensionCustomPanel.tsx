@@ -184,10 +184,35 @@ export function ExtensionCustomPanel({
 
   const selectedText = () => (typeof window === "undefined" ? "" : window.getSelection()?.toString() ?? "");
 
+  /**
+   * 面板可见期间**保住键盘**：焦点一旦落到面板之外就收回面板的输入区。
+   * 不这样做的话，用户点一下别处（焦点落到 body）之后按键会走窗口 ③，
+   * 只到插件的全局 onTerminalInput，而面板组件的 handleInput 收不到 ——
+   * 用户看到的就是「面板里的选项无法控制」。TUI 里 overlay 拿到键盘后也是这个语义。
+   */
+  useEffect(() => {
+    if (request.hidden) return undefined;
+    const refocus = () => {
+      const input = inputRef.current;
+      const rootEl = document.querySelector('[data-extension-panel="true"]');
+      if (!input || !rootEl) return;
+      const active = document.activeElement;
+      if (active && rootEl.contains(active)) return; // 焦点还在面板里（含面板内的按钮）→ 不抢
+      input.focus();
+    };
+    // focusout：焦点离开面板时补回来；click：用户点到页面别处时补回来
+    document.addEventListener("focusout", refocus, true);
+    document.addEventListener("click", refocus, true);
+    return () => {
+      document.removeEventListener("focusout", refocus, true);
+      document.removeEventListener("click", refocus, true);
+    };
+  }, [request.hidden, request.id]);
+
   if (request.hidden) return null;
 
   return (
-    <div className="extension-panel-overlay" style={overlayStyles?.containerStyle}>
+    <div data-extension-panel="true" className="extension-panel-overlay" style={overlayStyles?.containerStyle}>
       <ExtensionPanelChrome
         overlay
         panelStyle={overlayStyles?.panelStyle}
