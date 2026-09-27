@@ -381,6 +381,12 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     // 窗口 ①：插件把 custom 面板收起后，白名单按键仍要能到达它的全局监听器
     // （ctx.ui.onTerminalInput；如 rpiv-ask-user 的折叠键重新展开面板）。
     hiddenPanelRouting: Boolean(extensionCustomUi?.hidden) && extensionTerminalInputListenerCount > 0,
+    // 面板正在显示时，窗口 ③ 的按键优先交给面板组件（插件期望的输入入口就是它）
+    sendPanelKey: (data: string) => {
+      if (!extensionCustomUi || extensionCustomUi.hidden) return false;
+      void sendExtensionCustomInput(extensionCustomUi, data);
+      return true;
+    },
     // 焦点落在接管 keytrap 里时让位给它（不是「接管显示就整段关掉」：见 hook 的注释）。
     takeoverKeytrap: takeoverKeytrapRefCallback,
     // 窗口 ③：插件界面显示中。面板自己的 keytrap 仍然优先（判定里按「事件目标有没有

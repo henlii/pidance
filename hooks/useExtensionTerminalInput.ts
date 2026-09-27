@@ -57,11 +57,21 @@ export function useExtensionTerminalInput(options: {
    * 不能改成「接管显示就整段关掉窗口 ①」：那样焦点在消息列表时，收起面板的白名单键
    * 既不进插件监听器、也不进接管组件（评审指出的反例）。
    */
+  /**
+   * 交付给「正在显示的自定义面板组件」的按键入口：焦点一旦离开面板（用户点过别处），
+   * 窗口 ③ 的键若只发 terminal_input，只到插件的全局监听器、面板组件收不到 ——
+   * 用户看到的就是「面板无法操作」。返回 true 表示已交给面板，不再发 terminal_input。
+   */
+  sendPanelKey?: (data: string) => boolean;
   takeoverKeytrap?: () => Element | null;
   /** 窗口 ③：插件界面正在显示（可见的 custom 面板 / overlay / 扩展对话框）。 */
   surfaceRouting: boolean;
 }): void {
-  const { sessionId, hiddenPanelRouting, surfaceRouting, takeoverKeytrap } = options;
+  const { sessionId, hiddenPanelRouting, surfaceRouting, takeoverKeytrap, sendPanelKey } = options;
+  // 监听器建在 effect 里，闭包会固化成挂载那一刻的 options；面板是后开的，
+  // 所以 sendPanelKey 必须按**调用时**的最新值取（否则回调里看到的永远是空面板）。
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
   const compositionEndAtRef = useRef(0);
 
   useEffect(() => {
@@ -93,6 +103,7 @@ export function useExtensionTerminalInput(options: {
         event.preventDefault();
         event.stopPropagation();
         void sendAgentCommand(sessionId, { type: "terminal_input", data }).catch(() => {
+        if (optionsRef.current.sendPanelKey?.(data)) return;
           /* 询问失败就当作没被消费，不再重放按键 */
         });
         return;
@@ -124,6 +135,7 @@ export function useExtensionTerminalInput(options: {
       event.preventDefault();
       event.stopPropagation();
       void sendAgentCommand(sessionId, { type: "terminal_input", data }).catch(() => {
+      if (optionsRef.current.sendPanelKey?.(data)) return;
         /* 询问失败就当作没被消费，不再重放按键 */
       });
     };
