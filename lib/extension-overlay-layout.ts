@@ -85,20 +85,34 @@ export function marginToPadding(margin: ExtensionUiCustomLayout["margin"]): stri
  * 没有 layout（插件没声明 overlay）时返回 undefined，调用方保持全屏模态渲染。
  * 未知锚点回退 center（与 pi-tui 的默认一致），不抛错。
  */
+/**
+ * 面板正文的宽度（列数）。数值宽度按「字符列」理解：容器用 fit-content 包住正文，
+ * 正文自己用 Nch 定宽 —— 因为 ch 必须由**等宽正文**量（容器是正文字体，量出来偏小），
+ * 而且正文还有内边距；两者叠加会让插件恰好画满 N 列时也冒出横向滚动条。
+ */
+function bodyWidthCh(value: number | string | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
+  return Math.round(value);
+}
+
 export function buildExtensionOverlayStyle(
   layout: ExtensionUiCustomLayout | undefined,
-): { containerStyle: CSSProperties; panelStyle: CSSProperties } | undefined {
+): { containerStyle: CSSProperties; panelStyle: CSSProperties; bodyWidthCh?: number } | undefined {
   if (!layout) return undefined;
   const padding = marginToPadding(layout.margin);
+  const cols = bodyWidthCh(layout.width);
   return {
     containerStyle: {
       ...(ANCHOR_ALIGNMENT[layout.anchor] ?? ANCHOR_ALIGNMENT.center),
       ...(padding ? { padding } : {}),
     },
     panelStyle: {
-      width: clampWidth(layout.width) ?? CHAT_COLUMN_MAX_WIDTH_CSS,
+      width: cols === undefined ? (clampWidth(layout.width) ?? CHAT_COLUMN_MAX_WIDTH_CSS) : "fit-content",
+      ...(cols === undefined ? {} : { maxWidth: "100%" }),
       minWidth: layout.minWidth === undefined ? undefined : `min(${layout.minWidth}ch, 100%)`,
       maxHeight: clampHeight(layout.maxHeight),
     },
+    // 只有数值宽度这条路才动 maxWidth：字符串/缺省宽度保持原有字节一致的行为。
+    ...(cols === undefined ? {} : { bodyWidthCh: cols }),
   };
 }

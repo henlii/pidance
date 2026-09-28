@@ -87,7 +87,6 @@ import {
   maxChatColumnWidthFor,
   CHAT_COLUMN_WIDTH_MIN,
   chatColumnAvailableWidth,
-  chatColumnRatioFromWidth,
   clampChatColumnWidth,
   resolveChatColumnWidth,
 } from "@/lib/chat-column";

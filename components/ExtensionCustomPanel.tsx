@@ -285,6 +285,7 @@ export function ExtensionCustomPanel({
           className="extension-panel-keytrap"
         />
         <pre
+          style={overlayStyles?.bodyWidthCh ? { width: `${overlayStyles.bodyWidthCh}ch` } : undefined}
           ref={bodyRef}
           className="extension-panel-ansi"
           onClick={(event) => {
