@@ -7,6 +7,7 @@ import type { AgentMessage, BashExecutionMessage, SessionInfo, SessionTreeNode, 
 import type { BranchActions } from "@/lib/branch-bookmarks";
 import { parseAnsiLine } from "@/lib/ansi";
 import { RenderedLineBlocks } from "./RenderedLines";
+import { planOptionClick, verifyOptionCursor } from "@/lib/extension-panel-view";
 import { ExtensionKeyBar } from "./ExtensionKeyBar";
 import {
   resolveExtensionKeyBarChannel,
@@ -153,6 +154,9 @@ function planItemStableKey(
   if (typeof idx !== "number") return item.keyPrefix ?? null;
   return messageKeys[idx] ?? `idx:${idx}`;
 }
+
+/** 「切回原样」按浏览器记忆（与折叠状态同一套做法）。 */
+const RAWPANEL_MODE_KEY = "pidance.panelRawMode.v1";
 
 export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, projectRoots, onGuideTargetChange, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onTurnMetricsChange, onOpenFile, onReferenceFile, entryJumpRequest, onEntryJumpHandled, footerCollapsed, onFooterToggle }: Props) {
   const { t } = useI18n();
@@ -372,6 +376,55 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
    * 手机端屏幕按键条（issue #113）：软键盘产不出方向键，插件面板在手机上本来按不动。
    * 通道与物理键盘同一套，只在这里按「谁占着键盘」分派。
    */
+  /**
+   * 面板网页化（issue #114）：默认开，可「切回原样」；自校验失败时也会自动切回 ——
+   * 宁可不点，也不能在错误的项上确认。
+   */
+  const [panelRawMode, setPanelRawMode] = useState(false);
+  // 最新一份面板状态（SSE/投影随时更新）。点击自校验要读「此刻」的行，不能读渲染时那份。
+  const extensionCustomUiRef = useRef(extensionCustomUi);
+  extensionCustomUiRef.current = extensionCustomUi;
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(RAWPANEL_MODE_KEY) === "1") setPanelRawMode(true);
+    } catch {
+      // 隐私模式/配额异常：按默认（网页化）走
+    }
+  }, []);
+  const togglePanelRawMode = useCallback(() => {
+    setPanelRawMode((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(RAWPANEL_MODE_KEY, next ? "1" : "0");
+      } catch {
+        // 存不了就只在本次会话生效
+      }
+      return next;
+    });
+  }, []);
+  const handleSelectPanelOption = useCallback(
+    async (optionIndex: number) => {
+      const request = extensionCustomUiRef.current;
+      if (!request) return;
+      const plan = planOptionClick(request.lines, extensionCustomUiRef.current?.lines ?? request.lines, optionIndex);
+      if (plan.kind === "give-up") {
+        setPanelRawMode(true);
+        return;
+      }
+      for (const data of plan.keys) {
+        await sendExtensionCustomInput(request, data);
+      }
+      if (plan.keys.length > 0) {
+        if (!verifyOptionCursor(extensionCustomUiRef.current?.lines ?? [], optionIndex)) {
+          setPanelRawMode(true);
+          return;
+        }
+      }
+      await sendExtensionCustomInput(request, "\r");
+    },
+    [sendExtensionCustomInput],
+  );
+
   const keyBarChannel = resolveExtensionKeyBarChannel({
     hasEditorTakeover: editorTakeoverActive && Boolean(extensionEditorTakeover),
     hasVisibleCustomPanel: Boolean(extensionCustomUi && !extensionCustomUi.hidden),
@@ -1019,6 +1072,9 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
       {extensionCustomUi && (
         <ExtensionCustomPanel
           request={extensionCustomUi}
+          rawMode={panelRawMode}
+          onToggleRawMode={togglePanelRawMode}
+          onSelectOption={handleSelectPanelOption}
           onInput={sendExtensionCustomInput}
           onMouse={sendExtensionCustomMouse}
           onBounds={sendExtensionCustomBounds}

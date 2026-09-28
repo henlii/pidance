@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useMemo, useEffect, useRef, useState } from "react";
 import { normalizeCustomPanelLinesWithIndex, parseAnsiLine, stripAnsi } from "@/lib/ansi";
 import { RenderedLineBlocks } from "./RenderedLines";
 import { collectImageLineIndexes, remapImageLineIndexes, imageFallbackReasonKey } from "@/lib/kitty-image";
@@ -12,6 +12,8 @@ import { measureCharWidth, measureLineHeight } from "@/lib/render-width";
 import { useI18n } from "@/lib/i18n";
 import type { ExtensionUiCustomRequest } from "@/lib/extension-ui-bridge";
 import type { CustomPanelBounds } from "@/lib/types";
+import { ExtensionPanelWebView } from "./ExtensionPanelWebView";
+import { buildPanelView, shouldRenderPanelWebView } from "@/lib/extension-panel-view";
 import { ExtensionPanelChrome } from "./ExtensionPanelChrome";
 
 /**
@@ -61,6 +63,9 @@ export function ExtensionCustomPanel({
   request,
   onInput,
   onMouse,
+  rawMode,
+  onToggleRawMode,
+  onSelectOption,
   onBounds,
 }: {
   request: ExtensionUiCustomRequest;
@@ -70,6 +75,11 @@ export function ExtensionCustomPanel({
    * 面板几何（字符单元格）上报出口。面板的 `getBounds()` 是**同步**接口，所以只能
    * 由这里量出来推给服务端存下（口径与理由见 lib/custom-panel-bounds.ts）。
    */
+  /** 用户点了「切回原样」：这一页按原始渲染（issue #114 的可退回开关）。 */
+  rawMode?: boolean;
+  onToggleRawMode?: () => void;
+  /** 点了网页化选项行：由调用方合成按键（发键前会自校验，见 ChatWindow）。 */
+  onSelectOption?: (optionIndex: number) => void;
   onBounds?: (request: ExtensionUiCustomRequest, bounds: CustomPanelBounds) => void;
 }) {
   const { t } = useI18n();
@@ -112,6 +122,10 @@ export function ExtensionCustomPanel({
 
   // overlay 插件给的定位/尺寸：容器按 anchor 对齐、按 margin 留边，面板本体按
   // width/minWidth/maxHeight 定尺寸。没有 layout（非 overlay）时保持全屏模态。
+  // issue #114：行级语义识别 → 网页化视图；识别不到或被用户切回原样就按原样渲染。
+  const panelView = useMemo(() => buildPanelView(displayLines), [displayLines]);
+  const webViewEnabled = !rawMode && shouldRenderPanelWebView(panelView);
+
   const overlayStyles = buildExtensionOverlayStyle(request.layout);
 
   /**
@@ -232,6 +246,19 @@ export function ExtensionCustomPanel({
           </button>
         )}
         extraHeader={(
+          <>
+            {onToggleRawMode ? (
+              <button
+                type="button"
+                className="extension-card-btn"
+                data-panel-raw-toggle={rawMode ? "1" : "0"}
+                aria-label={rawMode ? t("panel_webView") : t("panel_rawMode")}
+                title={rawMode ? t("panel_webView") : t("panel_rawMode")}
+                onClick={onToggleRawMode}
+              >
+                {rawMode ? t("panel_webView") : t("panel_rawMode")}
+              </button>
+            ) : null}
           <button
             type="button"
             className="extension-card-btn"
@@ -240,6 +267,7 @@ export function ExtensionCustomPanel({
           >
             {copied ? t("extension_copied") : t("extension_copy")}
           </button>
+          </>
         )}
       >
         <textarea
@@ -295,6 +323,13 @@ export function ExtensionCustomPanel({
             if (mouse) onMouse?.(request, mouse);
           }}
         >
+          {webViewEnabled ? (
+            <ExtensionPanelWebView
+              view={panelView}
+              renderLine={renderAnsiLine}
+              onSelectOption={onSelectOption}
+            />
+          ) : (
           <RenderedLineBlocks
             lines={displayLines.length ? displayLines : [""]}
             images={displayImages}
@@ -304,6 +339,7 @@ export function ExtensionCustomPanel({
             imageAlt={t("message_imageAlt")}
             fallbackLabel={(reason) => { const key = imageFallbackReasonKey(reason); return t("message_imageUnavailable", { reason: key ? t(key) : reason }); }}
           />
+          )}
         </pre>
       </ExtensionPanelChrome>
     </div>
