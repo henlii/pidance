@@ -1,11 +1,18 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
+import { sendAgentCommand } from "@/lib/agent-client";
 import { imageFallbackReasonKey } from "@/lib/kitty-image";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentMessage, BashExecutionMessage, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import type { BranchActions } from "@/lib/branch-bookmarks";
 import { parseAnsiLine } from "@/lib/ansi";
 import { RenderedLineBlocks } from "./RenderedLines";
+import { ExtensionKeyBar } from "./ExtensionKeyBar";
+import {
+  resolveExtensionKeyBarChannel,
+  shouldShowExtensionKeyBar,
+  type ExtensionKeyBarKey,
+} from "@/lib/extension-key-bar";
 import type { ExtensionRenderedImage, ExtensionRenderedImageFallback } from "@/lib/types";
 import {
   buildWidgetClickEvent,
@@ -360,6 +367,34 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   // 接管面板里的按键走 `editor_component_input`，适配器**先**过插件的全局监听器（pi-tui 顺序）
   // 再进被接管的组件 —— 被窗口 ① 抢先吃掉的话，「未被消费的键仍然到达聚焦组件」这半截就没了。
   const editorTakeoverHoldsKeys = editorTakeoverActive && !extensionSurfaceActive;
+
+  /**
+   * 手机端屏幕按键条（issue #113）：软键盘产不出方向键，插件面板在手机上本来按不动。
+   * 通道与物理键盘同一套，只在这里按「谁占着键盘」分派。
+   */
+  const keyBarChannel = resolveExtensionKeyBarChannel({
+    hasEditorTakeover: editorTakeoverActive && Boolean(extensionEditorTakeover),
+    hasVisibleCustomPanel: Boolean(extensionCustomUi && !extensionCustomUi.hidden),
+    // 其余插件浮层走窗口 ③ 的 terminal_input（对话框是壳自己的 DOM，不需要按键条）
+    canRouteTerminal: Boolean(extensionDialog) && extensionTerminalInputListenerCount > 0,
+  });
+  const showKeyBar = shouldShowExtensionKeyBar({ isMobile, channel: keyBarChannel });
+  const handleKeyBarKey = useCallback(
+    (_key: ExtensionKeyBarKey, data: string) => {
+      if (keyBarChannel === "editor" && extensionEditorTakeover) {
+        void sendExtensionEditorInput(extensionEditorTakeover, data);
+        return;
+      }
+      if (keyBarChannel === "panel" && extensionCustomUi) {
+        void sendExtensionCustomInput(extensionCustomUi, data);
+        return;
+      }
+      const sid = sessionIdRef.current;
+      if (sid) void sendAgentCommand(sid, { type: "terminal_input", data }).catch(() => {});
+    },
+    [keyBarChannel, extensionEditorTakeover, extensionCustomUi, sendExtensionEditorInput, sendExtensionCustomInput],
+  );
+
 
   /**
    * 插件快捷键（issue #105）：服务端解析好的清单 + Web 可用性（`extensionShortcuts`），
@@ -977,6 +1012,9 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
           </svg>
         </div>
       )}
+
+      {/* 手机端屏幕按键条：插件界面占着键盘时出现（桌面、无插件界面时不渲染）。 */}
+      {showKeyBar ? <ExtensionKeyBar onKey={handleKeyBarKey} /> : null}
 
       {extensionCustomUi && (
         <ExtensionCustomPanel
