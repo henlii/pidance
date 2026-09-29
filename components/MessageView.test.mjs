@@ -151,7 +151,7 @@ test("其它 customType 不误识别为 activity 卡片", () => {
   assert.ok(html.includes(">Extension Debug</span>"));
 });
 
-test("custom 渲染桥：合法 ANSI 行优先，隐藏原始内容、详情与复制区", () => {
+test("custom 渲染桥：插件渲染行默认折叠成首行，展开才铺全部（不再是永远铺满）", () => {
   const html = renderMessage({
     role: "custom",
     customType: "extension_notice",
@@ -162,15 +162,29 @@ test("custom 渲染桥：合法 ANSI 行优先，隐藏原始内容、详情与�
   });
 
   assert.ok(html.includes(">Extension Notice</span>"));
+  // 收起态只显示首行（去 ANSI 后的纯文本摘要），第二行不出现
   assert.ok(html.includes("⚠ 插件控制提示"));
-  assert.ok(html.includes("第二行"));
+  assert.ok(!html.includes("第二行"), "收起时不应铺出后续行（subagent-notify 就是被这条坑的）");
+  // 有折叠控件可展开
+  assert.ok(html.includes('aria-label="Expand"'), "应给出展开入口");
   assert.ok(!html.includes("原始文本"));
   assert.ok(!html.includes("&quot;raw&quot;"));
   assert.ok(!html.includes('aria-label="Copy message"'));
   assert.ok(!html.includes('aria-label="Show details"'));
+  // 收起态是等宽摘要行（展开态的 <pre> 保结构由真机用例覆盖：折叠/展开都必须等宽）
   assert.match(html, /font-family:var\(--font-mono\)/);
-  // 插件渲染行必须保结构（pre）：换行会把方框/表格拆散，超宽交给横向滚动
-  assert.match(html, /white-space:pre"/);
+});
+
+test("custom 渲染桥：只有一行渲染行时不折叠（不必为一行内容再点一次）", () => {
+  const html = renderMessage({
+    role: "custom",
+    customType: "extension_notice",
+    content: "原始文本",
+    display: true,
+    renderedLines: ["\u001b[33m单行提示\u001b[0m"],
+  });
+  assert.ok(html.includes("单行提示"));
+  assert.ok(!html.includes('aria-label="Expand"'), "单行不需要展开入口");
 });
 
 test("custom 渲染桥：空数组和非法载荷回退现有文本与详情逻辑", () => {

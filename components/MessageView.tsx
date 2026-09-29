@@ -22,7 +22,7 @@ import { isUnexplainedUpstreamRejection } from "@/lib/provider-error";
 import { humanizeExtensionIdentifier } from "@/lib/extension-labels";
 import { collapsedSummaryLine, isActiveStreamBlock, isAssistantTruncated, isEmptyThinkingBlock, shouldRenderLiveToolOutput } from "@/lib/message-display";
 import { getThinkingText, projectDisplayBlocks } from "@/lib/thinking-content";
-import { parseAnsiLine } from "@/lib/ansi";
+import { parseAnsiLine, stripAnsi } from "@/lib/ansi";
 import type { ToolExecutionSnapshot, ToolExecutionStatus } from "@/lib/tool-execution-buffer";
 import { parseUnifiedPatch, type SplitDiffCell, type SplitDiffFile } from "@/lib/patch";
 import {
@@ -2582,6 +2582,14 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
     : t("message_extensionDefaultType");
   const time = formatTime(message.timestamp);
   const renderedLines = getRenderableAnsiLines(message.renderedLines);
+  // 插件渲染行（条目渲染器的输出）此前无条件全量上屏，既不折叠也没有折叠按钮：
+  // subagent-notify 这类块因此永远铺满。按统一折叠规则处理 —— 收起显示首行（纯文本、去 ANSI），
+  // 与 thinking / 工具 / 压缩块同一套语义（流式已结束 → 首行）。
+  const renderedPlainLines = renderedLines ? renderedLines.map((line) => stripAnsi(line)) : null;
+  const renderedSummary = renderedPlainLines
+    ? collapsedSummaryLine(renderedPlainLines.join("\n"), { streaming: false })
+    : "";
+  const renderedCollapsible = Boolean(renderedLines && renderedLines.length > 1);
 
   const copyContent = () => {
     copyText(text || detailsText).then(() => {
@@ -2618,7 +2626,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
           </span>
           {isHiddenDisplay && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("message_hiddenExtensionMessage")}</span>}
           {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
-          {isHiddenDisplay && !renderedLines ? (
+          {renderedCollapsible || (isHiddenDisplay && !renderedLines) ? (
             <button
               type="button"
               onClick={() => setContentExpanded((v) => !v)}
@@ -2643,19 +2651,42 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
         </div>
 
         {renderedLines ? (
-          <pre
-            style={{
-              margin: 0,
-              padding: "6px 9px",
-              color: "var(--text-muted)",
-              fontFamily: "var(--font-mono)",
-              fontSize: 12,
-              lineHeight: 1.55,
-              whiteSpace: "pre",
-            }}
-          >
-            {renderAnsiLines(renderedLines, "custom-rendered")}
-          </pre>
+          contentExpanded || !renderedCollapsible ? (
+            <pre
+              style={{
+                margin: 0,
+                padding: "6px 9px",
+                color: "var(--text-muted)",
+                fontFamily: "var(--font-mono)",
+                fontSize: 12,
+                lineHeight: 1.55,
+                whiteSpace: "pre",
+              }}
+            >
+            {renderAnsiLines(renderedLines ?? [], "custom-rendered")}
+            </pre>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setContentExpanded(true)}
+              aria-expanded={false}
+              title={t("message_expand")}
+              style={{
+                display: "block",
+                width: "100%",
+                padding: "8px 10px",
+                border: "none",
+                background: "transparent",
+                color: "var(--text-dim)",
+                cursor: "pointer",
+                fontSize: 12,
+                textAlign: "left",
+                fontFamily: "var(--font-mono)",
+              }}
+            >
+              {previewText(renderedSummary || renderedPlainLines?.[0] || "", t("message_noExtensionMessage"))}
+            </button>
+          )
         ) : contentExpanded ? (
           <div style={{ padding: "6px 9px" }}>
             {images.length > 0 && (
