@@ -3672,6 +3672,15 @@ export class SdkSessionHost {
         return { applied: Boolean(ok) };
       }
 
+      case "extension_ui_set_input": {
+        // issue #116（呈现那半）：面板里有 pi-tui 的 Input 原语时，网页输入框把文本写回组件；
+        // confirm = 用户在网页里按了回车，把回车交给该 Input（触发插件的 onSubmit）。
+        const id = asString(command.id);
+        const value = typeof command.value === "string" ? command.value : undefined;
+        const ok = id ? this.extensionUi?.setCustomInputValue(id, value, command.confirm === true) : false;
+        return { applied: Boolean(ok) };
+      }
+
       case "extension_ui_mouse": {
         // custom 面板内的鼠标事件（pi-subagents 的面板靠它点标题行折叠）
         const id = asString(command.id);

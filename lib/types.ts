@@ -419,6 +419,12 @@ export type ExtensionUiRequest =
        * 不必合成 N 次方向键。缺省/未给 = 没有该原语，走行级层的合成按键。
        */
       selectList?: boolean;
+      /**
+       * 面板组件树里含 pi-tui 的 Input 原语（issue #116）：前端渲染真输入框，
+       * 文本写回组件（value 是初值）。缺省 = 没有该原语，照旧用面板自己的键盘捕获。
+       */
+      input?: boolean;
+      inputValue?: string;
     }
   | {
       type: "extension_ui_request";

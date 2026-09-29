@@ -9,7 +9,7 @@ import {
   createHeadlessCustomUiTui,
   DEFAULT_CUSTOM_UI_ROWS,
 } from "./custom-ui-terminal";
-import { applySelectListIndex, findPanelSelectList } from "./extension-panel-primitives";
+import { applySelectListIndex, findPanelInput, findPanelSelectList } from "./extension-panel-primitives";
 import { getAgentDir } from "./pi-paths";
 import { asBracketedPaste } from "./terminal-input";
 import { getPidancePrefsBus } from "./pidance-prefs-bus";
@@ -189,6 +189,8 @@ export type WebExtensionUIAdapter = {
   inputCustomMouse: (id: string, event: Record<string, unknown>) => boolean;
   /** 直接设置可选列表的选中项（issue #116）；false = 无该原语或索引非法，调用方回退合成按键。 */
   selectCustomOption: (id: string, index: number, confirm?: boolean) => boolean;
+  /** 写回面板里 Input 原语的文本；confirm = 顺带确认（回车）。 */
+  setCustomInputValue: (id: string, value: string | undefined, confirm?: boolean) => boolean;
   /**
    * 客户端上报 custom 面板的几何（字符单元格坐标）。
    *
@@ -1821,6 +1823,7 @@ export function createWebExtensionUIAdapter(
             ...(fallbacksChanged ? { imageFallbacks: lastImageFallbacks } : {}),
             focus: focusState,
             ...(findPanelSelectList(component) ? { selectList: true } : {}),
+            ...(findPanelInput(component) ? { input: true, inputValue: readPanelInputValue(component) } : {}),
             ...(hidden ? { hidden } : {}),
             ...(layout ? { layout } : {}),
           });
@@ -1833,6 +1836,7 @@ export function createWebExtensionUIAdapter(
             ...(lastImageFallbacks.length > 0 ? { imageFallbacks: lastImageFallbacks } : {}),
             focus: focusState,
             ...(findPanelSelectList(component) ? { selectList: true } : {}),
+            ...(findPanelInput(component) ? { input: true, inputValue: readPanelInputValue(component) } : {}),
             ...(hidden ? { hidden } : {}),
             ...(layout ? { layout } : {}),
           };
@@ -1978,6 +1982,17 @@ export function createWebExtensionUIAdapter(
         };
         // 挂载时就认一次原语（面板组件树在生命周期内不变），结果随面板状态一起下发。
         // 存**取值函数**而不是值本身：这行在 factory 调用之前执行，存值会永远是 undefined。
+        /** 面板里 Input 原语的当前文本（没有原语时返回 undefined，前端据此不渲染输入框）。 */
+        const readPanelInputValue = (root: unknown): string | undefined => {
+          const node = findPanelInput(root) as { getValue?: () => unknown } | null;
+          if (!node) return undefined;
+          try {
+            const value = node.getValue?.();
+            return typeof value === "string" ? value : undefined;
+          } catch {
+            return undefined;
+          }
+        };
         customSessions.set(id, { handleInput, handleMouse, done, setBounds, getComponent: () => component, requestRender: () => emitLines() });
         const tui = createHeadlessCustomUiTui(() => {
           emitLines();
@@ -2298,6 +2313,37 @@ export function createWebExtensionUIAdapter(
           (list as { handleInput?: (data: string) => void })?.handleInput?.("\r");
         } catch (error) {
           console.error("[pidance] custom UI confirm failed:", error);
+          return false;
+        }
+      }
+      return true;
+    },
+    /**
+     * 写回面板里 Input 原语的文本（issue #116 的「呈现」那半：前端渲染真输入框）。
+     * confirm = 用户在网页输入框里按了回车：把回车**直接交给该 Input**（它会触发插件的 onSubmit）。
+     * 返回 false = 面板没有该原语 / 面板已结束，调用方不必上报。
+     */
+    setCustomInputValue(id, value, confirm) {
+      const session = customSessions.get(id);
+      if (!session) return false;
+      const node = findPanelInput(session.getComponent?.()) as
+        | { setValue?: (text: string) => void; handleInput?: (data: string) => void }
+        | null;
+      if (!node || typeof node.setValue !== "function") return false;
+      if (typeof value === "string") {
+        try {
+          node.setValue(value);
+        } catch (error) {
+          console.error("[pidance] custom UI input write failed:", error);
+          return false;
+        }
+      }
+      session.requestRender?.();
+      if (confirm) {
+        try {
+          node.handleInput?.("\r");
+        } catch (error) {
+          console.error("[pidance] custom UI input confirm failed:", error);
           return false;
         }
       }

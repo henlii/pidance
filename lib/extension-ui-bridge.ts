@@ -221,7 +221,7 @@ export function pickCapabilityNotices(
  */
 export function restoreCustomUi(
   state: ExtensionUiState,
-  active: { id?: unknown; lines?: unknown; images?: unknown; imageFallbacks?: unknown; layout?: unknown; hidden?: unknown } | null | undefined,
+  active: { id?: unknown; lines?: unknown; images?: unknown; imageFallbacks?: unknown; layout?: unknown; hidden?: unknown; selectList?: unknown; input?: unknown; inputValue?: unknown } | null | undefined,
 ): ExtensionUiState {
   const id = typeof active?.id === "string" && active.id ? active.id : null;
   if (!id) return state;
@@ -248,6 +248,9 @@ export function restoreCustomUi(
         ? { imageFallbacks: active.imageFallbacks }
         : {}),
       ...(hidden ? { hidden } : {}),
+      // issue #116：组件树原语标记与输入初值同样要恢复（否则刷新后真输入框没了/是空的）
+      ...(active?.selectList === true ? { selectList: true } : {}),
+      ...(active?.input === true ? { input: true, inputValue: typeof active.inputValue === "string" ? active.inputValue : "" } : {}),
       ...(layout ? { layout } : {}),
     } as ExtensionUiCustomRequest,
   };

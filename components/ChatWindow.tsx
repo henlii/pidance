@@ -250,6 +250,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     dismissEditorTakeover, reenterEditorTakeover, reportEditorTakeoverView,
     handleBranchHere, handleBranchFromAssistant,
     handleNewSessionFromHere, handleNewSessionFromAnswer,
+    sendExtensionPanelInput,
   } = useAgentSession({
     session, newSessionCwd: effectiveNewSessionCwd, newSessionIntentId, onAgentEnd: wrappedOnAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
@@ -1086,6 +1087,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
           rawMode={panelRawMode}
           onToggleRawMode={togglePanelRawMode}
           onSelectOption={handleSelectPanelOption}
+          onInputValue={sendExtensionPanelInput}
           onInput={sendExtensionCustomInput}
           onMouse={sendExtensionCustomMouse}
           onBounds={sendExtensionCustomBounds}

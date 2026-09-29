@@ -282,6 +282,8 @@ export const en = {
   panel_rawMode: "Plain view",
   panel_webView: "Web view",
   panel_selectFailed: "The panel changed; switched to the plain view.",
+  panel_inputLabel: "Panel input",
+  panel_inputPlaceholder: "Type here…",
   chat_editorTakeoverQueued: "{count} queued",
   chat_editorTakeoverHint: 'Keys go to the plugin editor. Press "Back to input box" to use the normal composer again.',
   chat_editorTakeoverCollapsed: 'Plugin editor is hidden; using the normal input box.',

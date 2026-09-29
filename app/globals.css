@@ -1415,6 +1415,24 @@ span.linenumber {
   user-select: text;
   -webkit-user-select: text;
 }
+/* 面板里的 Input 原语渲染成真输入框（issue #116 呈现那半）：与面板正文同一套等宽字体与配色 */
+.extension-panel-input {
+  display: block;
+  width: 100%;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.extension-panel-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 .extension-panel-keytrap {
   position: absolute;
   width: 1px;

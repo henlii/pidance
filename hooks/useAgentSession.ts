@@ -2219,6 +2219,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [capabilities.canSendSessionCommands, extensionUiStateRef]);
 
   /**
+   * 面板里的 Input 原语（issue #116 呈现那半）：把网页输入框的文本写回插件组件。
+   * confirm = 用户在网页里按了回车：由服务端把回车交给该 Input（触发插件的 onSubmit）。
+   */
+  const sendExtensionPanelInput = useCallback(
+    async (request: ExtensionUiCustomRequest, value: string, confirm: boolean) => {
+      if (!capabilities.canSendSessionCommands) return;
+      const sid = sessionIdRef.current;
+      if (!sid) return;
+      try {
+        await sendAgentCommand(sid, {
+          type: "extension_ui_set_input",
+          id: request.id,
+          value,
+          ...(confirm ? { confirm: true } : {}),
+        });
+      } catch (e) {
+        console.error("Failed to write extension panel input:", e);
+      }
+    },
+    [capabilities.canSendSessionCommands],
+  );
+
+  /**
    * 面板内的鼠标事件：转成 pi-tui 的 TuiMouseEvent 交给面板组件。
    * 目前唯一的消费者是 pi-subagents 的 async widget（点标题行折叠），
    * 它只看 type / button / y 与修饰键。
@@ -4848,6 +4871,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     dismissNotice,
     toggleNoticePin,
     extensionDialog, extensionCustomUi, extensionEditorTakeover, extensionStatuses, extensionWidgets, extensionHeader, extensionFooter, extensionTerminalInputListenerCount, extensionShortcuts, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel: extensionHiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, dismissExtensionUiRequest, sendExtensionCustomInput, sendExtensionCustomMouse, sendExtensionCustomBounds, sendExtensionWidgetMouse, sendExtensionEditorInput, runExtensionShortcut,
+    sendExtensionPanelInput,
     todos,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,

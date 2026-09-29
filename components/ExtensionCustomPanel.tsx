@@ -66,6 +66,7 @@ export function ExtensionCustomPanel({
   rawMode,
   onToggleRawMode,
   onSelectOption,
+  onInputValue,
   onBounds,
 }: {
   request: ExtensionUiCustomRequest;
@@ -80,6 +81,8 @@ export function ExtensionCustomPanel({
   onToggleRawMode?: () => void;
   /** 点了网页化选项行：由调用方合成按键（发键前会自校验，见 ChatWindow）。 */
   onSelectOption?: (optionIndex: number) => void;
+  /** 面板里的 Input 原语：把文本写回组件；confirm = 回车确认（issue #116 呈现那半）。 */
+  onInputValue?: (request: ExtensionUiCustomRequest, value: string, confirm: boolean) => void;
   onBounds?: (request: ExtensionUiCustomRequest, bounds: CustomPanelBounds) => void;
 }) {
   const { t } = useI18n();
@@ -132,6 +135,14 @@ export function ExtensionCustomPanel({
   const webViewEnabled = !rawMode && shouldRenderPanelWebView(panelView);
 
   const overlayStyles = buildExtensionOverlayStyle(request.layout);
+  // 面板里 Input 原语的文本（初值来自服务端投影；打字时本地先行，再写回组件）
+  const [panelInputValue, setPanelInputValue] = useState(request.inputValue ?? "");
+  const inputValueTimer = useRef<number | null>(null);
+  useEffect(() => {
+    // 换了面板或服务端初值变了就重置；打字期间不覆盖本地（否则光标会跳）
+    setPanelInputValue(request.inputValue ?? "");
+  }, [request.id]);
+  useEffect(() => () => { if (inputValueTimer.current !== null) window.clearTimeout(inputValueTimer.current); }, []);
 
   /**
    * 键盘焦点由**服务端**驱动（overlay 句柄的 focus/unfocus → request.focus）：
@@ -317,6 +328,33 @@ export function ExtensionCustomPanel({
           }}
           className="extension-panel-keytrap"
         />
+        {request.input ? (
+          // 面板里有 pi-tui 的 Input 原语 → 用真输入框（issue #116 呈现那半）：
+          // 打字把文本写回组件，回车交给插件的 onSubmit。
+          <input
+            data-extension-input="true"
+            value={panelInputValue}
+            aria-label={t("panel_inputLabel")}
+            placeholder={t("panel_inputPlaceholder")}
+            onChange={(event) => {
+              const next = event.currentTarget.value;
+              setPanelInputValue(next);
+              // 打字只写文本（不确认）；回车才确认，避免每敲一下都触发插件逻辑
+              if (inputValueTimer.current !== null) window.clearTimeout(inputValueTimer.current);
+              inputValueTimer.current = window.setTimeout(() => {
+                inputValueTimer.current = null;
+                onInputValue?.(request, next, false);
+              }, 150);
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+              event.preventDefault();
+              if (inputValueTimer.current !== null) { window.clearTimeout(inputValueTimer.current); inputValueTimer.current = null; }
+              onInputValue?.(request, event.currentTarget.value, true);
+            }}
+            className="extension-panel-input"
+          />
+        ) : null}
         <pre
           style={overlayStyles?.bodyWidthCh ? { width: `${overlayStyles.bodyWidthCh}ch` } : undefined}
           ref={bodyRef}

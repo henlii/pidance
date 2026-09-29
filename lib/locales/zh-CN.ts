@@ -276,6 +276,8 @@ export const zhCN: Record<TranslationKey, string> = {
   panel_rawMode: "切回原样",
   panel_webView: "网页视图",
   panel_selectFailed: "面板内容已变化，已切回原样显示。",
+  panel_inputLabel: "面板输入",
+  panel_inputPlaceholder: "在这里输入…",
   chat_editorTakeoverQueued: "已排队 {count} 条",
   chat_editorTakeoverHint: '按键交给插件编辑器。想用普通输入框时点「返回输入框」。',
   chat_editorTakeoverCollapsed: '插件编辑器已收起，当前用普通输入框。',
