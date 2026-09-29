@@ -414,6 +414,11 @@ export type ExtensionUiRequest =
        * 客户端只在**状态变化**时移动 DOM 焦点，否则插件每次重渲都会把焦点从用户手里抢回去。
        */
       focus?: CustomPanelFocus;
+      /**
+       * 面板组件树里含 pi-tui 的可选列表原语（issue #116）：客户端可以「直接设置选中项」，
+       * 不必合成 N 次方向键。缺省/未给 = 没有该原语，走行级层的合成按键。
+       */
+      selectList?: boolean;
     }
   | {
       type: "extension_ui_request";

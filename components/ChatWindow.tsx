@@ -406,6 +406,17 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     async (optionIndex: number) => {
       const request = extensionCustomUiRef.current;
       if (!request) return;
+      // 面板里有 pi-tui 的可选列表原语时**直接设置选中项**（更准，且没有发键中途漂移的问题）；
+      // 适配器返回 false（没有原语/索引非法）才回退到合成方向键。
+      if (request.selectList) {
+        const sid = sessionIdRef.current;
+        const response = sid
+          ? await sendAgentCommand(sid, { type: "extension_ui_select_index", id: request.id, index: optionIndex, confirm: true }).catch(() => null)
+          : null;
+        if (response && (response as { applied?: boolean }).applied) {
+          return;
+        }
+      }
       const plan = planOptionClick(request.lines, extensionCustomUiRef.current?.lines ?? request.lines, optionIndex);
       if (plan.kind === "give-up") {
         setPanelRawMode(true);

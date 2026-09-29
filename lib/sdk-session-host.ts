@@ -3659,6 +3659,19 @@ export class SdkSessionHost {
         return null;
       }
 
+      case "extension_ui_select_index": {
+        // issue #116：面板里有 pi-tui 的可选列表原语时，直接设置选中项 ——
+        // 比合成 N 次方向键更准（发键中途插件若重渲染，合成按键可能点错项）。
+        // 适配器返回 false（没有原语/索引非法）时客户端回退到行级层的合成按键。
+        const id = asString(command.id);
+        const index = command.index;
+        const ok =
+          typeof index === "number" && id
+            ? this.extensionUi?.selectCustomOption(id, index, command.confirm === true)
+            : false;
+        return { applied: Boolean(ok) };
+      }
+
       case "extension_ui_mouse": {
         // custom 面板内的鼠标事件（pi-subagents 的面板靠它点标题行折叠）
         const id = asString(command.id);

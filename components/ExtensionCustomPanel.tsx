@@ -123,7 +123,12 @@ export function ExtensionCustomPanel({
   // overlay 插件给的定位/尺寸：容器按 anchor 对齐、按 margin 留边，面板本体按
   // width/minWidth/maxHeight 定尺寸。没有 layout（非 overlay）时保持全屏模态。
   // issue #114：行级语义识别 → 网页化视图；识别不到或被用户切回原样就按原样渲染。
-  const panelView = useMemo(() => buildPanelView(displayLines), [displayLines]);
+  // 面板含 pi-tui 的可选列表原语时（request.selectList），连带启用「光标列列表」识别 ——
+  // 这时点击是直接设置选中项，不模拟按键，所以放宽识别没有点错项的风险。
+  const panelView = useMemo(
+    () => buildPanelView(displayLines, { allowCursorList: request.selectList === true }),
+    [displayLines, request.selectList],
+  );
   const webViewEnabled = !rawMode && shouldRenderPanelWebView(panelView);
 
   const overlayStyles = buildExtensionOverlayStyle(request.layout);

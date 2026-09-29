@@ -16,7 +16,7 @@ import { stripAnsi } from "./ansi";
 const BOX_DRAWING_CHARS = /^[\s─│┌┐└┘├┤┬┴┼┏┓┗┛┣┫┳┻╋━┃]+$/;
 
 /** 光标标记：pi-tui 的选择列表用 ❯ / ▶ 或 > 表示当前项。 */
-const CURSOR_MARKERS = ["❯", "▶", ">"];
+const CURSOR_MARKERS = ["❯", "▶", "→", ">"];
 
 /** 选项行前缀：编号（1. / 2) / (3)）或项目符号（- / * / •）。 */
 const OPTION_PREFIX = /^\s*(?:[❯▶>]\s*)?(?:\(?\d+[).、]|[-*•])\s+\S/;
@@ -87,7 +87,10 @@ function cursorIndexOf(line: string): number {
  * 识别选项列表。保守：必须有 ≥2 个同形前缀的候选行、且**恰好一行**带光标标记。
  * 像表格的面板（含制表边框行或列间隙很大的行）一律判否 —— 宁可不识别，也不能把表格当选项。
  */
-export function detectPanelOptionList(lines: string[]): PanelOptionList | null {
+export function detectPanelOptionList(
+  lines: string[],
+  options: { allowCursorList?: boolean } = {},
+): PanelOptionList | null {
   const candidates: { index: number; line: string; label: string; cursor: boolean; indent: number }[] = [];
   for (const line of lines) {
     const plain = stripAnsi(line);
@@ -101,7 +104,7 @@ export function detectPanelOptionList(lines: string[]): PanelOptionList | null {
     const label = plain.replace(/^\s*(?:[❯▶>]\s*)?/, "").trim();
     candidates.push({ index: candidates.length, line, label, cursor, indent });
   }
-  if (candidates.length < 2) return null;
+  if (candidates.length < 2) return options.allowCursorList ? detectCursorColumnList(lines) : null;
   // 同形前缀：缩进一致（容 1 格误差），否则可能是散落在正文里的编号
   const baseIndent = candidates[0].indent;
   if (candidates.some((c) => Math.abs(c.indent - baseIndent) > 1)) return null;
@@ -114,8 +117,54 @@ export function detectPanelOptionList(lines: string[]): PanelOptionList | null {
   };
 }
 
+/**
+ * 「光标列」列表识别：**没有编号**、靠一根光标标记（→ / ❯ / ▶ / >）标出当前项的那种列表
+ * —— pi-tui 自己的 SelectList 就是这样渲染的（`→ 甲` / `  乙` / `  丙`）。
+ *
+ * 只在**面板确实含可选列表原语**时才启用（见 detectPanelOptionList 的 allowCursorList）：
+ * 这时点击是「直接设置选中项」，不模拟按键，所以放宽识别不会带来点错项的风险；
+ * 手搓 Text 的面板仍只认编号/项目符号，避免把散文里的箭头当选项。
+ */
+export function detectCursorColumnList(lines: string[]): PanelOptionList | null {
+  const rows = lines.map((line) => ({ line, plain: stripAnsi(line) }));
+  // 与编号分支同口径：面板里一旦出现整行制表符，就不猜（框里放列表的多半是表格）
+  if (lines.some((line) => isBorderRow(line))) return null;
+  let cursorRow = -1;
+  let contentColumn = -1;
+  for (let i = 0; i < rows.length; i += 1) {
+    const match = rows[i].plain.match(/^(\s*)([❯▶→>])(\s+)/);
+    if (!match) continue;
+    if (cursorRow >= 0) return null; // 出现两个光标行 → 不猜
+    cursorRow = i;
+    contentColumn = match[1].length + match[2].length + match[3].length;
+  }
+  if (cursorRow < 0 || contentColumn <= 0) return null;
+  const startsItem = (plain: string, index: number) => {
+    if (isBorderRow(rows[index].line)) return false;
+    if (plain.trim() === "") return false;
+    if (/^\s*[❯▶→>](\s+)/.test(plain)) return plain.length > contentColumn;
+    // 非光标行：必须是同一内容列起的文本（前导空格数正好等于 contentColumn）
+    return plain.length > contentColumn && plain.slice(0, contentColumn).trim() === "";
+  };
+  let start = cursorRow;
+  while (start - 1 >= 0 && startsItem(rows[start - 1].plain, start - 1)) start -= 1;
+  let end = cursorRow;
+  while (end + 1 < rows.length && startsItem(rows[end + 1].plain, end + 1)) end += 1;
+  const group = rows.slice(start, end + 1);
+  if (group.length < 2) return null;
+  const items: PanelOptionItem[] = group.map((row, index) => ({
+    index,
+    label: row.plain.slice(contentColumn).trim(),
+    line: row.line,
+    cursor: index === cursorRow - start,
+  }));
+  if (items.some((item) => item.label.length === 0 || item.label.length > 60)) return null;
+  return { items, cursorIndex: cursorRow - start };
+}
+
+
 /** 把 ANIS 行切成块：边框 / 标题 / 正文，同时附带选项识别结果。 */
-export function buildPanelView(lines: string[]): PanelView {
+export function buildPanelView(lines: string[], options: { allowCursorList?: boolean } = {}): PanelView {
   const blocks: PanelBlock[] = [];
   for (const line of lines) {
     const kind: PanelBlockKind = isBorderRow(line) ? "border" : isHeadingRow(line) ? "heading" : "text";
@@ -127,7 +176,7 @@ export function buildPanelView(lines: string[]): PanelView {
       blocks.push({ kind, lines: [line], plainLines: [stripAnsi(line)] });
     }
   }
-  return { blocks, options: detectPanelOptionList(lines) };
+  return { blocks, options: detectPanelOptionList(lines, options) };
 }
 
 /**

@@ -9,6 +9,7 @@ import {
   createHeadlessCustomUiTui,
   DEFAULT_CUSTOM_UI_ROWS,
 } from "./custom-ui-terminal";
+import { applySelectListIndex, findPanelSelectList } from "./extension-panel-primitives";
 import { getAgentDir } from "./pi-paths";
 import { asBracketedPaste } from "./terminal-input";
 import { getPidancePrefsBus } from "./pidance-prefs-bus";
@@ -154,6 +155,12 @@ export type PendingExtensionRequest = {
 export type ExtensionUiSettleReason = "responded" | "timeout" | "abort" | "disposed" | "failed";
 
 type CustomUiSession = {
+  /** 面板根组件：走组件树认原语（issue #116，只用公开的 children 与公开方法）。 */
+  getComponent?: () => unknown;
+  /** 请求重绘（插件不知道我们改了选中项，得由壳发起）。 */
+  requestRender?: () => void;
+  /** 是否含可选列表原语：客户端据此选择「直接设置」而不是合成按键。 */
+  hasSelectList?: boolean;
   handleInput: (data: string) => void;
   handleMouse: (event: Record<string, unknown>) => void;
   done: (result?: unknown) => void;
@@ -180,6 +187,8 @@ export type WebExtensionUIAdapter = {
   inputCustom: (id: string, data: string) => boolean;
   /** 面板内的鼠标事件（pi-subagents 的 custom 面板靠它点标题行折叠）。 */
   inputCustomMouse: (id: string, event: Record<string, unknown>) => boolean;
+  /** 直接设置可选列表的选中项（issue #116）；false = 无该原语或索引非法，调用方回退合成按键。 */
+  selectCustomOption: (id: string, index: number, confirm?: boolean) => boolean;
   /**
    * 客户端上报 custom 面板的几何（字符单元格坐标）。
    *
@@ -1774,6 +1783,8 @@ export function createWebExtensionUIAdapter(
           resolve(result as never);
         };
         // 最后一次渲染的行：hidden 切换时要把完整状态重发一遍（前端按事件整体替换）
+        // issue #116：面板里有 pi-tui 的可选列表原语 → 客户端可以「点第 N 项直接设置选中项」，
+        // 不必合成 N 次方向键（更准，也没有发键中途漂移的问题）。
         let lastLines: string[] = [];
         let lastImages: ExtensionRenderedImage[] = [];
         let lastImageFallbacks: ExtensionRenderedImageFallback[] = [];
@@ -1809,6 +1820,7 @@ export function createWebExtensionUIAdapter(
             ...(imagesChanged ? { images: lastImages } : {}),
             ...(fallbacksChanged ? { imageFallbacks: lastImageFallbacks } : {}),
             focus: focusState,
+            ...(findPanelSelectList(component) ? { selectList: true } : {}),
             ...(hidden ? { hidden } : {}),
             ...(layout ? { layout } : {}),
           });
@@ -1820,6 +1832,7 @@ export function createWebExtensionUIAdapter(
             ...(lastImages.length > 0 ? { images: lastImages } : {}),
             ...(lastImageFallbacks.length > 0 ? { imageFallbacks: lastImageFallbacks } : {}),
             focus: focusState,
+            ...(findPanelSelectList(component) ? { selectList: true } : {}),
             ...(hidden ? { hidden } : {}),
             ...(layout ? { layout } : {}),
           };
@@ -1963,7 +1976,9 @@ export function createWebExtensionUIAdapter(
           bounds = next;
           return true;
         };
-        customSessions.set(id, { handleInput, handleMouse, done, setBounds });
+        // 挂载时就认一次原语（面板组件树在生命周期内不变），结果随面板状态一起下发。
+        // 存**取值函数**而不是值本身：这行在 factory 调用之前执行，存值会永远是 undefined。
+        customSessions.set(id, { handleInput, handleMouse, done, setBounds, getComponent: () => component, requestRender: () => emitLines() });
         const tui = createHeadlessCustomUiTui(() => {
           emitLines();
         }, () => renderWidth, () => renderRows, { isEditorFocused, onUnsupported: notifyUnsupported });
@@ -2267,6 +2282,25 @@ export function createWebExtensionUIAdapter(
       const session = customSessions.get(id);
       if (!session) return false;
       session.handleMouse(event);
+      return true;
+    },
+    selectCustomOption(id, index, confirm) {
+      const session = customSessions.get(id);
+      if (!session) return false;
+      const list = findPanelSelectList(session.getComponent?.());
+      if (!applySelectListIndex(list, index)) return false;
+      // 插件不知道我们改了选中项，重绘得由壳发起（否则界面还停在旧光标上）
+      session.requestRender?.();
+      if (confirm) {
+        // 回车**直接给列表**：面板根若是 Container，它没有 handleInput，键会被丢掉
+        // （TUI 里按键是给聚焦组件的，而这里是我们在替用户确认）
+        try {
+          (list as { handleInput?: (data: string) => void })?.handleInput?.("\r");
+        } catch (error) {
+          console.error("[pidance] custom UI confirm failed:", error);
+          return false;
+        }
+      }
       return true;
     },
     setCustomBounds(id, value) {
