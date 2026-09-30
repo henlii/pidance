@@ -1190,35 +1190,9 @@ export function createWebExtensionUIAdapter(
   };
 
   /**
-   * 插件用了一个 Web 端**只部分支持**的能力。
-   *
-   * 与 `notifyUnsupported` 的区别：能力本身在（按键确实会送达），只是覆盖面比 TUI 窄。
-   * 不说清楚的话，插件作者会把「没收到按键」当成「用户没按」，于是这块交互静默消失
-   * ——所以注册时给一次可见提示。同样只报一次，且去重范围就是**这个适配器（这个会话）**：
-   * 插件会反复注册监听器，而通知是发往该会话的 SSE —— 放到进程级去重，会让「在没人开着的
-   * 会话里注册」那一次丢掉之后永远不再出现。
-   *
-   * 文案用英文：与 `notifyUnsupported` 同属面向插件生态的诊断信息（客户端也把这类
-   * 通知固定成 `Extension warning` / `Extension error` 英文标题，见
-   * `hooks/useAgentSession.ts`），不为它单独开一条服务端 → 客户端的文案键协议。
-   * **但文案必须与 `lib/extension-panel-keys.ts` 的实际窗口逐字一致** —— 说错窗口
-   * 比不说更糟：插件作者会照着一份不存在的契约去设计交互。
-   */
-  const notifyLimitedSupport = (feature: string, detail: string) => {
-    if (capabilityNoticesSent.has(feature)) return;
-    capabilityNoticesSent.add(feature);
-    const message = `Extension UI "${feature}" is limited by the Pidance web client: ${detail}`;
-    console.warn(`[pidance] ${message}`);
-    const id = randomUUID();
-    recordCapabilityNotice(id, message);
-    emit({
-      type: "extension_ui_request",
-      id,
-      method: "notify",
-      message,
-      notifyType: "warning",
-    });
-  };
+  // 这里原本有 `notifyLimitedSupport`（插件用了 Web 端只部分支持的能力时发一次可见提示）。
+  // 现在只剩 `notifyUnsupported` 一条运行时通道（tui.stop()/start() 这类真正不支持的能力），
+  // 说明性的内容统一写在「关于」页，不再往会话里塞通知。
 
   /**
    * 工厂形式的 widget（如 pi-subagents 的 async widget）：工厂只调用一次、组件实例
@@ -1614,21 +1588,9 @@ export function createWebExtensionUIAdapter(
       //
       // 覆盖范围必须**告知**（issue #74）：插件注册后可能一个键都收不到，
       // 无从知道是「用户没按」还是「Web 端收不到」，这块交互就静默消失了。
-      notifyLimitedSupport(
-        "onTerminalInput",
-        "handlers only receive keys in a few narrow windows: " +
-          // 窗口 ②：widget 选择态（lib/extension-panel-keys.ts 的 resolveExtensionWidgetKeyAction）
-          "(1) with a widget present and the composer focused and empty, Down/Left start a selection, " +
-          "after which arrows, j, k, Enter and Escape are routed while the selection lasts; " +
-          // 窗口 ①：收起的面板（同文件 shouldRouteKeyToExtensionListener）
-          "(2) while a collapsed extension panel exists, Escape, F1-F12, Alt+<char> and Ctrl+<char> " +
-          "(browser-reserved chords and Ctrl+Space excluded) are routed; " +
-          // 窗口 ③：插件界面显示中（同文件 resolveExtensionSurfaceKeyAction）
-          "(3) while a plugin panel, overlay or dialog is visible, keys that no focused field or " +
-          "control owns are routed to the handlers as they are (Meta chords, the browser-reserved " +
-          "Ctrl chords, Ctrl+Space, the shell's Ctrl+K and Tab stay with the browser). " +
-          "Ordinary typing in the composer never reaches them.",
-      );
+      // 覆盖范围**不再**发能力提示（用户要求：这类说明统一放进「关于」页，见
+      // components/AboutDialog.tsx 的扩展界面能力一节）；三个窄窗口的实现仍在
+      // hooks/useExtensionTerminalInput.ts 与 hooks/useExtensionWidgetKeys.ts。
       terminalInputListeners.add(handler);
       emitTerminalInputListeners();
       return () => {

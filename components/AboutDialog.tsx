@@ -244,6 +244,34 @@ export function AboutDialog({ open, onClose }: AboutDialogProps) {
             <span>{t("about_github")}</span>
           </a>
 
+          {/* 扩展界面能力说明（issue #113/#116 之后新增的「说明都放这里」一节的落点）：
+              插件注册全局按键监听时会在会话里弹一条英文提示，用户每次开会话都看到 —— 改为只在这里说明。 */}
+          <section
+            aria-label={t("about_extTitle")}
+            style={{
+              margin: "0 0 12px",
+              padding: "10px 12px",
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              background: "var(--bg-subtle)",
+              maxWidth: 420,
+              fontSize: 11,
+              lineHeight: 1.6,
+              color: "var(--text-muted)",
+            }}
+          >
+            <div style={{ fontWeight: 600, color: "var(--text)", marginBottom: 6 }}>
+              {t("about_extTitle")}
+            </div>
+            <p style={{ margin: "0 0 8px" }}>{t("about_extIntro")}</p>
+            <div style={{ marginBottom: 4, color: "var(--text)" }}>{t("about_extKeysTitle")}</div>
+            <ul style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 4 }}>
+              <li>{t("about_extKeysWindow1")}</li>
+              <li>{t("about_extKeysWindow2")}</li>
+              <li>{t("about_extKeysWindow3")}</li>
+            </ul>
+            <p style={{ margin: "8px 0 0" }}>{t("about_extKeysNote")}</p>
+          </section>
           <p
             style={{
               margin: 0,
