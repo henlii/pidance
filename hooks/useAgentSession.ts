@@ -90,10 +90,7 @@ import {
   type ToolExecutionUpdateInput,
   type ToolExecutionEndInput,
 } from "@/lib/tool-execution-buffer";
-import {
-  DEFAULT_SESSION_HISTORY_PAGE,
-  DEFAULT_SESSION_TAIL_LIMIT,
-} from "@/lib/session-context-window";
+import { loadSessionLazyLoadSetting, sessionLazyLoadLimit } from "@/lib/session-lazy-load";
 import { submissionKey } from "@/lib/session-timeline";
 import {
   adoptServerSnapshot,
@@ -1291,11 +1288,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       // tail-first：首屏只拉最新 N 条，尽快结束 loading；更旧历史按需 prepend。
       const hydrateRequestSeq = registry.beginHydrate(sid);
-      const params = new URLSearchParams({
-        deferThinking: "1",
-        deferMedia: "1",
-        limit: String(DEFAULT_SESSION_TAIL_LIMIT),
-      });
+      const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
+      // 「会话内容懒加载」（设置 → 会话）：勾选带 limit、不勾选**不带 limit**（全量，服务端不切片）。
+      const lazyLoadLimit = sessionLazyLoadLimit(loadSessionLazyLoadSetting());
+      if (lazyLoadLimit !== null) params.set("limit", String(lazyLoadLimit));
       // 带超时 + 有界重试：连接被饿住时不至于把界面永久留在 loading（#91）。
       // 取消语义不变：signal aborted 时助手抛 AbortError，下面的 isAbortError 照旧当「不是错误」。
       const res = await loadWithBoundedRetry({
@@ -1567,10 +1563,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 窗口形态取**该会话 slot** 上的（不是视图 ref）：后台会话补待办时，视图 ref 说的是
     // 当前会话的形态，会取错档位。
     const inHistoryWindow = snapshot?.hasMoreAfter === true;
-    const limit = Math.min(THEME_REFRESH_MAX_ROWS, Math.max(present.length, DEFAULT_SESSION_HISTORY_PAGE));
+    // 换色重取要覆盖「已经加载的窗口」，所以下界取已加载条数；未启用懒加载时不带 limit（全量）。
+    const lazyLoadLimit = sessionLazyLoadLimit(loadSessionLazyLoadSetting(), present.length);
     const leafId = sid === sessionIdRef.current ? activeLeafIdRef.current : null;
     const buildUrl = (params: URLSearchParams) => {
-      const query = new URLSearchParams({ deferThinking: "1", deferMedia: "1", limit: String(limit) });
+      const query = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
+      if (lazyLoadLimit !== null) query.set("limit", String(lazyLoadLimit));
       for (const [key, value] of params) query.set(key, value);
       if (leafId) query.set("leafId", leafId);
       return `/api/sessions/${encodeURIComponent(sid)}/context?${query}`;
@@ -1704,12 +1702,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const registry = getOrCreateBrowserSessionRuntimeRegistry();
     const hydrateRequestSeq = registry.beginHydrate(sid);
     try {
-      const params = new URLSearchParams({
-        deferThinking: "1",
-        deferMedia: "1",
-        before,
-        limit: String(DEFAULT_SESSION_HISTORY_PAGE),
-      });
+      const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1", before });
+      // 「会话内容懒加载」（设置 → 会话）：勾选带 limit、不勾选**不带 limit**（全量，服务端不切片）。
+      const lazyLoadLimit = sessionLazyLoadLimit(loadSessionLazyLoadSetting());
+      if (lazyLoadLimit !== null) params.set("limit", String(lazyLoadLimit));
       if (activeLeafId) params.set("leafId", activeLeafId);
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`, {
         signal: beginLoadRequest(),
@@ -1763,11 +1759,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     try {
       // 分支切换：同样 tail-first，避免整包阻塞
-      const params = new URLSearchParams({
-        deferThinking: "1",
-        deferMedia: "1",
-        limit: String(DEFAULT_SESSION_TAIL_LIMIT),
-      });
+      const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
+      // 「会话内容懒加载」（设置 → 会话）：勾选带 limit、不勾选**不带 limit**（全量，服务端不切片）。
+      const lazyLoadLimit = sessionLazyLoadLimit(loadSessionLazyLoadSetting());
+      if (lazyLoadLimit !== null) params.set("limit", String(lazyLoadLimit));
       if (leafId) params.set("leafId", leafId);
       const url = `/api/sessions/${encodeURIComponent(sid)}/context?${params}`;
       const registry = getOrCreateBrowserSessionRuntimeRegistry();
