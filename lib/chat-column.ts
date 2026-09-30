@@ -120,7 +120,9 @@ export const CHAT_SIDE_BAND =
 
 /** 可用宽度下会话区能取到的最大宽度（保证两侧带宽完整）。 */
 export function maxChatColumnWidthFor(availableWidth: number, isMobile = false): number {
-  if (!Number.isFinite(availableWidth) || availableWidth <= 0) return 0;
+  // 还没量到宽度（首帧 available=0）不能把列压成 0，否则内容会瞬闪成不可见；
+  // 与 resolveChatColumnWidth 对非法可用宽度的处理保持一致（回落到参考宽度）。
+  if (!Number.isFinite(availableWidth) || availableWidth <= 0) return CHAT_COLUMN_WIDTH_REFERENCE;
   // 手机端没有调宽手柄（整层都不渲染），再减掉「手柄 + 间距」的带宽只会让内容两边凭空多出
   // 一条空白 —— 用户看到的就是「会话区左右两端空白有点大」。桌面才需要给手柄留位置。
   if (isMobile) return Math.max(0, Math.round(availableWidth));
