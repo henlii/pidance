@@ -491,6 +491,18 @@ pre, code,
 .markdown-body .katex {
   font-size: 1.05em;
 }
+/* 行内公式不能把时间线撑宽：KaTeX 的 .katex 默认是 inline，既不能断行也不能横滚，
+   一条长公式（实测 472 > 390）会把整个会话区变成可左右拖动。让它变成 inline-block
+   并在超宽时在自己的框里横滚：公式一个字符都不少，时间线也不再横向滚动。
+   display 公式（.katex-display 的子元素）已有自己的横滚，不动它。 */
+.markdown-body .katex:not(.katex-display > .katex) {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  vertical-align: middle;
+  scrollbar-width: thin;
+}
 .markdown-user-message p {
   white-space: pre-wrap;
 }
