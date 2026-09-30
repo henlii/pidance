@@ -116,7 +116,10 @@ void startPidanceHttpServer({
     if (stopping) return;
     stopping = true;
     server.close(() => process.exit(0));
-    const force = setTimeout(() => process.exit(1), STOP_GRACE_MS);
+    // 宽限期到点＝正常收尾没能在 8s 内完成，**不是失败**：这里曾用 exit(1)，
+    // 于是 systemd 把每次重启都记成 FAILURE（Restart=on-failure 还会变成重启循环），
+    // 也干扰排查（正常重启看起来像崩溃）。信号触发的收尾退出 0。
+    const force = setTimeout(() => process.exit(0), STOP_GRACE_MS);
     if (typeof force.unref === "function") force.unref();
   }
   process.on("SIGTERM", requestStop);
