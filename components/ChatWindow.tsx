@@ -268,6 +268,39 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     || Boolean(extensionCustomUi && !extensionCustomUi.hidden);
 
   /**
+   * 面板形态与布局（见 docs/ui-vs-tui.md 第 5 节）：
+   * - **全屏面板**（`ctx.ui.custom()` 没写 overlayOptions）：标题栏与会话区之间，展开时替代会话区、
+   *   收起时只留一行标题并把会话区还回来；
+   * - **半屏面板**（带 overlayOptions 的 custom）与**阻塞弹窗**：会话区之下，展开时占会话区高度的一半；
+   * - 三者任一激活时，输入区（todo / 输入框 / footer / widget）整体隐藏。
+   * 展开态放在这里：它决定会话区是隐藏还是被挤占，必须由持有布局的这一层知道。
+   */
+  const customPanelVisible = Boolean(extensionCustomUi && !extensionCustomUi.hidden);
+  const fullscreenPanel = customPanelVisible && !extensionCustomUi?.layout ? extensionCustomUi : null;
+  const halfScreenCustom = customPanelVisible && extensionCustomUi?.layout ? extensionCustomUi : null;
+  const halfScreenActive = Boolean(halfScreenCustom || extensionDialog);
+  const [panelExpanded, setPanelExpanded] = useState(true);
+  useEffect(() => {
+    // 换面板/关闭后回到默认展开（与外壳「默认展开」一致）。
+    setPanelExpanded(true);
+  }, [extensionCustomUi?.id, extensionDialog]);
+  const panelState = fullscreenPanel
+    ? (panelExpanded ? "fullscreen-expanded" : "fullscreen-collapsed")
+    : halfScreenActive
+      ? (panelExpanded ? "half-expanded" : "half-collapsed")
+      : "none";
+  /**
+   * 会话区与半屏插槽的分高。用 inline style 而不是 CSS 类：会话区本身带 Tailwind 的
+   * `flex-1`，类选择器压不过它（实测渲染成 1:1 而不是 2:1）。半屏展开时会话区 flex:2、
+   * 插槽 flex:1 → 面板正好是会话区高度的一半。
+   */
+  const transcriptFlexStyle = panelState === "half-expanded" ? { flex: "1 1 0" } : undefined;
+  // 面板吃掉可用高度的 1/3、会话区拿剩下的 2/3 —— 两者之和正好 2:1，不依赖 grow 的分配
+  // （grow 2:1 在这层实测没生效，见 ChatWindow.test.mjs 的布局契约）。
+  const halfSlotFlexStyle = panelState === "half-expanded" ? { flex: "0 0 33.3333%" } : undefined;
+  const fullscreenSlotFlexStyle = panelState === "fullscreen-expanded" ? { flex: "1 1 0" } : undefined;
+
+  /**
    * 插件编辑器接管（issue #107）：在**输入框位置**渲染插件组件（`setEditorComponent`）。
    *
    * 三处门槛，缺一不可：
@@ -443,7 +476,14 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     // 其余插件浮层走窗口 ③ 的 terminal_input（对话框是壳自己的 DOM，不需要按键条）
     canRouteTerminal: Boolean(extensionDialog) && extensionTerminalInputListenerCount > 0,
   });
-  const showKeyBar = shouldShowExtensionKeyBar({ isMobile, channel: keyBarChannel });
+  /**
+   * 方向键/回车/Esc 这排控制键（见 ExtensionKeyBar）：**面板内联**在底栏左侧，与右下角的
+   * 「取消」同一排 —— 面板是自绘的终端界面，没有这排键手机上根本操作不了，桌面上点按钮
+   * 同样管用（与物理键盘走同一条通道）。
+   * 固定底部那条只剩「编辑器接管」：那时没有面板底栏可挂。
+   */
+  const panelKeyBarVisible = keyBarChannel === "panel" || keyBarChannel === "terminal";
+  const showKeyBar = shouldShowExtensionKeyBar({ isMobile, channel: keyBarChannel }) && keyBarChannel === "editor";
   const handleKeyBarKey = useCallback(
     (_key: ExtensionKeyBarKey, data: string) => {
       if (keyBarChannel === "editor" && extensionEditorTakeover) {
@@ -459,6 +499,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     },
     [keyBarChannel, extensionEditorTakeover, extensionCustomUi, sendExtensionEditorInput, sendExtensionCustomInput],
   );
+  // 面板底栏左侧那排键（依赖 handleKeyBarKey，所以放在它后面声明）
+  const keyBarNode = panelKeyBarVisible ? <ExtensionKeyBar inline onKey={handleKeyBarKey} /> : null;
 
 
   /**
@@ -648,11 +690,13 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
 
   const writesDisabled = isReadOnly || lockedByOther;
   /**
-   * 输入框有没有真的挂载。「引用到输入框」的按钮活在消息卡里，而输入框在三种状态下会被
-   * 换掉（扩展弹窗独占输入区 / 只读会话 / 被别的 writer 占用）—— 那时回调拿到的是空 ref，
-   * 点下去没有任何反应。这种情况不下发回调，卡片里的引用按钮随之消失，不留死按钮。
+   * 输入框有没有真的挂载、且用户看得见。「引用到输入框」的按钮活在消息卡里，而输入框在三种
+   * 状态下用户根本看不到它：扩展面板激活时整个输入区被隐藏（`data-panel-state` 的 CSS，
+   * 元素还在但 display:none）、只读会话、被别的 writer 占用 —— 那时点下去没有任何反应。
+   * 这种情况不下发回调，卡片里的引用按钮随之消失，不留死按钮。
    */
-  const canReferenceIntoComposer = !extensionDialog && !(isReadOnly && session) && !lockedByOther;
+  const canReferenceIntoComposer = !(isReadOnly && session) && !lockedByOther
+    && !fullscreenPanel && !halfScreenActive;
   const sessionBusy = agentRunning || bashRunning || isCompacting;
   const liveSlot = streamState.isStreaming && streamState.streamingMessage
     ? { message: streamState.streamingMessage, isActive: true }
@@ -809,7 +853,9 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   useEffect(() => () => { onContextUsageChange?.(null); }, [onContextUsageChange]);
 
   // 吞吐读数只在 message_end 时变，用标量 key 避免流式帧触发多余推送。
-  const metricsKey = `${turnMetrics.ttftMs ?? ""}|${turnMetrics.tokensPerSecond ?? ""}`;
+  // key 必须覆盖全部字段：toolMs 只在工具结束变、ttftAvgMs 只在下一步首帧变，
+  // 漏掉它们会让弹窗停在上一次吞吐变化时的旧值。
+  const metricsKey = JSON.stringify(turnMetrics);
   const turnMetricsRef = useRef(turnMetrics);
   turnMetricsRef.current = turnMetrics;
   useEffect(() => {
@@ -853,26 +899,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
           }}
         />
       ) : null}
-      {extensionDialog ? (
-        // 面板打开时独占输入区（与输入框同内边距/同宽）：输入栏（含队列、模型选择）与底栏
-        // 一并让位，否则面板与输入栏上下挤在一起、键盘归属也不清楚。
-        <div
-          style={{
-            flexShrink: 0,
-            padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px 8px`,
-          }}
-        >
-          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH_CSS, margin: "0 auto" }}>
-            <ExtensionDialog
-              request={extensionDialog}
-              disabled={writesDisabled || !sessionIdRef.current}
-              onRespond={(response) => {
-                void respondToExtensionUi(extensionDialog, response);
-              }}
-            />
-          </div>
-        </div>
-      ) : isReadOnly && session ? (
+      {isReadOnly && session ? (
         // 只读优先于「被对端持有」：只读是会话自身的属性（不受谁拿写权影响），而锁定条
         // 给的是「等下就能写」的预期——对只读会话那是错的。两者同时成立时只显示只读条。
         <ReadOnlySessionBar session={session} isMobile={isMobile} />
@@ -898,11 +925,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
           // 插件浮层/对话框在显示时键盘归它们（TUI 里 overlay 会从编辑器拿走焦点）。
           autoFocus={editorTakeoverHoldsKeys}
         />
-      ) : extensionCustomUi && !extensionCustomUi.hidden ? (
-        // 插件面板（ctx.ui.custom 的浮层/问卷）显示时也独占输入区：与对话框同理，
-        // 输入栏（含队列、模型选择）与底栏一并让位 —— TUI 里 overlay 拿到焦点后编辑器
-        // 就不在输入链路上了，面板的键盘捕获元素才是唯一的输入落点。
-        null
       ) : (
         <ChatInput
       ref={chatInputRef}
@@ -1038,6 +1060,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
       data-chat-entry-count={entryIds.length}
       data-chat-entry-ids={entryIds.join(",")}
       className="relative flex h-full min-h-0 flex-col overflow-hidden"
+      data-chat-root="1"
+      data-panel-state={panelState}
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -1078,23 +1102,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
         </div>
       )}
 
-      {/* 手机端屏幕按键条：插件界面占着键盘时出现（桌面、无插件界面时不渲染）。 */}
+      {/* 固定在屏幕底部的按键条：只剩编辑器接管（面板内的那排在各自底栏里）。 */}
       {showKeyBar ? <ExtensionKeyBar onKey={handleKeyBarKey} /> : null}
-
-      {extensionCustomUi && (
-        <ExtensionCustomPanel
-          request={extensionCustomUi}
-          rawMode={panelRawMode}
-          onToggleRawMode={togglePanelRawMode}
-          onSelectOption={handleSelectPanelOption}
-          onInputValue={sendExtensionPanelInput}
-          isMobile={isMobile}
-          bottomInset={showKeyBar ? EXTENSION_KEY_BAR_HEIGHT : 0}
-          onInput={sendExtensionCustomInput}
-          onMouse={sendExtensionCustomMouse}
-          onBounds={sendExtensionCustomBounds}
-        />
-      )}
 
       {/* 插件页头（ctx.ui.setHeader）：TUI 里常驻在转写区之上、不随内容滚动。
           放在 isEmptyNew 三元**之外**：新建会话的欢迎页同样是「转写区」，页头不该在那一刻消失。 */}
@@ -1110,8 +1119,39 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
           </div>
         </div>
       ) : null}
+      {/* 全屏面板：标题栏与会话区之间（会话区被它替代，见 data-panel-state 的 CSS） */}
+      {fullscreenPanel ? (
+        <div
+          className={`extension-panel-slot extension-panel-slot--fullscreen${panelExpanded ? " is-expanded" : ""}`}
+          style={{
+            padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px 8px`,
+            ...fullscreenSlotFlexStyle,
+          }}
+        >
+          <ExtensionCustomPanel
+            request={fullscreenPanel}
+            keyBar={keyBarNode}
+            rawMode={panelRawMode}
+            onToggleRawMode={togglePanelRawMode}
+            onSelectOption={handleSelectPanelOption}
+            onInputValue={sendExtensionPanelInput}
+            isMobile={isMobile}
+            bottomInset={0}
+            onInput={sendExtensionCustomInput}
+            onMouse={sendExtensionCustomMouse}
+            onBounds={sendExtensionCustomBounds}
+            expanded={panelExpanded}
+            onExpandedChange={setPanelExpanded}
+          />
+        </div>
+      ) : null}
       {isEmptyNew ? (
-        <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8">
+        <div
+          data-chat-transcript="1"
+          className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8"
+          // 半屏面板展开时与会话区 2:1 分高（inline：Tailwind 的 flex-1 会盖掉类选择器）
+          style={transcriptFlexStyle}
+        >
           <div className="w-full max-w-[760px]">
             <div
               className="mb-3"
@@ -1195,6 +1235,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
         <div
           ref={scrollContainerRef}
           data-chat-scroller="true"
+          data-chat-transcript="1"
           className="min-h-0 flex-1 overflow-y-auto py-4 [scrollbar-width:none]"
           // overflow-anchor 由 useChatAutoFollow 按跟随状态直接写 DOM（阅读态 auto、
           // 跟随态 none），这里不能声明：React 会在重渲染时把它覆盖回去。
@@ -1204,6 +1245,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
           style={{
             overscrollBehavior: "auto",
             padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px`,
+            ...transcriptFlexStyle,
           }}
         >
           <ToolExpansionRequestProvider value={extensionToolsExpandedRequest}>
@@ -1425,7 +1467,46 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
         )}
       </div>
 
-      <div className="relative">
+      {/* 半屏面板 / 阻塞弹窗：会话区之下，展开时占会话区高度的一半 */}
+      {halfScreenActive ? (
+        <div
+          className={`extension-panel-slot extension-panel-slot--half${panelExpanded ? " is-expanded" : ""}`}
+          style={{
+            padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px 8px`,
+            ...halfSlotFlexStyle,
+          }}
+        >
+          {extensionDialog ? (
+            <ExtensionDialog
+              request={extensionDialog}
+              keyBar={keyBarNode}
+              disabled={writesDisabled || !sessionIdRef.current}
+              expanded={panelExpanded}
+              onExpandedChange={setPanelExpanded}
+              onRespond={(response) => {
+                void respondToExtensionUi(extensionDialog, response);
+              }}
+            />
+          ) : halfScreenCustom ? (
+            <ExtensionCustomPanel
+            request={halfScreenCustom}
+            keyBar={keyBarNode}
+            rawMode={panelRawMode}
+            onToggleRawMode={togglePanelRawMode}
+            onSelectOption={handleSelectPanelOption}
+            onInputValue={sendExtensionPanelInput}
+            isMobile={isMobile}
+            bottomInset={0}
+            onInput={sendExtensionCustomInput}
+            onMouse={sendExtensionCustomMouse}
+            onBounds={sendExtensionCustomBounds}
+              expanded={panelExpanded}
+              onExpandedChange={setPanelExpanded}
+            />
+          ) : null}
+        </div>
+      ) : null}
+      <div className="relative" data-chat-input-area="1">
         {/* aboveEditor widget（对齐 TUI：紧贴输入框上方） */}
         <div
           style={{

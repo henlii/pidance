@@ -30,8 +30,18 @@ const BUTTON_GLYPHS: Record<ExtensionKeyBarKey, string> = {
  *
  * 样式只取 app/globals.css 的主题变量；触摸目标按 44px 给足。
  */
-export function ExtensionKeyBar({ onKey }: { onKey: (key: ExtensionKeyBarKey, data: string) => void }) {
-  const { t } = useI18n();
+export function ExtensionKeyBar({
+  onKey,
+  inline = false,
+}: {
+  onKey: (key: ExtensionKeyBarKey, data: string) => void;
+  /**
+   * 内联形态：不再固定在屏幕底部，而是作为一排按钮渲染（面板底栏左侧，与「取消」同一排）。
+   * 面板（全屏 / 半屏）都走这条；固定底部那条只剩「编辑器接管」用 —— 那时没有面板底栏可挂。
+   */
+  inline?: boolean;
+}) {
+  if (inline) return <KeyBarBody onKey={onKey} inline />;
   // 固定在屏幕底部（用户要求：扩展按钮放下面，拇指够得着）。流里补一块等高的占位，
   // 免得挡住面板正文/状态栏；高度 = 上下 padding 8+8 + 按钮 44 + 安全区。
   return (
@@ -42,7 +52,7 @@ export function ExtensionKeyBar({ onKey }: { onKey: (key: ExtensionKeyBarKey, da
   );
 }
 
-function KeyBarBody({ onKey }: { onKey: (key: ExtensionKeyBarKey, data: string) => void }) {
+function KeyBarBody({ onKey, inline = false }: { onKey: (key: ExtensionKeyBarKey, data: string) => void; inline?: boolean }) {
   const { t } = useI18n();
   return (
     <div
@@ -50,18 +60,23 @@ function KeyBarBody({ onKey }: { onKey: (key: ExtensionKeyBarKey, data: string) 
       role="toolbar"
       aria-label={t("keyBar_title")}
       style={{
-        position: "fixed",
-        left: 0,
-        right: 0,
-        bottom: 0,
-        zIndex: 40,
-        flexShrink: 0,
         display: "flex",
-        justifyContent: "center",
-        gap: 8,
-        padding: "8px 12px calc(8px + env(safe-area-inset-bottom))",
-        borderTop: "1px solid var(--border)",
-        background: "var(--bg-panel)",
+        alignItems: "center",
+        gap: inline ? 6 : 8,
+        ...(inline
+          ? { flexShrink: 0 }
+          : {
+              position: "fixed",
+              left: 0,
+              right: 0,
+              bottom: 0,
+              zIndex: 40,
+              flexShrink: 0,
+              justifyContent: "center",
+              padding: "8px 12px calc(8px + env(safe-area-inset-bottom))",
+              borderTop: "1px solid var(--border)",
+              background: "var(--bg-panel)",
+            }),
       }}
     >
       {EXTENSION_KEY_BAR_KEYS.map((key) => {
@@ -79,15 +94,17 @@ function KeyBarBody({ onKey }: { onKey: (key: ExtensionKeyBarKey, data: string) 
               if (data !== null) onKey(key, data);
             }}
             style={{
-              minWidth: 44,
-              height: 44,
-              padding: "0 10px",
+              // 内联时贴面板底栏的高度（与「取消」同排不抢高度），固定条仍按 44px 触摸目标
+              minWidth: inline ? 38 : 44,
+              height: inline ? 32 : 44,
+              padding: inline ? "0 8px" : "0 10px",
               borderRadius: 8,
               border: "1px solid var(--border)",
               background: "var(--bg)",
               color: "var(--text)",
               fontFamily: "var(--font-mono)",
               fontSize: 13,
+              cursor: "pointer",
             }}
           >
             {BUTTON_GLYPHS[key]}

@@ -1,6 +1,8 @@
 import { sessionService } from "@/lib/session-service";
 import { getPidancePrefsBus } from "@/lib/pidance-prefs-bus";
 import { isShuttingDown, registerEventStreamCloser, SHUTDOWN_REASON } from "@/lib/server-shutdown";
+import { listSessionsLockedByOther, subscribeCrossProcessEvents } from "@/lib/cross-process-watch";
+import { invalidateSessionListCache } from "@/lib/session-reader";
 
 export const dynamic = "force-dynamic";
 
@@ -46,6 +48,26 @@ export async function GET(req: Request) {
         }
       });
 
+      // 跨进程变更（31415/31416 互相可见）：对端开始/结束执行 → 推锁集；
+      // 对端新建/删除会话 → 让本进程列表缓存失效并通知前端重取。
+      // 事件来自 fs.watch（inotify），2 秒兜底对账，见 lib/cross-process-watch.ts。
+      const encodeLocks = (ids: string[]) => {
+        encode({ type: "locks", lockedSessionIds: ids });
+      };
+      const unsubscribeCrossProcess = subscribeCrossProcessEvents((event) => {
+        try {
+          if (event.type === "locks") {
+            encodeLocks(event.lockedSessionIds);
+            return;
+          }
+          invalidateSessionListCache();
+          encode({ type: "sessions-changed" });
+        } catch {
+          // controller already closed
+        }
+      });
+      encodeLocks(listSessionsLockedByOther());
+
       encodeRunning(sessionService.getRunningIds());
 
       // Heartbeat to keep the connection alive through proxies/timeouts.
@@ -61,6 +83,7 @@ export async function GET(req: Request) {
         clearInterval(heartbeat);
         unsubscribe();
         unsubscribePrefs();
+        unsubscribeCrossProcess();
         // 收尾期间同样走 error（见 [id]/events 的同类注释）。
         const reason = shutdownReason ?? (isShuttingDown() ? SHUTDOWN_REASON : undefined);
         try {

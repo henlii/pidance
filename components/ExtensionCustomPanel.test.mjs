@@ -72,7 +72,12 @@ test("custom 面板：降级说明落在末尾空行上也要可见（不是静�
 
 test("custom 面板：GUI 外壳、复制、标题行折叠；空 lines 不崩", () => {
   const html = renderPanel(["hello", "world"]);
-  assert.ok(html.includes("extension-panel-overlay"));
+  assert.ok(html.includes("extension-panel-custom"), "面板容器类丢了");
+  // 控制按钮（切回原样/复制）在底栏左侧、与右下角的取消同一排
+  assert.ok(html.includes("extension-panel-footer-actions"), "控制按钮不在底栏左侧");
+  // 「切回原样」暂时隐藏：能力（rawMode/onToggleRawMode）保留，只是不再渲染按钮
+  assert.ok(!/切回原样|网页视图|Back to raw|Web view/.test(html), "「切回原样」按钮仍被渲染");
+  assert.ok(!html.includes("extension-panel-header-actions"), "控制按钮仍留在标题行");
   assert.ok(html.includes("extension-panel-ansi"));
   assert.ok(html.includes("hello"));
   assert.ok(html.includes("aria-label=\"Copy\"") || html.includes("aria-label=\"复制\""));

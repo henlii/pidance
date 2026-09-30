@@ -72,6 +72,7 @@ import { getSessionCapabilities } from "./session-capabilities";
 import { useProjectActions, useProjectIdentity } from "./ProjectProvider";
 
 import { useI18n } from "@/lib/i18n";
+import { isPendingSessionId } from "@/lib/new-session-intent";
 import {
   loadUnreadSessionClock,
   mergeUnreadSessionState,
@@ -185,6 +186,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [catalogTick, setCatalogTick] = useState(0);
   const catalogSelectedRef = useRef(selectedSessionId);
   catalogSelectedRef.current = selectedSessionId;
+  /** 已就「会话消失」通知过上层一次的 id：避免同一会话重复触发收口。 */
+  const reportedMissingSessionRef = useRef<string | null>(null);
+  /** handleSessionDeletedLocal 定义在本文件更靠后的位置（loadSessions 之后），用 ref 转发。 */
+  const handleSessionDeletedLocalRef = useRef<((sessionId: string) => void) | null>(null);
   const catalogSnapshot = useMemo(
     () => catalogStore.getSnapshot(catalogSelectedRef.current),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -478,6 +483,26 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         now: Date.now(),
       });
       saveCachedSessionList(data.sessions);
+      // 对端（31415/31416）删掉了当前正打开的会话：本轮列表里已经没有它，走本机删除后的
+      // 同一条收口（清选中 → 上层切回引导页）。
+      // 判据是「**上一次**列表里还有它、**这一次**没有了」——只看「这次没有」会把
+      // 「冷启动直接用 ?session= 指向一个不存在的会话」也当成对端删除，抢掉既有恢复流程的错误态。
+      // 另外排除刚提交、还没落盘的会话（它们在服务端列表出现之前本就不在里面）。
+      const missingSelectedId = catalogSelectedRef.current;
+      if (
+        missingSelectedId
+        && !isPendingSessionId(missingSelectedId)
+        && !catalogStore.getState().startingIds.has(missingSelectedId)
+        && reportedMissingSessionRef.current !== missingSelectedId
+        && serverSessionsRef.current.some((s) => s.id === missingSelectedId)
+      ) {
+        const knownIds = new Set(data.sessions.map((s) => s.id));
+        for (const archived of data.archivedSessions ?? []) knownIds.add(archived.id);
+        if (!knownIds.has(missingSelectedId)) {
+          reportedMissingSessionRef.current = missingSelectedId;
+          handleSessionDeletedLocalRef.current?.(missingSelectedId);
+        }
+      }
       // 成功即收尾：清掉可能还挂着的重试定时器（否则成功之后还会空打一次请求）
       sessionListRetryRef.current = 0;
       if (sessionListRetryTimerRef.current) {
@@ -626,7 +651,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         runningStartedAt?: unknown;
         pendingExtensionUi?: unknown;
       } | null;
-      if (!data || data.type !== "running") return;
+      if (!data) return;
+      // 对端（31415/31416）新建/删除/改名会话：本进程列表缓存已在服务端失效，
+      // 这里直接重取一次，不必等用户刷新页面或切换项目。
+      if (data.type === "sessions-changed") {
+        void loadSessionsRef.current?.(false);
+        return;
+      }
+      if (data.type !== "running") return;
       runningSnapshotAuthoritativeRef.current = true;
       commitRunningSnapshot(
         Array.isArray(data.runningSessionIds)
@@ -857,6 +889,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     onSessionDeleted?.(id);
     loadSessions();
   }, [catalogStore, onSessionDeleted, loadSessions, updatePrefs]);
+  handleSessionDeletedLocalRef.current = handleSessionDeletedLocal;
 
   /** 归档收口：菜单动作 → POST archive → 成功后统一重拉 /api/sessions。
    *  409（running）/ 403（readOnly）等失败按分类展示 i18n 文案。 */

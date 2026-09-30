@@ -479,11 +479,32 @@ export class SdkSessionHost {
   private turnMetrics: {
     startedAt: number;
     firstTokenAt: number | null;
+    /**
+     * 本 step 的起点：pi 的 `turn_start`（在压缩等准备之后、下一次模型请求之前，
+     * 位置与 dsh 的 `step/start` 相同）。`message_start` 是响应头到达，太晚；
+     * `tool_execution_end` 会漏掉压缩与无工具的后续步。
+     */
+    stepStartedAt: number | null;
+    /** 整轮（首个 step）的 TTFT，顶栏用。 */
     ttftMs: number | null;
+    /** 每步 TTFT 之和 / 步数：弹窗里的平均首 token。 */
+    ttftSumMs: number;
+    ttftSteps: number;
     decodeMs: number;
+    /** 模型用时合计（step 请求发出 → 消息结束），含 TTFT 与解码。 */
+    llmMs: number;
+    /** 工具调用用时合计（`tool_execution_start` → `end`，按 toolCallId 配对；并发工具各算各的墙钟）。 */
+    toolMs: number;
+    pendingToolCalls: Map<string, number>;
+    /** 已结算的 assistant step 数（有 usage 的才计入）。 */
+    steps: number;
     outputTokens: number;
     sampled: boolean;
-  } = { startedAt: 0, firstTokenAt: null, ttftMs: null, decodeMs: 0, outputTokens: 0, sampled: false };
+  } = {
+    startedAt: 0, firstTokenAt: null, stepStartedAt: null, ttftMs: null,
+    ttftSumMs: 0, ttftSteps: 0, decodeMs: 0, llmMs: 0, toolMs: 0,
+    pendingToolCalls: new Map(), steps: 0, outputTokens: 0, sampled: false,
+  };
   /** Live-host prompt receipts; same submissionId does not call Pi twice. */
   private promptReceipts = new Map<string, PromptReceipt>();
   /** submissionId → in-flight prompt promise（单飞；结算后删除） */
@@ -1978,8 +1999,27 @@ export class SdkSessionHost {
   private accumulateTurnMetrics(event: SdkAgentEvent): boolean {
     const now = Date.now();
     if (event.type === "agent_start") {
-      this.turnMetrics = { startedAt: now, firstTokenAt: null, ttftMs: null, decodeMs: 0, outputTokens: 0, sampled: false };
+      this.turnMetrics = {
+        startedAt: now,
+        firstTokenAt: null,
+        stepStartedAt: null,
+        ttftMs: null,
+        ttftSumMs: 0,
+        ttftSteps: 0,
+        decodeMs: 0,
+        llmMs: 0,
+        toolMs: 0,
+        pendingToolCalls: new Map(),
+        steps: 0,
+        outputTokens: 0,
+        sampled: false,
+      };
       return true;
+    }
+    if (event.type === "turn_start") {
+      // 每步一次（含第一步）：模型用时的起点在这里，压缩/扩展准备不计入。
+      this.turnMetrics.stepStartedAt = now;
+      return false;
     }
     if (event.type === "message_start" || event.type === "message_update") {
       const message = event.message as { role?: string; content?: unknown } | undefined;
@@ -1990,6 +2030,11 @@ export class SdkSessionHost {
       if (this.turnMetrics.firstTokenAt === null && SdkSessionHost.hasRenderableContent(message)) {
         this.turnMetrics.firstTokenAt = now;
         const isFirstStep = this.turnMetrics.ttftMs === null;
+        const stepStartedAt = this.turnMetrics.stepStartedAt;
+        if (stepStartedAt !== null && now >= stepStartedAt) {
+          this.turnMetrics.ttftSumMs += now - stepStartedAt;
+          this.turnMetrics.ttftSteps += 1;
+        }
         if (isFirstStep && this.turnMetrics.startedAt > 0 && now >= this.turnMetrics.startedAt) {
           this.turnMetrics.ttftMs = now - this.turnMetrics.startedAt;
         }
@@ -2003,25 +2048,67 @@ export class SdkSessionHost {
       if (message?.role !== "assistant") return false;
       const decodeMs = this.turnMetrics.firstTokenAt === null ? null : Math.max(0, now - this.turnMetrics.firstTokenAt);
       this.turnMetrics.firstTokenAt = null;
+      const stepStartedAt = this.turnMetrics.stepStartedAt;
+      this.turnMetrics.stepStartedAt = null;
+      if (stepStartedAt !== null && now >= stepStartedAt) this.turnMetrics.llmMs += now - stepStartedAt;
       const outputTokens = SdkSessionHost.outputTokensOf(message);
       if (decodeMs !== null && outputTokens !== null) {
         this.turnMetrics.decodeMs += decodeMs;
         this.turnMetrics.outputTokens += outputTokens;
+        this.turnMetrics.steps += 1;
         this.turnMetrics.sampled = true;
         // step 结束：本 step 已计入，下发最新读数（客户端不再自行累计）
         return true;
       }
+      return false;
+    }
+    if (event.type === "tool_execution_start") {
+      const toolCallId = asToolCallId(event.toolCallId);
+      if (toolCallId) this.turnMetrics.pendingToolCalls.set(toolCallId, now);
+      return false;
+    }
+    if (event.type === "tool_execution_end") {
+      const toolCallId = asToolCallId(event.toolCallId);
+      const startedAt = toolCallId === null ? undefined : this.turnMetrics.pendingToolCalls.get(toolCallId);
+      if (toolCallId === null || startedAt === undefined) return false;
+      this.turnMetrics.pendingToolCalls.delete(toolCallId);
+      if (now >= startedAt) this.turnMetrics.toolMs += now - startedAt;
+      // 工具用时变了就下发一帧：弹窗不必等到下一步结束才拿到这次工具耗时。
+      return true;
     }
     return false;
   }
 
   /** 投影给客户端的读数；起点未知时不编造 TTFT。 */
-  private projectTurnMetrics(): { tokensPerSecond?: number; ttftMs?: number } {
-    const metrics: { tokensPerSecond?: number; ttftMs?: number } = {};
+  private projectTurnMetrics(): {
+    tokensPerSecond?: number;
+    ttftMs?: number;
+    ttftAvgMs?: number;
+    llmMs?: number;
+    toolMs?: number;
+    steps?: number;
+    outputTokens?: number;
+  } {
+    const metrics: {
+      tokensPerSecond?: number;
+      ttftMs?: number;
+      ttftAvgMs?: number;
+      llmMs?: number;
+      toolMs?: number;
+      steps?: number;
+      outputTokens?: number;
+    } = {};
     if (this.turnMetrics.ttftMs !== null && this.turnMetrics.startedAt > 0) metrics.ttftMs = this.turnMetrics.ttftMs;
+    if (this.turnMetrics.ttftSteps > 0) metrics.ttftAvgMs = this.turnMetrics.ttftSumMs / this.turnMetrics.ttftSteps;
     if (this.turnMetrics.sampled && this.turnMetrics.decodeMs > 0) {
       metrics.tokensPerSecond = this.turnMetrics.outputTokens / (this.turnMetrics.decodeMs / 1e3);
     }
+    if (this.turnMetrics.steps > 0) {
+      metrics.steps = this.turnMetrics.steps;
+      metrics.outputTokens = this.turnMetrics.outputTokens;
+    }
+    if (this.turnMetrics.llmMs > 0) metrics.llmMs = this.turnMetrics.llmMs;
+    if (this.turnMetrics.toolMs > 0) metrics.toolMs = this.turnMetrics.toolMs;
     return metrics;
   }
 
@@ -2155,7 +2242,7 @@ export class SdkSessionHost {
     // 必须挂到 eventToEmit —— 它是 emit 的目标对象，直接改 event 会被下面的浅拷贝丢掉。
     if (metricsChanged) {
       const projected = this.projectTurnMetrics();
-      if (projected.ttftMs !== undefined || projected.tokensPerSecond !== undefined) {
+      if (Object.keys(projected).length > 0) {
         eventToEmit = { ...eventToEmit, turnMetrics: projected };
       }
     }

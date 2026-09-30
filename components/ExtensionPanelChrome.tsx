@@ -15,25 +15,45 @@ export function ExtensionPanelChrome({
   accessibilityLabel,
   overlay = false,
   extraHeader,
+  footerActions,
   footer,
   children,
   panelStyle,
+  expanded: expandedProp,
+  onExpandedChange,
 }: {
   title: ReactNode;
   accessibilityLabel?: string;
   overlay?: boolean;
   extraHeader?: ReactNode;
+  /**
+   * 底栏**左侧**的动作区（「切回原样」「复制」这类控制按钮）。
+   * 与右侧的主按钮（取消/提交）同一排：控制按钮左对齐、主按钮右对齐。
+   */
+  footerActions?: ReactNode;
+  /** 底栏**右侧**的主按钮（取消 / 确认 / 提交）。 */
   footer?: ReactNode;
   children: ReactNode;
-  /** 覆盖面板本体尺寸；overlay 面板用它落实插件给的 width / minWidth / maxHeight。 */
+  /** 覆盖面板本体尺寸；半屏面板用它落实插件给的 width 差异。 */
   panelStyle?: CSSProperties;
+  /**
+   * 展开态受控：面板展开时会替代/挤占会话区（见 ChatWindow 的插槽布局），
+   * 所以展开与否必须由持有布局的那一层知道。不传则退回组件内部 state。
+   */
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
 }) {
   const { t } = useI18n();
   const titleText = accessibilityLabel ?? (typeof title === "string" ? title : undefined);
   // 默认展开——上限高不代表一定变高（高度仍由内容决定，短提问不会因此占满屏），
   // 长提问默认就能看全，用户嫌大点一下标题行收起。状态是每个面板自己的，不跨请求记忆。
-  const [expanded, setExpanded] = useState(true);
-  const toggle = () => setExpanded((value) => !value);
+  const [expandedLocal, setExpandedLocal] = useState(true);
+  const expanded = expandedProp ?? expandedLocal;
+  const toggle = () => {
+    const next = !expanded;
+    if (onExpandedChange) onExpandedChange(next);
+    else setExpandedLocal(next);
+  };
   const className = [
     "extension-panel-shell",
     overlay ? "extension-panel-shell--overlay" : "",
@@ -76,7 +96,12 @@ export function ExtensionPanelChrome({
         ) : null}
       </header>
       {expanded ? <div className="extension-panel-body">{children}</div> : null}
-      {expanded && footer ? <footer className="extension-panel-footer">{footer}</footer> : null}
+      {expanded && (footer || footerActions) ? (
+        <footer className="extension-panel-footer">
+          <div className="extension-panel-footer-actions">{footerActions}</div>
+          <div className="extension-panel-footer-primary">{footer}</div>
+        </footer>
+      ) : null}
     </section>
   );
 }

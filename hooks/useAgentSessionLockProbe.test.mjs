@@ -49,7 +49,7 @@ test("探针本身只读且轻量：不打 /state、有可见性守卫、失败�
 
 test("只读条仍优先于锁定条，且注释写明了理由", () => {
   const chatWindow = read("../components/ChatWindow.tsx");
-  const branch = chatWindow.match(/\) : isReadOnly && session \? \(([\s\S]{0,500}?)\) : lockedByOther \? \(/);
+  const branch = chatWindow.match(/\{isReadOnly && session \? \(([\s\S]{0,500}?)\) : lockedByOther \? \(/);
   assert.ok(branch, "只读/锁定两条分支的先后顺序变了（同时成立时显示哪个是有意的决定）");
   assert.match(branch[1], /只读优先于「被对端持有」/, "优先级决定没有留下理由");
 });

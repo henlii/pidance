@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useEffect, useRef, useState } from "react";
+import { useMemo, useEffect, useRef, useState, type ReactNode } from "react";
 import { normalizeCustomPanelLinesWithIndex, parseAnsiLine, stripAnsi } from "@/lib/ansi";
 import { RenderedLineBlocks } from "./RenderedLines";
 import { collectImageLineIndexes, remapImageLineIndexes, imageFallbackReasonKey } from "@/lib/kitty-image";
@@ -70,6 +70,9 @@ export function ExtensionCustomPanel({
   isMobile,
   bottomInset = 0,
   onBounds,
+  expanded,
+  onExpandedChange,
+  keyBar,
 }: {
   request: ExtensionUiCustomRequest;
   onInput: (request: ExtensionUiCustomRequest, data: string) => void;
@@ -80,6 +83,7 @@ export function ExtensionCustomPanel({
    */
   /** 用户点了「切回原样」：这一页按原始渲染（issue #114 的可退回开关）。 */
   rawMode?: boolean;
+  /** 「切回原样」的能力：按钮暂时隐藏（见 footerActions 处的注释），开关本身保留。 */
   onToggleRawMode?: () => void;
   /** 点了网页化选项行：由调用方合成按键（发键前会自校验，见 ChatWindow）。 */
   onSelectOption?: (optionIndex: number) => void;
@@ -93,8 +97,18 @@ export function ExtensionCustomPanel({
   /** 屏幕按键条遮住的高度（px）：面板容器底部让出同样的空间，别把正文压在按键条下面。 */
   bottomInset?: number;
   onBounds?: (request: ExtensionUiCustomRequest, bounds: CustomPanelBounds) => void;
+  /**
+   * 展开态：展开时面板会替代会话区（全屏）或挤占它一半高度（半屏），
+   * 所以状态由持有布局的 ChatWindow 控制；不传则退回外壳内部 state。
+   */
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
+  /** 方向键/回车/Esc 那排控制键（内联按键条）：放底栏最左，与右侧的取消同一排。 */
+  keyBar?: ReactNode;
 }) {
   const { t } = useI18n();
+  // 按钮暂时隐藏但能力保留（用户要求），显式消费一次免得被当成死代码删掉
+  void onToggleRawMode;
   const inputRef = useRef<HTMLTextAreaElement>(null);
   /** 画 ANSI 的那块：几何与鼠标坐标都以此为准（两处必须同源）。 */
   const bodyRef = useRef<HTMLPreElement>(null);
@@ -256,15 +270,14 @@ export function ExtensionCustomPanel({
   return (
     <div
       data-extension-panel="true"
-      className="extension-panel-overlay"
-      style={{
-        ...overlayStyles?.containerStyle,
-        ...(bottomInset > 0 ? { paddingBottom: `calc(${bottomInset}px + env(safe-area-inset-bottom))` } : {}),
-      }}
+      className="extension-panel-custom"
+      style={bottomInset > 0 ? { paddingBottom: `calc(${bottomInset}px + env(safe-area-inset-bottom))` } : undefined}
     >
       <ExtensionPanelChrome
-        overlay
+        overlay={Boolean(request.layout)}
         panelStyle={overlayStyles?.panelStyle}
+        expanded={expanded}
+        onExpandedChange={onExpandedChange}
         title={t("chat_extensionPanel")}
         // 中断入口放在底栏（与问答块的「取消」同一位置/同一语义）：标题行只有折叠，
         // 而这类面板是扩展自绘的 TUI 界面，没有底栏就等于没有鼠标退出口
@@ -280,20 +293,15 @@ export function ExtensionCustomPanel({
             {t("extension_cancel")}
           </button>
         )}
-        extraHeader={(
+        footerActions={(
           <>
-            {onToggleRawMode ? (
-              <button
-                type="button"
-                className="extension-card-btn"
-                data-panel-raw-toggle={rawMode ? "1" : "0"}
-                aria-label={rawMode ? t("panel_webView") : t("panel_rawMode")}
-                title={rawMode ? t("panel_webView") : t("panel_rawMode")}
-                onClick={onToggleRawMode}
-              >
-                {rawMode ? t("panel_webView") : t("panel_rawMode")}
-              </button>
-            ) : null}
+            {keyBar}
+            {/*
+              「切回原样」暂时隐藏（用户要求）：行级语义识别对多数插件面板看不出差别
+              （只有制表边框换成 CSS 细线、识别出的选项变可点按钮这两处会变），按钮摆在那里
+              只让人以为没生效。能力仍在 —— rawMode / onToggleRawMode 两个 prop 保留，
+              恢复只需把这里那个按钮放回来。
+            */}
           <button
             type="button"
             className="extension-card-btn"

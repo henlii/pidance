@@ -89,10 +89,20 @@ export type PendingBash = {
  * 客户端不再自行累计（此前是双份实现，口径容易漂移）。
  */
 export type TurnMetrics = {
-  /** 本轮 agent_start → 首个内容帧，毫秒。 */
+  /** 本轮 agent_start → 首个内容帧，毫秒（首个 step）。 */
   ttftMs?: number;
   /** 本轮 provider 上报 output tokens / 解码总耗时。 */
   tokensPerSecond?: number;
+  /** 每步 TTFT 的平均值（弹窗用）。 */
+  ttftAvgMs?: number;
+  /** 模型用时合计（step 请求发出 → 消息结束）。 */
+  llmMs?: number;
+  /** 工具调用用时合计。 */
+  toolMs?: number;
+  /** 已结算的步骤数。 */
+  steps?: number;
+  /** 本轮 provider 上报的输出词元合计。 */
+  outputTokens?: number;
 };
 
 export type SessionRuntimeSnapshot = {

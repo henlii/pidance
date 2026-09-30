@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { type ReactNode, useEffect, useRef, useState, type CSSProperties } from "react";
 import type { ExtensionUiDialogRequest } from "@/lib/extension-ui-bridge";
 import { useI18n } from "@/lib/i18n";
 import { MarkdownBody } from "./MarkdownBody";
@@ -15,6 +15,11 @@ export interface ExtensionDialogProps {
   request: ExtensionUiDialogRequest;
   disabled?: boolean;
   onRespond: (response: ExtensionDialogResponse) => void;
+  /** 展开态由持有布局的 ChatWindow 控制（半屏插槽的 flex 比例随它变）。 */
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
+  /** 方向键/回车/Esc 那排控制键：放底栏最左（与右侧的取消/提交同一排）。 */
+  keyBar?: ReactNode;
 }
 
 /**
@@ -52,7 +57,7 @@ const inputStyle: CSSProperties = {
  * 扩展阻塞请求面板（select/confirm/input/editor）。
  * GUI 外壳 + 原生控件；响应必须显式给出。Esc 仅在 input/editor 内处理。
  */
-export function ExtensionDialog({ request, disabled = false, onRespond }: ExtensionDialogProps) {
+export function ExtensionDialog({ request, disabled = false, onRespond, expanded, onExpandedChange, keyBar }: ExtensionDialogProps) {
   const { t } = useI18n();
   const respondedRequestRef = useRef<string | null>(null);
   const [respondedRequestId, setRespondedRequestId] = useState<string | null>(null);
@@ -191,6 +196,9 @@ export function ExtensionDialog({ request, disabled = false, onRespond }: Extens
   return (
     <div className="extension-panel-inline">
       <ExtensionPanelChrome
+        expanded={expanded}
+        onExpandedChange={onExpandedChange}
+        footerActions={keyBar}
         title={<MarkdownBody className="markdown-body--extension">{request.title}</MarkdownBody>}
         accessibilityLabel={request.title}
         footer={(

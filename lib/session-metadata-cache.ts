@@ -19,6 +19,21 @@ import { readFileSync, writeFileSync, existsSync, renameSync } from "fs";
 import { isAbsolute, join, relative } from "path";
 import { getAgentDir } from "./pi-paths";
 
+/**
+ * 一个会话的全量 token 统计（扫描时折叠全部 message 条目）。
+ *
+ * 与 dsh 的 whole-log projection 同口径：数字覆盖整条日志，与客户端加载了多少
+ * 消息无关；随列表扫描缓存按 (mtime, size) 失效，不额外读文件。
+ */
+export interface CachedSessionStats {
+	tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+	cost: number;
+	userMessages: number;
+	assistantMessages: number;
+	toolCalls: number;
+	toolResults: number;
+}
+
 export interface CachedSessionInfo {
 	id: string;
 	cwd: string;
@@ -30,6 +45,8 @@ export interface CachedSessionInfo {
 	messageCount: number;
 	firstMessage: string;
 	parentSessionPath?: string;
+	/** 全量统计；旧缓存条目没有这个字段（版本升级后重新扫描即有）。 */
+	stats?: CachedSessionStats;
 }
 
 /** 与 DiscoveredSubagent 同构的扁平缓存形状（header 字段直接提取） */
@@ -74,12 +91,12 @@ interface SessionFileHeader {
 }
 
 interface SessionMetadataCacheFile {
-	version: 2;
+	version: 3;
 	sessions: Record<string, SessionCacheRecord>;
 	discovery: Record<string, DiscoveryCacheRecord>;
 }
 
-const CACHE_VERSION = 2 as const;
+const CACHE_VERSION = 3 as const;
 const CACHE_FILE_NAME = "pidance-session-cache.json";
 /** 缓存写防抖：批量变更只落盘一次 */
 const SAVE_DEBOUNCE_MS = 1_500;
@@ -236,6 +253,63 @@ function extractTextContent(message: { content?: unknown }): string {
 		.join(" ");
 }
 
+function nonNegativeNumber(value: unknown): number {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/** 零值统计；扫描时逐条累加。 */
+export function emptySessionStats(): CachedSessionStats {
+	return {
+		tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		cost: 0,
+		userMessages: 0,
+		assistantMessages: 0,
+		toolCalls: 0,
+		toolResults: 0,
+	};
+}
+
+/**
+ * 把一条 message 条目折进统计。
+ *
+ * 只认 Pi 的 message 条目：user/assistant/toolResult 计数、assistant 的
+ * `usage`（provider 上报的 input/output/cacheRead/cacheWrite/cost）与 toolCall 数。
+ * 压缩条目不是 message 条目，不进统计；被压缩遮蔽的历史仍在日志里，因此这些
+ * 数字不会因为压缩而变小 —— 与 dsh 的投影口径一致。
+ */
+function collectSessionStats(
+	stats: CachedSessionStats,
+	message: { role?: unknown; content?: unknown },
+): void {
+	const role = typeof message.role === "string" ? message.role : undefined;
+	if (role === "user") {
+		stats.userMessages += 1;
+		return;
+	}
+	if (role === "toolResult") {
+		stats.toolResults += 1;
+		return;
+	}
+	if (role !== "assistant") return;
+	stats.assistantMessages += 1;
+	if (Array.isArray(message.content)) {
+		for (const block of message.content) {
+			if (block && typeof block === "object" && (block as { type?: unknown }).type === "toolCall") {
+				stats.toolCalls += 1;
+			}
+		}
+	}
+	const usage = (message as {
+		usage?: { input?: unknown; output?: unknown; cacheRead?: unknown; cacheWrite?: unknown; cost?: { total?: unknown } };
+	}).usage;
+	if (!usage) return;
+	stats.tokens.input += nonNegativeNumber(usage.input);
+	stats.tokens.output += nonNegativeNumber(usage.output);
+	stats.tokens.cacheRead += nonNegativeNumber(usage.cacheRead);
+	stats.tokens.cacheWrite += nonNegativeNumber(usage.cacheWrite);
+	stats.cost += nonNegativeNumber(usage.cost?.total);
+}
+
 function isMessageWithContent(
 	message: unknown,
 ): message is { role?: unknown; content?: unknown; timestamp?: unknown } {
@@ -279,6 +353,7 @@ export async function scanSessionFileFast(
 		});
 		let header: SessionFileHeader | null = null;
 		let messageCount = 0;
+		const stats = emptySessionStats();
 		let name: string | undefined;
 		let lastActivityTime: number | undefined;
 		let firstMessage = "";
@@ -313,6 +388,7 @@ export async function scanSessionFileFast(
 			}
 			const message = (entry as { message?: unknown }).message;
 			if (!isMessageWithContent(message)) continue;
+			collectSessionStats(stats, message);
 			if (message.role !== "user" && message.role !== "assistant") continue;
 			const textContent = extractTextContent(message);
 			if (!textContent) continue;
@@ -331,6 +407,8 @@ export async function scanSessionFileFast(
 				: !Number.isNaN(headerTime)
 					? new Date(headerTime)
 					: new Date(st.mtimeMs);
+		stats.tokens.total =
+			stats.tokens.input + stats.tokens.output + stats.tokens.cacheRead + stats.tokens.cacheWrite;
 		return {
 			id: typeof header.id === "string" ? header.id : "",
 			cwd: typeof header.cwd === "string" ? header.cwd : "",
@@ -339,6 +417,7 @@ export async function scanSessionFileFast(
 			modified: modified.toISOString(),
 			messageCount,
 			firstMessage: firstMessage || "(no messages)",
+			stats,
 			parentSessionPath:
 				typeof header.parentSession === "string"
 					? header.parentSession
@@ -370,3 +449,30 @@ export async function scanSessionFilesWithConcurrency(
 }
 
 export type { SessionCacheRecord, DiscoveryCacheRecord };
+
+/**
+ * 取某个会话文件的全量统计。
+ *
+ * 优先复用扫描缓存（列表扫描已经算过）；缓存未命中或文件已变更时现扫一次并回写，
+ * 单会话详情请求因此不会反复解析同一文件。文件不存在/损坏返回 null（调用方按空态处理，
+ * 不升成 5xx）。
+ */
+export async function loadSessionStats(filePath: string): Promise<CachedSessionStats | null> {
+	const st = await statSafe(filePath);
+	if (!st) return null;
+	const cache = loadSessionMetadataCache();
+	const record = cache?.sessions[filePath];
+	if (record && record.m === st.mtimeMs && record.s === st.size && record.i?.stats) {
+		return record.i.stats;
+	}
+	const info = await scanSessionFileFast(filePath, st);
+	if (!info?.stats) return null;
+	if (cache) {
+		cache.sessions[filePath] = { m: st.mtimeMs, s: st.size, i: info };
+		scheduleSessionMetadataCacheSave(
+			new Map(Object.entries(cache.sessions)),
+			new Map(Object.entries(cache.discovery ?? {})),
+		);
+	}
+	return info.stats;
+}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useReducer, type CSSProperties } from "react";
+import { useState, useCallback, useRef, useEffect, useId, useLayoutEffect, useMemo, useReducer, type CSSProperties } from "react";
 import { useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
@@ -10,6 +10,7 @@ import type { Tab } from "./TabBar";
 import { RightPanel } from "./RightPanel";
 import { ChangesPanel } from "./ChangesPanel";
 import { SessionInfoPanel } from "./SessionInfoPanel";
+import { SessionStatsPopover } from "./SessionStatsPopover";
 import { SettingsView } from "./SettingsView";
 import { CommandPalette } from "./CommandPalette";
 import type { SettingsPageId } from "./settings-nav";
@@ -491,6 +492,15 @@ function AppShellInner() {
   const handleTurnMetricsChange = useCallback((metrics: TurnMetrics) => {
     setTurnMetrics(metrics);
   }, []);
+
+  // 顶栏统计读数的气泡弹窗（本轮速度/用时 + 会话词元用量；对齐 dsh 两个气泡的内容）
+  const [statsPopoverOpen, setStatsPopoverOpen] = useState(false);
+  const statsPopoverAnchorRef = useRef<HTMLButtonElement | null>(null);
+  const statsPopoverId = useId();
+  useEffect(() => {
+    // 换会话即收起：气泡里是本会话的读数，留着会串。
+    setStatsPopoverOpen(false);
+  }, [selectedSession?.id]);
 
   const handleSidebarToggle = useCallback(() => {
     if (isMobile) {
@@ -1450,15 +1460,17 @@ function AppShellInner() {
             if (ttftStr) tooltipParts.push(t("app_ttftTooltip", { ttft: ttftStr }));
             const tooltip = tooltipParts.length > 0 ? tooltipParts.join("\n") : null;
 
-            const infoTabActive = rightPanelOpen && activeRightTabId === "info";
             return (
               <button
+                ref={statsPopoverAnchorRef}
                 type="button"
-                onClick={openSessionInfoTab}
-                data-tooltip={tooltip || t("app_sessionInfo")}
+                onClick={() => setStatsPopoverOpen((open) => !open)}
+                data-tooltip={tooltip || t("app_sessionStats")}
                 className="instant-tooltip app-top-bar-stats"
-                aria-label={t("app_sessionInfo")}
-                aria-pressed={infoTabActive}
+                aria-label={t("app_sessionStats")}
+                aria-haspopup="dialog"
+                aria-expanded={statsPopoverOpen}
+                aria-controls={statsPopoverOpen ? statsPopoverId : undefined}
                 style={{
                   marginLeft: "auto",
                   display: "flex", alignItems: "center", gap: isMobile ? 4 : 10,
@@ -1468,16 +1480,16 @@ function AppShellInner() {
                   minWidth: 0,
                   maxWidth: isMobile ? "48vw" : undefined,
                   overflow: "hidden",
-                  background: infoTabActive ? "var(--bg-selected)" : "none",
+                  background: statsPopoverOpen ? "var(--bg-selected)" : "none",
                   border: "none",
-                  borderTop: infoTabActive ? "2px solid var(--accent)" : "2px solid transparent",
+                  borderTop: statsPopoverOpen ? "2px solid var(--accent)" : "2px solid transparent",
                   fontSize: isMobile ? 12 : 11, color: "var(--text-muted)",
                   whiteSpace: "nowrap", cursor: "pointer",
                   fontVariantNumeric: "tabular-nums",
                   transition: "color 0.1s, background 0.1s",
                 }}
                 onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.color = infoTabActive ? "var(--text)" : "var(--text-muted)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = statsPopoverOpen ? "var(--text)" : "var(--text-muted)"; }}
               >
                 {isMobile && (
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -1506,6 +1518,19 @@ function AppShellInner() {
               </button>
             );
           })()}
+          {/* 顶栏统计气泡：本轮速度/用时 + 会话词元用量 */}
+          {showChat && (
+            <SessionStatsPopover
+              open={statsPopoverOpen}
+              panelId={statsPopoverId}
+              anchorRef={statsPopoverAnchorRef}
+              onClose={() => setStatsPopoverOpen(false)}
+              turnMetrics={turnMetrics}
+              sessionStats={sessionStats}
+              contextUsage={contextUsage}
+              isMobile={isMobile}
+            />
+          )}
           {/* 右栏（文件/diff/会话信息面板）开关；stats 按钮缺省时自身右对齐 */}
           {isMobile && <button
             type="button"

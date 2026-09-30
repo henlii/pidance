@@ -110,3 +110,17 @@ test("图片查看器：缩小/拖动后必须收敛平移量（缩回 100% 即�
   // 视口变化（旋转/软键盘）后重新收敛。
   assert.ok(/setOffset\(\(current\) => clampOffset\(current, zoom\)\)/.test(source), "视口变化后应重新收敛");
 });
+
+test("图片查看器：双指缩放接入捏合计算，触摸手势不被浏览器接管", () => {
+  const source = readFileSync(fileURLToPath(new URL("./MessageImage.tsx", import.meta.url)), "utf8");
+  assert.ok(
+    source.includes("pinchZoom(pinch, distance, MIN_ZOOM, MAX_ZOOM)"),
+    "双指缩放没有走 lib/image-pinch 的 pinchZoom（算术抽出去就是为了钉住它）",
+  );
+  assert.ok(source.includes("pointersRef.current.delete(event.pointerId)"), "指针抬起时应清理捏合基线");
+  assert.ok(
+    source.includes('touchAction: "none"'),
+    "缺少 touchAction: none —— 浏览器会接手双指手势，捏合根本到不了组件",
+  );
+  assert.ok(source.includes("if (pinch && pointers.size >= 2)"), "缺少双指分支（单指拖动之外的第二条路）");
+});

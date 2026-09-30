@@ -637,9 +637,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     [serverPrefs],
   );
 
-  /** 选择思考深度：写缓存 + 应用（带深度切换模型）。 */
+  /** 选择思考深度：写缓存 + 应用（带深度切换模型）。运行中一律不接（见下方按钮禁用）。 */
   const applyModelWithThinking = useCallback(
     (provider: string, modelId: string, level: string) => {
+      // 运行中改档会让「磁盘/显示」与实际发请求的档位分叉（宿主已按旧档位在跑），
+      // 所以运行期间直接拒绝：不是「下一轮生效」，而是这期间根本不给改。
+      if (isStreaming) return;
       setServerPref(`thinkingLevel.${provider}:${modelId}`, level);
       closeDepthMenu();
       // 选择后关闭模型选择列表并切换模型 + 思考深度
@@ -647,7 +650,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       modelButtonRef.current?.focus({ preventScroll: true });
       onModelChange?.(provider, modelId, level);
     },
-    [closeDepthMenu, onModelChange],
+    [closeDepthMenu, isStreaming, onModelChange],
   );
 
   // 服务端草稿恢复（多客户端同步）：挂载/切 key 时若服务端有草稿且本地为空则回填
@@ -1106,6 +1109,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   useEffect(() => {
     const ta = textareaRef.current;
     if (!ta) return;
+    // 支持 field-sizing 时高度由 CSS 自己算（见 .chat-input-textarea）：这里每键
+    // `height="auto"` + 读 scrollHeight 是一次强制同步重排，能省则省。
+    const supportsFieldSizing = typeof CSS !== "undefined"
+      && typeof CSS.supports === "function"
+      && CSS.supports("field-sizing", "content");
+    if (supportsFieldSizing) return;
     ta.style.height = "auto";
     if (value) ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
   }, [value]);
@@ -2836,6 +2845,7 @@ type AtMenuItem = CompletionMenuEntry<FileIndexEntry>;
           </button>
           <textarea
             ref={textareaRef}
+            className="chat-input-textarea"
             value={value}
             role="combobox"
             aria-expanded={slashMenuVisible || atMenuVisible}
@@ -2994,7 +3004,11 @@ type AtMenuItem = CompletionMenuEntry<FileIndexEntry>;
                     aria-haspopup="listbox"
                     aria-expanded={modelDropdownOpen}
                     aria-controls={modelMenuId}
+                    disabled={isStreaming}
+                    aria-disabled={isStreaming || undefined}
                     onClick={() => {
+                      // 运行中不给打开：档位与模型都在这一层选（宿主正在按旧档位跑）
+                      if (isStreaming) return;
                       const opening = !modelDropdownOpen;
                       setModelDropdownOpen(opening);
                       if (opening) {
@@ -3006,7 +3020,7 @@ type AtMenuItem = CompletionMenuEntry<FileIndexEntry>;
                     }}
                     title={
                       isStreaming
-                        ? t("input_changeAppliesNextTurn")
+                        ? t("input_changeLockedWhileRunning")
                         : (model
                             ? modelInfoTitle({
                                 modelId: model.modelId,

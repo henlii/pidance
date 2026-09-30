@@ -1266,15 +1266,53 @@ span.linenumber {
 }
 
 /* ── 扩展面板 GUI 外壳 ── */
-.extension-panel-overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 95;
+/* 输入框高度：交给浏览器按内容算（field-sizing），不再每键读 scrollHeight 触发强制重排。
+   不支持的浏览器由 ChatInput 的 JS 回退接管（见那里的 useEffect）。 */
+.chat-input-textarea {
+  field-sizing: content;
+  max-height: 200px;
+  overflow-y: auto;
+}
+/* 插件面板的插槽：面板是会话列里的布局块，不再是覆盖会话区的浮层。
+   两种形态（见 docs/ui-vs-tui.md 第 5 节）：
+   - 全屏面板：标题栏与会话区之间；展开时替代会话区，收起时只留一行标题；
+   - 半屏面板 / 阻塞弹窗：会话区之下；展开时占会话区高度的一半，收起同样只留一行。 */
+.extension-panel-slot {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
-  background: var(--overlay);
+  flex-direction: column;
+  /* min-height:0 + overflow:hidden 一起用：flex 项的默认 min-height:auto 会让面板内容
+     把插槽撑高，2:1 分配就失效（实测渲染成 1:1）。面板内部自己有滚动。 */
+  min-height: 0;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+/* 展开时的 flex 比例由 ChatWindow 的 inline style 给（会话区带 Tailwind 的 flex-1，
+   类选择器压不过它）。这里只留「收起 = 不占伸缩空间」这条。 */
+/* 插槽里的面板本体填满插槽（尺寸由插槽的 flex 决定，不再按 vh 猜）。
+   面板容器（custom / dialog）与面板外壳都在插槽里，所以用后代选择器。 */
+.extension-panel-custom,
+.extension-panel-dialog {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  height: 100%;
+}
+.extension-panel-slot .extension-panel-shell {
+  height: 100%;
+  max-height: none;
+  margin: 0 auto;
+}
+.extension-panel-slot .extension-panel-shell:not(.extension-panel-shell--expanded) {
+  height: auto;
+}
+/* 会话列按 data-panel-state 让位：全屏展开时藏起会话区，半屏展开时与它 2:1 分高，
+   任一面板激活都隐藏输入区（todo / 输入框 / footer / widget 都在那一块里）。 */
+[data-chat-root][data-panel-state="fullscreen-expanded"] [data-chat-transcript] {
+  display: none;
+}
+[data-chat-root]:not([data-panel-state="none"]) [data-chat-input-area] {
+  display: none;
 }
 .extension-panel-inline {
   flex-shrink: 0;
@@ -1374,14 +1412,28 @@ span.linenumber {
   user-select: text;
   -webkit-user-select: text;
 }
+/* 底栏分两区：控制按钮（切回原样/复制）左对齐，主按钮（取消/提交）右对齐 */
 .extension-panel-footer {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
   padding: 10px 14px;
   border-top: 1px solid var(--border);
   background: var(--bg-subtle);
+}
+.extension-panel-footer-actions,
+.extension-panel-footer-primary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.extension-panel-footer-actions {
+  margin-right: auto;
+}
+.extension-panel-footer-primary {
+  margin-left: auto;
 }
 .extension-panel-hint,
 .extension-panel-status {

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouse
 import { createPortal } from "react-dom";
 import { Download, Minus, Plus, RotateCcw } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
+import { pinchZoom } from "@/lib/image-pinch";
 import { closeImagePreview, isImageDownloaded, markImageDownloaded, openImagePreview, useImagePreview } from "@/lib/image-preview-store";
 import { filePathFromApiUrl } from "@/lib/file-paths";
 import { SaveAsDialog } from "./SaveAsDialog";
@@ -209,6 +210,10 @@ export function ImagePreviewOverlay() {
   // 记录是否发生拖动：拖完不应被当成「点击背景」而误关闭。
   const movedRef = useRef(false);
   const dragRef = useRef<{ pointerId: number; x: number; y: number; offsetX: number; offsetY: number } | null>(null);
+  /** 活跃指针（pointerId → 坐标）：双指缩放要同时跟两根手指。 */
+  const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  /** 双指缩放基线：起始两指间距与当时的倍数（按比例算，不按绝对位移）。 */
+  const pinchRef = useRef<{ distance: number; zoom: number } | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
 
@@ -310,6 +315,15 @@ export function ImagePreviewOverlay() {
 
   const onPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     movedRef.current = false;
+    // 双指缩放（手机上看图的基本操作）：未放大时也要能捏开，所以这一步排在缩放门槛之前。
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointersRef.current.size >= 2) {
+      dragRef.current = null; // 两指进来了：停掉单指拖动，改由捏合驱动
+      const [a, b] = [...pointersRef.current.values()];
+      pinchRef.current = { distance: Math.hypot(a.x - b.x, a.y - b.y) || 1, zoom };
+      event.preventDefault();
+      return;
+    }
     // 未放大时拖动没有意义，交给遮罩的点击关闭处理。
     if (zoom <= MIN_ZOOM) return;
     event.preventDefault();
@@ -324,6 +338,19 @@ export function ImagePreviewOverlay() {
   }, [offset.x, offset.y, zoom]);
 
   const onPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const pointers = pointersRef.current;
+    if (pointers.has(event.pointerId)) pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    const pinch = pinchRef.current;
+    if (pinch && pointers.size >= 2) {
+      const [a, b] = [...pointers.values()];
+      const distance = Math.hypot(a.x - b.x, a.y - b.y);
+      const next = pinchZoom(pinch, distance, MIN_ZOOM, MAX_ZOOM);
+      movedRef.current = true; // 捏合过就不算「点背景」：松手后不该顺手关掉查看器
+      setZoom(next);
+      setOffset((current) => clampOffset(current, next));
+      event.preventDefault();
+      return;
+    }
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     const dx = event.clientX - drag.x;
@@ -333,6 +360,9 @@ export function ImagePreviewOverlay() {
   }, [clampOffset, zoom]);
 
   const stopDragging = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    // 先退指针：两根手指还剩一根时退出缩放，避免剩下那根被当成捏合的延续。
+    pointersRef.current.delete(event.pointerId);
+    if (pointersRef.current.size < 2) pinchRef.current = null;
     if (dragRef.current?.pointerId !== event.pointerId) return;
     dragRef.current = null;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {

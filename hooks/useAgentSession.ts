@@ -45,6 +45,7 @@ import {
 import { pendingSessionId } from "@/lib/new-session-intent";
 import { applyExternallyRequestedTheme } from "@/hooks/useTheme";
 import type { ContextUsage, SessionStatsInfo } from "@/lib/pi-types";
+import type { CachedSessionStats } from "@/lib/session-metadata-cache";
 import {
   applyExtensionUiRequest,
   filterSettledBlockingRequests,
@@ -303,7 +304,15 @@ type AgentStateResponse = {
    */
   extensionCapabilityNotices?: { id?: string; message?: string; notifyType?: string }[];
   /** host 侧本 run 的吞吐读数（冷挂载/刷新时 seed；本地采样后失效）。 */
-  turnMetrics?: { tokensPerSecond?: number; ttftMs?: number } | null;
+  turnMetrics?: {
+    tokensPerSecond?: number;
+    ttftMs?: number;
+    ttftAvgMs?: number;
+    llmMs?: number;
+    toolMs?: number;
+    steps?: number;
+    outputTokens?: number;
+  } | null;
 };
 
 export interface QueuedMessageRow {
@@ -726,6 +735,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // 通知按 sessionId 入队，当前加载的会话展示其 FIFO 投影（3 普通 + 3 高级）。
   const { notices, liveNoticeActivities, addNotice, addLiveActivity, clearLiveActivities, dismissNotice, toggleNoticePin } = useNoticeState(session?.id ?? null);
   const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
+  // 服务端全量统计（扫描折叠整条 JSONL，与加载窗口无关）。窗口折叠只在它没到之前兜底。
+  const [serverSessionStats, setServerSessionStats] = useState<CachedSessionStats | null>(null);
+
+  /** 拉一次服务端全量统计：打开会话时、run 结束时。失败就退回窗口折叠，不影响会话。 */
+  const refreshServerSessionStats = useCallback(async (sid: string) => {
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/stats`);
+      if (!res.ok) return;
+      const payload = await res.json() as { stats?: CachedSessionStats | null };
+      if (sessionIdRef.current !== sid) return; // 会话已切走：迟到响应丢弃
+      setServerSessionStats(payload.stats ?? null);
+    } catch {
+      /* 统计拿不到不影响会话内容 */
+    }
+  }, []);
+
+  useEffect(() => {
+    // 换会话即清空：全量统计属于上一个会话，留着会把数字串到新会话上。
+    setServerSessionStats(null);
+  }, [session?.id]);
   // extension UI 展示状态（#17 D5c）：5 state + ref + 3 更新回调已抽至 useExtensionUiState。
   const {
     extensionDialog, extensionCustomUi, extensionEditorTakeover, extensionStatuses, extensionWidgets,
@@ -1245,6 +1274,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       tokens.cacheWrite += u.cacheWrite ?? 0;
       cost += u.cost?.total ?? 0;
     }
+    // 全量统计优先（与 dsh 的 whole-log projection 同口径）；上面的窗口折叠是
+    // 服务端值还没到时的降级路径 —— 长会话与压缩过的会话只按窗口求和会偏小。
+    if (serverSessionStats) {
+      tokens.input = serverSessionStats.tokens.input;
+      tokens.output = serverSessionStats.tokens.output;
+      tokens.cacheRead = serverSessionStats.tokens.cacheRead;
+      tokens.cacheWrite = serverSessionStats.tokens.cacheWrite;
+      cost = serverSessionStats.cost;
+      userMessages = serverSessionStats.userMessages;
+      assistantMessages = serverSessionStats.assistantMessages;
+      toolCalls = serverSessionStats.toolCalls;
+      toolResults = serverSessionStats.toolResults;
+    }
     tokens.total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
     if (tokens.total === 0 && messages.length === 0) return null;
     return {
@@ -1261,7 +1303,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 热 state 优先，其次磁盘兜底（非 live 会话仍能显示上下文比例）。
       ...((contextUsage ?? diskContextUsage) ? { contextUsage: contextUsage ?? diskContextUsage ?? undefined } : {}),
     } satisfies SessionStatsInfo;
-  }, [messages, sessionStatsOverride, contextUsage, diskContextUsage, data?.filePath, session?.id, session?.name]);
+  }, [messages, sessionStatsOverride, serverSessionStats, contextUsage, diskContextUsage, data?.filePath, session?.id, session?.name]);
 
   const loadSession = useCallback(async (
     sid: string,
@@ -1327,6 +1369,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       ) {
         return null;
       }
+      void refreshServerSessionStats(sid);
       const tailEntryIds = d.context.entryIds ?? [];
       const tailMessages = d.context.messages ?? [];
       // 归并一律交给 registry：从 slot 自己的 timeline 算，不依赖 React updater
@@ -2818,7 +2861,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }, APP_EVENTS_WAKE_RETRY_MS);
     };
     const unsubscribe = subscribeAppEvents((payload) => {
-      const data = payload as { type?: unknown; runningSessionIds?: unknown };
+      const data = payload as { type?: unknown; runningSessionIds?: unknown; lockedSessionIds?: unknown };
+      // 对端开始/结束执行：来自 fs.watch 的即时通知（见 lib/cross-process-watch.ts），
+      // 比 3 秒探针轮询更快；探针仍作为 inotify 失效时的兜底保留。
+      if (data?.type === "locks") {
+        if (sessionIdRef.current !== sid) return;
+        setLockedByOther(
+          Array.isArray(data.lockedSessionIds) && data.lockedSessionIds.includes(sid),
+        );
+        return;
+      }
       if (data?.type !== "running" || !Array.isArray(data.runningSessionIds)) return;
       if (!data.runningSessionIds.includes(sid)) return;
       const registry = getOrCreateBrowserSessionRuntimeRegistry();
@@ -2874,6 +2926,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 跨进程运行锁在 agent_settled 后立即释放；已显示锁定条的页面用短轮询
     // 感知释放，避免旧的 5s 窗口让用户还要等一轮才能发送。未上锁时反过来：
     // 用轻量探针发现「对端抢锁」，否则要等下一次状态刷新（空闲时 2 分钟一档）。
+    // 共享的应用级流不重放「最后一帧 locks」：本页订阅得比那一帧晚时，先自己探一次，
+    // 不必等满一个探针周期。
+    probeLock();
     const interval = lockedByOther
       ? window.setInterval(refreshLock, 1_000)
       : window.setInterval(probeLock, SESSION_LOCK_PROBE_MS);
@@ -2956,6 +3011,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ? getOrCreateBrowserSessionRuntimeRegistry().getRunState(sid)?.promptRunId
           : undefined;
         if (sid && runId !== undefined) void finishAgentRun(sid, runId);
+        // 本轮消息刚落盘：稍后重取全量统计，弹窗/信息面板不必等下次打开会话。
+        if (sid) setTimeout(() => { void refreshServerSessionStats(sid); }, 300);
         break;
       }
       case "prompt_error": {
@@ -3491,6 +3548,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleModelChange = useCallback(async (provider: string, modelId: string, thinkingLevel?: string | null) => {
     // 只读会话：set_model 会写会话状态，拦截。
     if (isReadOnly) return;
+    // 运行中不接模型/档位改动：宿主正按旧值发请求，改了会让「显示」与「实际」分叉
+    // （用户口径：磁盘权威 + 运行期间不许改）。UI 上按钮已禁用，这里挡住其余路径。
+    if (getRuntimeAgentRunning() || bashRunningRef.current || isCompactingRef.current) return;
     if (isNew) {
       // 引导页常无 live session：本地状态必须先更新（否则无 sid 时直接 return，思考/模型选不中）
       setNewSessionModel({ provider, modelId });
@@ -4470,6 +4530,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     // 只读会话：set_thinking_level 会写会话状态，拦截。
     if (isReadOnly) return;
+    // 运行中不接档位改动（与 handleModelChange 同一口径）
+    if (getRuntimeAgentRunning() || bashRunningRef.current || isCompactingRef.current) return;
     // 与 handleModelChange 共用同一结算入口：串行 + 按操作代次回滚，
     // 避免同一会话里「旧请求迟到失败抹掉更新的选择」。
     const previous = thinkingLevelRef.current;
