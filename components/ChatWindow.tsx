@@ -8,7 +8,7 @@ import type { BranchActions } from "@/lib/branch-bookmarks";
 import { parseAnsiLine } from "@/lib/ansi";
 import { RenderedLineBlocks } from "./RenderedLines";
 import { planOptionClick, verifyOptionCursor } from "@/lib/extension-panel-view";
-import { ExtensionKeyBar } from "./ExtensionKeyBar";
+import { EXTENSION_KEY_BAR_HEIGHT, ExtensionKeyBar } from "./ExtensionKeyBar";
 import {
   resolveExtensionKeyBarChannel,
   shouldShowExtensionKeyBar,
@@ -1088,6 +1088,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
           onToggleRawMode={togglePanelRawMode}
           onSelectOption={handleSelectPanelOption}
           onInputValue={sendExtensionPanelInput}
+          isMobile={isMobile}
+          bottomInset={showKeyBar ? EXTENSION_KEY_BAR_HEIGHT : 0}
           onInput={sendExtensionCustomInput}
           onMouse={sendExtensionCustomMouse}
           onBounds={sendExtensionCustomBounds}

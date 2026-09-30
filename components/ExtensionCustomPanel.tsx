@@ -67,6 +67,8 @@ export function ExtensionCustomPanel({
   onToggleRawMode,
   onSelectOption,
   onInputValue,
+  isMobile,
+  bottomInset = 0,
   onBounds,
 }: {
   request: ExtensionUiCustomRequest;
@@ -83,6 +85,13 @@ export function ExtensionCustomPanel({
   onSelectOption?: (optionIndex: number) => void;
   /** 面板里的 Input 原语：把文本写回组件；confirm = 回车确认（issue #116 呈现那半）。 */
   onInputValue?: (request: ExtensionUiCustomRequest, value: string, confirm: boolean) => void;
+  /**
+   * 窄视口（useIsMobile）：手机上没有物理键盘，插件面板的键盘捕获元素不该弹软键盘 ——
+   * 方向键/回车由屏幕按键条送（issue #113），所以这里让 keytrap 只读并停用焦点守卫。
+   */
+  isMobile?: boolean;
+  /** 屏幕按键条遮住的高度（px）：面板容器底部让出同样的空间，别把正文压在按键条下面。 */
+  bottomInset?: number;
   onBounds?: (request: ExtensionUiCustomRequest, bounds: CustomPanelBounds) => void;
 }) {
   const { t } = useI18n();
@@ -157,9 +166,9 @@ export function ExtensionCustomPanel({
     if (request.hidden) return;
     const input = inputRef.current;
     if (!input) return;
-    if (request.focus === undefined || request.focus === "panel") input.focus();
+    if (isMobile) { input.blur(); return; } // 手机端不抢焦点：一聚焦软键盘就顶上来盖住面板
     else input.blur();
-  }, [request.focus, request.hidden, request.id]);
+  }, [request.focus, request.hidden, request.id, isMobile]);
 
   /**
    * 上报几何：挂载时一次、尺寸变化时、窗口缩放/滚动时、以及**恢复可见**时。
@@ -222,6 +231,9 @@ export function ExtensionCustomPanel({
    */
   useEffect(() => {
     if (request.hidden) return undefined;
+    // 手机端不挂焦点守卫：守卫会把焦点塞给 keytrap（textarea），一点面板软键盘就顶上来。
+    // 手机上方向键/回车走屏幕按键条（issue #113），不依赖焦点。
+    if (isMobile) return undefined;
     const refocus = () => {
       const input = inputRef.current;
       const rootEl = document.querySelector('[data-extension-panel="true"]');
@@ -237,12 +249,19 @@ export function ExtensionCustomPanel({
       document.removeEventListener("focusout", refocus, true);
       document.removeEventListener("click", refocus, true);
     };
-  }, [request.hidden, request.id]);
+  }, [request.hidden, request.id, isMobile]);
 
   if (request.hidden) return null;
 
   return (
-    <div data-extension-panel="true" className="extension-panel-overlay" style={overlayStyles?.containerStyle}>
+    <div
+      data-extension-panel="true"
+      className="extension-panel-overlay"
+      style={{
+        ...overlayStyles?.containerStyle,
+        ...(bottomInset > 0 ? { paddingBottom: `calc(${bottomInset}px + env(safe-area-inset-bottom))` } : {}),
+      }}
+    >
       <ExtensionPanelChrome
         overlay
         panelStyle={overlayStyles?.panelStyle}
@@ -289,6 +308,8 @@ export function ExtensionCustomPanel({
         <textarea
           ref={inputRef}
           data-extension-keytrap="true"
+          readOnly={isMobile === true}
+          inputMode={isMobile ? "none" : undefined}
           aria-label={t("chat_extensionPanel")}
           autoCapitalize="off"
           autoComplete="off"

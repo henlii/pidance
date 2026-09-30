@@ -285,9 +285,9 @@ function AppShellInner() {
   const chatColumnWidth = useMemo(
     () => Math.min(
       resolveChatColumnWidth({ availableWidth: chatColumnAvailable, ratio: chatColumnRatio }),
-      maxChatColumnWidthFor(chatColumnAvailable),
+      maxChatColumnWidthFor(chatColumnAvailable, isMobile),
     ),
-    [chatColumnAvailable, chatColumnRatio],
+    [chatColumnAvailable, chatColumnRatio, isMobile],
   );
   const chatColumnWidthRef = useRef(chatColumnWidth);
   chatColumnWidthRef.current = chatColumnWidth;
