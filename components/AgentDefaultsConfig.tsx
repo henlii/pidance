@@ -11,6 +11,16 @@ import {
   type AgentThinkingLevel,
   type CacheWarmingMode,
 } from "@/lib/agent-settings";
+import {
+  DEFAULT_SESSION_LAZY_LOAD,
+  DEFAULT_SESSION_LAZY_LOAD_COUNT,
+  SESSION_LAZY_LOAD_MAX_COUNT,
+  SESSION_LAZY_LOAD_MIN_COUNT,
+  loadSessionLazyLoadSetting,
+  sanitizeSessionLazyLoadCount,
+  saveSessionLazyLoadSetting,
+  type SessionLazyLoadSetting,
+} from "@/lib/session-lazy-load";
 import { SettingsJsonEditor } from "./SettingsJsonEditor";
 import { SettingsPageFooter, settingsPrimaryButtonStyle, settingsSecondaryButtonStyle } from "./SettingsPageFooter";
 
@@ -84,12 +94,16 @@ function NumberField({
   min,
   max,
   onChange,
+  disabled,
+  onBlur,
 }: {
   label: string;
   value: string;
   min?: number;
   max?: number;
   onChange: (v: string) => void;
+  disabled?: boolean;
+  onBlur?: () => void;
 }) {
   return (
     <div>
@@ -99,8 +113,10 @@ function NumberField({
         value={value}
         min={min}
         max={max}
+        disabled={disabled}
+        onBlur={onBlur}
         onChange={(e) => onChange(e.target.value)}
-        style={{ ...inputStyle, maxWidth: 220 }}
+        style={{ ...inputStyle, maxWidth: 220, ...(disabled ? { opacity: 0.5, cursor: "not-allowed" } : {}) }}
       />
     </div>
   );
@@ -259,6 +275,33 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
   const [reloadKey, setReloadKey] = useState(0);
   /** 二级页：基础表单 / 原始 JSON */
   const [activeTab, setActiveTab] = useState<"basic" | "json">("basic");
+  // 「会话内容懒加载」是**本机界面偏好**（不写 agent settings.json），所以不进 draft、改完立刻持久化。
+  // 初始值用默认渲染、挂载后再读 localStorage：避免首帧与存储值不一致（同构/水合）。
+  const [lazyLoad, setLazyLoad] = useState<SessionLazyLoadSetting>(DEFAULT_SESSION_LAZY_LOAD);
+  const [lazyLoadCountText, setLazyLoadCountText] = useState(String(DEFAULT_SESSION_LAZY_LOAD_COUNT));
+  useEffect(() => {
+    const stored = loadSessionLazyLoadSetting();
+    setLazyLoad(stored);
+    setLazyLoadCountText(String(stored.count));
+  }, []);
+  /** 改开关/条数立刻落盘（本地偏好）。条数只在合法时提交，输入框里允许停在半成品。 */
+  const updateLazyLoad = useCallback((next: SessionLazyLoadSetting) => {
+    setLazyLoad(next);
+    saveSessionLazyLoadSetting(next);
+  }, []);
+  const commitLazyLoadCountText = useCallback((text: string) => {
+    setLazyLoadCountText(text);
+    const parsed = Number(text.trim());
+    if (Number.isInteger(parsed) && parsed >= SESSION_LAZY_LOAD_MIN_COUNT && parsed <= SESSION_LAZY_LOAD_MAX_COUNT) {
+      updateLazyLoad({ ...lazyLoad, count: parsed });
+    }
+  }, [lazyLoad, updateLazyLoad]);
+  /** 失焦时把半成品收口：清空/非法 → 回落默认，并写回输入框。 */
+  const normalizeLazyLoadCountText = useCallback(() => {
+    const sanitized = sanitizeSessionLazyLoadCount(lazyLoadCountText);
+    setLazyLoadCountText(String(sanitized));
+    updateLazyLoad({ ...lazyLoad, count: sanitized });
+  }, [lazyLoad, lazyLoadCountText, updateLazyLoad]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -636,6 +679,30 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
                 ))}
               </select>
               <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 4 }}>{t("defaults_cacheWarmingHint")}</div>
+            </div>
+          </div>
+
+          {/* 会话内容（本机偏好：懒加载开关 + 每条条数） */}
+          <div style={blockStyle}>
+            <div style={sectionTitleStyle}>{t("defaults_sessionSection")}</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <BooleanField
+                label={t("defaults_sessionLazyLoad")}
+                checked={lazyLoad.enabled}
+                onChange={(v) => updateLazyLoad({ ...lazyLoad, enabled: v })}
+              />
+              <NumberField
+                label={t("defaults_sessionLazyLoadCount")}
+                value={lazyLoadCountText}
+                min={SESSION_LAZY_LOAD_MIN_COUNT}
+                max={SESSION_LAZY_LOAD_MAX_COUNT}
+                disabled={!lazyLoad.enabled}
+                onChange={commitLazyLoadCountText}
+                onBlur={normalizeLazyLoadCountText}
+              />
+              <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>
+                {t("defaults_sessionLazyLoadHint")}
+              </div>
             </div>
           </div>
 

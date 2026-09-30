@@ -21,6 +21,7 @@ const { notifyPiThemeApplied, resetPiThemeSignalForTests, subscribePiThemeApplie
   "../lib/pi-theme-signal.ts",
 );
 const { DEFAULT_SESSION_HISTORY_PAGE } = await jiti.import("../lib/session-context-window.ts");
+const { sessionLazyLoadLimit } = await jiti.import("../lib/session-lazy-load.ts");
 
 /** 抽出 hook 源码里 `const <name> = useCallback((…) => {…}, […])` 的第一个参数（真实函数）。 */
 function extractCallback(env, name) {
@@ -81,6 +82,10 @@ function makeEnv(options = {}) {
     themeRefreshPendingRef: { current: new Set() },
     document: { visibilityState: visibility },
     // 注入的是真实模块里的常量；两个局部常量在源码模块作用域，测试只能给同值替身。
+    // 懒加载设置：注入**真实**的限额函数，加载器钉在旧的缺省页大小 ——
+    // 这组用例验的是「换色重取覆盖已加载窗口」的窗口形态，与开关取值无关。
+    sessionLazyLoadLimit,
+    loadSessionLazyLoadSetting: () => ({ enabled: true, count: DEFAULT_SESSION_HISTORY_PAGE }),
     DEFAULT_SESSION_HISTORY_PAGE,
     THEME_REFRESH_MAX_ROWS: 500,
     THEME_REFRESH_MAX_HOPS: 4,
