@@ -63,7 +63,7 @@ export function loadUnreadSessionClock(storage: StorageLike): UnreadSessionState
     if (legacy.size === 0) return emptyUnreadSessionState();
     const completedAt: Record<string, string> = {};
     for (const id of legacy) completedAt[id] = LEGACY_LIST_COMPLETED_AT;
-    return { completedAt, readAt: {} };
+    return { completedAt, abnormalAt: {}, readAt: {} };
   } catch {
     return emptyUnreadSessionState();
   }
@@ -108,8 +108,14 @@ export function applyRunningUnreadTransition(
 }
 
 /** 多端可合并的未读时钟：unread 当且仅当 completedAt > readAt。 */
+/**
+ * 「异常中断」时钟：某会话**最后一次运行**以 aborted/error 结束时，服务端写 abnormalAt。<id>；
+ * 跑完正常结束会清掉它。展示规则与未读同一套（abnormalAt > readAt 才亮红点），
+ * 所以复用同一份存储与 readAt —— 用户读过就消失。
+ */
 export type UnreadSessionState = {
   completedAt: Record<string, string>;
+  abnormalAt: Record<string, string>;
   readAt: Record<string, string>;
 };
 
@@ -130,7 +136,7 @@ function parseTimeMap(value: unknown): Record<string, string> {
 }
 
 export function emptyUnreadSessionState(): UnreadSessionState {
-  return { completedAt: {}, readAt: {} };
+  return { completedAt: {}, abnormalAt: {}, readAt: {} };
 }
 
 /** 接受新结构或旧版 unreadSessionIds 字符串数组。 */
@@ -140,12 +146,13 @@ export function parseUnreadSessionState(raw: unknown, nowIso = new Date().toISOS
     for (const id of raw) {
       if (typeof id === "string" && id) completedAt[id] = nowIso;
     }
-    return { completedAt, readAt: {} };
+    return { completedAt, abnormalAt: {}, readAt: {} };
   }
   if (raw === null || typeof raw !== "object") return emptyUnreadSessionState();
   const record = raw as Record<string, unknown>;
   return {
     completedAt: parseTimeMap(record.completedAt),
+    abnormalAt: parseTimeMap(record.abnormalAt),
     readAt: parseTimeMap(record.readAt),
   };
 }
@@ -161,12 +168,16 @@ export function mergeUnreadSessionState(a: UnreadSessionState, b: UnreadSessionS
   for (const [id, ts] of Object.entries(b.completedAt)) {
     if (!completedAt[id] || ts > completedAt[id]) completedAt[id] = ts;
   }
+  const abnormalAt = { ...a.abnormalAt };
+  for (const [id, ts] of Object.entries(b.abnormalAt)) {
+    if (!abnormalAt[id] || ts > abnormalAt[id]) abnormalAt[id] = ts;
+  }
   const readAt = { ...a.readAt };
   for (const [id, ts] of Object.entries(b.readAt)) {
     if (!readAt[id] || ts > readAt[id]) readAt[id] = ts;
   }
-  if (sameTimeMap(completedAt, a.completedAt) && sameTimeMap(readAt, a.readAt)) return a;
-  return { completedAt, readAt };
+  if (sameTimeMap(completedAt, a.completedAt) && sameTimeMap(abnormalAt, a.abnormalAt) && sameTimeMap(readAt, a.readAt)) return a;
+  return { completedAt, abnormalAt, readAt };
 }
 
 export function unreadIdsFromState(state: UnreadSessionState): Set<string> {
@@ -174,6 +185,19 @@ export function unreadIdsFromState(state: UnreadSessionState): Set<string> {
   for (const [id, completed] of Object.entries(state.completedAt)) {
     const read = state.readAt[id];
     if (!read || read < completed) ids.add(id);
+  }
+  return ids;
+}
+
+/**
+ * 异常中断（red dot）：服务端记的 abnormalAt 晚于我读过的时刻 —— 与未读同一套判据，
+ * 所以「打开会话」这件事会同时把未读点和红点清掉。
+ */
+export function abnormalIdsFromState(state: UnreadSessionState): Set<string> {
+  const ids = new Set<string>();
+  for (const [id, at] of Object.entries(state.abnormalAt)) {
+    const read = state.readAt[id];
+    if (!read || read < at) ids.add(id);
   }
   return ids;
 }
@@ -186,23 +210,23 @@ export function markSessionRead(state: UnreadSessionState, sessionId: string, at
 
 export function pruneUnreadSessionState(state: UnreadSessionState, existingIds: ReadonlySet<string>): UnreadSessionState {
   let changed = false;
-  const completedAt: Record<string, string> = {};
-  const readAt: Record<string, string> = {};
-  for (const [id, ts] of Object.entries(state.completedAt)) {
-    if (!existingIds.has(id)) {
-      changed = true;
-      continue;
+  // 三个桶同进同出：会话没了就把 completedAt / abnormalAt / readAt 一起清掉，
+  // 否则红点会挂在一个已经不存在的会话上（也就永远清不掉）。
+  const prune = (source: Record<string, string>): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const [id, ts] of Object.entries(source)) {
+      if (!existingIds.has(id)) {
+        changed = true;
+        continue;
+      }
+      out[id] = ts;
     }
-    completedAt[id] = ts;
-  }
-  for (const [id, ts] of Object.entries(state.readAt)) {
-    if (!existingIds.has(id)) {
-      changed = true;
-      continue;
-    }
-    readAt[id] = ts;
-  }
-  return changed ? { completedAt, readAt } : state;
+    return out;
+  };
+  const completedAt = prune(state.completedAt);
+  const abnormalAt = prune(state.abnormalAt);
+  const readAt = prune(state.readAt);
+  return changed ? { completedAt, abnormalAt, readAt } : state;
 }
 
 /** 仅接受未被较新 running 事件或恢复请求覆盖的 GET 快照。 */

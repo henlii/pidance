@@ -169,6 +169,7 @@ export const zhCN: Record<TranslationKey, string> = {
   sidebar_cancel: '取消',
   sidebar_projectDescription: '描述',
   sidebar_running: '运行中',
+  sidebar_abnormal: "上次运行被中断（异常结束）",
   subagent_widgetTitle: '异步子代理',
   subagent_widgetSingle: '异步子代理 {name}',
   subagent_widgetBackground: '后台',

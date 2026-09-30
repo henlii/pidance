@@ -141,7 +141,7 @@ const SIDEBAR_BASE_LEFT = SIDEBAR_GUTTER + SIDEBAR_INDICATOR_SLOT + SIDEBAR_INDI
 const sidebarRowPaddingLeft = (depth: number) => SIDEBAR_BASE_LEFT + depth * SIDEBAR_DEPTH_STEP;
 const sidebarIndicatorLeft = (depth: number) => SIDEBAR_GUTTER + depth * SIDEBAR_DEPTH_STEP;
 
-import { RunningTimeContext, WaitingSessionIdsContext } from "@/components/session-sidebar/running-time";
+import { AbnormalSessionIdsContext, RunningTimeContext, WaitingSessionIdsContext } from "@/components/session-sidebar/running-time";
 
 interface Props {
   selectedSessionId: string | null;
@@ -1327,6 +1327,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   return (
     <RunningTimeContext.Provider value={{ startedAt: runningStartedAt, now: runningNow }}>
+    <AbnormalSessionIdsContext.Provider value={catalogSnapshot.abnormalIds}>
     <WaitingSessionIdsContext.Provider value={waitingUserIds}>
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       {/* Header：品牌 + 全图标工具栏（OpenChamber 规格 24×24 / 图标 18 / 6px 圆角） */}
@@ -1936,6 +1937,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       />
       </div>
     </WaitingSessionIdsContext.Provider>
+    </AbnormalSessionIdsContext.Provider>
     </RunningTimeContext.Provider>
     );
   }

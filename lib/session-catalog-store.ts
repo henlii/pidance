@@ -15,6 +15,7 @@ import {
   markSessionRead,
   pruneUnreadSessionState,
   unreadIdsFromState,
+  abnormalIdsFromState,
   type UnreadSessionState,
 } from "./unread-sessions-storage";
 
@@ -46,6 +47,8 @@ export type SessionCatalogSnapshot = {
   startingIds: Set<string>;
   effectiveRunningIds: Set<string>;
   unreadIds: Set<string>;
+  /** 上次运行异常中断（aborted/error）且我还没读过的会话 —— 侧栏红点。 */
+  abnormalIds: Set<string>;
   loading: boolean;
   error: string | null;
   serverListLoaded: boolean;
@@ -240,6 +243,9 @@ export function createSessionCatalogStore(options?: {
       });
       const running = effectiveRunning();
       const unreadIds = unreadIdsFromState(state.unread);
+      const abnormalIds = abnormalIdsFromState(state.unread);
+      for (const id of running) abnormalIds.delete(id);
+      if (selectedSessionId) abnormalIds.delete(selectedSessionId);
       for (const id of running) unreadIds.delete(id);
       if (selectedSessionId) unreadIds.delete(selectedSessionId);
       return {
@@ -250,6 +256,7 @@ export function createSessionCatalogStore(options?: {
         startingIds: cloneSet(state.startingIds),
         effectiveRunningIds: running,
         unreadIds,
+        abnormalIds,
         loading: state.loading,
         error: state.error,
         serverListLoaded: state.serverListLoaded,

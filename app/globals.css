@@ -44,7 +44,7 @@
   --assistant-bg: #fdfcfa;
   --tool-bg: #efeeec80;
   --code-bg: #f4f3f1;
-  --status-running: #b35017;
+  --status-running: #2d72c4; /* 运行中=蓝（用户要求：圆圈改蓝色）；未读点用的是 --status-unread 同色系 */
   --status-waiting: #c99700;
   --status-unread: #2d72c4;
   --status-success: #5f8d3d;
@@ -104,7 +104,7 @@ html.dark {
   --assistant-bg: #120f0e;
   --tool-bg: #120f0e80;
   --code-bg: #0e0c0b;
-  --status-running: #da7c47;
+  --status-running: #5aa9e6;
   --status-waiting: #eab308;
   --status-unread: #479fe6;
   --status-success: #76ad4f;
@@ -157,7 +157,7 @@ html[data-theme-style="fusion"] {
   --tool-bg: #f0f5f4;
   --code-bg: #172126;
   /* 运行中用橙：与成功绿、失败红一眼可分（原来是青绿，和成功绿太近） */
-  --status-running: #b35017;
+  --status-running: #2d72c4; /* 运行中=蓝（用户要求：圆圈改蓝色）；未读点用的是 --status-unread 同色系 */
   --status-waiting: #cf9f1d;
   --status-unread: #286e98;
   --status-success: #49805d;
@@ -206,7 +206,7 @@ html.dark[data-theme-style="fusion"] {
   --tool-bg: #121d1f;
   --code-bg: #0b1113;
   /* 运行中用橙（暗色主题版本），理由同上 */
-  --status-running: #da7c47;
+  --status-running: #5aa9e6;
   --status-waiting: #ecc94b;
   --status-unread: #69a7ca;
   --status-success: #79ad78;

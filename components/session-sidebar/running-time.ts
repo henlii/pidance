@@ -28,3 +28,13 @@ export const WaitingSessionIdsContext = createContext<ReadonlySet<string>>(new S
 export function useWaitingSessionIds(): ReadonlySet<string> {
   return useContext(WaitingSessionIdsContext);
 }
+
+/**
+ * 上次运行异常中断（aborted/error）且尚未读过的会话：侧栏显示红点。
+ * 事实由服务端写（unreadSessionState.abnormalAt），这里只负责传到行上。
+ */
+export const AbnormalSessionIdsContext = createContext<ReadonlySet<string>>(new Set());
+
+export function useAbnormalSessionIds(): ReadonlySet<string> {
+  return useContext(AbnormalSessionIdsContext);
+}

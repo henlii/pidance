@@ -656,6 +656,34 @@ export function RunningDurationText({ startedAt, now, running }: {
   );
 }
 
+/**
+ * 会话异常中断（最后一次运行 aborted/error）：红点，优先于未读蓝点。
+ * 判据来自存储层的 abnormalIdsFromState（服务端记时刻、打开会话即清除）。
+ */
+export function AbnormalSessionIndicator({ size = 14 }: { size?: number }) {
+  const { t } = useI18n();
+  return (
+    <span
+      title={t("sidebar_abnormal")}
+      aria-label={t("sidebar_abnormal")}
+      style={{
+        width: size,
+        height: size,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+        color: "var(--status-danger)",
+      }}
+    >
+      <span
+        aria-hidden="true"
+        style={{ width: size, height: size, borderRadius: "50%", background: "currentColor" }}
+      />
+    </span>
+  );
+}
+
 export function UnreadSessionIndicator({ size = 14 }: { size?: number }) {
   const { t } = useI18n();
   return (

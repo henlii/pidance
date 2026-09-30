@@ -169,6 +169,7 @@ export const en = {
   sidebar_cancel: 'Cancel',
   sidebar_projectDescription: 'Description',
   sidebar_running: 'Running',
+  sidebar_abnormal: "Last run was interrupted (ended abnormally)",
   subagent_widgetTitle: 'Async agents',
   subagent_widgetSingle: 'async subagent {name}',
   subagent_widgetBackground: 'background',

@@ -1983,7 +1983,10 @@ export class SdkSessionHost {
     }
     if (event.type === "message_start" || event.type === "message_update") {
       const message = event.message as { role?: string; content?: unknown } | undefined;
-      if (message?.role === "user") return false;
+      // 只有模型输出算数：user / toolResult（工具结果消息）/ custom（扩展消息）都带内容，
+      // 若在它们身上记首 token，本 step 的分母就会从「工具刚结束」那一刻起算，把重新
+      // 请求的等待（TTFT）也算进解码时间 —— 工具调用越多的 run，吞吐被压得越低。
+      if (message?.role !== "assistant") return false;
       if (this.turnMetrics.firstTokenAt === null && SdkSessionHost.hasRenderableContent(message)) {
         this.turnMetrics.firstTokenAt = now;
         const isFirstStep = this.turnMetrics.ttftMs === null;
@@ -2041,6 +2044,18 @@ export class SdkSessionHost {
         this.lastStopReason = this.readStopReasonFromAgentEnd(event) ?? this.lastStopReason ?? "completed";
         if (this.lastStopReason === "aborted" || this.lastStopReason === "error") {
           this.setFollowUpHeld(true);
+        }
+        // 「异常中断」红点（侧栏）：最后一次运行以 aborted/error 结束时记一个时刻，
+        // 正常跑完就清掉。与未读同一套存储与 readAt —— 打开会话即视为已看过。
+        // 写盘失败不影响运行（红点只是提示）。
+        try {
+          const abnormal = this.lastStopReason === "aborted" || this.lastStopReason === "error";
+          updatePidancePref(
+            `unreadSessionState.abnormalAt.${this.realSessionId}`,
+            abnormal ? new Date().toISOString() : null,
+          );
+        } catch (error) {
+          console.error("[pidance] failed to record abnormal-end marker:", error);
         }
         clearRunningStartedAt(this.realSessionId);
         this.options.onSessionListInvalidate?.();

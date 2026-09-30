@@ -7,7 +7,7 @@
  */
 
 import { useCallback, useContext, useRef, useState, type ReactNode } from "react";
-import { RunningTimeContext, useWaitingSessionIds } from "./running-time";
+import { AbnormalSessionIdsContext, RunningTimeContext, useWaitingSessionIds, useAbnormalSessionIds } from "./running-time";
 import { ViewportDialog } from "../ui/ViewportDialog";
 import { useI18n } from "@/lib/i18n";
 import type { SessionInfo } from "@/lib/types";
@@ -36,6 +36,7 @@ import {
   SearchIcon,
   SidebarIconButton,
   SlidersIcon,
+  AbnormalSessionIndicator,
   UnreadSessionIndicator,
   WaitingSessionIndicator,
 } from "@/components/session-sidebar/display";
@@ -429,6 +430,9 @@ function SessionItem({
   const inputRef = useRef<HTMLInputElement>(null);
   // agent 询问用户中（extension 弹窗/ask）：暂停态显示黄点，不转动画。
   const waitingIds = useWaitingSessionIds();
+  // 异常中断红点：服务端记的「最后一次运行以 aborted/error 结束」，读过即清（与未读同一套读时刻）
+  const abnormalIds = useAbnormalSessionIds();
+  const isAbnormal = session.id ? abnormalIds.has(session.id) : false;
   const isWaitingUser = session.id ? waitingIds.has(session.id) : false;
 
   const capabilities = getSessionCapabilities(session);
@@ -632,7 +636,11 @@ const handleDeleteConfirm = useCallback(async () => {
                   未读显示在标题之前（OpenChamber 风格）；运行中已上移到图标列。 */}
               {isWaitingUser ? (
                 <WaitingSessionIndicator size={10} />
-              ) : (!isRunning && isUnread && <UnreadSessionIndicator size={10} />)}
+              ) : isRunning ? null : isAbnormal ? (
+                <AbnormalSessionIndicator size={10} />
+              ) : isUnread ? (
+                <UnreadSessionIndicator size={10} />
+              ) : null}
               {/* Compact：运行时长内联在圆点后（行右侧信息区）；折叠父组只留圆点 */}
               {!isWaitingUser && showRunningDuration && compact && (
                 <RunningDurationText startedAt={runningStartedAt} now={runningTime.now} running />
