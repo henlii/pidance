@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useRef, useState, useCallback, useEffect, useMemo, useId, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
+import React, { useRef, useState, useCallback, useEffect, useMemo, useId, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
 import type { SetStateAction } from "react";
 import { thinkingLabel as resolveThinkingLabel } from "@/lib/thinking-level-policy";
 import { createPortal } from "react-dom";
@@ -404,7 +404,25 @@ const QueuedMessageRow = React.memo(function QueuedMessageRow({ kind, text, stat
   );
 });
 
-export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
+/**
+ * 输入区用 memo 包住：ChatWindow 在**流式期间每帧**都会重渲染（消息在变），
+ * 默认行为会把整棵输入区（模型/档位、队列、附件、补全菜单…）一起重建。
+ * 实测：模型吐 token 时单次按键延迟冲到 200ms 以上，空闲时只有 16-19ms。
+ * 包上 memo 后，只有真正相关的 props 变化才会重建输入区。
+ */
+/**
+ * 浏览器是否支持 `field-sizing: content`。
+ *
+ * 支持时 textarea 的高度由 CSS 自己算，JS 侧任何 `height="auto"` + 读 scrollHeight
+ * 都是多余的一次强制同步重排 —— 而这两条路径（onInput 与 [value] effect）每次按键都会走。
+ */
+function supportsFieldSizing(): boolean {
+  return typeof CSS !== "undefined"
+    && typeof CSS.supports === "function"
+    && CSS.supports("field-sizing", "content");
+}
+
+export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, blocked = false, model, isAutoModelSelection, modelNames, modelList, sessionTokens, modelAuthConfigured, onModelChange,
   onAbortCompaction, isCompacting, compactError, compactResult,
   thinkingLevel, thinkingReady, onThinkingLevelChange, defaultThinkingLevel, availableThinkingLevels, thinkingLevelMap, thinkingLevelMaps,
@@ -507,6 +525,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
+  /**
+   * 输入法组合期间暂存的原生值。
+   *
+   * 受控 textarea 在组合期每次 onChange 都 setState，等于每个按键都让整棵输入区
+   * 重渲染 —— 手机上（Android + 中文输入法）就是「打字几百 ms 才上屏」。
+   * 组合期只记原生值（浏览器自己维护合成期的显示），结束后一次性同步。
+   */
+  const composingValueRef = useRef<string | null>(null);
   const lastCompositionEndAtRef = useRef(0);
   const slashCommandsRequestedRef = useRef(false);
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -1115,10 +1141,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (!ta) return;
     // 支持 field-sizing 时高度由 CSS 自己算（见 .chat-input-textarea）：这里每键
     // `height="auto"` + 读 scrollHeight 是一次强制同步重排，能省则省。
-    const supportsFieldSizing = typeof CSS !== "undefined"
-      && typeof CSS.supports === "function"
-      && CSS.supports("field-sizing", "content");
-    if (supportsFieldSizing) return;
+    if (supportsFieldSizing()) return;
     ta.style.height = "auto";
     if (value) ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
   }, [value]);
@@ -1888,9 +1911,12 @@ type AtMenuItem = CompletionMenuEntry<FileIndexEntry>;
     [isStreaming, isMobile, streamingEnterDefault, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, argMenuOpen, argItems, argActiveIndex, applyArgCompletion, sendQueued, handleSend, getNextSlashIndex, atMenuVisible, atMenuOpen, atQuery, atMenuItems, atActiveIndex, applyMenuItem, cancelPluginCompletion, queuedMessages, onSendQueueAsSteer, flushQueueAsSteer]
   );
 
-  const handleInput = useCallback(() => {
-    const ta = textareaRef.current;
-    if (!ta) return;
+  const handleInput = useCallback((e: React.FormEvent<HTMLTextAreaElement>) => {
+    const ta = e.currentTarget;
+    // 浏览器支持 field-sizing 时高度归 CSS 管，这里不要再读 scrollHeight：
+    // 读 scrollHeight 会强制一次同步重排，而这条路径**每次按键**都会走 ——
+    // 与 [value] effect 里的同名短路一起，才算真的只测量一次或零次。
+    if (supportsFieldSizing()) return;
     ta.style.height = "auto";
     ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
   }, []);
@@ -2857,6 +2883,12 @@ type AtMenuItem = CompletionMenuEntry<FileIndexEntry>;
             aria-activedescendant={inputActiveDescendant}
             aria-autocomplete="list"
             onChange={(e) => {
+              // 组合期不 setState（见 composingValueRef 的说明）：只暂存原生值，
+              // 等 onCompositionEnd 一次性同步。@ 查询本来就在组合期短路。
+              if (isComposingRef.current) {
+                composingValueRef.current = e.target.value;
+                return;
+              }
               setValueTouched(e.target.value);
               updateAtQuery(e.target.value, e.target.selectionStart);
             }}
@@ -2875,6 +2907,11 @@ type AtMenuItem = CompletionMenuEntry<FileIndexEntry>;
               isComposingRef.current = false;
               lastCompositionEndAtRef.current = Date.now();
               const el = e.currentTarget;
+              // 组合期攒下的值在这里一次性落到 state。
+              const composed = composingValueRef.current;
+              composingValueRef.current = null;
+              if (composed !== null && composed !== el.value) el.value = composed;
+              setValueTouched(el.value);
               updateAtQuery(el.value, el.selectionStart);
             }}
             onInput={handleInput}
@@ -3342,4 +3379,4 @@ type AtMenuItem = CompletionMenuEntry<FileIndexEntry>;
       </div>
     </div>
   );
-});
+}));

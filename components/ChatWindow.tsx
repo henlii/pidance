@@ -839,6 +839,17 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   // 会话级上下文占用：热 state 优先；非 live（打开历史/只读）会话回退磁盘统计，
   // 否则切换模型提示与错误卡片的占用行会缺数据。
   const sessionContextUsage = sessionStats?.contextUsage ?? contextUsage ?? null;
+  /**
+   * 传给输入区的 token 数单独节流：流式期间 contextUsage 每帧都在变，而它只用在
+   * 模型菜单的 badge 上 —— 每帧变会让 ChatInput 的 memo 失效，等于没包。
+   * 节流到 1s 一次，输入框就不必跟着流式帧重建。
+   */
+  const contextUsageTokens = sessionContextUsage?.tokens ?? null;
+  const [stableContextTokens, setStableContextTokens] = useState<number | null>(contextUsageTokens);
+  useEffect(() => {
+    const id = setTimeout(() => setStableContextTokens(contextUsageTokens), 1_000);
+    return () => clearTimeout(id);
+  }, [contextUsageTokens]);
 
   // Push context usage up to AppShell as well.
   const ctxKey = contextUsage
@@ -937,7 +948,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
       isAutoModelSelection={isAutoModelSelection}
       modelNames={modelNames}
       modelList={modelList}
-      sessionTokens={sessionContextUsage?.tokens ?? null}
+      sessionTokens={stableContextTokens}
       modelAuthConfigured={modelAuthConfigured}
       onModelChange={handleModelChange}
       onCompact={session || isNew ? handleCompact : undefined}
