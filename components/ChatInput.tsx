@@ -525,14 +525,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
-  /**
-   * 输入法组合期间暂存的原生值。
-   *
-   * 受控 textarea 在组合期每次 onChange 都 setState，等于每个按键都让整棵输入区
-   * 重渲染 —— 手机上（Android + 中文输入法）就是「打字几百 ms 才上屏」。
-   * 组合期只记原生值（浏览器自己维护合成期的显示），结束后一次性同步。
-   */
-  const composingValueRef = useRef<string | null>(null);
   const lastCompositionEndAtRef = useRef(0);
   const slashCommandsRequestedRef = useRef(false);
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -2883,12 +2875,9 @@ type AtMenuItem = CompletionMenuEntry<FileIndexEntry>;
             aria-activedescendant={inputActiveDescendant}
             aria-autocomplete="list"
             onChange={(e) => {
-              // 组合期不 setState（见 composingValueRef 的说明）：只暂存原生值，
-              // 等 onCompositionEnd 一次性同步。@ 查询本来就在组合期短路。
-              if (isComposingRef.current) {
-                composingValueRef.current = e.target.value;
-                return;
-              }
+              // 这里必须无条件 setState：受控 textarea 若在输入法组合期「先不更新」，
+              // React 会在下一次重渲染时把 DOM 值重置回 state 里的旧值，中文直接没法输入。
+              // （试过组合期暂存、结束后再同步，结果就是中文打不进去 —— 已回退。）
               setValueTouched(e.target.value);
               updateAtQuery(e.target.value, e.target.selectionStart);
             }}
@@ -2907,11 +2896,6 @@ type AtMenuItem = CompletionMenuEntry<FileIndexEntry>;
               isComposingRef.current = false;
               lastCompositionEndAtRef.current = Date.now();
               const el = e.currentTarget;
-              // 组合期攒下的值在这里一次性落到 state。
-              const composed = composingValueRef.current;
-              composingValueRef.current = null;
-              if (composed !== null && composed !== el.value) el.value = composed;
-              setValueTouched(el.value);
               updateAtQuery(el.value, el.selectionStart);
             }}
             onInput={handleInput}
