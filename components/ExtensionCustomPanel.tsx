@@ -107,8 +107,11 @@ export function ExtensionCustomPanel({
   keyBar?: ReactNode;
 }) {
   const { t } = useI18n();
-  // 按钮暂时隐藏但能力保留（用户要求），显式消费一次免得被当成死代码删掉
+  // 网页化与网页输入框停用后，这几项暂时没有渲染出口（能力保留，恢复时直接用）：
+  // 显式消费一次，免得被当成死代码删掉。
   void onToggleRawMode;
+  void rawMode;
+  void onInputValue;
   const inputRef = useRef<HTMLTextAreaElement>(null);
   /** 画 ANSI 的那块：几何与鼠标坐标都以此为准（两处必须同源）。 */
   const bodyRef = useRef<HTMLPreElement>(null);
@@ -155,11 +158,17 @@ export function ExtensionCustomPanel({
     () => buildPanelView(displayLines, { allowCursorList: request.selectList === true }),
     [displayLines, request.selectList],
   );
-  const webViewEnabled = !rawMode && shouldRenderPanelWebView(panelView);
+  // 面板内部**按插件自己画的 ANSI 行原样渲染**（用户口径 2026-10-01：网页化先停用，
+  // 内容与输入都由插件自己控制）。`ExtensionPanelWebView` 与行级语义识别（issue #114）
+  // 的实现都留着，恢复只需把这个常量改回 `!rawMode && shouldRenderPanelWebView(panelView)`。
+  const webViewEnabled = false;
+  void panelView;
+  void shouldRenderPanelWebView;
 
   const overlayStyles = buildExtensionOverlayStyle(request.layout);
-  // 面板里 Input 原语的文本（初值来自服务端投影；打字时本地先行，再写回组件）
+  // 面板里 Input 原语的文本 —— 网页输入框停用后这里不再渲染，保留供恢复时使用。
   const [panelInputValue, setPanelInputValue] = useState(request.inputValue ?? "");
+  void panelInputValue;
   const inputValueTimer = useRef<number | null>(null);
   useEffect(() => {
     // 换了面板或服务端初值变了就重置；打字期间不覆盖本地（否则光标会跳）
@@ -174,14 +183,21 @@ export function ExtensionCustomPanel({
    * - `editor` / `none`：让出焦点（前者由 useEffect 之外的 `focusEditor` 副作用把焦点
    *   交给输入框；后者谁也不聚焦）。
    *
-   * 只在**值变化**时动 DOM：每帧都 focus 会把用户刚点到输入框的焦点抢回面板。
+   * 依赖是**具体字段**（不是每帧）：只有面板身份/焦点归属/可见性变化时才动 DOM，
+   * 用户自己点到面板内的输入框不会被抢回去。
    */
   useEffect(() => {
     if (request.hidden) return;
     const input = inputRef.current;
     if (!input) return;
-    if (isMobile) { input.blur(); return; } // 手机端不抢焦点：一聚焦软键盘就顶上来盖住面板
-    else input.blur();
+    // 手机端不抢焦点：一聚焦软键盘就顶上来盖住面板（方向键走屏幕按键条）。
+    if (isMobile) { input.blur(); return; }
+    // editor / none：服务端要求把键盘让给编辑器或谁也不给。
+    if (request.focus === "editor" || request.focus === "none") { input.blur(); return; }
+    // panel（或缺省）：**焦点必须落在 keytrap**。这里以前两个分支都 blur，于是焦点留在
+    // body —— 方向键与回车到不了插件组件的 handleInput，面板看着「按不动、选不了」，
+    // ask-user 的「Type something.」正是靠 ↓ + ⏎ 选出来的（2026-10-01 实测定位）。
+    input.focus({ preventScroll: true });
   }, [request.focus, request.hidden, request.id, isMobile]);
 
   /**
@@ -357,33 +373,12 @@ export function ExtensionCustomPanel({
           }}
           className="extension-panel-keytrap"
         />
-        {request.input ? (
-          // 面板里有 pi-tui 的 Input 原语 → 用真输入框（issue #116 呈现那半）：
-          // 打字把文本写回组件，回车交给插件的 onSubmit。
-          <input
-            data-extension-input="true"
-            value={panelInputValue}
-            aria-label={t("panel_inputLabel")}
-            placeholder={t("panel_inputPlaceholder")}
-            onChange={(event) => {
-              const next = event.currentTarget.value;
-              setPanelInputValue(next);
-              // 打字只写文本（不确认）；回车才确认，避免每敲一下都触发插件逻辑
-              if (inputValueTimer.current !== null) window.clearTimeout(inputValueTimer.current);
-              inputValueTimer.current = window.setTimeout(() => {
-                inputValueTimer.current = null;
-                onInputValue?.(request, next, false);
-              }, 150);
-            }}
-            onKeyDown={(event) => {
-              if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
-              event.preventDefault();
-              if (inputValueTimer.current !== null) { window.clearTimeout(inputValueTimer.current); inputValueTimer.current = null; }
-              onInputValue?.(request, event.currentTarget.value, true);
-            }}
-            className="extension-panel-input"
-          />
-        ) : null}
+        {/*
+          面板里的 pi-tui Input 原语不再由我们渲染成网页输入框（issue #116 的呈现那半
+          先停用）：输入改由插件组件自己处理 —— 焦点在 keytrap 上，按键原样转发给它的
+          handleInput()。要恢复时把上面那段 <input data-extension-input> 放回来，
+          并接上 onInputValue。
+        */}
         <pre
           style={overlayStyles?.bodyWidthCh ? { width: `${overlayStyles.bodyWidthCh}ch` } : undefined}
           ref={bodyRef}

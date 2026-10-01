@@ -328,7 +328,11 @@ function focusTriggerButton(anchor: HTMLElement | null): void {
 }
 
 /** 队列行。`stateLabel` 非空时额外渲染状态徽标（在途 / 结果未知）。 */
-function QueuedMessageRow({ kind, text, state, stateLabel, imageCount }: { kind: "steer" | "follow-up"; text: string; state?: QueuedRow["state"]; stateLabel?: string; imageCount?: number }) {
+/**
+ * 队列行：props 全是原始类型，且与会话文本无关 —— memo 让它不随输入重渲染
+ * （队列可能有多行，每行都重建是白费）。
+ */
+const QueuedMessageRow = React.memo(function QueuedMessageRow({ kind, text, state, stateLabel, imageCount }: { kind: "steer" | "follow-up"; text: string; state?: QueuedRow["state"]; stateLabel?: string; imageCount?: number }) {
   return (
     <div
       title={text}
@@ -398,7 +402,7 @@ function QueuedMessageRow({ kind, text, state, stateLabel, imageCount }: { kind:
       <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
     </div>
   );
-}
+});
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, blocked = false, model, isAutoModelSelection, modelNames, modelList, sessionTokens, modelAuthConfigured, onModelChange,

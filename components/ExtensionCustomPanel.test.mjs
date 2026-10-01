@@ -103,3 +103,20 @@ test("custom 面板：底栏有取消（走 TUI 中断），标题行只负责�
   assert.ok(/aria-label="取消"|aria-label="Cancel"/.test(html), "底栏取消丢了：这类面板没有别的鼠标退出口");
   assert.ok(source.includes('"\\x03"'), "取消必须发 TUI 中断（Ctrl+C），不能只是隐藏面板");
 });
+
+test("面板显示时焦点必须落在 keytrap（否则方向键/回车到不了插件）", () => {
+  const source = readFileSync(fileURLToPath(new URL("./ExtensionCustomPanel.tsx", import.meta.url)), "utf8");
+  // 回归：这里曾经两个分支都 blur()，焦点留在 body → 面板按不动、选不了
+  assert.ok(
+    /request\.focus === "editor" \|\| request\.focus === "none"/.test(source),
+    "缺少 editor/none 的让出分支",
+  );
+  assert.ok(
+    source.includes('input.focus({ preventScroll: true })'),
+    "panel 档没有聚焦 keytrap —— 方向键与回车会到不了插件",
+  );
+  assert.ok(
+    !/if \(isMobile\) \{ input\.blur\(\); return; \}\s*else input\.blur\(\);/.test(source),
+    "又回到了「两个分支都 blur」的旧实现",
+  );
+});

@@ -22,6 +22,11 @@ import {
  * - `pending`：在途 → 同样**不显示**本地文件项（插件可能正要说「没有」）；
  * - `local`：没注册 / 失败 / 超时 → 回退我们自己那套文件补全。
  */
+/** 是否处于「没有插件触发上下文」的本地态（用于避免重复 setState）。 */
+function isLocalPluginCompletion(state: PluginCompletionState): boolean {
+  return state.status === "local";
+}
+
 export function usePluginCompletion(options: {
   enabled: boolean;
   onLoad: (input: {
@@ -71,7 +76,9 @@ export function usePluginCompletion(options: {
 
   const cancel = useCallback(() => {
     scheduler.cancel();
-    setState(LOCAL_PLUGIN_COMPLETION);
+    // 值相同就返回同一个引用：React 会 bail out，不再为每键多渲染一次
+    // （无触发上下文时每键都会走到这里）。
+    setState((prev) => (isLocalPluginCompletion(prev) ? prev : LOCAL_PLUGIN_COMPLETION));
   }, [scheduler]);
 
   const schedule = useCallback((input: { lines: string[]; cursorLine: number; cursorCol: number } | null) => {
@@ -80,7 +87,9 @@ export function usePluginCompletion(options: {
       return;
     }
     // 在途态：既不给插件项（还没有），也不给本地文件项（插件可能要说「没有」）。
-    setState({ status: "pending" });
+    // 同上：已经在 pending 就别再写一个新对象 —— 连按删除时每键都 setState 会让整棵
+    // 输入区多渲染一次（实测这是「越写越卡」的一部分）。
+    setState((prev) => (prev.status === "pending" ? prev : { status: "pending" }));
     scheduler.schedule(input);
   }, [cancel, enabled, scheduler]);
 
