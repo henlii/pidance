@@ -37,10 +37,11 @@ test("面板激活时输入区整块隐藏；全屏面板替代会话区、半�
   );
   // 比例走 inline style（会话区带 Tailwind 的 flex-1，类选择器压不过它）；面板占可用高度
   // 的 1/3、会话区拿 2/3 —— 两者之和正好是「面板 = 会话区的一半」。
+  // 半屏高度：内容驱动 + CSS 上限（不再是写死的 1/3）
   assert.match(
-    source,
-    /halfSlotFlexStyle = panelState === "half-expanded" \? \{ flex: "0 0 33\.3333%" \}/,
-    "半屏展开时插槽应占可用高度的 1/3",
+    css,
+    /\.extension-panel-slot--half\.is-expanded \{\s*flex: 0 1 auto;\s*max-height: 50%;/,
+    "半屏插槽应为内容驱动 + 上限 50%（隐藏输入区后视觉上的一半）",
   );
   assert.match(
     source,

@@ -1286,10 +1286,17 @@ span.linenumber {
   overflow: hidden;
   flex: 0 0 auto;
 }
-/* 展开时的 flex 比例由 ChatWindow 的 inline style 给（会话区带 Tailwind 的 flex-1，
-   类选择器压不过它）。这里只留「收起 = 不占伸缩空间」这条。 */
-/* 插槽里的面板本体填满插槽（尺寸由插槽的 flex 决定，不再按 vh 猜）。
-   面板容器（custom / dialog）与面板外壳都在插槽里，所以用后代选择器。 */
+/* 半屏面板 / 阻塞弹窗：**高度由内容决定**，上限是「隐藏输入区后可用高度的一半」。
+   此时输入区已隐藏，根容器高度 = 会话区 + 面板，所以上限取 50% —— 面板最多占视觉上的
+   一半，会话区拿另一半；内容不足时面板更矮、会话区更高，到上限之后才由面板内部滚动
+   （.extension-panel-body 已有 overflow-y: auto）。
+   全屏面板的 flex 仍由 ChatWindow 的 inline style 给（会话区带 Tailwind 的 flex-1，
+   类选择器压不过它）。 */
+.extension-panel-slot--half.is-expanded {
+  flex: 0 1 auto;
+  max-height: 50%;
+}
+/* 面板容器（custom / dialog）与面板外壳都在插槽里，所以用后代选择器。 */
 .extension-panel-custom,
 .extension-panel-dialog {
   display: flex;
@@ -1299,9 +1306,15 @@ span.linenumber {
   height: 100%;
 }
 .extension-panel-slot .extension-panel-shell {
-  height: 100%;
-  max-height: none;
   margin: 0 auto;
+  max-height: 100%;
+}
+/* 全屏：填满插槽；半屏：按内容长高（到上限才开始滚动）。 */
+.extension-panel-slot--fullscreen .extension-panel-shell {
+  height: 100%;
+}
+.extension-panel-slot--half .extension-panel-shell {
+  height: auto;
 }
 .extension-panel-slot .extension-panel-shell:not(.extension-panel-shell--expanded) {
   height: auto;

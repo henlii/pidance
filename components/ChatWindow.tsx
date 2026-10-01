@@ -295,9 +295,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
    * 插槽 flex:1 → 面板正好是会话区高度的一半。
    */
   const transcriptFlexStyle = panelState === "half-expanded" ? { flex: "1 1 0" } : undefined;
-  // 面板吃掉可用高度的 1/3、会话区拿剩下的 2/3 —— 两者之和正好 2:1，不依赖 grow 的分配
-  // （grow 2:1 在这层实测没生效，见 ChatWindow.test.mjs 的布局契约）。
-  const halfSlotFlexStyle = panelState === "half-expanded" ? { flex: "0 0 33.3333%" } : undefined;
+  // 半屏插槽的高度交给 CSS：内容驱动（flex: 0 1 auto）+ max-height 50%
+  // （输入区已隐藏，根容器 = 会话区 + 面板 → 面板最多占视觉上一半，超过才开始滚动）。
   const fullscreenSlotFlexStyle = panelState === "fullscreen-expanded" ? { flex: "1 1 0" } : undefined;
 
   /**
@@ -1471,10 +1470,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
       {halfScreenActive ? (
         <div
           className={`extension-panel-slot extension-panel-slot--half${panelExpanded ? " is-expanded" : ""}`}
-          style={{
-            padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px 8px`,
-            ...halfSlotFlexStyle,
-          }}
+          style={{ padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px 8px` }}
         >
           {extensionDialog ? (
             <ExtensionDialog
