@@ -40,6 +40,15 @@ export type RunningLease = {
   heartbeatAt: number;
   /** 稳定 run 起始（首次 acquire 落盘）；跨进程 epoch 用，滚动 heartbeat 不改写 */
   startedAt: number;
+  /**
+   * 持有者此刻是否**真的在跑**（prompt / bash / 压缩 / 流式中）。
+   *
+   * 两个概念必须分开：
+   * - **写保护**看「有没有活着的 writer」—— 空闲的 host 也是 writer，acquire 照样拒绝；
+   * - **界面显示占用**看这个字段 —— 只是「打开了会话 / 页面挂着」不该让别的实例看到锁定。
+   * 旧租约缺字段按 false 处理：宁可少显示锁定，也不要误报占用。
+   */
+  running?: boolean;
 };
 
 function leaseDir(agentDir: string): string {
@@ -71,6 +80,8 @@ function readLeaseFile(path: string): RunningLease | null {
       sessionId: raw.sessionId,
       heartbeatAt: raw.heartbeatAt,
       startedAt: typeof raw.startedAt === "number" ? raw.startedAt : raw.heartbeatAt,
+      // 缺字段 = 旧租约：按「没在跑」处理（见 RunningLease.running 的说明）。
+      running: raw.running === true,
     };
   } catch {
     return null;
@@ -283,6 +294,8 @@ export function acquireRunningLease(
       sessionId,
       heartbeatAt: now,
       startedAt: current && current.pid === process.pid ? current.startedAt : now,
+      // 刚拿到租约就是要开跑；之后由心跳按真实运行态刷新。
+      running: true,
     });
       return true;
     });
@@ -296,6 +309,8 @@ export function heartbeatRunningLease(
   sessionId: string,
   agentDir: string = getAgentDir(),
   now = Date.now(),
+  /** 持有者此刻是否真的在跑（默认 true：调用方没传时按原来的语义）。 */
+  running = true,
 ): void {
   if (!sessionId) return;
   try {
@@ -309,6 +324,7 @@ export function heartbeatRunningLease(
         sessionId,
         heartbeatAt: now,
         startedAt: current && current.pid === process.pid ? current.startedAt : now,
+        running,
       });
     });
   } catch (error) {
@@ -343,6 +359,29 @@ export function listFreshRunningLeaseSessionIds(
   now = Date.now(),
 ): string[] {
   return scanLeases(agentDir, now).fresh.map((lease) => lease.sessionId);
+}
+
+/**
+ * 对端是否**正在跑**这个会话（界面显示锁定的判据）。
+ *
+ * 与 isRunningLeaseHeldByOther 的区别：那个只问「有没有活着的 writer」（写保护用），
+ * 这个还要求租约上写着 running —— 只是打开会话 / 页面挂着的空闲 host 不算占用。
+ * 死进程一律不算；缺 running 字段的旧租约也不算（宁可少显示锁定）。
+ */
+export function isRunningLeaseActivelyRunningByOther(
+  sessionId: string,
+  agentDir: string = getAgentDir(),
+  now = Date.now(),
+): boolean {
+  if (!sessionId) return false;
+  const lease = existsSync(leasePath(agentDir, sessionId))
+    ? readLeaseFile(leasePath(agentDir, sessionId))
+    : null;
+  if (!lease) return false;
+  if (lease.pid === process.pid) return false;
+  if (!isLeaseHeldByLiveOwner(lease)) return false;
+  void now;
+  return lease.running === true;
 }
 
 export function isRunningLeaseHeldByOther(

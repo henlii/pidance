@@ -328,8 +328,11 @@ const RUNNING_LEASE_HEARTBEAT_MS = 8_000;
 
 function syncOwnedRunningLeases(): void {
   const local = new Set(getLocalWriterAndStartingIds());
+  // 租约里带上「是否真的在跑」：对端据此决定界面要不要显示锁定。
+  // 只打开会话 / 页面挂着的空闲 host 仍然是 writer（写保护不变），但不再显示占用。
+  const actuallyRunning = new Set(getLocalActuallyRunningIds());
   for (const id of local) {
-    heartbeatRunningLease(id);
+    heartbeatRunningLease(id, undefined, undefined, actuallyRunning.has(id));
     ownedRunningLeases.add(id);
   }
   for (const id of [...ownedRunningLeases]) {

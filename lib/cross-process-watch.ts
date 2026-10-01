@@ -20,7 +20,7 @@ import { readdirSync, watch, type FSWatcher } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "./pi-paths";
 import { scanSessionFiles } from "./session-metadata-cache";
-import { RUNNING_LEASE_DIRNAME, isRunningLeaseHeldByOther } from "./session-running-lease";
+import { RUNNING_LEASE_DIRNAME, isRunningLeaseActivelyRunningByOther } from "./session-running-lease";
 
 /** 锁状态兜底对账间隔：用户要的「2 秒一轮询」下限（对端开始/结束执行最多迟 2 秒可见）。 */
 export const LOCK_POLL_MS = 2_000;
@@ -84,7 +84,7 @@ function state(): WatchState {
 /**
  * 对端持有写租约的会话 id（排序后返回，便于比对）。
  *
- * 判据是 `isRunningLeaseHeldByOther`（**对端进程还活着**就是占用），不是「心跳新鲜」：
+ * 判据是 `isRunningLeaseActivelyRunningByOther`（对端进程活着**且在跑**），不是「心跳新鲜」：
  * 对端事件循环卡住/SIGSTOP 超过租约 TTL 时心跳会过期，但它仍然是 writer，
  * `acquireRunningLease` 也仍然拒绝本进程。用新鲜度当占用集会让锁定条与输入框
  * 反复撒谎（推空锁集 → 收起锁定条 → 下一帧又变回锁定）。
@@ -102,7 +102,7 @@ export function listSessionsLockedByOther(
 	for (const name of names) {
 		if (!name.endsWith(".json")) continue;
 		const sessionId = name.slice(0, -".json".length);
-		if (isRunningLeaseHeldByOther(sessionId, agentDir)) ids.push(sessionId);
+		if (isRunningLeaseActivelyRunningByOther(sessionId, agentDir)) ids.push(sessionId);
 	}
 	return ids.sort();
 }

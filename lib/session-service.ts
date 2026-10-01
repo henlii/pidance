@@ -86,6 +86,7 @@ import { shouldInheritModel } from "./model-selection";
 import { readPidancePrefs, updatePidancePref } from "./pidance-prefs-file";
 import {
   acquireRunningLease,
+  isRunningLeaseActivelyRunningByOther,
   isRunningLeaseHeldByOther,
   isSessionRunningLockedError,
   releaseRunningLease,
@@ -907,7 +908,9 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
      */
     isLockedByOther(sessionId: string): boolean {
       if (!sessionId || typeof sessionId !== "string") return false;
-      return isRunningLeaseHeldByOther(sessionId);
+      // 界面锁定只看「对端真的在跑」：空闲的 writer（只是打开了会话/页面挂着）
+      // 不该显示占用。写保护仍走 isRunningLeaseHeldByOther（acquire 会拒绝）。
+      return isRunningLeaseActivelyRunningByOther(sessionId);
     },
 
     getLiveSession(sessionId) {
