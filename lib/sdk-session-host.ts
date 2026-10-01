@@ -3690,6 +3690,22 @@ export class SdkSessionHost {
         return null;
       }
 
+      case "extension_ui_cancel_active": {
+        // 删除会话前先把活动 custom 面板解掉。
+        // 为什么必须要做：面板的 `ctx.ui.custom()` promise 只有插件的组件结束才 resolve，
+        // 它不 resolve → 那次工具调用不返回 → agent run 结束不了 → `destroyAsync` 一直等它。
+        // 实测后果是删除请求永久挂起（会话进入「Session is being deleted」且 abort 被拒），
+        // 用户看到的就是那个会话卡死、面板里的选项点不动。
+        const snapshot = this.extensionUi?.customSnapshot as { id?: unknown } | null | undefined;
+        const activeId = asString(snapshot?.id);
+        if (!activeId) return { cancelled: false };
+        // 用 **Esc** 而不是 Ctrl+C：按 lib/extension-panel-keys.ts 的口径，插件界面显示时
+        // Esc 归插件（关面板 / 退出选择态），而 Ctrl+C 是壳的「中断运行」；实测发 \x03
+        // 时 rpiv-ask-user 的面板并不结束（run 继续挂着，destroy 照样等下去）。
+        this.extensionUi?.inputCustom(activeId, "\x1b");
+        return { cancelled: true };
+      }
+
       case "editor_component_input": {
         // 插件编辑器接管的按键（issue #107）：进被接管的编辑器组件。
         // 顺序对齐 pi-tui —— 适配器内部先过全局监听器（可 consume / 改写），

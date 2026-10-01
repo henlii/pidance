@@ -990,6 +990,15 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
         // 1. running 先 abort（不 flush）；abort 失败只记录并继续删除。
         const live = deps.getRpcSession(liveSessionId) ?? deps.getRpcSession(sessionId);
         const runningIds = deps.getRunningRpcSessionIds();
+        if (live?.isAlive?.()) {
+          // 0) 先解掉活动 custom 面板：插件的 `ctx.ui.custom()` 不结束，那次工具调用就不会返回，
+          //    run 结束不了 —— 后面的 destroyAsync 会一直等（实测删除永久挂起，会话卡死）。
+          try {
+            await live.send({ type: "extension_ui_cancel_active" });
+          } catch (error) {
+            console.error("[pidance] cancel active panel before delete failed:", error);
+          }
+        }
         if (live?.isAlive?.() && (runningIds.includes(sessionId) || runningIds.includes(liveSessionId))) {
           try {
             await live.send({ type: "abort" });
