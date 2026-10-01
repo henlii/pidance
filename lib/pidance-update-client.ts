@@ -44,7 +44,17 @@ export async function streamApplyPidanceUpdate(
   const decoder = new TextDecoder();
   let buf = "";
   let finalResult: ApplyStreamResult | null = null;
+  /**
+   * 流是不是被**切断**的（而不是正常读完）。
+   *
+   * 升级最后会重启服务，那条 SSE 连接必然断 —— 浏览器抛的是
+   * `TypeError: Error in input stream`。以前这个异常直接冒泡，调用方就把它当成
+   * 「升级失败」显示，而实际上服务已经换到新版本了（用户实测：界面报失败，版本已升）。
+   * 所以这里显式记下来，交给上层去问实际版本。
+   */
+  let streamDropped = false;
 
+  try {
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -77,14 +87,18 @@ export async function streamApplyPidanceUpdate(
     }
   }
 
-  return (
-    finalResult ?? {
-      ok: false,
-      status: "error",
-      message: "升级未返回结果",
-      targetVersion: version,
-    }
-  );
+  } catch {
+    // 读取期间连接断了：多半就是重启那把流切了（见 streamDropped 的说明）。
+    streamDropped = true;
+  }
+
+  if (finalResult) return finalResult;
+  return {
+    ok: false,
+    status: streamDropped ? "dropped" : "error",
+    message: streamDropped ? "升级过程中连接被切断（服务可能已重启）" : "升级未返回结果",
+    targetVersion: version,
+  };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -129,9 +143,13 @@ export async function waitForPidanceReady(options: {
 
 function likelyRestartedWithoutResult(lastPhase: UpgradePhase, result: ApplyStreamResult): boolean {
   if (result.ok) return false;
+  // 显式标记最可靠：流被切断就是要重启，与走到哪个 phase 无关。
+  // （以前只按 message 里的关键词猜，而浏览器抛的是 "Error in input stream"，
+  //  `/network|fetch|abort|failed/i` 一个都不匹配 —— 于是界面报失败、实际已升级。）
+  if (result.status === "dropped") return true;
   const dropped =
     result.message.includes("升级未返回结果") ||
-    /network|fetch|abort|failed/i.test(result.message);
+    /network|fetch|abort|failed|input stream/i.test(result.message);
   return dropped && (lastPhase === "restarting" || lastPhase === "linking" || lastPhase === "done");
 }
 
