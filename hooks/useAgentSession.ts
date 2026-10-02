@@ -3550,12 +3550,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [addNotice, t]);
 
-  const handleModelChange = useCallback(async (provider: string, modelId: string, thinkingLevel?: string | null) => {
+  /**
+   * 返回 true 表示这次选择**真的下发并被接受**了。
+   *
+   * 调用方（输入区）依赖它决定要不要写 per-model 偏好缓存：以前无论成败都先写，
+   * 于是运行中被门禁拒绝时界面仍显示「新档位」，而会话档位一个字节都没改
+   * （实测：用户改 high 一直不生效、刷新后又变回 max，就是这个）。
+   */
+  const handleModelChange = useCallback(async (provider: string, modelId: string, thinkingLevel?: string | null): Promise<boolean> => {
     // 只读会话：set_model 会写会话状态，拦截。
-    if (isReadOnly) return;
+    if (isReadOnly) return false;
     // 运行中不接模型/档位改动：宿主正按旧值发请求，改了会让「显示」与「实际」分叉
     // （用户口径：磁盘权威 + 运行期间不许改）。UI 上按钮已禁用，这里挡住其余路径。
-    if (getRuntimeAgentRunning() || bashRunningRef.current || isCompactingRef.current) return;
+    if (getRuntimeAgentRunning() || bashRunningRef.current || isCompactingRef.current) {
+      // 静默 return 会让用户以为改成功了（实测：反复改档位以为生效，其实一次都没写盘）。
+      addNotice({ type: "error", message: t("input_changeLockedWhileRunning") });
+      return false;
+    }
     if (isNew) {
       // 引导页常无 live session：本地状态必须先更新（否则无 sid 时直接 return，思考/模型选不中）
       setNewSessionModel({ provider, modelId });
@@ -3574,17 +3585,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           sid = null;
         }
       }
-      if (!sid) return; // 首条消息 ensureNewSession 会带上当前 model/thinkingLevel
-      await applySelection({
+      if (!sid) return false; // 首条消息 ensureNewSession 会带上当前 model/thinkingLevel
+      return await applySelection({
         sessionId: sid,
         model: { provider, modelId },
         thinkingLevel,
         // 引导页失败：本地选择保留（用户可重选），不写 error 之外的状态。
       });
-      return;
     }
     const sid = sessionIdRef.current;
-    if (!sid) return;
+    if (!sid) return false;
     // 本地立即同步显示；失败时按代次回滚到选择前的值。
     const previousThinking = thinkingLevelRef.current;
     const previousOverride = currentModelOverrideRef.current;
@@ -3596,7 +3606,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const capturedGen = thinkingGenerationRef.current;
     const targetSid = sid;
     setCurrentModelOverride({ provider, modelId });
-    await applySelection({
+    return await applySelection({
       sessionId: sid,
       model: { provider, modelId },
       thinkingLevel,
@@ -3607,7 +3617,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setThinkingLevel(previousThinking);
       },
     });
-  }, [isNew, isReadOnly, setNewSessionModel, applySelection]);
+  }, [addNotice, applySelection, isNew, isReadOnly, setNewSessionModel, t]);
 
   const handleCompact = useCallback(async () => {
     // 只读会话：compact 会重写 session 文件，拦截。
@@ -4532,16 +4542,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [addNotice, ensureEventsConnected, isReadOnly, notifyAutoFollowSend, queueDispatchErrorMessage, syncQueueWrite, t]);
 
-  const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
+  const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption): Promise<boolean> => {
     // 只读会话：set_thinking_level 会写会话状态，拦截。
-    if (isReadOnly) return;
+    if (isReadOnly) return false;
     // 运行中不接档位改动（与 handleModelChange 同一口径）
     if (getRuntimeAgentRunning() || bashRunningRef.current || isCompactingRef.current) {
       // 以前这里静默 return：UI 完全不动、也没有任何提示。实测用户「每次发消息前把档位
       // 改成 high 却没效果、刷新后依然是 max」，其中一部分就是这个 —— 他改的那一刻
       // 这个会话正在跑，请求被门禁挡掉，而界面上看不出任何迹象。被拒必须说出来。
       addNotice({ type: "error", message: t("input_changeLockedWhileRunning") });
-      return;
+      return false;
     }
     // 与 handleModelChange 共用同一结算入口：串行 + 按操作代次回滚，
     // 避免同一会话里「旧请求迟到失败抹掉更新的选择」。
@@ -4552,8 +4562,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const targetSid = sessionIdRef.current;
     setThinkingLevel(level);
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
-    if (!sid) return;
-    await applySelection({
+    if (!sid) return false;
+    return await applySelection({
       sessionId: sid,
       thinkingLevel: level,
       onFailure: () => {

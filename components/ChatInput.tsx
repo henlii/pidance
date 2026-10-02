@@ -113,7 +113,11 @@ interface Props {
   /** 当前会话上下文占用（tokens，估算）；仅用于切换前与目标模型声明窗口对比。 */
   sessionTokens?: number | null;
   modelAuthConfigured?: Record<string, boolean>;
-  onModelChange?: (provider: string, modelId: string, thinkingLevel?: string | null) => void;
+  /**
+   * 切换模型 + 思考深度。返回 false 表示**没有真的生效**（被运行中门禁拒绝等），
+   * 调用方据此决定要不要写偏好缓存 —— 否则界面会显示一个并未生效的新档位。
+   */
+  onModelChange?: (provider: string, modelId: string, thinkingLevel?: string | null) => void | Promise<boolean>;
   onCompact?: () => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
@@ -660,19 +664,27 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   );
 
   /** 选择思考深度：写缓存 + 应用（带深度切换模型）。运行中一律不接（见下方按钮禁用）。 */
+  /**
+   * 切换模型 + 思考深度。
+   *
+   * 这里**不再自己判断「运行中」**：判据统一由 hook 的 getRuntimeAgentRunning 负责
+   * （两个判据不同源会出现空窗 —— 界面认为空闲、按钮可点、菜单能选，而 hook 已按
+   * registry 判据拒绝，结果就是用户看到的「改了 high 却没生效、刷新又变回 max」）。
+   *
+   * 偏好缓存也改成**只有真的生效才写**：以前无论成败都先写，于是被拒时界面照样显示
+   * 新档位，把「没生效」伪装成「已生效」。
+   */
   const applyModelWithThinking = useCallback(
-    (provider: string, modelId: string, level: string) => {
-      // 运行中改档会让「磁盘/显示」与实际发请求的档位分叉（宿主已按旧档位在跑），
-      // 所以运行期间直接拒绝：不是「下一轮生效」，而是这期间根本不给改。
-      if (isStreaming) return;
-      setServerPref(`thinkingLevel.${provider}:${modelId}`, level);
+    async (provider: string, modelId: string, level: string) => {
       closeDepthMenu();
-      // 选择后关闭模型选择列表并切换模型 + 思考深度
       setModelDropdownOpen(false);
       modelButtonRef.current?.focus({ preventScroll: true });
-      onModelChange?.(provider, modelId, level);
+      const applied = await onModelChange?.(provider, modelId, level);
+      if (applied !== false) {
+        setServerPref(`thinkingLevel.${provider}:${modelId}`, level);
+      }
     },
-    [closeDepthMenu, isStreaming, onModelChange],
+    [closeDepthMenu, onModelChange],
   );
 
   // 服务端草稿恢复（多客户端同步）：挂载/切 key 时若服务端有草稿且本地为空则回填
