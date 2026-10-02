@@ -3533,11 +3533,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 只有仍是最新操作时才回滚/报错：更新的选择已经把它顶替。
       if (isLatestOp(selectionOpBookRef.current, sessionId, opId)) {
         onFailure?.();
+        const message = e instanceof Error ? e.message : String(e);
+        // 写保护（另一个 Pidance 实例持有这个会话的写入权）要单独说清楚。
+        // 实测：用户反复把档位改成 high，其实每次都是 409 被拒 + 回滚，
+        // 而只报「切换模型失败：Session is locked by ...」时他以为是档位功能坏了。
+        const lockedByPeer = /locked by another|writable host ownership/i.test(message);
         addNotice({
           type: "error",
-          message: t("models_switchFailed", {
-            error: e instanceof Error ? e.message : String(e),
-          }),
+          message: lockedByPeer
+            ? t("models_lockedByOtherInstance")
+            : t("models_switchFailed", { error: message }),
         });
       }
       selectionOpBookRef.current = closeSelectionOp(selectionOpBookRef.current, sessionId, opId);
