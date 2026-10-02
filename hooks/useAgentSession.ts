@@ -4536,7 +4536,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 只读会话：set_thinking_level 会写会话状态，拦截。
     if (isReadOnly) return;
     // 运行中不接档位改动（与 handleModelChange 同一口径）
-    if (getRuntimeAgentRunning() || bashRunningRef.current || isCompactingRef.current) return;
+    if (getRuntimeAgentRunning() || bashRunningRef.current || isCompactingRef.current) {
+      // 以前这里静默 return：UI 完全不动、也没有任何提示。实测用户「每次发消息前把档位
+      // 改成 high 却没效果、刷新后依然是 max」，其中一部分就是这个 —— 他改的那一刻
+      // 这个会话正在跑，请求被门禁挡掉，而界面上看不出任何迹象。被拒必须说出来。
+      addNotice({ type: "error", message: t("input_changeLockedWhileRunning") });
+      return;
+    }
     // 与 handleModelChange 共用同一结算入口：串行 + 按操作代次回滚，
     // 避免同一会话里「旧请求迟到失败抹掉更新的选择」。
     const previous = thinkingLevelRef.current;
@@ -4556,7 +4562,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setThinkingLevel(previous);
       },
     });
-  }, [applySelection, isReadOnly]);
+  }, [addNotice, applySelection, isReadOnly, t]);
 
   /**
    * Workspace History 命令：仅通过 type:prompt 派发 slash 到扩展，
