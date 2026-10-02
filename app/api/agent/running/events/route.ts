@@ -60,6 +60,12 @@ export async function GET(req: Request) {
             encodeLocks(event.lockedSessionIds);
             return;
           }
+          if (event.type === "session-state") {
+            // 空闲会话被其他实例改了档位/模型：转发给页面，让它按 id 重新对齐
+            // （权威值始终在磁盘上，这里只是「请重读」的信号）。
+            if (event.sessionIds.length > 0) encode({ type: "session-state", sessionIds: event.sessionIds });
+            return;
+          }
           invalidateSessionListCache();
           encode({ type: "sessions-changed" });
         } catch {

@@ -10,6 +10,7 @@ import { getPidancePref, readPidancePrefs, updatePidancePref, type PidancePrefs 
 import { hasQueuedFollowUp } from "./session-queue";
 import { startSdkSessionHost, type SdkSessionHost } from "./sdk-session-host";
 import { getRunningStartedAt as getLocalRunningStartedAt } from "./running-state";
+import { subscribeCrossProcessEvents } from "./cross-process-watch";
 import type { TreeNavigationSessionManager } from "./session-tree-navigation";
 import {
   acquireRunningLease,
@@ -158,6 +159,20 @@ export function getRegistry(): Map<string, LiveAgentSession> {
     process.once("exit", cleanup);
     process.once("SIGINT", cleanup);
     process.once("SIGTERM", cleanup);
+    // 另一个实例改了这个会话的档位/模型（空闲时任何实例都能改，磁盘权威）：
+    // 本进程若正好有这个会话的空闲 host，它的内存档位已经陈旧 —— 直接丢弃，
+    // 下次读取/执行时重建，自然从磁盘读到新值。正在跑的 host 不动（它正按
+    // 当前档位发请求，半路换档会制造新的分叉）。
+    subscribeCrossProcessEvents((event) => {
+      if (event.type !== "session-state") return;
+      for (const id of event.sessionIds) {
+        const host = getRegistry().get(id);
+        if (!host || host.isRunning()) continue;
+        void host.destroyAsync().catch(() => {
+          /* 已销毁 / 竞争失败：下一次信号或重建会覆盖 */
+        });
+      }
+    });
   }
   return globalThis.__piSessions;
 }

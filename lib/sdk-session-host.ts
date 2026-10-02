@@ -41,6 +41,7 @@ import {
   releaseRunningLease,
   SESSION_RUNNING_LOCKED_MESSAGE,
 } from "./session-running-lease";
+import { signalSessionStateChanged } from "./session-state-signal";
 
 /**
  * 命令仍在进行、无法安全交出 writer 时的失败消息。
@@ -3327,6 +3328,9 @@ export class SdkSessionHost {
         }
         if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
         await session.setModel(withPassThroughExtendedThinking(model));
+        // 同 set_thinking_level：切模型也会改会话状态（并套用模型自带档位），
+        // 主动让其他实例知道该重读磁盘。
+        signalSessionStateChanged(this.realSessionId, this.agentDir);
         this.options.onSessionListInvalidate?.();
         return model;
       }
@@ -3334,6 +3338,9 @@ export class SdkSessionHost {
       case "set_thinking_level": {
         if (session.model) applyPassThroughExtendedThinkingInPlace(session.model);
         session.setThinkingLevel(command.level as never);
+        // 主动通知其他实例：空闲时任何实例都能改档位，改完要让别人的页面跟着变
+        // （他们读同一份磁盘，这里只是让他们知道「该重读了」）。
+        signalSessionStateChanged(this.realSessionId, this.agentDir);
         this.options.onSessionListInvalidate?.();
         return null;
       }

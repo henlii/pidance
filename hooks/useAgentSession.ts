@@ -2873,6 +2873,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         );
         return;
       }
+      if (data?.type === "session-state") {
+        // 另一个实例刚改了这个会话的状态（思考档位 / 模型），磁盘是权威。
+        // 本页可能停在旧值上，本进程的 host 内存态也可能是旧的 —— 重拉一次对齐。
+        const ids = (data as { sessionIds?: unknown }).sessionIds;
+        if (!Array.isArray(ids) || !ids.includes(sid)) return;
+        void reconcileAgentState(sid);
+        // 档位/模型走静默重载：loadSession 的 disk 源会按「磁盘权威」覆盖本地显示值
+        // （applyRemoteThinking 的 source === "disk" 分支总是接受）。
+        void loadSession(sid, false, true);
+        return;
+      }
       if (data?.type !== "running" || !Array.isArray(data.runningSessionIds)) return;
       if (!data.runningSessionIds.includes(sid)) return;
       const registry = getOrCreateBrowserSessionRuntimeRegistry();

@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { getAgentDir } from "./pi-paths";
 import { scanSessionFiles } from "./session-metadata-cache";
 import { RUNNING_LEASE_DIRNAME, isRunningLeaseActivelyRunningByOther } from "./session-running-lease";
+import { SESSION_STATE_DIRNAME, SESSION_STATE_POLL_MS, listSignaledSessionIds, signaledSessionsFingerprint } from "./session-state-signal";
 
 /** 锁状态兜底对账间隔：用户要的「2 秒一轮询」下限（对端开始/结束执行最多迟 2 秒可见）。 */
 export const LOCK_POLL_MS = 2_000;
@@ -36,7 +37,14 @@ export type CrossProcessEvent =
 	/** 对端进程当前持有写租约的会话 id（已排序、不含本进程）。 */
 	| { type: "locks"; lockedSessionIds: string[] }
 	/** 会话目录发生了增删改：列表缓存已失效，前端应重取。 */
-	| { type: "sessions-changed" };
+	| { type: "sessions-changed" }
+	/**
+	 * 某个实例刚改写了这些会话的状态（思考档位 / 模型）。
+	 *
+	 * 与 `sessions-changed` 分开：那个是「列表变了」，这个是「同一个会话的权威值变了」，
+	 * 消费方要按 id 重新对齐（而不是重取整份列表）。空数组表示没有信号。
+	 */
+	| { type: "session-state"; sessionIds: string[] };
 
 type Listener = (event: CrossProcessEvent) => void;
 
@@ -46,6 +54,10 @@ interface WatchState {
 	sessionTimer: ReturnType<typeof setInterval> | null;
 	debounce: ReturnType<typeof setTimeout> | null;
 	leaseWatcher: FSWatcher | null;
+	/** 状态信号目录的 watch（空闲会话被其他实例改了档位/模型时对齐）。 */
+	stateWatcher: FSWatcher | null;
+	stateTimer: ReturnType<typeof setInterval> | null;
+	stateKey: string;
 	/** 会话目录的 watch：根 + 每个项目子目录各一个（非递归）。 */
 	sessionWatchers: Map<string, FSWatcher>;
 	/** 上一次对账结果（变化才通知）。 */
@@ -70,6 +82,9 @@ function state(): WatchState {
 			sessionTimer: null,
 			debounce: null,
 			leaseWatcher: null,
+			stateWatcher: null,
+			stateTimer: null,
+			stateKey: "", 
 			sessionWatchers: new Map(),
 			lockedKey: "",
 			sessionsKey: "",
@@ -173,15 +188,37 @@ async function reconcileSessions(): Promise<void> {
 	emit({ type: "sessions-changed" });
 }
 
+/**
+ * 对账状态信号：只在「被标记过的会话集合」变化时广播。
+ *
+ * 信号文件由改写方（host 处理 set_thinking_level / set_model 成功后）主动写出，
+ * fs.watch 立刻可见；这里同时是 2 秒兜底探针的落点（inotify 失效时仍能收敛）。
+ */
+function reconcileSessionState(): void {
+	const s = state();
+	const ids = listSignaledSessionIds(s.agentDir);
+	// 指纹带 mtime：同一会话再次改档位时集合不变，只看集合会漏掉。
+	const key = signaledSessionsFingerprint(s.agentDir);
+	if (!s.primed) {
+		s.stateKey = key;
+		return;
+	}
+	if (key === s.stateKey) return;
+	s.stateKey = key;
+	emit({ type: "session-state", sessionIds: ids });
+}
+
 /** 建基线：首次对账只记录当前状态，不广播（避免服务刚起来就推一屏）。 */
 async function reconcile(): Promise<void> {
 	const s = state();
 	if (s.primed) {
 		reconcileLocks();
+		reconcileSessionState();
 		await reconcileSessions();
 		return;
 	}
 	s.lockedKey = listSessionsLockedByOther(s.agentDir).join(",");
+	s.stateKey = signaledSessionsFingerprint(s.agentDir);
 	try {
 		s.sessionsKey = await sessionsFingerprint();
 	} catch {
@@ -198,6 +235,7 @@ function scheduleReconcile(): void {
 		s.debounce = null;
 		if (s.primed) {
 			reconcileLocks();
+			reconcileSessionState();
 			void reconcileSessions();
 		}
 	}, EVENT_DEBOUNCE_MS);
@@ -216,6 +254,19 @@ function attachWatchers(): void {
 		} catch {
 			// 目录还不存在（本进程还没跑过任何会话）：兜底轮询会覆盖，下次订阅时再试
 			s.leaseWatcher = null;
+		}
+	}
+	if (!s.stateWatcher) {
+		try {
+			const stateWatcher = watch(join(s.agentDir, SESSION_STATE_DIRNAME), { persistent: false }, scheduleReconcile);
+			stateWatcher.on("error", () => {
+				try { stateWatcher.close(); } catch { /* 已关闭 */ }
+				s.stateWatcher = null;
+			});
+			s.stateWatcher = stateWatcher;
+		} catch {
+			// 目录还不存在（还没有任何实例改过档位/模型）：兜底探针会覆盖
+			s.stateWatcher = null;
 		}
 	}
 	// 不使用 `recursive: true`：Node 在 Linux 上把它实现成「每个文件一个 watch」，
@@ -253,6 +304,10 @@ export function subscribeCrossProcessEvents(listener: Listener): () => void {
 		const sessionTimer = setInterval(() => { void reconcileSessions(); }, SESSION_POLL_MS);
 		sessionTimer.unref?.();
 		s.sessionTimer = sessionTimer;
+		// 状态信号兜底：fs.watch 失效时，其他实例的档位/模型改动最迟 2s 被察觉。
+		const stateTimer = setInterval(() => { reconcileSessionState(); }, SESSION_STATE_POLL_MS);
+		stateTimer.unref?.();
+		s.stateTimer = stateTimer;
 		void reconcile(); // 建基线（首次不广播）
 	}
 	return () => {
@@ -272,6 +327,14 @@ export function stopCrossProcessWatch(): void {
 	if (s.sessionTimer) {
 		clearInterval(s.sessionTimer);
 		s.sessionTimer = null;
+	}
+	if (s.stateTimer) {
+		clearInterval(s.stateTimer);
+		s.stateTimer = null;
+	}
+	if (s.stateWatcher) {
+		try { s.stateWatcher.close(); } catch { /* 已关闭 */ }
+		s.stateWatcher = null;
 	}
 	if (s.debounce) {
 		clearTimeout(s.debounce);
