@@ -18,7 +18,7 @@ test("未上锁时用 /lock 探针发现对端抢锁，上锁后仍用 /state �
   const hook = read("./useAgentSession.ts");
   assert.match(
     hook,
-    /const SESSION_LOCK_PROBE_MS = 3_000;/,
+    /const SESSION_LOCK_PROBE_MS = 2_000;/,
     "探针间隔常量缺失或改了值（脚本 A12 的等待窗口从这行读回，别悄悄改）",
   );
   assert.match(

@@ -515,10 +515,11 @@ export async function startLiveSession(
   const inflight = locks.get(sessionId);
   if (inflight) return inflight;
 
-  if (!acquireRunningLease(sessionId)) {
-    throw new Error(SESSION_RUNNING_LOCKED_MESSAGE);
-  }
-  notifyRunningChange();
+  // 打开/唤醒 host **不再**占租约。租约语义是「正在执行」，不是「我是 writer」：
+  // 以前这里一 acquire，只要本实例还开着这个会话（页面在 → 有 SSE 订阅 → host 不回收），
+  // 别的实例改档位/模型就一律被 409 挡住。用户口径：会话加载与运行中是两个状态，
+  // 加载不该锁，只有执行中才互斥。真正的互斥点在 host 处理 prompt 时 acquire
+  // （见 sdk-session-host 的 case "prompt"），失败才回 locked。
 
   const starting = (async () => {
     try {

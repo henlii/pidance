@@ -38,6 +38,7 @@ import {
 } from "./pidance-prefs-file";
 import {
   acquireRunningLease,
+  releaseRunningLease,
   SESSION_RUNNING_LOCKED_MESSAGE,
 } from "./session-running-lease";
 
@@ -2145,6 +2146,11 @@ export class SdkSessionHost {
           console.error("[pidance] failed to record abnormal-end marker:", error);
         }
         clearRunningStartedAt(this.realSessionId);
+        // 执行结束**立即**释放租约，不等 host dispose：startup host 在有 SSE 订阅时
+        // 不会回收，靠 dispose 释放就等于「只要页面开着就一直占着」，别的实例
+        // 在整个空闲期间都改不了档位/模型。释放后本 host 仍是可用 writer，
+        // 下次 prompt 会重新 acquire（见 case "prompt"）。
+        releaseRunningLease(this.realSessionId);
         this.options.onSessionListInvalidate?.();
         if (this.realSessionFile) clearLeafSidecar(this.realSessionFile);
         this.maybeAutoNameSession();
@@ -2153,6 +2159,7 @@ export class SdkSessionHost {
         break;
       case "agent_settled":
         this.promptRunning = false;
+        releaseRunningLease(this.realSessionId);
         this.notifyRunning();
         // 触发点必须是 agent_settled；agent_end 只记录本轮结果。
         if (this.lastStopReason === "completed") {

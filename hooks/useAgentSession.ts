@@ -470,13 +470,15 @@ const APP_EVENTS_WAKE_RETRY_MAX = 6;
 /**
  * 未上锁时探测「对端抢锁」的间隔。
  *
- * 锁定态来自**另一个进程**持有的租约文件，本进程没有事件可订阅，只能轮询。3s 的
- * 取舍：用户切回本页、或另一个实例开始写时，一眼就能看到锁定条，而不是盯着可编辑的
- * 输入框等到下一次状态刷新（空闲且事件流活着时那一档是 RECONCILE_IDLE_MS = 2 分钟）；
+ * 锁定态来自**另一个进程**持有的租约文件。正常路径由跨进程事件推送（fs.watch → SSE
+ * {type:locks}），轮询是兜底；用户口径是「某实例开始执行后其他实例最多 2 秒察觉」，
+ * 所以这里取 2s。它的取舍：用户切回本页、或另一个实例开始执行时，一眼就能看到锁定条，
+ * 而不是盯着可编辑的输入框等到下一次状态刷新（空闲且事件流活着时那一档是
+ * RECONCILE_IDLE_MS = 2 分钟）；
  * 同时它打的是只读探针（一次租约文件读），不是按秒跑 `/state` 的完整状态投影。
  * 上锁之后改用既有的 1s `/state` 轮询感知释放。
  */
-const SESSION_LOCK_PROBE_MS = 3_000;
+const SESSION_LOCK_PROBE_MS = 2_000;
 const BASH_STATE_RECONCILE_MS = 1_000;
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
