@@ -133,15 +133,21 @@ function AppShellInner() {
    * 只会让另一台设备莫名其妙被掀开或折叠（这里原先用 `footerChosenRef` 拒绝远端值，
    * 其实已经承认了这一点）。服务端上若还留着历史值，也不再读，属惰性数据。
    */
-  const handleFooterToggle = () => {
-    const next = !footerCollapsed;
-    setFooterCollapsed(next);
-    try {
-      localStorage.setItem("pidance.footerCollapsed", next ? "1" : "0");
-    } catch {
-      /* localStorage 不可用时仅内存生效 */
-    }
-  };
+  // 必须是稳定引用：它会被一路传到 ChatInput，而 ChatInput 用 memo 包着 ——
+  // 每次渲染新建一个函数会让 memo 彻底失效。实测（agent-browser）：这个函数每帧新，
+  // 导致输入区被以 **244 次/秒** 持续重渲染，按键只能排在后面，
+  // 手机上就表现为「打字几百毫秒才上屏」。改成稳定引用后该计数降到 0。
+  const handleFooterToggle = useCallback(() => {
+    setFooterCollapsed((current) => {
+      const next = !current;
+      try {
+        localStorage.setItem("pidance.footerCollapsed", next ? "1" : "0");
+      } catch {
+        /* localStorage 不可用时仅内存生效 */
+      }
+      return next;
+    });
+  }, []);
   const navigationStoreRef = useRef(createSessionNavigationStore());
   const catalogStoreRef = useRef(createSessionCatalogStore());
   // 乐观 starting 标记的兜底回收：标记由当前 chat 上报，chat 切走后没人撤销；
