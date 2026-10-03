@@ -462,10 +462,27 @@ function AppShellInner() {
   // D3 分支书签/摘要动作（可写门禁、带选项切换、set_label），由 useAgentSession 下发。
   const [branchActions, setBranchActions] = useState<BranchActions | null>(null);
 
+  /**
+   * 分支树投影写入。
+   *
+   * 上游（useAgentSession 那条 effect）每次渲染都会送来**新引用**的 tree/actions，
+   * 直接 setState 会让 React 无法 bail-out，形成
+   * 「ChatWindow 渲染 → effect → setState → AppShellInner 渲染 → 传新 props → ChatWindow 渲染」
+   * 的空转闭环。实测：AppShellInner 278 次/秒、handleBranchDataChange 278 次/秒，
+   * 而 DOM 每秒只变 2 次 —— 纯烧 CPU，手机上是发热耗电、也会拖慢输入。
+   *
+   * 这里按内容签名判等：结构没变就不写状态，闭环断开。
+   * （树的结构以 id 序列为准；节点内部字段的刷新本来也不走这条通道。）
+   */
+  const branchSigRef = useRef("");
   const handleBranchDataChange = useCallback((tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void, actions: BranchActions) => {
+    branchLeafChangeFnRef.current = onLeafChange;
+    const actionsKey = actions ? Object.keys(actions).sort().join(",") : "";
+    const sig = `${activeLeafId ?? ""}|${tree.length}|${tree.map((n) => n.entry?.id ?? "").join(",")}|${actionsKey}`;
+    if (sig === branchSigRef.current) return;
+    branchSigRef.current = sig;
     setBranchTree(tree);
     setBranchActiveLeafId(activeLeafId);
-    branchLeafChangeFnRef.current = onLeafChange;
     setBranchActions(actions);
   }, []);
 
