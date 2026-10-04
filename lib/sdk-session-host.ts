@@ -392,6 +392,50 @@ export function openSessionManagerForHost(
 /** pi-tui 默认键位的解析结果（与进程无关，解析一次即可）。 */
 let tuiDefaultKeybindingsCache: KeybindingsConfig | null = null;
 
+/**
+ * 从会话 JSONL 读取「当前分支上最后一个档位」——磁盘权威值。
+ *
+ * Pidance 的 leaf 语义是「文件里最后一条 entry」（导航状态存在 sidecar 里，
+ * SDK 建 session 时并不知情），所以这里不查 SDK 的 leafId/分支索引，
+ * 直接按 parentId 从末尾回溯，取路径上最后一条 `thinking_level_change`。
+ *
+ * 读不到（文件缺失/空/损坏）返回 null，调用方保持 SDK 给的值。
+ */
+function readThinkingLevelFromSessionFile(sessionFile: string | null | undefined): string | null {
+  if (!sessionFile || !existsSync(sessionFile)) return null;
+  try {
+    const entries = new Map<string, { parentId?: unknown; type?: unknown; thinkingLevel?: unknown }>();
+    let lastId: string | null = null;
+    for (const line of readFileSync(sessionFile, "utf8").split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let entry: { id?: unknown; parentId?: unknown; type?: unknown; thinkingLevel?: unknown };
+      try {
+        entry = JSON.parse(trimmed) as typeof entry;
+      } catch {
+        continue; // 半截行（写入中）：跳过
+      }
+      if (typeof entry.id !== "string") continue;
+      entries.set(entry.id, entry);
+      lastId = entry.id;
+    }
+    let cursor = lastId;
+    const seen = new Set<string>();
+    while (cursor && !seen.has(cursor)) {
+      seen.add(cursor);
+      const entry = entries.get(cursor);
+      if (!entry) break;
+      if (entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") {
+        return entry.thinkingLevel;
+      }
+      cursor = typeof entry.parentId === "string" ? entry.parentId : null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 export class SdkSessionHost {
   private listeners: SdkEventListener[] = [];
   private runtime: AgentSessionRuntime | null = null;
@@ -2782,6 +2826,28 @@ export class SdkSessionHost {
         agentDir,
         sessionManager,
       });
+      /**
+       * 用**磁盘的权威档位**收敛内存值。
+       *
+       * SDK 建 session 时 `leafId` 还没恢复 → `getBranch()` 取不到分支 → `hasThinkingEntry`
+       * 为 false → 档位落到 `settings.json` 的 `defaultThinkingLevel`（本机 high），
+       * 会话自己的档位从没被读过。
+       *
+       * 症状：改成 high「没反应」（SDK 认为没变化，不写盘）；改成 max 能写盘，但 host 一被
+       * 回收、下次打开又回到 high —— 界面上就是「选完一瞬间是新值，马上变回原来的」。
+       *
+       * 必须放在 runtime 建好**之后**：`createRuntime` 回调里那个 session 不是最终
+       * 在用的实例（实测对它 setThinkingLevel 后读回来不变）。
+       * 这里按 Pidance 的 leaf 语义（文件最后一条 entry）自己回溯，不依赖 SDK 的 leafId。
+       */
+      try {
+        const diskLevel = readThinkingLevelFromSessionFile(this.sessionFile);
+        if (diskLevel && diskLevel !== this.runtime.session.thinkingLevel) {
+          this.runtime.session.setThinkingLevel(diskLevel as never);
+        }
+      } catch (error) {
+        console.error("[pidance] failed to align thinking level with disk:", error);
+      }
       this.runtime.setRebindSession(async () => {
         await this.rebindSession();
       });
