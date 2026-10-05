@@ -47,7 +47,10 @@ const DROPDOWN_ANIMATION_MS = 140;
 
 export function AnimatedDropdown({ open, children, style }: { open: boolean; children: ReactNode; style: CSSProperties }) {
   const [mounted, setMounted] = useState(open);
-  const [visible, setVisible] = useState(open);
+  // 初值必须是「不可见」：入场动画由下面 effect 的两帧 rAF 触发。
+  // 以前用 open 当初值，菜单在挂载那一帧就已经可见，紧接着 effect 又把它设成 false，
+  // 视觉上就是「先弹一下、消失、再弹一次」——用户看到的「点击弹 2 次气泡」。
+  const [visible, setVisible] = useState(false);
 
   useEffect(() => {
     let frame: number | undefined;
