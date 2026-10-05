@@ -1759,7 +1759,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         {/* 最近会话区：项目列表上方的纯快捷入口（OpenChamber Recent zone 语义）。
             搜索激活时隐藏，只显示匹配树；不参与树的分组/折叠状态，
             选中态、运行/未读徽标与树内同会话共享同一数据源。 */}
-        {!searchActive && recentSessions.length > 0 && (
+        {/* 取消勾选「最近会话」= 整个区从列表消失（连标题行一起），不留一个空标题当成「收起」。
+            想再显示就回到「显示选项」里重新勾上。 */}
+        {!searchActive && recentSessions.length > 0 && showRecentSessions && (
           <div style={{ paddingBottom: 5, borderBottom: "1px solid var(--border)", marginBottom: 5 }}>
             <div
               data-sidebar-depth={0}
