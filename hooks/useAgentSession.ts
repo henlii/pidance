@@ -3729,7 +3729,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           });
           setCompactResult(readCompactResult(result, "manual"));
           await recordCommandEntry(`/compact${args ? ` ${args}` : ""}`, "Compacted context");
-          if (await loadSession(sid, true)) promoteNewSession();
+          // 压缩确实改写了消息，必须重拉；但要静默（showLoading=false）——
+          // 用 true 会让整个会话区进加载态、消息重建，看起来就是「压缩把会话区重新加载了」。
+          // 与 /reload 的静默重拉保持一致。
+          if (await loadSession(sid, false, true)) promoteNewSession();
           return complete({ handled: true, message: "Compacted context" });
         }
 
