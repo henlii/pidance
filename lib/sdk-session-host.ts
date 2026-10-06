@@ -180,6 +180,7 @@ import {
   type PiTheme,
   type PiThemeConstructor,
 } from "./tui-render-bridge";
+import { createRenderBudget } from "./render-budget";
 import { createToolRenderScheduler, pickChangedSlots } from "./tool-render-scheduler";
 
 /**
@@ -593,8 +594,16 @@ export class SdkSessionHost {
    * 重渲调度（限频 / 同栈重入补跑）：插件的 invalidate() 走它。
    * 渲染与去重在 recompute/emit 里做，调度只保证「不并发、不丢、不过密」。
    */
+  /**
+   * 渲染开销预算（2026-10-07 事故）：实际开销在 `renderToolSlotsNow` 里量（所有工具重渲的
+   * 唯一入口），两条限流路径都按它放大间隔。声明顺序不能动 —— 字段按声明顺序初始化，
+   * 下面那个调度器要用到它。
+   */
+  private readonly renderBudget = createRenderBudget({
+    baseMs: SdkSessionHost.PARTIAL_RENDER_MIN_INTERVAL_MS,
+  });
   private readonly toolRenderScheduler = createToolRenderScheduler<{ callLines?: string[]; resultLines?: string[] }>({
-    minIntervalMs: SdkSessionHost.RERENDER_MIN_INTERVAL_MS,
+    minIntervalMs: () => this.renderBudget.minIntervalMs(),
     recompute: (key) => this.recomputeToolSlots(key),
     emit: (key, change) => this.emitRenderedLinesUpdate(key, change),
   });
@@ -2589,10 +2598,14 @@ export class SdkSessionHost {
 
   /**
    * 宽度变化后重渲已经渲染过的工具块：按 SDK 语义重新调用渲染器（组件按新宽度排版），
-   * 只把**内容真的变了**的槽推给前端。宽度变化低频，不额外限频。
+   * 只把**内容真的变了**的槽推给前端。
+   *
+   * 走 `request` 而不是 `flush`：拖动窗口时宽度是**逐帧**变的，立即重渲等于把限频绕过去 ——
+   * 一个超大工具输出（单次渲染几百毫秒）拖着窗口就能把事件循环打满。限频后这次重渲仍在
+   * 一个间隔内落地（正常情况下 100ms，肉眼无感），开销大时自动变慢。
    */
   private rerenderToolLines(): void {
-    this.toolRenderScheduler.flushAll([...this.toolRenderStates.keys()]);
+    for (const key of this.toolRenderStates.keys()) this.toolRenderScheduler.request(key);
   }
 
   /**
@@ -2627,6 +2640,21 @@ export class SdkSessionHost {
    * 且插件不会再 invalidate（它已经画完了）。
    */
   private renderToolSlotsNow(
+    toolCallId: string,
+    entry: ToolRenderStateEntry,
+  ): { callLines?: string[]; resultLines?: string[] } | null {
+    // 这里是**所有**工具重渲的唯一入口（partial、插件 invalidate、start/end、宽度变化），
+    // 所以开销只在这里量：预算是「渲染最多占 1/4 墙钟时间」，量错了那两条限流就白限。
+    const startedAt = Date.now();
+    try {
+      return this.renderToolSlots(toolCallId, entry);
+    } finally {
+      this.renderBudget.record(Date.now() - startedAt);
+    }
+  }
+
+  /** 真正的重渲（见 renderToolSlotsNow 的开销计时）。 */
+  private renderToolSlots(
     toolCallId: string,
     entry: ToolRenderStateEntry,
   ): { callLines?: string[]; resultLines?: string[] } | null {
@@ -2725,7 +2753,7 @@ export class SdkSessionHost {
     if (!entry) return true;
     if (
       entry.lastPartialRenderAt !== undefined
-      && now - entry.lastPartialRenderAt < SdkSessionHost.PARTIAL_RENDER_MIN_INTERVAL_MS
+      && now - entry.lastPartialRenderAt < this.renderBudget.minIntervalMs()
     ) {
       return false;
     }

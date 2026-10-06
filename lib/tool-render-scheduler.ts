@@ -54,8 +54,11 @@ export function pickChangedSlots(rendered: RenderedSlots, previous: EmittedSlots
 }
 
 export interface ToolRenderSchedulerOptions<TChange> {
-  /** 同一键两次渲染之间的最短间隔（ms）。 */
-  minIntervalMs: number;
+  /**
+   * 同一键两次渲染之间的最短间隔（ms）。给函数时**每次调度现读**：调用方按上次渲染的
+   * 实际开销动态抬高间隔（见 lib/render-budget.ts）。
+   */
+  minIntervalMs: number | (() => number);
   /** 重算该键：返回需要推送的变化；返回 null/undefined 表示没有变化（不推事件）。 */
   recompute: (key: string) => TChange | null | undefined;
   /** 推送变化（仅当 recompute 返回非空时调用）。 */
@@ -143,12 +146,15 @@ export function createToolRenderScheduler<TChange>(
       return;
     }
     const elapsed = state.lastRunAt === undefined ? Number.POSITIVE_INFINITY : now() - state.lastRunAt;
-    if (elapsed < options.minIntervalMs) {
+    // 每次调度只读一次：预算可能在比较与设定时器之间被别的键的渲染改掉，
+    // 读两次会让「已等待的时长」与「还要等多久」对不上。
+    const minInterval = typeof options.minIntervalMs === "function" ? options.minIntervalMs() : options.minIntervalMs;
+    if (elapsed < minInterval) {
       if (state.timer !== null) return;
       state.timer = setTimer(() => {
         state.timer = null;
         run(key, state);
-      }, options.minIntervalMs - elapsed);
+      }, minInterval - elapsed);
       return;
     }
     run(key, state);
