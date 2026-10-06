@@ -3,7 +3,8 @@
  * 对齐 RPC mode 的 request/response 协议字段，供 SdkSessionHost 注入 bindExtensions。
  */
 import { randomUUID } from "node:crypto";
-import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { ExtensionSelectorComponent } from "@earendil-works/pi-coding-agent";
+import type { ExtensionUIContext, ExtensionUIDialogOptions } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import {
   createHeadlessCustomUiTui,
@@ -543,6 +544,61 @@ export interface WebExtensionUiOptions {
 /**
  * 创建 Web Extension UI 适配器。emit 将事件推给浏览器 SSE。
  */
+/**
+ * 用 SDK 导出的 `ExtensionSelectorComponent` 跑一次选择器（`select` / `confirm` 共用）。
+ *
+ * 为什么不在 Web 端自己画按钮：这就是 TUI 里 `ctx.ui.select` 的实现 —— 边框、粗体标题、
+ * `→` 选中项、键位提示行全由它自己画。Web 端只负责把行画出来、把按键（方向键/回车/Esc，
+ * 手机上是底栏按键条）送回来，两边就是同一份观感（用户口径 2026-10-06）。
+ *
+ * 已确认接受的代价：每按一次方向键一次往返；选项行不可点；「取消」不再补发 abort
+ * （那条语义属于客户端弹窗那条路，见 docs/ui-vs-tui.md 第 5 节）。
+ *
+ * 走的是 `ctx.ui.custom` 那条既有通道（渲染 + 按键 + 快照 + 关帧都已经在它手里），
+ * 所以这里只做「建组件、收尾、接 AbortSignal」三件事。
+ */
+function runTuiSelector(
+  uiContext: ExtensionUIContext,
+  title: string,
+  options: string[],
+  opts: ExtensionUIDialogOptions | undefined,
+): Promise<string | undefined> {
+  // 已经中止：与 TUI 的 showExtensionSelector 同形，直接返回 undefined（不挂面板）。
+  if (opts?.signal?.aborted) return Promise.resolve(undefined);
+  return uiContext.custom<string | undefined>(
+    (tui, _theme, _keybindings, done) => {
+      // 组件用对象装一层：`finish` 要拿它去 dispose，而它在 `finish` 之后才建出来
+      // （构造函数的两个回调就是 `finish`，互相引用）。
+      const mounted: { component?: ExtensionSelectorComponent } = {};
+      let settled = false;
+      const finish = (value: string | undefined) => {
+        if (settled) return;
+        settled = true;
+        opts?.signal?.removeEventListener("abort", onAbort);
+        // dispose 只管停掉倒计时定时器（组件自己到期时也会停）；抛错不能影响收尾
+        try {
+          mounted.component?.dispose();
+        } catch {
+          /* 见上：收尾不能被组件的 dispose 带崩 */
+        }
+        done(value);
+      };
+      const onAbort = () => finish(undefined);
+      const component = new ExtensionSelectorComponent(
+        title,
+        options,
+        (option) => finish(option),
+        () => finish(undefined),
+        { tui, timeout: opts?.timeout },
+      );
+      mounted.component = component;
+      opts?.signal?.addEventListener("abort", onAbort, { once: true });
+      return component;
+    },
+    { overlay: false },
+  );
+}
+
 export function createWebExtensionUIAdapter(
   emit: ExtensionUiEmit,
   options: WebExtensionUiOptions = {},
@@ -1527,36 +1583,16 @@ export function createWebExtensionUIAdapter(
   };
 
   const uiContext: ExtensionUIContext = {
-    select: (title, options, opts) =>
-      createDialogPromise(
-        pending,
-        pendingSnapshot,
-        emit,
-        opts,
-        undefined,
-        { method: "select", title, options },
-        (r) =>
-          "cancelled" in r && r.cancelled
-            ? undefined
-            : "value" in r
-              ? (r.value as string)
-              : undefined,
-      ),
-    confirm: (title, message, opts) =>
-      createDialogPromise(
-        pending,
-        pendingSnapshot,
-        emit,
-        opts,
-        false,
-        { method: "confirm", title, message },
-        (r) =>
-          "cancelled" in r && r.cancelled
-            ? false
-            : "confirmed" in r
-              ? Boolean(r.confirmed)
-              : false,
-      ),
+    /**
+     * select / confirm 走**终端渲染**（见 runTuiSelector）：不再发 select/confirm 弹窗请求，
+     * 面板本体就是 SDK 那个组件画出来的行。
+     */
+    select: (title, options, opts) => runTuiSelector(uiContext, title, options, opts),
+    confirm: async (title, message, opts) => {
+      // 与 TUI 的 showExtensionConfirm 同形：标题里带上 message，选项固定 Yes/No。
+      const result = await runTuiSelector(uiContext, `${title}\n${message}`, ["Yes", "No"], opts);
+      return result === "Yes";
+    },
     input: (title, placeholder, opts) =>
       createDialogPromise(
         pending,
@@ -1917,6 +1953,11 @@ export function createWebExtensionUIAdapter(
           } catch (error) {
             console.error("[pidance] custom UI input failed:", error);
           }
+          // 按键之后立刻重画一帧：pi-tui 的 TUI 就是这么做的（`handleInput` 之后紧跟
+          // `requestImmediateRender()`，见 pi-tui dist/tui.js 的 input 分支），而组件自己
+          // **不一定**会请求渲染 —— SDK 的 `ExtensionSelectorComponent.updateList()` 只换子
+          // 节点。少了这一步，方向键改了选中项而界面停在旧光标上。
+          emitLines();
         };
         const handleMouse = (event: Record<string, unknown>) => {
           try {

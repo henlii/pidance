@@ -112,7 +112,8 @@
 | footer 状态条（`setStatus`） | 输入框下方状态条 | `lib/extension-ui-bridge.ts`（statuses）、`components/ChatWindow.tsx` | 同 |
 | footer（快捷键提示） | footer 右侧读数（模型/思考/上下文/速率） | `components/AppShell.tsx`、`components/ChatWindow.tsx` | Web 显示实时读数，不显示键位 |
 | 队列消息 | 输入框上方队列块 | `lib/queue-state.ts`、`components/ChatWindow.tsx` | 同；Web 有 flush/steer 按钮 |
-| dialog（select/confirm/input/editor） | `ExtensionDialog` 模态 | `components/ExtensionDialog.tsx`、`lib/extension-ui-bridge.ts` | 同 |
+| dialog select / confirm | 面板插槽里的**终端选择器**（SDK 的 `ExtensionSelectorComponent` 自己画的行） | `lib/web-extension-ui.ts`（`runTuiSelector`）、`components/ExtensionCustomPanel.tsx` | 方向键改选中项要一次往返；选项行不可点；「取消」只关这次选择，不补发 `abort`（见 §5.12） |
+| dialog input / editor | `ExtensionDialog` 模态 | `components/ExtensionDialog.tsx`、`lib/extension-ui-bridge.ts` | 同 |
 | custom 面板（替换 editor 区域） | 会话区下方的面板插槽 | `components/ExtensionCustomPanel.tsx`、`components/ChatWindow.tsx` | 与 dialog 同一个插槽（会话区不隐藏）；标题栏取插件画的标题行，识别不到退回「扩展面板」 |
 | notify | notice shelf | `components/ChatWindow.tsx`（同文件内 `NoticeShelf`）、`lib/notice-reducer.ts` | Web 支持钉住/堆叠/错误分类 |
 | `setTitle` | 浏览器标签标题 | `lib/window-title.ts` ↔ `components/AppShell.tsx` | 覆盖顶在项目名之上，**直到下一次标题写入**（切项目 / 切会话 / 插件再 `setTitle`）—— 与 Pi 的 TUI 一致（它直接写终端标题，没有到期这回事）。此前是 30s TTL 自动回落，已按 #76 改掉 |
@@ -246,9 +247,21 @@ Web 端已经有**真正的图形渲染**（`components/MarkdownBody.tsx` 动态
    - **会话内容区宽度可拖拽、按比例记忆**（2026-09-22 决定）：宽度 = 内容区**可用宽度** × 比例，再夹到 [1000, 1600]，可用宽度不够时由 `100%` 兜住 —— 于是宽屏到 1600 封顶后只长两侧空白，窄到下限后只缩空白，空白归零后内容才跟着缩。比例存 `localStorage`（本机 UI 状态，随 #65 口径），窗口/侧栏尺寸变化自动重算。把手贴在内容列左右缘（`role="separator"`，拖任一侧对称改宽、被拖那条边跟手；双击回默认）。宽度用 CSS 变量 `--pidance-chat-column-width` **一处设置**（AppShell），消息列/输入栏/扩展面板/widget/底栏共用同一变量，保证同宽同中心线。
    - **折叠总规则（2026-09-22 决定）**：会话时间线里**只有智能体直接输出的正文默认展开**；除此之外的块（thinking、工具调用、过程分组、压缩、分支摘要、扩展自定义消息、子代理通知）一律可折叠且**默认收起**。过程分组只包中间过程（thinking / 工具 / 子代理回复），每轮末尾的正式回答由 compositor 渲染在组外，所以收起不会藏掉智能体输出。
 11. **状态条与 widget 不区分“谁提供”**：Web 侧只按 key 渲染与折叠（折叠状态存 `localStorage` 的 `pidance.collapsedWidgetKeys.v1`）。
-12. **阻塞弹窗（`ExtensionDialog`）的按钮与可读性由 Web 侧定**：协议只传 `title` / `options` / `placeholder` 这类纯文本字段，插件无法定制样式与按钮。现状：
-   - 按钮按 `method` 固定：`select` 只有底部「取消」；`input`/`editor` 是「取消 + 提交」；`confirm` 是「取消 + 确认」。**`select` 不再渲染右上「关闭」**——它与「取消」发的是同一个 `cancelled` 响应（并且会中止这次执行），并排两个等价按钮只会让人以为「关闭」是温和的那个。
-   - 「取消」的语义不止关窗：`hooks/useAgentSession.ts` 在 cancelled 之后若 agent 仍在跑会补发 `abort`（对齐 OpenChamber）。
+12. **`select` / `confirm` 用 SDK 组件做终端渲染，`input` / `editor` 仍是 Web 弹窗**（2026-10-06 用户口径：用 SDK 的 TUI 组件真渲染）。
+   `lib/web-extension-ui.ts` 的 `runTuiSelector` 直接实例化 SDK 导出的 `ExtensionSelectorComponent`，走**已有的 `ctx.ui.custom` 通道**
+   （渲染成行 → SSE → 前端按键经 `extension_ui_input` 回到组件的 `handleInput`），所以 `select` 面板与插件自绘面板**同槽位、同外壳、同按键条**，
+   边框、粗体标题、`→` 选中项、`↑↓ navigate / enter select / escape cancel` 提示行都是组件自己画的。
+   `confirm` 与 TUI 的 `showExtensionConfirm` 同形：标题里带上 `message`，选项固定 `Yes`/`No`，`Yes` 才为真。`timeout` 交给组件自己的倒计时。
+   **已确认接受的三项代价**（换来的是与插件面板逐字符一致的观感）：
+   - 每按一次方向键一次 HTTP 往返 + 一次整面板重渲染（与面板里打字同一条路径）；
+   - 选项行**不再是可点按钮**（选择只能靠面板按键区 / 手机端底部按键条），点击选项的路径消失、无障碍退化为普通文本；
+   - 面板底部「取消」发的是 `\x03`（与其它面板一致：交回插件侧取消），**不再**触发 `input`/`editor` 那条「cancelled 之后补发 `abort`」的语义。
+   按键之后适配器会**立刻重画一帧**：pi-tui 的 TUI 在 `handleInput` 之后紧跟 `requestImmediateRender()`，而组件自己不一定请求渲染
+   （`ExtensionSelectorComponent.updateList()` 只换子节点），少了这一步方向键改了选中项而界面停在旧光标上。
+   保留 Web 弹窗的只有 `input` / `editor`（原生 `<input>`/`textarea`，IME、聚焦、真按钮与移动端可用性都在它身上；也正因如此 `select`/`confirm` 的
+   旧协议（`extension_ui_settled`、`expiresAt`、按 id 响应）只剩这两个 method 在用）。
+   仍由 Web 侧定的部分：
+   - `input`/`editor` 的按钮固定为「取消 + 提交」；「取消」的语义不止关窗：`hooks/useAgentSession.ts` 在 cancelled 之后若 agent 仍在跑会补发 `abort`（对齐 OpenChamber）。
    - **长提问可滚**：扩展经常把 preview / 说明折进 `title`，所以标题本身就是内容区（`.extension-panel-title`，`max-height: min(30vh, 240px); overflow-y: auto`）；正文（选项等）在 `.extension-panel-body` 里滚动。
    - **展开/收回，默认展开**：header 有「收回 / 展开」开关（`ExtensionPanelChrome` 的本地 state，不跨请求记忆，默认展开）。展开同时抬高面板与提问区的上限（`.extension-panel-shell--expanded`，桌面 `min(78vh, 900px)` / 窄屏 `calc(100dvh - 96px - 安全区)`，提问区 60vh / 窄屏 56vh）——**只抬面板不抬提问区等于没解决「问题显示不全」**，这条改动两侧必须成对。默认展开是安全的：`max-height` 只是上限，面板高度仍由内容决定，短提问不会因此占满屏。
    - 验收：`/tmp` 下的临时脚本 `extension-panel-readability.mjs`（CDP 拦截 `/state` 注入 `pendingExtensionRequests`，桌面 1280x900 + 窄屏 390x844 各 10 项）与单测 `components/ExtensionDialog.test.mjs` 的 CSS 契约。
