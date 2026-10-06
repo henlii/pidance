@@ -342,14 +342,35 @@ export function ExtensionCustomPanel({
           >
             {copied ? t("extension_copied") : t("extension_copy")}
           </button>
+          {/*
+            「输入法」只在手机显示：面板正文是插件画的终端行，里面的搜索框/输入原语要打字，
+            而手机端**平时不让 keytrap 拿焦点**（一聚焦软键盘就顶上来盖住面板，方向键走屏幕
+            按键条，见上面的焦点 effect）。需要打字时由这个按钮把焦点交过去一次 —— 必须是
+            用户手势，浏览器才允许弹软键盘。桌面有物理键盘，keytrap 一直聚焦着，不需要它。
+          */}
+          {isMobile ? (
+            <button
+              type="button"
+              className="extension-card-btn"
+              onClick={() => { inputRef.current?.focus({ preventScroll: true }); }}
+              aria-label={t("extension_showKeyboard")}
+              title={t("extension_showKeyboard")}
+            >
+              {t("extension_showKeyboard")}
+            </button>
+          ) : null}
           </>
         )}
       >
+        {/*
+          keytrap **可编辑**、也没有 inputMode="none"：手机端靠底栏「输入法」按钮聚焦它来弹
+          软键盘（readOnly 的输入框 focus() 也弹不出系统键盘）。它 1px、透明、
+          pointer-events:none，点不到、只能被程序化聚焦 —— 所以平时不会自己冒出键盘。
+          （手机上打字＝每个字符一次往返，重排整块面板；与桌面走的是同一条通道。）
+        */}
         <textarea
           ref={inputRef}
           data-extension-keytrap="true"
-          readOnly={isMobile === true}
-          inputMode={isMobile ? "none" : undefined}
           aria-label={t("chat_extensionPanel")}
           autoCapitalize="off"
           autoComplete="off"

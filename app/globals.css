@@ -1433,6 +1433,11 @@ span.linenumber {
 }
 .extension-panel-footer-actions {
   margin-right: auto;
+  /* 动作区允许换行：按键条（6 个键，flexShrink:0）在 390px 上已经占掉大半宽度，
+     后面还有「复制」「输入法」两个按钮 —— 不换行就会把按钮挤到右边界外（实测手机上
+     「复制」被压成两行、「输入法」只剩半个字）。 */
+  flex-wrap: wrap;
+  min-width: 0;
 }
 .extension-panel-footer-primary {
   margin-left: auto;

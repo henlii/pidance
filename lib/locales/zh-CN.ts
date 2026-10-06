@@ -584,6 +584,7 @@ export const zhCN: Record<TranslationKey, string> = {
   extension_otherPlaceholder: '输入自定义内容',
   extension_ctrlEnterHint: 'Ctrl+Enter 提交',
   extension_copy: '复制',
+  extension_showKeyboard: '输入法',
   extension_copied: '已复制',
   // 本轮核心工作区补充翻译
 

@@ -584,6 +584,7 @@ export const en = {
   extension_otherPlaceholder: 'Enter a custom value',
   extension_ctrlEnterHint: 'Ctrl+Enter to submit',
   extension_copy: 'Copy',
+  extension_showKeyboard: 'Keyboard',
   extension_copied: 'Copied',
   // 本轮核心工作区补充翻译
 
