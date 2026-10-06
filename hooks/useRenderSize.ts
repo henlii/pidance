@@ -58,8 +58,16 @@ export function useRenderSize(options: {
   containerRef: RefObject<HTMLElement | null>;
   /** 关掉（例如只读会话）。 */
   enabled?: boolean;
+  /**
+   * 宿主换人时改它（同一个 DOM 节点当不成依赖，所以调用方给个稳定的键）。
+   *
+   * 为什么需要：插件面板占屏幕时，插件看到的「终端」是**面板自己**，调用方会把
+   * containerRef 指到面板正文上（面板激活时会话区被挤成一条缝甚至 0 高，继续按会话区
+   * 上报 rows 会让插件重排成更少的行 —— 拖大面板反而把内容拖小了）。
+   */
+  hostKey?: string | number | null;
 }): void {
-  const { sessionId, containerRef, enabled = true } = options;
+  const { sessionId, containerRef, enabled = true, hostKey = null } = options;
   const lastSentRef = useRef<RenderSizeReport | null>(null);
 
   useEffect(() => {
@@ -133,5 +141,7 @@ export function useRenderSize(options: {
       observer = null;
       observedHost = null;
     };
-  }, [containerRef, enabled, sessionId]);
+    // hostKey 参与依赖：宿主换人（会话区 ↔ 面板正文）时 effect 必须重跑才能重新挂观察者，
+    // 而 DOM 节点本身当不成依赖值。
+  }, [containerRef, enabled, sessionId, hostKey]);
 }

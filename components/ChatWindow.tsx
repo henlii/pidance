@@ -578,10 +578,32 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   // 会话 id 取 `session?.id` 优先（与本文件其它调用点同口径）：它是当前**显示**的会话。
   // 这个值也是 effect 的依赖——换会话时它必须真的变，否则 effect 不重跑，
   // 新会话的 host 就不会收到尺寸（columns/rows 会停在默认值，插件按默认值裁切）。
+  /**
+   * 上报尺寸的宿主：平时是会话滚动区，**插件面板占屏幕时换成面板正文**。
+   *
+   * 面板激活后会话区被面板挤成一条缝甚至 0 高，而插件是拿上报的 rows 当终端高度排版/裁切的
+   * （rpiv-ask-user 的 dialog-builder 就按 `tui.terminal.rows` 裁可见行、超了才滚动）。
+   * 继续按会话区上报，拖大面板只会让插件重排成更少的行 —— 用户看到的就是「面板变大、
+   * 内容反而变小」。面板正文和终端行同源（同一套等宽字体、同一个盒子），量出来就是插件
+   * 真正能用的行数与列数。
+   */
+  const renderSizeHostRef = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    const root = scrollContainerRef.current?.closest("[data-chat-root]") ?? null;
+    const panelBody =
+      panelActive && panelExpanded
+        ? root?.querySelector<HTMLElement>("[data-extension-panel-body]") ?? null
+        : null;
+    renderSizeHostRef.current = panelBody ?? scrollContainerRef.current;
+  }, [panelActive, panelExpanded, extensionCustomUi?.id, extensionDialog]);
   useRenderSize({
     sessionId: session?.id ?? sessionIdRef.current,
-    containerRef: scrollContainerRef,
+    containerRef: renderSizeHostRef,
     enabled: !isReadOnly,
+    // 收起态没有正文节点，会退回会话区；展开/换面板都要重新挂一次观察者
+    hostKey: panelActive
+      ? `panel:${extensionCustomUi?.id ?? extensionDialog?.id ?? "?"}:${panelExpanded ? "open" : "collapsed"}`
+      : "chat",
   });
   /**
    * 会话全部用户消息大纲（左侧导航条「列出所有提问」）。

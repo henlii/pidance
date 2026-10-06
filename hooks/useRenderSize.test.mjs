@@ -54,3 +54,13 @@ test("接线：换会话作废上次记录，且两个维度一起发", () => {
   assert.match(source, /RENDER_SIZE_MAX_RETRIES/, "上报失败要有有界重试");
   assert.match(source, /ResizeObserver/, "尺寸变化要靠观察者跟");
 });
+
+test("接线：宿主换人时重新挂观察者（面板占屏幕时插件看到的终端是面板）", () => {
+  const source = readFileSync(new URL("./useRenderSize.ts", import.meta.url), "utf8");
+  assert.match(source, /\}, \[containerRef, enabled, sessionId, hostKey\]\);/, "hostKey 必须参与依赖，否则宿主换人不重挂");
+  const chatWindow = readFileSync(new URL("../components/ChatWindow.tsx", import.meta.url), "utf8");
+  assert.match(chatWindow, /querySelector<HTMLElement>\("\[data-extension-panel-body\]"\)/, "面板占屏幕时尺寸宿主没换成面板正文");
+  assert.match(chatWindow, /renderSizeHostRef\.current = panelBody \?\? scrollContainerRef\.current;/, "换宿主缺少回退（收起态没有正文节点）");
+  const chrome = readFileSync(new URL("../components/ExtensionPanelChrome.tsx", import.meta.url), "utf8");
+  assert.match(chrome, /data-extension-panel-body="true"/, "面板正文缺少标记，尺寸宿主选中不了");
+});
