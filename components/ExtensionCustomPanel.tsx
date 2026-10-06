@@ -150,7 +150,8 @@ export function ExtensionCustomPanel({
   const plainText = displayLines.map((line) => stripAnsi(line)).join("\n");
 
   // overlay 插件给的定位/尺寸：容器按 anchor 对齐、按 margin 留边，面板本体按
-  // width/minWidth/maxHeight 定尺寸。没有 layout（非 overlay）时保持全屏模态。
+  // width/minWidth/maxHeight 定尺寸。没有 layout（非 overlay）时按默认宽度铺满内容列 ——
+  // 插槽位置对两种 custom 是一样的（见 ChatWindow 的插槽注释）。
   // issue #114：行级语义识别 → 网页化视图；识别不到或被用户切回原样就按原样渲染。
   // 面板含 pi-tui 的可选列表原语时（request.selectList），连带启用「光标列列表」识别 ——
   // 这时点击是直接设置选中项，不模拟按键，所以放宽识别没有点错项的风险。
@@ -162,8 +163,23 @@ export function ExtensionCustomPanel({
   // 内容与输入都由插件自己控制）。`ExtensionPanelWebView` 与行级语义识别（issue #114）
   // 的实现都留着，恢复只需把这个常量改回 `!rawMode && shouldRenderPanelWebView(panelView)`。
   const webViewEnabled = false;
-  void panelView;
   void shouldRenderPanelWebView;
+  /**
+   * 标题栏文案：优先用插件自己画的标题行，识别不到才退回通用名。
+   *
+   * 为什么要把插件画的标题再写一遍到外壳标题栏：标题栏是**唯一跨面板稳定**的那一行 ——
+   * 面板正文按插件原文渲染，而同一段流程里可能连着开好几个面板（/advisor-models 先选
+   * Executor 模型、再选 Advisor 模型，正文长得几乎一样），标题栏不写清楚就分不出自己
+   * 正在回答哪一个问题（用户口径 2026-10-06）。
+   *
+   * 识别口径复用 pi-tui 的观感：加粗且短的那一行 = 标题（见 lib/extension-panel-view.ts
+   * 的 isHeadingRow）；识别不到不猜，退回通用文案。
+   */
+  const panelTitle = useMemo(() => {
+    const heading = panelView.blocks.find((block) => block.kind === "heading");
+    const text = heading?.plainLines.join(" ").trim();
+    return text ? text : t("chat_extensionPanel");
+  }, [panelView, t]);
 
   const overlayStyles = buildExtensionOverlayStyle(request.layout);
   // 面板里 Input 原语的文本 —— 网页输入框停用后这里不再渲染，保留供恢复时使用。
@@ -294,7 +310,7 @@ export function ExtensionCustomPanel({
         panelStyle={overlayStyles?.panelStyle}
         expanded={expanded}
         onExpandedChange={onExpandedChange}
-        title={t("chat_extensionPanel")}
+        title={panelTitle}
         // 中断入口放在底栏（与问答块的「取消」同一位置/同一语义）：标题行只有折叠，
         // 而这类面板是扩展自绘的 TUI 界面，没有底栏就等于没有鼠标退出口
         // （键盘 Esc/Ctrl+C 由 keytrap 转发，手机上没有键盘）。

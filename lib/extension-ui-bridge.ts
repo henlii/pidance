@@ -229,7 +229,7 @@ export function restoreCustomUi(
   const lines = Array.isArray(active?.lines)
     ? (active!.lines as unknown[]).filter((line): line is string => typeof line === "string")
     : [];
-  // overlay 布局必须跟内容一起恢复，否则刷新后浮层变回全屏模态、盖住输入区
+  // overlay 布局必须跟内容一起恢复，否则刷新后浮层丢掉插件给的尺寸、盖住输入区
   const layout =
     active?.layout && typeof active.layout === "object"
       ? (active.layout as ExtensionUiCustomLayout)

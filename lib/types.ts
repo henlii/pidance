@@ -407,7 +407,7 @@ export type ExtensionUiRequest =
       closed?: boolean;
       /** 插件把面板收起了（overlay 句柄的 setHidden）：前端让位给背后的会话内容。 */
       hidden?: boolean;
-      /** 插件声明了 overlay 时的定位/尺寸；缺省表示按全屏模态面板渲染。 */
+      /** 插件声明了 overlay 时的定位/尺寸；缺省表示按内容列宽度铺满（面板插槽位置不变）。 */
       layout?: ExtensionUiCustomLayout;
       /**
        * 键盘焦点态（overlay 句柄的 focus/unfocus）。缺省 = `panel`（照旧自动聚焦面板）。

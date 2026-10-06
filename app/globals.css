@@ -1274,9 +1274,8 @@ span.linenumber {
   overflow-y: auto;
 }
 /* 插件面板的插槽：面板是会话列里的布局块，不再是覆盖会话区的浮层。
-   两种形态（见 docs/ui-vs-tui.md 第 5 节）：
-   - 全屏面板：标题栏与会话区之间；展开时替代会话区，收起时只留一行标题；
-   - 半屏面板 / 阻塞弹窗：会话区之下；展开时占会话区高度的一半，收起同样只留一行。 */
+   custom 面板（写不写 overlayOptions）与阻塞弹窗落在同一个插槽里（见 docs/ui-vs-tui.md 第 5 节）：
+   会话区之下、输入区的位置 —— 展开时占可用高度的一半，收起时只留一行标题，会话区始终可见。 */
 .extension-panel-slot {
   display: flex;
   flex-direction: column;
@@ -1286,13 +1285,13 @@ span.linenumber {
   overflow: hidden;
   flex: 0 0 auto;
 }
-/* 半屏面板 / 阻塞弹窗：**高度由内容决定**，上限是「隐藏输入区后可用高度的一半」。
+/* 展开态：**高度由内容决定**，上限是「隐藏输入区后可用高度的一半」。
    此时输入区已隐藏，根容器高度 = 会话区 + 面板，所以上限取 50% —— 面板最多占视觉上的
    一半，会话区拿另一半；内容不足时面板更矮、会话区更高，到上限之后才由面板内部滚动
    （.extension-panel-body 已有 overflow-y: auto）。
-   全屏面板的 flex 仍由 ChatWindow 的 inline style 给（会话区带 Tailwind 的 flex-1，
+   会话区让出的 flex 由 ChatWindow 的 inline style 给（会话区带 Tailwind 的 flex-1，
    类选择器压不过它）。 */
-.extension-panel-slot--half.is-expanded {
+.extension-panel-slot.is-expanded {
   flex: 0 1 auto;
   max-height: 50%;
 }
@@ -1305,25 +1304,15 @@ span.linenumber {
   overflow: hidden;
   height: 100%;
 }
+/* 面板本体按内容长高（到插槽上限才开始在面板内部滚动）。 */
 .extension-panel-slot .extension-panel-shell {
   margin: 0 auto;
+  height: auto;
   max-height: 100%;
 }
-/* 全屏：填满插槽；半屏：按内容长高（到上限才开始滚动）。 */
-.extension-panel-slot--fullscreen .extension-panel-shell {
-  height: 100%;
-}
-.extension-panel-slot--half .extension-panel-shell {
-  height: auto;
-}
-.extension-panel-slot .extension-panel-shell:not(.extension-panel-shell--expanded) {
-  height: auto;
-}
-/* 会话列按 data-panel-state 让位：全屏展开时藏起会话区，半屏展开时与它 2:1 分高，
-   任一面板激活都隐藏输入区（todo / 输入框 / footer / widget 都在那一块里）。 */
-[data-chat-root][data-panel-state="fullscreen-expanded"] [data-chat-transcript] {
-  display: none;
-}
+/* 会话列按 data-panel-state 让位：展开时与会话区 2:1 分高；任一面板激活都隐藏输入区
+   （todo / 输入框 / footer / widget 都在那一块里）。会话区本身**不隐藏** —— 面板落在
+   输入区的位置，会话内容始终看得见。 */
 [data-chat-root]:not([data-panel-state="none"]) [data-chat-input-area] {
   display: none;
 }

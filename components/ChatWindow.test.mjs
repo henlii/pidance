@@ -14,7 +14,7 @@ const jiti = createJiti(import.meta.url, {
 const t = (key) => key;
 
 
-test("面板激活时输入区整块隐藏；全屏面板替代会话区、半屏面板与它 2:1 分高", () => {
+test("面板激活时输入区整块隐藏；custom 面板与弹窗共用会话区下方那个插槽", () => {
   const source = readFileSync(fileURLToPath(new URL("./ChatWindow.tsx", import.meta.url)), "utf8");
   const css = readFileSync(fileURLToPath(new URL("../app/globals.css", import.meta.url)), "utf8");
   const inputBranch = source.slice(source.indexOf("const chatInputElement"), source.indexOf("const aboveEditorWidgets"));
@@ -30,33 +30,31 @@ test("面板激活时输入区整块隐藏；全屏面板替代会话区、半�
     /\[data-chat-root\]:not\(\[data-panel-state="none"\]\) \[data-chat-input-area\] \{\s*display: none;/,
     "输入区没有随面板状态隐藏",
   );
-  assert.match(
-    css,
-    /\[data-chat-root\]\[data-panel-state="fullscreen-expanded"\] \[data-chat-transcript\] \{\s*display: none;/,
-    "全屏面板展开时应隐藏会话区",
+  // 2026-10-06 用户口径：非 overlay 的 custom 在 TUI 里替换的是 editor 区域（输入区），
+  // 不是整屏。所以面板不再画到会话区上方、也不再藏掉会话区 —— 会话区始终看得见。
+  assert.ok(
+    !css.includes('data-panel-state="fullscreen-expanded"'),
+    "会话区不该再被面板隐藏（面板落在输入区的位置）",
   );
-  // 比例走 inline style（会话区带 Tailwind 的 flex-1，类选择器压不过它）；面板占可用高度
-  // 的 1/3、会话区拿 2/3 —— 两者之和正好是「面板 = 会话区的一半」。
-  // 半屏高度：内容驱动 + CSS 上限（不再是写死的 1/3）
   assert.match(
     css,
-    /\.extension-panel-slot--half\.is-expanded \{\s*flex: 0 1 auto;\s*max-height: 50%;/,
-    "半屏插槽应为内容驱动 + 上限 50%（隐藏输入区后视觉上的一半）",
+    /\.extension-panel-slot\.is-expanded \{\s*flex: 0 1 auto;\s*max-height: 50%;/,
+    "插槽应为内容驱动 + 上限 50%（隐藏输入区后视觉上的一半）",
   );
   assert.match(
     source,
-    /transcriptFlexStyle = panelState === "half-expanded" \? \{ flex: "1 1 0" \}/,
-    "半屏展开时会话区应吃掉剩下的 2/3",
+    /transcriptFlexStyle = panelState === "panel-expanded" \? \{ flex: "1 1 0" \}/,
+    "展开时会话区应让出一半给插槽",
   );
-  assert.match(
-    source,
-    /fullscreenSlotFlexStyle = panelState === "fullscreen-expanded" \? \{ flex: "1 1 0" \}/,
-    "全屏展开时插槽应占满（inline）",
+  // 只有一种插槽：custom（带不带 overlayOptions）与阻塞弹窗都落在这里。
+  assert.ok(
+    source.includes('className={`extension-panel-slot${panelExpanded ? " is-expanded" : ""}`}'),
+    "面板插槽类名应为单一的 extension-panel-slot",
   );
-  // 面板在插槽里，插槽高度决定面板高度（不再按 vh 猜）
-  assert.match(source, /extension-panel-slot extension-panel-slot--fullscreen/, "全屏面板没有插槽");
-  assert.match(source, /extension-panel-slot extension-panel-slot--half/, "半屏面板/弹窗没有插槽");
-  assert.match(source, /extension-panel-slot--half[\s\S]{0,400}<ExtensionDialog/, "阻塞弹窗应落在半屏槽里");
+  assert.ok(!source.includes("extension-panel-slot--fullscreen"), "不该再有全屏插槽");
+  assert.ok(!source.includes("extension-panel-slot--half"), "不该再有半屏插槽");
+  assert.match(source, /extension-panel-slot[\s\S]{0,400}<ExtensionDialog/, "阻塞弹窗应落在面板插槽里");
+  assert.match(source, /<ExtensionDialog[\s\S]{0,700}<ExtensionCustomPanel/, "custom 面板应落在同一个插槽里");
 });
 
 test("扩展 widget 内容限高内滚；自定义面板与输入框同宽（共用常量）", () => {
@@ -236,7 +234,7 @@ test("引用到输入框的接线：AppShell 处理器 → ChatWindow → Messag
   // ref，点下去没任何反应——所以门禁必须与输入框的渲染分支同步，不留死按钮。
   assert.match(
     chat,
-    /const canReferenceIntoComposer = !\(isReadOnly && session\) && !lockedByOther\s*\n\s*&& !fullscreenPanel && !halfScreenActive;/,
+    /const canReferenceIntoComposer = !\(isReadOnly && session\) && !lockedByOther\s*\n\s*&& !panelActive;/,
     "引用回调缺少「输入框已挂载且可见」门禁（面板激活时输入区被 CSS 隐藏）",
   );
   assert.ok(

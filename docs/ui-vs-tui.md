@@ -46,7 +46,7 @@
 │ belowEditor widget（扩展）                                  │
 │ footer：状态条（扩展 setStatus）+ 快捷键提示                 │
 └────────────────────────────────────────────────────────────┘
-模态：dialog（select/confirm/input/editor）、custom 面板（整屏替换）
+模态：dialog（select/confirm/input/editor）、custom 面板（替换编辑区）
 ```
 
 ### 2.2 Pidance Web（桌面，≥641px）
@@ -113,7 +113,7 @@
 | footer（快捷键提示） | footer 右侧读数（模型/思考/上下文/速率） | `components/AppShell.tsx`、`components/ChatWindow.tsx` | Web 显示实时读数，不显示键位 |
 | 队列消息 | 输入框上方队列块 | `lib/queue-state.ts`、`components/ChatWindow.tsx` | 同；Web 有 flush/steer 按钮 |
 | dialog（select/confirm/input/editor） | `ExtensionDialog` 模态 | `components/ExtensionDialog.tsx`、`lib/extension-ui-bridge.ts` | 同 |
-| custom 面板（整屏替换） | `ExtensionCustomPanel` | `components/ExtensionCustomPanel.tsx` | 同；Web 面板可滚动、可关闭 |
+| custom 面板（替换 editor 区域） | 会话区下方的面板插槽 | `components/ExtensionCustomPanel.tsx`、`components/ChatWindow.tsx` | 与 dialog 同一个插槽（会话区不隐藏）；标题栏取插件画的标题行，识别不到退回「扩展面板」 |
 | notify | notice shelf | `components/ChatWindow.tsx`（同文件内 `NoticeShelf`）、`lib/notice-reducer.ts` | Web 支持钉住/堆叠/错误分类 |
 | `setTitle` | 浏览器标签标题 | `lib/window-title.ts` ↔ `components/AppShell.tsx` | 覆盖顶在项目名之上，**直到下一次标题写入**（切项目 / 切会话 / 插件再 `setTitle`）—— 与 Pi 的 TUI 一致（它直接写终端标题，没有到期这回事）。此前是 30s TTL 自动回落，已按 #76 改掉 |
 | `setEditorText` | 光标处插入文本 | `hooks/useAgentSession.ts` | 同 |
@@ -148,7 +148,7 @@ Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContex
 
 1. **widget 的 placement**：缺省按 `aboveEditor` 处理（与 Pi 默认一致），所以扩展不写 placement 时，Web 就会把它渲染在**输入框上方**。
 2. **组件工厂形式**（`setWidget(key, (tui, theme) => Component)`）：工厂只调用一次，组件实例常驻在适配器里，`tui.requestRender()` 触发重新渲染并按 microtask 合并，产出走与字符串数组相同的 `setWidget` 通道（`lib/web-extension-ui.ts` 的 `mountWidgetFactory` + `lib/tui-render-bridge.ts` 的 `renderWidgetComponentLines`）。渲染失败保留上一次的行（不推空帧）；卸载、替换成字符串数组或适配器 dispose 时调组件的 `dispose?.()`。工厂收到的 `tui` 是有 `requestRender` + `terminal` 的真对象（此前传 `undefined`）。
-3. **`custom()` 的 overlay 与 keybindings**：`ctx.ui.custom(factory, options)` 接收第二参，把 `overlayOptions` 的 `anchor` / `width` / `minWidth` / `maxHeight` / `margin` 归一化成 `ExtensionUiCustomLayout` 随事件下发（`lib/web-extension-ui.ts` 的 `normalizeCustomOverlayLayout`），前端由 `lib/extension-overlay-layout.ts` 映射成浮层的对齐与尺寸。**没有 layout 的 custom 仍是全屏模态**——那对齐的是 `overlay: false` 的语义（替换 editor 区域，如 pi-subagents 的 SelectorComponent）。回调第 3 参注入真的 `KeybindingsManager`（键名定义取 pi-tui 的 `TUI_KEYBINDINGS`）；pi 的应用级键位（如 `app.editor.external`）不在这份定义里，对应的 `matches()` 恒为 false。`tui.stop()` / `tui.start()` 是 no-op 占位（Web 没有可让出的终端），插件的外部编辑器路径会因 spawn 不到 tty 自行失败；`stop()` 会经 `notifyUnsupported` **报一次可见失败**（#76），免得用户只看到面板静静地卡住。
+3. **`custom()` 的 overlay 与 keybindings**：`ctx.ui.custom(factory, options)` 接收第二参，把 `overlayOptions` 的 `anchor` / `width` / `minWidth` / `maxHeight` / `margin` 归一化成 `ExtensionUiCustomLayout` 随事件下发（`lib/web-extension-ui.ts` 的 `normalizeCustomOverlayLayout`），前端由 `lib/extension-overlay-layout.ts` 映射成浮层的对齐与尺寸。**两种 custom（写不写 overlayOptions）与阻塞弹窗现在落在同一个插槽里**（2026-10-06 用户口径）：会话区之下、输入区的位置，展开时占可用高度的一半、收起时只留一行标题，会话区始终可见。非 overlay 的 custom 在 TUI 里替换的是 **editor 区域**（不是整屏，如 pi-subagents 的 SelectorComponent），而 Web 上 editor 就是输入区 —— 此前把它画到会话区上方并把会话区藏掉，既不对齐 TUI 语义，短面板还会在下方留一大片空白。`overlayOptions` 仍只决定插件给的定位与尺寸（anchor / width / minWidth / maxHeight / margin）。外壳标题栏对 custom 面板取**插件自己画的标题行**（加粗且短的那一行，`lib/extension-panel-view.ts` 的 `isHeadingRow`），识别不到才退回通用名「扩展面板」——同一段流程里可能连着开好几个面板（`/advisor-models` 先选 Executor 模型、再选 Advisor 模型），正文长得几乎一样，靠标题栏才分得清在回答哪一个。回调第 3 参注入真的 `KeybindingsManager`（键名定义取 pi-tui 的 `TUI_KEYBINDINGS`）；pi 的应用级键位（如 `app.editor.external`）不在这份定义里，对应的 `matches()` 恒为 false。`tui.stop()` / `tui.start()` 是 no-op 占位（Web 没有可让出的终端），插件的外部编辑器路径会因 spawn 不到 tty 自行失败；`stop()` 会经 `notifyUnsupported` **报一次可见失败**（#76），免得用户只看到面板静静地卡住。
 4. **`mode` 是 `"tui"`**（`lib/sdk-session-host.ts` 的 `bindExtensions`）：宿主声明能渲染扩展自绘组件，插件因此走富路径而不是降级——pi-subagents 的 async widget 走组件工厂、pi-mcp-adapter 启用 `/mcp` 的 overlay、pi-advisor-flow 才进 `custom()`。`lib/subagent-async-widget.ts` 仍保留 rpc 快照载荷的解析（`PI_SUBAGENT_ASYNC_JSON:`），作为旧会话与兼容路径。
 5. **`mode === "rpc"` 快照已解码**：pi-subagents 在检测到宿主是 rpc 模式时，发的是同一份数据的一行快照
    `PI_SUBAGENT_ASYNC_JSON:{"kind":"pi-subagents.async-status-snapshot",…}`（见其 `src/tui/render.ts` 与 `src/runs/background/async-status-snapshot.ts`）。

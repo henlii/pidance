@@ -69,8 +69,9 @@ export function appendCapabilityNotice<T>(list: T[], item: T, max = MAX_CAPABILI
 /**
  * `ctx.ui.custom(factory, options)` 的 overlay 选项 → Web 面板布局。
  *
- * 非 overlay（未声明或 `overlay: false`）返回 null，面板走既有的全屏模态渲染 ——
- * pi-subagents 的 SelectorComponent 就是这种（它要求替换 editor 区域）。
+ * 非 overlay（未声明或 `overlay: false`）返回 null，面板按默认宽度铺满内容列 ——
+ * pi-subagents 的 SelectorComponent 就是这种（它要求替换 editor 区域，Web 上编辑器
+ * 就是输入区那个位置）。
  *
  * `overlayOptions` 为函数形式（可随终端尺寸变化重新求值）时不求值：Web 只在打开
  * 时取一次，求值时机与 pi-tui 每帧重算不同，宁可不给尺寸也不给错的。
@@ -1722,7 +1723,7 @@ export function createWebExtensionUIAdapter(
     async custom(factory, options) {
       // headless custom：调用 Component.render(width) 得到 ANSI 行，再投影到 Web 面板。
       // /btw 等 overlay 扩展依赖 theme.fg/bg 与 requestRender；缺 lines 会让 React 崩页面。
-      // options 决定面板是浮层（按插件给的尺寸/锚点）还是全屏模态。
+      // options 只决定面板是不是浮层（按插件给的尺寸/锚点）；缺省按内容列宽度铺满。
       const id = randomUUID();
       const layout = normalizeCustomOverlayLayout(options);
       // 初始焦点态对齐 pi-tui 的 showOverlay：可见且没声明 nonCapturing 就聚焦 overlay；

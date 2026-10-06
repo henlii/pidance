@@ -268,35 +268,33 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
 
   /**
    * 面板形态与布局（见 docs/ui-vs-tui.md 第 5 节）：
-   * - **全屏面板**（`ctx.ui.custom()` 没写 overlayOptions）：标题栏与会话区之间，展开时替代会话区、
-   *   收起时只留一行标题并把会话区还回来；
-   * - **半屏面板**（带 overlayOptions 的 custom）与**阻塞弹窗**：会话区之下，展开时占会话区高度的一半；
-   * - 三者任一激活时，输入区（todo / 输入框 / footer / widget）整体隐藏。
-   * 展开态放在这里：它决定会话区是隐藏还是被挤占，必须由持有布局的这一层知道。
+   * - **custom 面板**（`ctx.ui.custom()`，写不写 overlayOptions 都一样）：会话区之下、输入区的位置，
+   *   展开时占可用高度的一半、收起时只留一行标题；
+   * - **阻塞弹窗**（select / confirm / input / editor）：同一个插槽，同一套外壳；
+   * - 任一激活时，输入区（todo / 输入框 / footer / widget）整体隐藏。
+   *
+   * 不再区分「全屏 / 半屏」（2026-10-06 用户口径）：非 overlay 的 custom 在 TUI 里替换的是
+   * **editor 区域**（不是整屏），而 Web 上 editor 就是输入区 —— 把它画到会话区上方并把会话区
+   * 藏掉，既不对齐 TUI 语义，短面板还会在下方留一大片空白。现在两种 custom 与弹窗都落在这个
+   * 插槽里，只有标题不同（custom 的标题取插件自己画的标题行）。
+   *
+   * 展开态放在这里：它决定会话区要不要让出高度，必须由持有布局的这一层知道。
    */
   const customPanelVisible = Boolean(extensionCustomUi && !extensionCustomUi.hidden);
-  const fullscreenPanel = customPanelVisible && !extensionCustomUi?.layout ? extensionCustomUi : null;
-  const halfScreenCustom = customPanelVisible && extensionCustomUi?.layout ? extensionCustomUi : null;
-  const halfScreenActive = Boolean(halfScreenCustom || extensionDialog);
+  const panelActive = Boolean(customPanelVisible || extensionDialog);
   const [panelExpanded, setPanelExpanded] = useState(true);
   useEffect(() => {
     // 换面板/关闭后回到默认展开（与外壳「默认展开」一致）。
     setPanelExpanded(true);
   }, [extensionCustomUi?.id, extensionDialog]);
-  const panelState = fullscreenPanel
-    ? (panelExpanded ? "fullscreen-expanded" : "fullscreen-collapsed")
-    : halfScreenActive
-      ? (panelExpanded ? "half-expanded" : "half-collapsed")
-      : "none";
+  const panelState = panelActive
+    ? (panelExpanded ? "panel-expanded" : "panel-collapsed")
+    : "none";
   /**
-   * 会话区与半屏插槽的分高。用 inline style 而不是 CSS 类：会话区本身带 Tailwind 的
-   * `flex-1`，类选择器压不过它（实测渲染成 1:1 而不是 2:1）。半屏展开时会话区 flex:2、
-   * 插槽 flex:1 → 面板正好是会话区高度的一半。
+   * 会话区与面板插槽的分高。用 inline style 而不是 CSS 类：会话区本身带 Tailwind 的
+   * `flex-1`，类选择器压不过它（实测渲染成 1:1 而不是 2:1）。展开时会话区让出一半给插槽。
    */
-  const transcriptFlexStyle = panelState === "half-expanded" ? { flex: "1 1 0" } : undefined;
-  // 半屏插槽的高度交给 CSS：内容驱动（flex: 0 1 auto）+ max-height 50%
-  // （输入区已隐藏，根容器 = 会话区 + 面板 → 面板最多占视觉上一半，超过才开始滚动）。
-  const fullscreenSlotFlexStyle = panelState === "fullscreen-expanded" ? { flex: "1 1 0" } : undefined;
+  const transcriptFlexStyle = panelState === "panel-expanded" ? { flex: "1 1 0" } : undefined;
 
   /**
    * 插件编辑器接管（issue #107）：在**输入框位置**渲染插件组件（`setEditorComponent`）。
@@ -694,7 +692,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
    * 这种情况不下发回调，卡片里的引用按钮随之消失，不留死按钮。
    */
   const canReferenceIntoComposer = !(isReadOnly && session) && !lockedByOther
-    && !fullscreenPanel && !halfScreenActive;
+    && !panelActive;
   const sessionBusy = agentRunning || bashRunning || isCompacting;
   const liveSlot = streamState.isStreaming && streamState.streamingMessage
     ? { message: streamState.streamingMessage, isActive: true }
@@ -1128,32 +1126,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
           </div>
         </div>
       ) : null}
-      {/* 全屏面板：标题栏与会话区之间（会话区被它替代，见 data-panel-state 的 CSS） */}
-      {fullscreenPanel ? (
-        <div
-          className={`extension-panel-slot extension-panel-slot--fullscreen${panelExpanded ? " is-expanded" : ""}`}
-          style={{
-            padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px 8px`,
-            ...fullscreenSlotFlexStyle,
-          }}
-        >
-          <ExtensionCustomPanel
-            request={fullscreenPanel}
-            keyBar={keyBarNode}
-            rawMode={panelRawMode}
-            onToggleRawMode={togglePanelRawMode}
-            onSelectOption={handleSelectPanelOption}
-            onInputValue={sendExtensionPanelInput}
-            isMobile={isMobile}
-            bottomInset={0}
-            onInput={sendExtensionCustomInput}
-            onMouse={sendExtensionCustomMouse}
-            onBounds={sendExtensionCustomBounds}
-            expanded={panelExpanded}
-            onExpandedChange={setPanelExpanded}
-          />
-        </div>
-      ) : null}
       {isEmptyNew ? (
         <div
           data-chat-transcript="1"
@@ -1476,10 +1448,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
         )}
       </div>
 
-      {/* 半屏面板 / 阻塞弹窗：会话区之下，展开时占会话区高度的一半 */}
-      {halfScreenActive ? (
+      {/* 插件面板 / 阻塞弹窗：会话区之下（会话区仍可见），展开时占可用高度的一半 */}
+      {panelActive ? (
         <div
-          className={`extension-panel-slot extension-panel-slot--half${panelExpanded ? " is-expanded" : ""}`}
+          className={`extension-panel-slot${panelExpanded ? " is-expanded" : ""}`}
           style={{ padding: `0 ${isMobile ? CHAT_INPUT_SIDE_PADDING_MOBILE : CHAT_INPUT_SIDE_PADDING}px 8px` }}
         >
           {extensionDialog ? (
@@ -1493,19 +1465,19 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
                 void respondToExtensionUi(extensionDialog, response);
               }}
             />
-          ) : halfScreenCustom ? (
+          ) : extensionCustomUi ? (
             <ExtensionCustomPanel
-            request={halfScreenCustom}
-            keyBar={keyBarNode}
-            rawMode={panelRawMode}
-            onToggleRawMode={togglePanelRawMode}
-            onSelectOption={handleSelectPanelOption}
-            onInputValue={sendExtensionPanelInput}
-            isMobile={isMobile}
-            bottomInset={0}
-            onInput={sendExtensionCustomInput}
-            onMouse={sendExtensionCustomMouse}
-            onBounds={sendExtensionCustomBounds}
+              request={extensionCustomUi}
+              keyBar={keyBarNode}
+              rawMode={panelRawMode}
+              onToggleRawMode={togglePanelRawMode}
+              onSelectOption={handleSelectPanelOption}
+              onInputValue={sendExtensionPanelInput}
+              isMobile={isMobile}
+              bottomInset={0}
+              onInput={sendExtensionCustomInput}
+              onMouse={sendExtensionCustomMouse}
+              onBounds={sendExtensionCustomBounds}
               expanded={panelExpanded}
               onExpandedChange={setPanelExpanded}
             />

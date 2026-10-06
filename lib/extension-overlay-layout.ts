@@ -82,7 +82,8 @@ export function marginToPadding(margin: ExtensionUiCustomLayout["margin"]): stri
 
 /**
  * overlay layout → 容器与面板两处的 CSS。
- * 没有 layout（插件没声明 overlay）时返回 undefined，调用方保持全屏模态渲染。
+ * 没有 layout（插件没声明 overlay）时返回 undefined，调用方按默认宽度铺满内容列 ——
+ * 插槽位置对两种 custom 是一样的（见 components/ChatWindow.tsx 的插槽注释）。
  * 未知锚点回退 center（与 pi-tui 的默认一致），不抛错。
  */
 /**
