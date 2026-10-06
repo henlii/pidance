@@ -18,6 +18,9 @@ export interface ExtensionDialogProps {
   /** 展开态由持有布局的 ChatWindow 控制（半屏插槽的 flex 比例随它变）。 */
   expanded?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
+  /** 拖动标题行改出来的高度（px，null = 内容决定）。同样由 ChatWindow 持有，跨面板步骤保留。 */
+  height?: number | null;
+  onHeightChange?: (height: number | null) => void;
   /** 方向键/回车/Esc 那排控制键：放底栏最左（与右侧的取消/提交同一排）。 */
   keyBar?: ReactNode;
 }
@@ -57,7 +60,7 @@ const inputStyle: CSSProperties = {
  * 扩展阻塞请求面板（select/confirm/input/editor）。
  * GUI 外壳 + 原生控件；响应必须显式给出。Esc 仅在 input/editor 内处理。
  */
-export function ExtensionDialog({ request, disabled = false, onRespond, expanded, onExpandedChange, keyBar }: ExtensionDialogProps) {
+export function ExtensionDialog({ request, disabled = false, onRespond, expanded, onExpandedChange, height, onHeightChange, keyBar }: ExtensionDialogProps) {
   const { t } = useI18n();
   const respondedRequestRef = useRef<string | null>(null);
   const [respondedRequestId, setRespondedRequestId] = useState<string | null>(null);
@@ -198,6 +201,8 @@ export function ExtensionDialog({ request, disabled = false, onRespond, expanded
       <ExtensionPanelChrome
         expanded={expanded}
         onExpandedChange={onExpandedChange}
+        height={height}
+        onHeightChange={onHeightChange}
         footerActions={keyBar}
         title={<MarkdownBody className="markdown-body--extension">{request.title}</MarkdownBody>}
         accessibilityLabel={request.title}

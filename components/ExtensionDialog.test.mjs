@@ -153,7 +153,7 @@ test("SSR：标题行不再有任何「关闭/收起」按钮，取消留在底�
   }
 });
 
-test("SSR：面板带展开/收回开关，默认展开（可收回）", () => {
+test("SSR：面板带展开/收回按钮（左）与拖动把手（标题区），默认展开", () => {
   const html = renderCard({
     request: request("select", { options: ["一"] }),
     onRespond: () => {},
@@ -162,8 +162,8 @@ test("SSR：面板带展开/收回开关，默认展开（可收回）", () => {
   assert.ok(/aria-label="收回"|aria-label="Collapse"/.test(html), "默认展开时标题行应标为可收回");
   assert.ok(html.includes("extension-panel-shell--expanded"), "默认应为展开态（长提问默认能看全）");
   assert.ok(!/aria-label="展开"/.test(html), "展开文案只在收回后出现");
-  // 整行标题就是开关：header 上带 role=button + aria-expanded（不再靠独立按钮）
-  assert.match(html, /class="extension-panel-header"[^>]*role="button"/, "标题行不是折叠开关");
+  // 折叠开关是左侧独立按钮（标题区留给拖动改高度）
+  assert.match(html, /class="extension-panel-collapse"[^>]*aria-expanded="true"/, "缺少左侧折叠按钮");
 });
 
 test("CSS 契约：提问区可滚、展开态提高高度上限（含窄屏规则）", () => {
@@ -181,6 +181,20 @@ test("CSS 契约：提问区可滚、展开态提高高度上限（含窄屏规�
     css.includes("calc(100dvh - 96px - env(safe-area-inset-top) - env(safe-area-inset-bottom))"),
     "缺窄屏展开态高度（移动端展开后要顶到视口可用高度）",
   );
+  // 底栏图标按钮（复制/输入法）必须与按键条那几个键同尺寸，否则同一排高矮不齐
+  assert.match(css, /\.extension-panel-icon-btn \{[^}]*min-width: 38px;[^}]*height: 32px;/, "图标按钮尺寸与按键条不一致");
+  // 折叠按钮在标题行最左；标题区是拖动把手（上下拖改高度）
+  assert.match(css, /\.extension-panel-collapse \{/, "缺折叠按钮样式");
+  assert.match(css, /\.extension-panel-title \{\s*cursor: ns-resize;/, "标题区不是拖动把手");
+});
+
+test("面板外壳：标题区接线拖动改高度（指针捕获 + 上限取会话列高度）", () => {
+  const chrome = readFileSync(fileURLToPath(new URL("./ExtensionPanelChrome.tsx", import.meta.url)), "utf8");
+  assert.match(chrome, /className="extension-panel-collapse"/, "折叠按钮丢了");
+  assert.match(chrome, /onPointerDown=\{startDrag\}/, "标题区没有拖动把手");
+  assert.match(chrome, /setPointerCapture\(event\.pointerId\)/, "拖动没有指针捕获（指针一离开元素就断）");
+  assert.match(chrome, /closest\("\[data-chat-root\]"\)/, "高度上限不取会话列高度");
+  assert.match(chrome, /expanded && height !== null \? \{ height:/, "拖动高度应收起态不套用（否则留一大块空白）");
 });
 
 // ── Issue #100：对话框超时倒计时 ─────────────────────────────────────────────

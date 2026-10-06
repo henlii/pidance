@@ -70,7 +70,7 @@ test("custom 面板：降级说明落在末尾空行上也要可见（不是静�
   assert.ok(html.includes("extension-panel-image-fallback") || /图片|Image/.test(html), "降级说明必须可见");
 });
 
-test("custom 面板：GUI 外壳、复制、标题行折叠；空 lines 不崩", () => {
+test("custom 面板：GUI 外壳、复制图标、左侧折叠按钮；空 lines 不崩", () => {
   const html = renderPanel(["hello", "world"]);
   assert.ok(html.includes("extension-panel-custom"), "面板容器类丢了");
   // 控制按钮（切回原样/复制）在底栏左侧、与右下角的取消同一排
@@ -80,9 +80,15 @@ test("custom 面板：GUI 外壳、复制、标题行折叠；空 lines 不崩",
   assert.ok(!html.includes("extension-panel-header-actions"), "控制按钮仍留在标题行");
   assert.ok(html.includes("extension-panel-ansi"));
   assert.ok(html.includes("hello"));
-  assert.ok(html.includes("aria-label=\"Copy\"") || html.includes("aria-label=\"复制\""));
-  // 折叠开关在标题行上（整行可点），不再有独立的「关闭/收起」按钮
-  assert.match(html, /class="extension-panel-header"[^>]*role="button"/, "标题行不是折叠开关");
+  // 复制是图标按钮（与按键条那几个键同尺寸），文案只留在 aria-label/title
+  assert.match(
+    html,
+    /class="extension-panel-icon-btn"[^>]*aria-label="(Copy|复制)"/,
+    "复制不是图标按钮",
+  );
+  assert.ok(html.includes("<svg"), "图标按钮里应有图标");
+  // 折叠开关是标题行最左的独立按钮；标题区留给拖动改高度（接线见 ExtensionDialog.test.mjs）
+  assert.match(html, /class="extension-panel-collapse"[^>]*aria-expanded="true"/, "缺少左侧折叠按钮");
   assert.match(html, /aria-expanded="true"/, "默认应为展开态");
   assert.ok(!/aria-label="关闭"/.test(html), "仍渲染「关闭」按钮");
   assert.ok(renderPanel(undefined).includes("extension-panel-ansi"));

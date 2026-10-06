@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useEffect, useRef, useState, type ReactNode } from "react";
+import { Check, Copy, Keyboard } from "lucide-react";
 import { normalizeCustomPanelLinesWithIndex, parseAnsiLine, stripAnsi } from "@/lib/ansi";
 import { RenderedLineBlocks } from "./RenderedLines";
 import { collectImageLineIndexes, remapImageLineIndexes, imageFallbackReasonKey } from "@/lib/kitty-image";
@@ -72,6 +73,8 @@ export function ExtensionCustomPanel({
   onBounds,
   expanded,
   onExpandedChange,
+  height,
+  onHeightChange,
   keyBar,
 }: {
   request: ExtensionUiCustomRequest;
@@ -98,11 +101,14 @@ export function ExtensionCustomPanel({
   bottomInset?: number;
   onBounds?: (request: ExtensionUiCustomRequest, bounds: CustomPanelBounds) => void;
   /**
-   * 展开态：展开时面板会替代会话区（全屏）或挤占它一半高度（半屏），
+   * 展开态：展开时面板会挤占会话列的高度（折叠只留一行标题），
    * 所以状态由持有布局的 ChatWindow 控制；不传则退回外壳内部 state。
    */
   expanded?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
+  /** 拖动标题行改出来的高度（px，null = 内容决定）。同样由 ChatWindow 持有，跨面板步骤保留。 */
+  height?: number | null;
+  onHeightChange?: (height: number | null) => void;
   /** 方向键/回车/Esc 那排控制键（内联按键条）：放底栏最左，与右侧的取消同一排。 */
   keyBar?: ReactNode;
 }) {
@@ -310,6 +316,8 @@ export function ExtensionCustomPanel({
         panelStyle={overlayStyles?.panelStyle}
         expanded={expanded}
         onExpandedChange={onExpandedChange}
+        height={height}
+        onHeightChange={onHeightChange}
         title={panelTitle}
         // 中断入口放在底栏（与问答块的「取消」同一位置/同一语义）：标题行只有折叠，
         // 而这类面板是扩展自绘的 TUI 界面，没有底栏就等于没有鼠标退出口
@@ -336,11 +344,13 @@ export function ExtensionCustomPanel({
             */}
           <button
             type="button"
-            className="extension-card-btn"
+            className="extension-panel-icon-btn"
             onClick={() => { void copyBody(); }}
             aria-label={copied ? t("extension_copied") : t("extension_copy")}
+            title={copied ? t("extension_copied") : t("extension_copy")}
           >
-            {copied ? t("extension_copied") : t("extension_copy")}
+            {/* 图标按钮（与按键条同尺寸）：文案留在 aria-label/title，点完换成对勾 */}
+            {copied ? <Check size={15} aria-hidden="true" /> : <Copy size={15} aria-hidden="true" />}
           </button>
           {/*
             「输入法」只在手机显示：面板正文是插件画的终端行，里面的搜索框/输入原语要打字，
@@ -351,12 +361,12 @@ export function ExtensionCustomPanel({
           {isMobile ? (
             <button
               type="button"
-              className="extension-card-btn"
+              className="extension-panel-icon-btn"
               onClick={() => { inputRef.current?.focus({ preventScroll: true }); }}
               aria-label={t("extension_showKeyboard")}
               title={t("extension_showKeyboard")}
             >
-              {t("extension_showKeyboard")}
+              <Keyboard size={15} aria-hidden="true" />
             </button>
           ) : null}
           </>

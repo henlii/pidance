@@ -38,8 +38,8 @@ test("面板激活时输入区整块隐藏；custom 面板与弹窗共用会话�
   );
   assert.match(
     css,
-    /\.extension-panel-slot\.is-expanded \{\s*flex: 0 1 auto;\s*max-height: 50%;/,
-    "插槽应为内容驱动 + 上限 50%（隐藏输入区后视觉上的一半）",
+    /\.extension-panel-slot\.is-expanded \{\s*flex: 0 1 auto;\s*max-height: 100%;/,
+    "插槽应为内容驱动 + 上限 100%（面板可顶满会话列，拖动上限也取这里）",
   );
   assert.match(
     source,

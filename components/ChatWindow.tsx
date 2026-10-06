@@ -269,7 +269,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   /**
    * 面板形态与布局（见 docs/ui-vs-tui.md 第 5 节）：
    * - **custom 面板**（`ctx.ui.custom()`，写不写 overlayOptions 都一样）：会话区之下、输入区的位置，
-   *   展开时占可用高度的一半、收起时只留一行标题；
+   *   高度由内容决定、上限是会话列的高度，用户可拖标题行改高；收起时只留一行标题；
    * - **阻塞弹窗**（select / confirm / input / editor）：同一个插槽，同一套外壳；
    * - 任一激活时，输入区（todo / 输入框 / footer / widget）整体隐藏。
    *
@@ -283,10 +283,22 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   const customPanelVisible = Boolean(extensionCustomUi && !extensionCustomUi.hidden);
   const panelActive = Boolean(customPanelVisible || extensionDialog);
   const [panelExpanded, setPanelExpanded] = useState(true);
+  /**
+   * 面板高度（px，null = 由内容决定）：拖标题行改的就是它，上限是会话列的高度。
+   *
+   * 放在这一层而不是外壳内部：一次插件流程会连着换面板（/advisor-models 四步里 custom 与
+   * 弹窗外壳交替），外壳实例跟着换 —— 状态留在它里面的话，每换一步高度就被丢掉。
+   * 复位时机也随之不同：展开态每个面板复位一次，高度只在整块面板关掉后复位。
+   */
+  const [panelHeight, setPanelHeight] = useState<number | null>(null);
   useEffect(() => {
     // 换面板/关闭后回到默认展开（与外壳「默认展开」一致）。
     setPanelExpanded(true);
   }, [extensionCustomUi?.id, extensionDialog]);
+  useEffect(() => {
+    // 面板整块关掉后高度回到内容决定（下次进来的面板内容不一样，沿用旧高度没有意义）。
+    if (!panelActive) setPanelHeight(null);
+  }, [panelActive]);
   const panelState = panelActive
     ? (panelExpanded ? "panel-expanded" : "panel-collapsed")
     : "none";
@@ -1448,7 +1460,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
         )}
       </div>
 
-      {/* 插件面板 / 阻塞弹窗：会话区之下（会话区仍可见），展开时占可用高度的一半 */}
+      {/* 插件面板 / 阻塞弹窗：会话区之下（会话区仍可见），高度由内容决定、可拖标题行改 */}
       {panelActive ? (
         <div
           className={`extension-panel-slot${panelExpanded ? " is-expanded" : ""}`}
@@ -1461,6 +1473,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
               disabled={writesDisabled || !sessionIdRef.current}
               expanded={panelExpanded}
               onExpandedChange={setPanelExpanded}
+              height={panelHeight}
+              onHeightChange={setPanelHeight}
               onRespond={(response) => {
                 void respondToExtensionUi(extensionDialog, response);
               }}
@@ -1480,6 +1494,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
               onBounds={sendExtensionCustomBounds}
               expanded={panelExpanded}
               onExpandedChange={setPanelExpanded}
+              height={panelHeight}
+              onHeightChange={setPanelHeight}
             />
           ) : null}
         </div>

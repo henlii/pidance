@@ -1285,15 +1285,15 @@ span.linenumber {
   overflow: hidden;
   flex: 0 0 auto;
 }
-/* 展开态：**高度由内容决定**，上限是「隐藏输入区后可用高度的一半」。
-   此时输入区已隐藏，根容器高度 = 会话区 + 面板，所以上限取 50% —— 面板最多占视觉上的
-   一半，会话区拿另一半；内容不足时面板更矮、会话区更高，到上限之后才由面板内部滚动
+/* 展开态：**高度由内容决定**，上限是**会话列的整个高度**（100%）—— 面板可以顶满整个
+   会话列，用户也可以拖标题行把它改矮（拖动时的上限就取这里）。
+   内容不足时面板更矮、会话区更高；到上限之后才由面板内部滚动
    （.extension-panel-body 已有 overflow-y: auto）。
    会话区让出的 flex 由 ChatWindow 的 inline style 给（会话区带 Tailwind 的 flex-1，
    类选择器压不过它）。 */
 .extension-panel-slot.is-expanded {
   flex: 0 1 auto;
-  max-height: 50%;
+  max-height: 100%;
 }
 /* 面板容器（custom / dialog）与面板外壳都在插槽里，所以用后代选择器。 */
 .extension-panel-custom,
@@ -1374,17 +1374,63 @@ span.linenumber {
   align-items: center;
   gap: 8px;
 }
-/* 标题行整行就是折叠开关（与工具块一致）：箭头朝右=收起，朝下=展开 */
-.extension-panel-header {
+/* 折叠按钮（标题行最左）：整行不再是开关 —— 标题区留给拖动改高度，折叠只有这一个入口 */
+.extension-panel-collapse {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  /* 按钮点击区比箭头大，往左收一点，免得标题看起来缩进 */
+  margin-left: -8px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-dim);
   cursor: pointer;
+}
+.extension-panel-collapse:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.extension-panel-collapse:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* 标题区是拖动把手：上下拖改高度（收起态没正文可变高，光标回到默认） */
+.extension-panel-title {
+  cursor: ns-resize;
   user-select: none;
 }
-.extension-panel-header:hover {
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
+.extension-panel-shell:not(.extension-panel-shell--expanded) .extension-panel-title {
+  cursor: default;
 }
-.extension-panel-header:focus-visible {
+.extension-panel-title:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
+}
+/* 底栏动作区里的图标按钮：与按键条那几个键同尺寸 —— 同一排里高度必须一致 */
+.extension-panel-icon-btn {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+.extension-panel-icon-btn:hover {
+  background: var(--bg-hover);
+}
+.extension-panel-icon-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 .extension-panel-chevron {
   display: inline-flex;

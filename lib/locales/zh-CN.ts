@@ -579,6 +579,7 @@ export const zhCN: Record<TranslationKey, string> = {
   extension_submit: '提交',
   extension_panelExpand: '展开',
   extension_panelCollapse: '收回',
+  extension_panelResize: '拖动调整高度',
   extension_other: '其他',
   extension_selectAnOption: '请选择一项',
   extension_otherPlaceholder: '输入自定义内容',
