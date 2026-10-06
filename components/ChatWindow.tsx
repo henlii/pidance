@@ -236,7 +236,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     jumpButtonVisible, jumpToBottom,
     loadOlderHistory,
     loadNewerHistory,
-    jumpToEntry,
     notifyBrowsingHistory,
     hasMoreAfter,
     lockedByOther,
@@ -597,7 +596,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   const messageJump = useMessageJump({
     scrollContainer: scrollContainerRef,
     resolveMessageElementRef,
-    jumpToEntry,
+    loadOlder: loadOlderHistory,
+    loadNewer: loadNewerHistory,
+    hasMoreBefore,
+    hasMoreAfter,
     railHandleRef,
     notifyBrowsingHistory,
   });

@@ -1734,10 +1734,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => subscribePiThemeApplied(refreshProjectionForTheme), [refreshProjectionForTheme]);
 
   /**
-   * 向上滚动加载更旧历史（OpenChamber loadOlder 语义）。
+   * 向上（更早）补一页（OpenChamber loadOlder 语义）。
    * 不置 loading，不阻塞发送；prepend 后由 ChatWindow 做滚轴补偿。
+   *
+   * limitOverride 给「跳转到历史某条」用：那条路径要一路补到目标，跟着懒加载设置走
+   * （默认 20 条/页）会补不动。正常分页（「加载更早的历史」按钮）不传，保持设置口径。
    */
-  const loadOlderHistory = useCallback(async (): Promise<boolean> => {
+  const loadOlderHistory = useCallback(async (limitOverride?: number): Promise<boolean> => {
     const sid = sessionIdRef.current;
     if (!sid || !hasMoreBeforeRef.current || historyLoadingRef.current) return false;
     const before = entryIdsRef.current[0];
@@ -1750,7 +1753,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1", before });
       // 「会话内容懒加载」（设置 → 会话）：勾选带 limit、不勾选**不带 limit**（全量，服务端不切片）。
       const lazyLoadLimit = sessionLazyLoadLimit(loadSessionLazyLoadSetting());
-      if (lazyLoadLimit !== null) params.set("limit", String(lazyLoadLimit));
+      // 跳转专用页宽优先；服务端会把 limit 夹到 1..500。
+      const pageLimit = limitOverride ?? lazyLoadLimit;
+      if (pageLimit !== null) params.set("limit", String(pageLimit));
       if (activeLeafId) params.set("leafId", activeLeafId);
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`, {
         signal: beginLoadRequest(),
@@ -4981,7 +4986,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     retryLoadSession,
     loadNewerHistory,
     hasMoreAfter,
-    jumpToEntry,
     /** 进入「浏览历史」态：跳转前必须离开跟随态（窗口内命中也走这条，否则会被钉回底部） */
     notifyBrowsingHistory,
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,

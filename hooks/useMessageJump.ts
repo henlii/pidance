@@ -9,9 +9,10 @@
  * 不滚动」。所以跳转机制移到这里，由 ChatWindow 持有（三端都在），导航条只拿
  * jumpTo / jumpingTo 做交互与视觉。
  *
- * 语义与原先在导航条里时完全一致：
+ * 语义：
  * - 目标已在 DOM：直接滚动；
- * - 否则调 jumpToEntry 让服务端返回该条附近窗口并整体替换时间线，再滚到目标；
+ * - 否则以当前已加载的消息为准，往更早的方向一页页往后补（prepend，保留现有内容），
+ *   补到目标进入时间线再滚过去；更早的方向补不动了就往更晚的方向补；
  * - 跳转期间钉住当前项（jumpPinRef），有看门狗兜底，避免「导航条永久停止跟随」。
  */
 
@@ -20,19 +21,51 @@ import {
   applyViewportScrollAnchor,
   captureViewportScrollAnchor,
 } from "@/lib/chat-scroll-anchor";
+import { easeInOutCubic } from "@/components/MessageNavRail";
 
 /** 跳转进行中「钉住」的看门狗：滚动链应在秒级内以 stopWatching 收尾并解除钉住。 */
 const JUMP_PIN_WATCHDOG_MS = 5_000;
+
+/**
+ * 「跳到选中消息」的滚动时长（ms）。
+ *
+ * 用自控缓动而不是原生 behavior:"smooth"：后者时长由浏览器决定、不可调，
+ * 而这一步是一次明确的定位动作，要短、要可预期。比导航条自身的
+ * RAIL_SCROLL_DURATION_MS(420) 更短，因为导航条是跟手滚动、这里是一次跳转。
+ */
+const JUMP_SCROLL_DURATION_MS = 260;
+
+/**
+ * 一次跳转最多补几页。
+ *
+ * 「以当前已加载的消息为准往上补」要一页页来，目标可能离当前窗口很远；
+ * 但也不能无限补（目标不在这个分支、或已被删除时会把整条会话拉下来）。
+ * 30 页 × JUMP_LOAD_PAGE_LIMIT(500) ≈ 15000 条，够覆盖任何合理长度。
+ */
+const MAX_JUMP_LOAD_PAGES = 30;
+
+/**
+ * 跳转时每页取多少条。
+ *
+ * 不跟「会话内容懒加载」设置走：那条设置是给正常上滚分页用的（默认 20 条），
+ * 而跳转要跨很远的历史，按 20 条补 30 页只有 600 条，稍长的会话根本到不了目标。
+ * 取服务端上限 500（clampLimit 1..500），30 页 ≈ 15000 条，覆盖任何合理长度。
+ */
+const JUMP_LOAD_PAGE_LIMIT = 500;
 
 export interface MessageJumpOptions {
   /** 会话滚动容器（三端都有） */
   scrollContainer: RefObject<HTMLDivElement | null>;
   /** entryId → 已渲染的消息元素（由 ChatWindow 提供；槽位映射归渲染层所有） */
   resolveMessageElementRef: RefObject<((entryId: string) => HTMLElement | null) | null>;
-  /** 按 entryId 跳到历史某条：服务端返回该条附近窗口并整体替换时间线（一次到位） */
-  jumpToEntry: (entryId: string) => Promise<boolean>;
-  /**
-   * 重算导航条高亮。导航条挂载时把自己的 syncActive 注册进来；手机端没有导航条
+  /** 向上（更早）补一页，保留当前已加载的消息（prepend） */
+  loadOlder: (limit?: number) => Promise<boolean>;
+  /** 向下（更晚）补一页 */
+  loadNewer: () => Promise<boolean>;
+  /** 更早方向还有没有内容（决定还能不能再往上补） */
+  hasMoreBefore: boolean;
+  /** 更晚方向还有没有内容 */
+  hasMoreAfter: boolean;
   /**
    * 导航条挂载时注册的能力（高亮重算 + 即刻设当前项）。手机端不挂导航条，
    * 窄屏或没有提问时导航条自行返回 null —— 此时为空，跳转流程不依赖它。
@@ -59,7 +92,10 @@ export interface MessageJumpHandle {
 export function useMessageJump({
   scrollContainer,
   resolveMessageElementRef,
-  jumpToEntry,
+  loadOlder,
+  loadNewer,
+  hasMoreBefore,
+  hasMoreAfter,
   railHandleRef,
   notifyBrowsingHistory,
 }: MessageJumpOptions): MessageJumpHandle {
@@ -70,11 +106,10 @@ export function useMessageJump({
   const jumpTo = useCallback(async (entryId: string): Promise<boolean> => {
     const scrollEl = scrollContainer.current;
     if (!scrollEl) return false;
-    // 点击即刻把该点设为当前项：不依赖异步流程末尾的解析结果。
-    // 理由：跳转会整体替换时间线，解析需要等新窗口渲染 + 滚动稳定，这期间用户已
-    // 经点过了；若末尾解析因窗口内无提问等原因返回 null（见 resolveActiveOutlineEntry），
-    // 高亮会一直停在跳转前那条。同步流程末尾仍会按实际位置校正一次。
-    // 点击即刻把该点设为当前项，并钉住到本次跳转结束：中间几拍不得被旧视口覆盖。
+    // 点击即刻把该点设为当前项，并钉住到本次跳转结束：不依赖异步流程末尾的解析
+    // 结果（补页 + 滚动整条链路是秒级，这期间用户早就点过了），中间几拍也不得被
+    // 旧视口覆盖；若末尾解析因窗口内无提问等原因返回 null（见 resolveActiveOutlineEntry），
+    // 高亮就会一直停在跳转前那条。流程收尾仍会按实际位置校正一次。
     railHandleRef.current?.setActive(entryId);
     jumpPinRef.current = entryId;
     // 看门狗：滚动链应在秒级内以 stopWatching 收尾（并解除钉住）。若因异常卡住，
@@ -94,15 +129,14 @@ export function useMessageJump({
       applyViewportScrollAnchor(scrollEl, anchor, (id) => resolveMessageElementRef.current?.(id) ?? null);
 
     /**
-     * 快速滚动到目标（平滑动画，不是瞬时跳转）。
+     * 滚动到目标（自控时长缓动，不是瞬时跳转）。
      *
-     * 定位会整体替换时间线，随后几帧里图片/折叠块还会改变高度；此时立刻发滚动，
+     * 定位前时间线还会继续长（补页分批提交、图片/媒体延迟挂载），此时立刻发滚动，
      * 目标偏移会算在旧布局上，落点整体偏掉（实测 topRel 2842px）。所以：
-     * 先等布局稳定（连续两帧位置一致）→ 平滑滚动 → 动画结束后再校正一次。
+     * 先等布局稳定（连续两帧位置一致）→ 缓动滚过去 → 动画结束后再校正一次。
      */
     const scrollToTarget = (el: HTMLElement, options?: {
-      instantAtTarget?: boolean;
-      /** 换窗锚点：填充期间钉回加载前的视口内容 */
+      /** 加载前视口内容的锚点：填充期间钉回原位 */
       anchor?: { entryId: string; offset: number } | null;
     }) => {
       const measure = () => el.getBoundingClientRect().top
@@ -129,11 +163,11 @@ export function useMessageJump({
       const drift = () => el.getBoundingClientRect().top - scrollEl.getBoundingClientRect().top;
 
       /**
-       * 换窗填充期持续把锚点钉回原位（无锚点时无事发生）。
+       * 补页填充期持续把锚点钉回原位（无锚点时无事发生）。
        *
        * 为什么不能只还原一次：定位后新加载的一页是分批挂载的，锚点上方内容变高
        * 就会把它整体推走 —— 一次性还原只挡住第一帧，之后仍漂 1695px。所以填充期间
-       * 每帧重钉，直到平滑滚动开始（动画一开始就不该再抢滚动）。
+       * 每帧重钉，直到缓动滚动开始（动画一开始就不该再抢滚动）。
        */
       const holdAnchor = () => {
         if (options?.anchor) applyAnchorOffset(options.anchor);
@@ -165,49 +199,48 @@ export function useMessageJump({
         const top = measure();
         const nextStable = Math.abs(top - last) < 2 ? stable + 1 : 0;
         if (nextStable >= 2 || attempt > 20) {
-          scrollEl.scrollTo({ top, behavior: "smooth" });
-          // 等平滑动画真正停下（连续三次 scrollTop 不变）再进收敛：
-          // 固定 450ms 太早，会在动画中段就判「偏离」并把视口定在中途
-          // （实测：目标停在视口上方 214px，而它本可以贴顶）。
-          const watch = (lastTop: number, idleFrames: number) => {
+          // 自控时长的快速滚动。动画跑完直接进收敛——以前用原生 smooth，
+          // 还要靠「每 60ms 采样、连续三帧 scrollTop 不变」去猜它何时结束，
+          // 既拖长了链路，也因为猜不准而多绕一轮收敛。
+          const from = scrollEl.scrollTop;
+          const delta = top - from;
+          const startedAt = performance.now();
+          const step = (now: number) => {
             if (interrupted || !isCurrent() || !el.isConnected) { stopWatching(); return; }
-            const now = scrollEl.scrollTop;
-            if (idleFrames >= 3) { converge(0, 0); return; }
-            window.setTimeout(
-              () => watch(now, Math.abs(now - lastTop) < 1 ? idleFrames + 1 : 0),
-              60,
-            );
+            const progress = Math.min(1, (now - startedAt) / JUMP_SCROLL_DURATION_MS);
+            scrollEl.scrollTop = from + delta * easeInOutCubic(progress);
+            if (progress < 1) { requestAnimationFrame(step); return; }
+            converge(0, 0);
           };
-          window.setTimeout(() => watch(scrollEl.scrollTop, 0), 60);
+          requestAnimationFrame(step);
           return;
         }
         requestAnimationFrame(() => settleThenScroll(attempt + 1, top, nextStable));
       };
 
       watchInterrupts();
-      // 兜底路径：加载前那条可见消息不在新窗口里，锚点还原不了 —— 只能就地贴到目标。
-      // 仍跑在调用方的 rAF 微任务里（绘制前），所以只是「没有动画」，不会闪。
-      if (options?.instantAtTarget) {
-        scrollEl.scrollTop = measure();
-        converge(0, 0);
-        return;
-      }
       requestAnimationFrame(() => settleThenScroll());
     };
 
     /**
      * 记下「加载前视口顶部的可见消息」及其相对容器顶的偏移。
      *
-     * 为什么需要：服务端定位会**整体替换时间线**（新窗口 = 目标前一页 → 最新），
-     * 而浏览器不会替我们保住「当前视口对应的内容」—— scrollTop 只是个数字，
-     * 换窗后它指向完全不同的内容，用户看到的就是「显示的内容被换掉了」。
+     * 为什么需要：跳转要往时间线**上方**补好几页，补一页上方就长高一截，
+     * 下方内容整体被推走；浏览器默认的锚定在 released 态虽已打开，但一次插入
+     * 上千条时它并不总保得住（Chrome 会放弃）。自己钉住才能保证「用户读到的
+     * 位置不动」。
      */
     const captureAnchor = (): { entryId: string; offset: number } | null =>
       captureViewportScrollAnchor(scrollEl);
 
-    // 等目标进入 DOM（服务端定位后需要一拍渲染）
-    const waitForTarget = async (): Promise<HTMLElement | null> => {
-      for (let i = 0; i < 10; i += 1) {
+    /**
+     * 等目标进入 DOM，最多轮 frames 帧。
+     *
+     * 为什么要按帧轮询而不是查一次：补页 hydrate 之后 React 才提交渲染，且上千条的
+     * 列表要分好几拍；查一次必然查不到，而「查不到」在这里等于「还没补到」。
+     */
+    const waitForTarget = async (frames = 10): Promise<HTMLElement | null> => {
+      for (let i = 0; i < frames; i += 1) {
         if (!isCurrent()) return null;
         const target = findTarget();
         if (target) return target;
@@ -216,41 +249,71 @@ export function useMessageJump({
       return null;
     };
 
-    let handedOff = false;
+    // 目标已在 DOM：不加载，直接滚过去（用户就是在当前窗口里点的这一条）。
     const immediate = await waitForTarget();
     if (immediate) {
-      // 目标已在 DOM：不会走 jumpToEntry（它内部才 notifyBrowsingHistory），
-      // 但「用户在窗口内点了一条命中」同样是从跟随态进入阅读态，必须显式进入。
       notifyBrowsingHistory();
-      handedOff = true;
       scrollToTarget(immediate);
       return true;
     }
+
     setJumpingTo(entryId);
-    // 必须在替换时间线**之前**取锚点：之后 DOM 已经是新窗口，量不到旧视口的内容。
+    // 进入浏览历史态必须发生在**第一次补页之前**：
+    // following 态下每次内容变高，自动跟随都会把 scrollTop 重写成新的底部，
+    // 而补页要连补好几轮、之后还要滚动到目标 —— 这期间任何一次重写都会把本次
+    // 定位抹掉；定位结束后迟到的图片/媒体把内容撑高，也一样会把视口拖回尾部
+    // （「跳了又弹回去」）。released 态同时还把 overflow-anchor 交还浏览器，
+    // 上方插入内容时视口保持不动。
+    notifyBrowsingHistory();
+    // 增量补页会往时间线里插内容（向上是 prepend），上方高度一变当前视口就被推走。
+    // 先记下「加载前视口顶部那段内容」，每补一页后把它钉回去 —— 用户读到的位置不动。
     const anchor = captureAnchor();
+    let target: HTMLElement | null = null;
     try {
-      const located = await jumpToEntry(entryId);
-      if (!located || !isCurrent()) return false;
-      const target = await waitForTarget();
-      if (target && isCurrent()) {
-        handedOff = true;
-        // 期望顺序：加载内容 → **加载完成的同时**把视口锚回「加载前显示的那段内容」
-        // （同一个 rAF 内、绘制前完成，因此不闪）→ 再平滑滚到跳转目标（动画保留）。
-        // 锚点还原不了（旧内容不在新窗口里）才退化为就地贴到目标。
-        const restored = anchor !== null && applyAnchorOffset(anchor);
-        // 还原成功 → 填充期继续钉住锚点，然后平滑滚到目标（动画保留）；
-        // 旧内容不在新窗口里 → 只能就地贴到目标（同样不闪，但没有动画）。
-        scrollToTarget(target, restored && anchor ? { anchor } : { instantAtTarget: true });
+      // 以当前已加载的消息为准，往更早的方向一页页补，直到目标进入时间线。
+      //
+      // 这里刻意不用「around 换窗」：那会把已经读到的内容整段替换掉，目标之后的消息
+      // 也不在手边（表现为「跳过去以后后续的会话被折叠起来」）。增量补页保留现状，
+      // 加载完直接滚过去。
+      //
+      // 每补一页都要等它真正落进 DOM 再判断：hydrate 之后 React 才提交渲染，紧跟着
+      // 同步查一次 DOM 必然查不到 —— 循环会误判「还没到」继续往上补，补到最顶端时
+      // loadOlder 只剩「没有更早的了」可答，于是整次跳转以失败收场（实测目标其实
+      // 已经在时间线里）。
+      let pages = 0;
+      while (
+        !target
+        && pages < MAX_JUMP_LOAD_PAGES
+        && hasMoreBefore
+        && await loadOlder(JUMP_LOAD_PAGE_LIMIT)
+      ) {
+        pages += 1;
+        if (!isCurrent()) return false;
+        // 上方插入内容会把视口推走：补完一页把加载前那段内容钉回原位。
+        if (anchor) applyAnchorOffset(anchor);
+        target = await waitForTarget();
       }
+      // 更早的方向补不动了目标还没出现：它可能在更晚的方向，往下补。
+      while (!target && pages < MAX_JUMP_LOAD_PAGES && hasMoreAfter && await loadNewer()) {
+        pages += 1;
+        if (!isCurrent()) return false;
+        if (anchor) applyAnchorOffset(anchor);
+        target = await waitForTarget();
+      }
+      // 两头的没得补了都收在这个分支上：最后一页可能还在提交渲染，这里再耐心等一次。
+      // 少了它，最后一页刚好还在提交时就会直接判「没这个目标」而放弃整次跳转。
+      if (!target) target = await waitForTarget(40);
     } finally {
       if (isCurrent()) setJumpingTo(null);
-      // 未交给 scrollToTarget（定位失败/目标没渲染出来）：立即按归属解除钉住。
+      // 目标始终没渲染出来：立即按归属解除钉住，不把流程交给 scrollToTarget。
       // 漏这一步的后果不是“高亮不准”，而是导航条**永久停止跟随**。
-      if (!handedOff && jumpPinRef.current === entryId) jumpPinRef.current = null;
+      if (!target && jumpPinRef.current === entryId) jumpPinRef.current = null;
     }
-    return handedOff;
-  }, [jumpToEntry, resolveMessageElementRef, scrollContainer, railHandleRef, notifyBrowsingHistory]);
+    if (!target || !isCurrent()) return false;
+    // 锚点还在就继续钉着，然后滚到目标（动画保留）；没有锚点就直接滚。
+    scrollToTarget(target, anchor ? { anchor } : undefined);
+    return true;
+  }, [loadOlder, loadNewer, hasMoreBefore, hasMoreAfter, resolveMessageElementRef, scrollContainer, railHandleRef, notifyBrowsingHistory]);
   return { jumpTo, jumpingTo, jumpPinRef };
 }
 
