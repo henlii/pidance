@@ -106,7 +106,7 @@ import {
 } from "./session-archive";
 import { getRunningStartedAt as readRunningStartedAt } from "./running-state";
 import { buildUserMessageOutline, type UserMessageOutlineItem } from "./session-outline";
-import { sliceContextAfter, sliceContextAround } from "./session-context-window";
+import { sliceContextAfter, sliceContextAround, sliceContextRange } from "./session-context-window";
 import { getRunningStartedAtTable, PLACEHOLDER_SESSION_ID_PREFIX } from "./live-session-registry";
 import { SESSION_WRITER_BUSY_MESSAGE } from "./sdk-session-host";
 import { searchSessionsFulltext, type SessionSearchResult } from "./session-fulltext-search";
@@ -411,6 +411,12 @@ export type SessionService = {
       before?: string;
       /** 按 entryId 定位窗口（跳转到历史某条）；与 before/after 互斥，优先 around */
       around?: string;
+      /**
+       * 范围窗口起点（含）：与 before 一起给出「跳到历史某条」要的那一段
+       * [from, before)，距离由服务端精确算，不按页宽猜。from 不在当前 leaf 路径上
+       * 时显式未命中（notFound=from）。
+       */
+      from?: string;
       /** 取 after 之后的更新窗口（定位到历史后继续向下加载） */
       after?: string;
       /** around 窗口是否一直取到最新（跳转历史时保留尾部流式段） */
@@ -1304,7 +1310,13 @@ export function createSessionService(overrides: Partial<SessionServiceDeps> = {}
       });
       const limit = options.limit;
       let context;
-      if (options.around) {
+      if (options.from) {
+        // 跳转范围：两头都是已知 entryId，一次把 [from, before) 整段取回。
+        // 不用 limit：要多少条由这两个 entry 的距离决定，截断反而会让目标进不了时间线。
+        const rangeWindow = sliceContextRange(full, options.from, options.before);
+        if (!rangeWindow) return { context: null, notFound: options.from };
+        context = rangeWindow;
+      } else if (options.around) {
         const aroundWindow = sliceContextAround(
           full,
           options.around,

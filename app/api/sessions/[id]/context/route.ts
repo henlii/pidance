@@ -16,6 +16,9 @@ export async function GET(
   const before = url.searchParams.get("before") ?? undefined;
   // 按 entryId 定位（导航条跳转到历史某条）：与 before/after 互斥，优先 around。
   const around = url.searchParams.get("around") ?? undefined;
+  // 范围窗口起点（含）：与 before 一起表示「要 [from, before) 这一段」。
+  // 「跳到历史某条」走这条 —— 两头都是已知 entryId，距离由服务端算，不按页宽猜。
+  const from = url.searchParams.get("from") ?? undefined;
   // 定位到历史后继续向下加载：取 after 之后的更新窗口。
   const after = url.searchParams.get("after") ?? undefined;
   // 跳转历史时窗口一直取到最新（保留尾部流式段，运行中会话不被切掉尾部）。
@@ -32,6 +35,7 @@ export async function GET(
       leafId,
       before,
       around,
+      from,
       after,
       aroundToEnd: around !== undefined ? aroundToEnd : undefined,
       limit,

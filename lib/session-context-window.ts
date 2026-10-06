@@ -320,6 +320,52 @@ export function sliceContextAfter(
 }
 
 /**
+ * 范围窗口「预留量」：从 from 往上多带这么多条**可见消息**（原始条数另受
+ * rawWindowSpanCap 硬顶，最多 200 条）。
+ *
+ * 为什么要有：窗口起点正好落在目标上时，滚动到位后目标就是第一行，上方一点上下文
+ * 都没有，看起来像「上面被切掉了」；留一小段还能让 hasMoreBefore 继续为真。
+ * 为什么只要一小段：这一段的每一条都是白拉进 DOM 的，跳转本来就嫌拉得多。
+ */
+export const DEFAULT_RANGE_MARGIN = 20;
+
+/**
+ * 取 [from, to) 这一段（from 含、to 不含）—— 「跳到历史某条」专用。
+ *
+ * 与 before/around/after 的区别：那三个都是「贴住某个 entry 的定长页」，调用方
+ * 只能一页页翻，于是每页都带一截用不上的余量。跳转这条路径两头都是已知的
+ * entryId（目标 + 客户端当前窗口起点），距离由服务端精确算出来即可，一次到位。
+ *
+ * to 缺省或不在当前 leaf 路径上（客户端状态过期 / 分支切换）时按「取到最新」处理：
+ * 这里宁可多给，不可少给 —— 少给会让目标根本进不了时间线。from 不在路径上返回
+ * null（显式未命中，与 around 同口径，不静默回退尾页）。
+ */
+export function sliceContextRange(
+  context: SessionContext,
+  from: string,
+  to?: string,
+  margin: number = DEFAULT_RANGE_MARGIN,
+): SessionContextWindow | null {
+  const totalMessageCount = context.messages.length;
+  const fromIdx = context.entryIds.indexOf(from);
+  if (fromIdx < 0) return null;
+  const toIdx = to ? context.entryIds.indexOf(to) : totalMessageCount;
+  const end = toIdx < 0 ? totalMessageCount : Math.max(toIdx, fromIdx + 1);
+  const messages = context.messages as { role?: string }[];
+  const keep = Number.isFinite(margin) && margin > 1 ? Math.floor(margin) : 1;
+  const start = Math.max(0, visibleWindowStart(messages, fromIdx, keep));
+  return {
+    messages: context.messages.slice(start, end),
+    entryIds: context.entryIds.slice(start, end),
+    thinkingLevel: context.thinkingLevel,
+    model: context.model,
+    hasMoreBefore: start > 0,
+    hasMoreAfter: end < totalMessageCount,
+    totalMessageCount,
+  };
+}
+
+/**
  * 取 beforeEntryId 之前的更旧窗口（不含 before 本身）。
  * before 不在列表中时返回空窗 + hasMoreBefore=false（调用方可当 400/空处理）。
  * 与首页同口径：预算按可见消息计，toolResult 搭车——否则「加载更早」在

@@ -11,8 +11,8 @@
  *
  * 语义：
  * - 目标已在 DOM：直接滚动；
- * - 否则以当前已加载的消息为准，往更早的方向一页页往后补（prepend，保留现有内容），
- *   补到目标进入时间线再滚过去；更早的方向补不动了就往更晚的方向补；
+ * - 否则以当前已加载的消息为准，把 [目标, 当前窗口起点) 这一段一次取回来
+ *   （prepend，保留现有内容），距离由服务端算，再滚过去；
  * - 跳转期间钉住当前项（jumpPinRef），有看门狗兜底，避免「导航条永久停止跟随」。
  */
 
@@ -35,37 +35,18 @@ const JUMP_PIN_WATCHDOG_MS = 5_000;
  */
 const JUMP_SCROLL_DURATION_MS = 260;
 
-/**
- * 一次跳转最多补几页。
- *
- * 「以当前已加载的消息为准往上补」要一页页来，目标可能离当前窗口很远；
- * 但也不能无限补（目标不在这个分支、或已被删除时会把整条会话拉下来）。
- * 30 页 × JUMP_LOAD_PAGE_LIMIT(500) ≈ 15000 条，够覆盖任何合理长度。
- */
-const MAX_JUMP_LOAD_PAGES = 30;
-
-/**
- * 跳转时每页取多少条。
- *
- * 不跟「会话内容懒加载」设置走：那条设置是给正常上滚分页用的（默认 20 条），
- * 而跳转要跨很远的历史，按 20 条补 30 页只有 600 条，稍长的会话根本到不了目标。
- * 取服务端上限 500（clampLimit 1..500），30 页 ≈ 15000 条，覆盖任何合理长度。
- */
-const JUMP_LOAD_PAGE_LIMIT = 500;
-
 export interface MessageJumpOptions {
   /** 会话滚动容器（三端都有） */
   scrollContainer: RefObject<HTMLDivElement | null>;
   /** entryId → 已渲染的消息元素（由 ChatWindow 提供；槽位映射归渲染层所有） */
   resolveMessageElementRef: RefObject<((entryId: string) => HTMLElement | null) | null>;
-  /** 向上（更早）补一页，保留当前已加载的消息（prepend） */
-  loadOlder: (limit?: number) => Promise<boolean>;
-  /** 向下（更晚）补一页 */
-  loadNewer: () => Promise<boolean>;
-  /** 更早方向还有没有内容（决定还能不能再往上补） */
-  hasMoreBefore: boolean;
-  /** 更晚方向还有没有内容 */
-  hasMoreAfter: boolean;
+  /**
+   * 向上（更早）补一段，保留当前已加载的消息（prepend）。
+   *
+   * options.from 给定时要的是 [from, 当前窗口起点) 这一整段 —— 要多少条由服务端
+   * 按两个 entryId 的距离算，调用方不猜距离、不猜页宽。
+   */
+  loadOlder: (options?: { from?: string }) => Promise<boolean>;
   /**
    * 导航条挂载时注册的能力（高亮重算 + 即刻设当前项）。手机端不挂导航条，
    * 窄屏或没有提问时导航条自行返回 null —— 此时为空，跳转流程不依赖它。
@@ -93,9 +74,6 @@ export function useMessageJump({
   scrollContainer,
   resolveMessageElementRef,
   loadOlder,
-  loadNewer,
-  hasMoreBefore,
-  hasMoreAfter,
   railHandleRef,
   notifyBrowsingHistory,
 }: MessageJumpOptions): MessageJumpHandle {
@@ -270,39 +248,23 @@ export function useMessageJump({
     const anchor = captureAnchor();
     let target: HTMLElement | null = null;
     try {
-      // 以当前已加载的消息为准，往更早的方向一页页补，直到目标进入时间线。
+      // 目标不在时间线里：一次把 [目标, 当前窗口起点) 整段要回来，prepend 保留现状。
+      // 要多少条由服务端按这两个 entryId 的距离精确算（外加目标上方一小段余量）——
+      // 不按页宽猜：页宽猜大了一页白拉几百条（跳转本来就嫌拉得多），猜小了要多跑
+      // 好几个来回。
       //
       // 这里刻意不用「around 换窗」：那会把已经读到的内容整段替换掉，目标之后的消息
-      // 也不在手边（表现为「跳过去以后后续的会话被折叠起来」）。增量补页保留现状，
-      // 加载完直接滚过去。
+      // 也不在手边（表现为「跳过去以后后续的会话被折叠起来」）。
       //
-      // 每补一页都要等它真正落进 DOM 再判断：hydrate 之后 React 才提交渲染，紧跟着
-      // 同步查一次 DOM 必然查不到 —— 循环会误判「还没到」继续往上补，补到最顶端时
-      // loadOlder 只剩「没有更早的了」可答，于是整次跳转以失败收场（实测目标其实
-      // 已经在时间线里）。
-      let pages = 0;
-      while (
-        !target
-        && pages < MAX_JUMP_LOAD_PAGES
-        && hasMoreBefore
-        && await loadOlder(JUMP_LOAD_PAGE_LIMIT)
-      ) {
-        pages += 1;
+      // 加载之后要等它真正落进 DOM 再找目标：hydrate 之后 React 才提交渲染，紧跟着
+      // 同步查一次 DOM 必然查不到（实测：目标其实已经在时间线里，却因为这一步把整次
+      // 跳转判成失败）。上千条的一次提交还会分几拍，所以按帧轮询。
+      if (await loadOlder({ from: entryId })) {
         if (!isCurrent()) return false;
-        // 上方插入内容会把视口推走：补完一页把加载前那段内容钉回原位。
+        // 上方插入内容会把视口推走：把加载前那段内容钉回原位，用户读到的位置不动。
         if (anchor) applyAnchorOffset(anchor);
-        target = await waitForTarget();
+        target = await waitForTarget(40);
       }
-      // 更早的方向补不动了目标还没出现：它可能在更晚的方向，往下补。
-      while (!target && pages < MAX_JUMP_LOAD_PAGES && hasMoreAfter && await loadNewer()) {
-        pages += 1;
-        if (!isCurrent()) return false;
-        if (anchor) applyAnchorOffset(anchor);
-        target = await waitForTarget();
-      }
-      // 两头的没得补了都收在这个分支上：最后一页可能还在提交渲染，这里再耐心等一次。
-      // 少了它，最后一页刚好还在提交时就会直接判「没这个目标」而放弃整次跳转。
-      if (!target) target = await waitForTarget(40);
     } finally {
       if (isCurrent()) setJumpingTo(null);
       // 目标始终没渲染出来：立即按归属解除钉住，不把流程交给 scrollToTarget。
@@ -313,7 +275,7 @@ export function useMessageJump({
     // 锚点还在就继续钉着，然后滚到目标（动画保留）；没有锚点就直接滚。
     scrollToTarget(target, anchor ? { anchor } : undefined);
     return true;
-  }, [loadOlder, loadNewer, hasMoreBefore, hasMoreAfter, resolveMessageElementRef, scrollContainer, railHandleRef, notifyBrowsingHistory]);
+  }, [loadOlder, resolveMessageElementRef, scrollContainer, railHandleRef, notifyBrowsingHistory]);
   return { jumpTo, jumpingTo, jumpPinRef };
 }
 

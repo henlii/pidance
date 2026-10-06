@@ -597,9 +597,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     scrollContainer: scrollContainerRef,
     resolveMessageElementRef,
     loadOlder: loadOlderHistory,
-    loadNewer: loadNewerHistory,
-    hasMoreBefore,
-    hasMoreAfter,
     railHandleRef,
     notifyBrowsingHistory,
   });
