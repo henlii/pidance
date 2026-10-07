@@ -45,6 +45,8 @@ export interface ToolExecutionSnapshot {
   renderedLines?: string[];
   /** 插件最终 renderResult 的 ANSI 行；存在时优先于结构化/文本结果。 */
   renderedResultLines?: string[];
+  /** 输出超过渲染上限、卡片画不出来（宿主下发 renderOversize）：UI 明说一句再走原文。 */
+  renderOversize?: true;
   /** 实时输出（partialResult replace 语义；end 兜底时来自 result 摘要） */
   output: string;
   /** 开始时间戳（ms）；无 start 记录由 end 兜底时与 endedAt 相同 */
@@ -77,6 +79,10 @@ export interface ToolExecutionUpdateInput {
   args?: unknown;
   partialResult?: unknown;
   renderedLines?: unknown;
+  /** 增量帧：在已有第 N 行之后追加（见 lib/render-budget.ts 的 renderedLinesFrame）。 */
+  renderedLinesAppendFrom?: unknown;
+  /** 输出超过渲染上限：卡片画不出来，前端明说一句再走原文回退。 */
+  renderOversize?: unknown;
 }
 
 /** end 事件宽松输入。 */
@@ -86,6 +92,8 @@ export interface ToolExecutionEndInput {
   result?: unknown;
   isError?: unknown;
   renderedResultLines?: unknown;
+  renderedResultLinesAppendFrom?: unknown;
+  renderOversize?: unknown;
 }
 
 /** command 摘要回退字段：args.command 缺失/非字符串时按此顺序取第一个字符串值。 */
@@ -105,6 +113,7 @@ function optionalString(value: unknown): string | undefined {
 export interface ToolExecutionResultRenderInput {
   toolCallId?: unknown;
   renderedResultLines?: unknown;
+  renderedResultLinesAppendFrom?: unknown;
 }
 
 /** ANSI 行只接受非空字符串数组；空数组或畸形载荷视为缺失，UI 继续走原回退。 */
@@ -113,6 +122,25 @@ function optionalRenderedLines(value: unknown): string[] | undefined {
     return undefined;
   }
   return [...value];
+}
+
+/**
+ * 一帧渲染行落到「当前已显示的行」上：给了 `appendFrom` 就是**只追加尾部几行**（大输出的常态），
+ * 否则整份替换。行数与前端对不上（丢过帧 / 事件乱序）时这次不应用 —— 宿主下一帧不是追加就是
+ * 全量，不会永久卡住；凭空接上一段错位的行才是真出问题。
+ */
+function applyRenderedLinesFrame(
+  current: string[] | undefined,
+  incoming: string[] | undefined,
+  appendFrom: unknown,
+): string[] | undefined {
+  // 显式空数组 / 畸形载荷 = 「这一帧没有可渲染的行」→ 清掉，UI 回退原文（原有语义）。
+  if (!incoming) return undefined;
+  const from =
+    typeof appendFrom === "number" && Number.isInteger(appendFrom) && appendFrom >= 0 ? appendFrom : null;
+  if (from === null) return incoming;
+  if (!current || current.length !== from) return current;
+  return [...current, ...incoming];
 }
 
 /** `toolShell` 只认 "self"（工具自带外壳）；其它值一律当没声明。 */
@@ -249,12 +277,26 @@ export function applyToolExecutionUpdate(state: ToolExecutionBufferState, event:
   // 连续帧上闪烁并降级成原始文本。显式给了字段（含空/畸形数组）就按它来：
   // 插件这一帧确实没渲染，就回退到原始 output。
   const renderedLines = Object.prototype.hasOwnProperty.call(event, "renderedLines")
-    ? optionalRenderedLines(event.renderedLines)
+    ? applyRenderedLinesFrame(existing.renderedLines, optionalRenderedLines(event.renderedLines), event.renderedLinesAppendFrom)
     : existing.renderedLines;
-  if (text === existing.output && truncated === (existing.truncated ?? false) && command === existing.command && renderedLines === existing.renderedLines) {
+  const renderOversize = event.renderOversize === true ? true : existing.renderOversize;
+  if (
+    text === existing.output
+    && truncated === (existing.truncated ?? false)
+    && command === existing.command
+    && renderedLines === existing.renderedLines
+    && renderOversize === existing.renderOversize
+  ) {
     return state;
   }
-  return new Map(state).set(id, { ...existing, output: text, truncated: truncated || undefined, command, renderedLines });
+  return new Map(state).set(id, {
+    ...existing,
+    output: text,
+    truncated: truncated || undefined,
+    command,
+    renderedLines,
+    ...(renderOversize ? { renderOversize: true } : {}),
+  });
 }
 
 /**
@@ -271,7 +313,10 @@ export function applyToolExecutionEnd(state: ToolExecutionBufferState, event: To
   const existing = state.get(id);
   const toolName = optionalString(event.toolName) ?? existing?.toolName ?? "";
   const status: ToolExecutionStatus = event.isError === true ? "error" : "success";
-  const renderedResultLines = optionalRenderedLines(event.renderedResultLines) ?? existing?.renderedResultLines;
+  const renderedResultLines = optionalRenderedLines(event.renderedResultLines) !== undefined
+    ? applyRenderedLinesFrame(existing?.renderedResultLines, optionalRenderedLines(event.renderedResultLines), event.renderedResultLinesAppendFrom)
+    : existing?.renderedResultLines;
+  const renderOversize = event.renderOversize === true ? true : existing?.renderOversize;
   if (!existing) {
     const { text, truncated } = clampOutput(stringifyPartial(event.result));
     const snapshot: ToolExecutionSnapshot = {
@@ -282,6 +327,7 @@ export function applyToolExecutionEnd(state: ToolExecutionBufferState, event: To
       endedAt: now,
       status,
       renderedResultLines,
+      ...(renderOversize ? { renderOversize: true } : {}),
       truncated: truncated || undefined,
     };
     return new Map(state).set(id, snapshot);
@@ -289,8 +335,15 @@ export function applyToolExecutionEnd(state: ToolExecutionBufferState, event: To
   if (existing.status !== "running") {
     // tool_execution_end 可能先于 tool_result 到达；终态保持不变，只允许后到的
     // 插件最终渲染补齐快照。
-    if (!renderedResultLines || renderedResultLines === existing.renderedResultLines) return state;
-    return new Map(state).set(id, { ...existing, renderedResultLines });
+    const oversizeChanged = Boolean(renderOversize) !== Boolean(existing.renderOversize);
+    if ((!renderedResultLines || renderedResultLines === existing.renderedResultLines) && !oversizeChanged) {
+      return state;
+    }
+    return new Map(state).set(id, {
+      ...existing,
+      ...(renderedResultLines ? { renderedResultLines } : {}),
+      ...(renderOversize ? { renderOversize: true } : {}),
+    });
   }
   let { output, truncated } = existing;
   if (output.length === 0 && event.result !== null && event.result !== undefined) {
@@ -298,7 +351,16 @@ export function applyToolExecutionEnd(state: ToolExecutionBufferState, event: To
     output = clamped.text;
     truncated = clamped.truncated;
   }
-  return new Map(state).set(id, { ...existing, toolName, output, truncated, renderedResultLines, endedAt: now, status });
+  return new Map(state).set(id, {
+    ...existing,
+    toolName,
+    output,
+    truncated,
+    ...(renderedResultLines ? { renderedResultLines } : {}),
+    ...(renderOversize ? { renderOversize: true } : {}),
+    endedAt: now,
+    status,
+  });
 }
 
 /**
@@ -310,9 +372,13 @@ export function applyToolExecutionResultRender(state: ToolExecutionBufferState, 
   const id = validToolCallId(event.toolCallId);
   if (!id) return state;
   const existing = state.get(id);
-  const renderedResultLines = optionalRenderedLines(event.renderedResultLines);
-  if (!existing || !renderedResultLines) return state;
-  return new Map(state).set(id, { ...existing, renderedResultLines });
+  const incoming = optionalRenderedLines(event.renderedResultLines);
+  if (!existing || !incoming) return state;
+  const renderedResultLines = applyRenderedLinesFrame(existing.renderedResultLines, incoming, event.renderedResultLinesAppendFrom);
+  return new Map(state).set(id, {
+    ...existing,
+    ...(renderedResultLines ? { renderedResultLines } : {}),
+  });
 }
 
 /**
@@ -321,7 +387,12 @@ export function applyToolExecutionResultRender(state: ToolExecutionBufferState, 
  */
 export function applyToolExecutionRenderLines(
   state: ToolExecutionBufferState,
-  event: { toolCallId?: unknown; renderedCallLines?: unknown; renderedResultLines?: unknown },
+  event: {
+    toolCallId?: unknown;
+    renderedCallLines?: unknown;
+    renderedResultLines?: unknown;
+    renderedResultLinesAppendFrom?: unknown;
+  },
 ): ToolExecutionBufferState {
   if (typeof event !== "object" || event === null) return state;
   const id = validToolCallId(event.toolCallId);
@@ -329,7 +400,10 @@ export function applyToolExecutionRenderLines(
   const existing = state.get(id);
   if (!existing) return state;
   const renderedCallLines = optionalRenderedLines(event.renderedCallLines);
-  const renderedResultLines = optionalRenderedLines(event.renderedResultLines);
+  const incoming = optionalRenderedLines(event.renderedResultLines);
+  const renderedResultLines = incoming
+    ? applyRenderedLinesFrame(existing.renderedResultLines, incoming, event.renderedResultLinesAppendFrom)
+    : undefined;
   if (!renderedCallLines && !renderedResultLines) return state;
   return new Map(state).set(id, {
     ...existing,

@@ -124,10 +124,18 @@ export function setPiThemeConstructor(base: PiThemeConstructor | null): void {
 /** 固定渲染宽度；前端按 pre-wrap 展示。 */
 export const RENDER_WIDTH = 100;
 
-/** 渲染输出上限（P1-6）：最大行数 / 最大单行字符数 / 最大总字符数。 */
-export const RENDER_MAX_LINES = 500;
+/**
+ * 渲染输出上限（P1-6）：最大行数 / 最大单行字符数 / 最大总字符数。
+ *
+ * 2026-10-07：行数与总字符数大幅放宽（500 → 2 万行、200KB → 4MB）。原来的上限是按「客户端撑不住」
+ * 定的，而真正撑不住的是**每帧整份重发 + 每帧重建几千个 DOM 行**（见 docs/incidents 那份报告）——
+ * 那两条已经改成增量帧（`renderedLinesFrame`）。上限只留作「插件渲染器真的无界膨胀」的兜底，
+ * 命中时宿主会带上 `renderOversize`，前端据此明说「输出过大，看原文」，不再静默回退。
+ * 单行长度保持不动：一条 4000 字符的行本来就不该出现在终端界面里。
+ */
+export const RENDER_MAX_LINES = 20_000;
 export const RENDER_MAX_LINE_LENGTH = 4000;
-export const RENDER_MAX_TOTAL_CHARS = 200 * 1024;
+export const RENDER_MAX_TOTAL_CHARS = 4 * 1024 * 1024;
 
 /** 一次渲染的完整产物：文本行 + 图片（issue #104）。 */
 export interface RenderedOutput {

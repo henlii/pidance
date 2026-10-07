@@ -14,6 +14,48 @@
  */
 export const RENDER_DUTY_CYCLE = 0.25;
 
+/**
+ * partial 重渲的**增长门槛**（字符数）：小输出按原节奏打字，大输出按比例稀疏。
+ *
+ * 光有时间限流不够：渲染开销随**总长度**线性涨，每秒 10 次就是 10 倍总长的活。按「长够了才渲」
+ * 之后，整条流的渲染次数从「时长 × 10 次/秒」变成 O(log n)，累计开销也从 O(总长 × 帧数)
+ * 变成 O(总长 ÷ 比例)（几何级数）。
+ *
+ * 下限保证小输出（1KB 一档）看起来还是连续打字；比例项让大输出自动变粗。
+ */
+export const PARTIAL_GROWTH_FLOOR_CHARS = 1024;
+export const PARTIAL_GROWTH_RATIO = 0.1;
+
+/** 这一档要长多少字符才值得重渲一次。 */
+export function partialGrowthThreshold(payloadChars: number): number {
+  const chars = Number.isFinite(payloadChars) && payloadChars > 0 ? payloadChars : 0;
+  return Math.max(PARTIAL_GROWTH_FLOOR_CHARS, Math.round(chars * PARTIAL_GROWTH_RATIO));
+}
+
+/**
+ * 一帧要推给前端的渲染行：与上次推过的行**只在尾部追加**时只推新增的那几行
+ * （`appendFrom` = 前端当前应有的行数），否则整份替换。
+ *
+ * 为什么这么省：大输出的行数组每帧 1MB 上下，而内容其实只多了尾巴几行 —— 整份重发既是
+ * 带宽与内存（事故里 3.5GB ArrayBuffers）的主要来源，也让前端每帧重建几千个 DOM 行。
+ */
+export function renderedLinesFrame(
+  previous: readonly string[] | undefined,
+  next: readonly string[],
+): { lines: string[]; appendFrom?: number } {
+  if (previous && previous.length > 0 && next.length > previous.length) {
+    let samePrefix = true;
+    for (let i = 0; i < previous.length; i += 1) {
+      if (previous[i] !== next[i]) {
+        samePrefix = false;
+        break;
+      }
+    }
+    if (samePrefix) return { lines: next.slice(previous.length), appendFrom: previous.length };
+  }
+  return { lines: [...next] };
+}
+
 export interface RenderBudget {
   /** 记一次渲染的实际开销（ms）。非有限值 / 负数忽略（量不出来就不改判定）。 */
   record(costMs: number): void;

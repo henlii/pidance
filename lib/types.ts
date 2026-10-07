@@ -559,9 +559,26 @@ export interface ExtensionWidgetItem {
  */
 export type ToolRenderedAgentEvent =
   | { type: "tool_execution_start"; renderedCallLines?: string[]; toolLabel?: string; toolShell?: "self" }
-  | { type: "tool_execution_update"; renderedLines?: string[] }
-  | { type: "tool_execution_end"; renderedResultLines?: string[] }
-  | { type: "rendered_lines_update"; renderedCallLines?: string[]; renderedResultLines?: string[] };
+  | {
+      type: "tool_execution_update";
+      renderedLines?: string[];
+      /** 结果槽的增量帧：给了就是「在已有的第 N 行之后追加」（见 lib/render-budget.ts）。 */
+      renderedLinesAppendFrom?: number;
+      /** 输出大到画不出卡片（超过渲染上限）：前端据此明说「未渲染，看原文」。 */
+      renderOversize?: true;
+    }
+  | {
+      type: "tool_execution_end";
+      renderedResultLines?: string[];
+      renderedResultLinesAppendFrom?: number;
+      renderOversize?: true;
+    }
+  | {
+      type: "rendered_lines_update";
+      renderedCallLines?: string[];
+      renderedResultLines?: string[];
+      renderedResultLinesAppendFrom?: number;
+    };
 
 export interface SessionMessageEntry extends SessionEntryBase {
   type: "message";

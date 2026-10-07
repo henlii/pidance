@@ -851,3 +851,19 @@ test("源码契约：工具块响应扩展的全局展开请求，但只在请�
   assert.match(block, /\}, \[toolsExpandedRevision\]\)/, "只绑 revision：绑值会在用户手动切换后被拉回");
   assert.ok(!/\[toolsExpandedRequest\]/.test(block), "依赖里不能带整个请求对象");
 });
+
+test("输出超过渲染上限：卡片位置明说「未渲染成卡片」，不再静默回退原文", () => {
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  // 实时输出段的表头（与「已在 64 KB 处截断」同一排）
+  assert.match(
+    source,
+    /\{snapshot\.renderOversize && <span[^>]*>\{t\("message_toolRenderOversize"\)\}<\/span>\}/,
+    "实时输出段没有如实说明",
+  );
+  // 配对结果段：回退原文之前也要说明（SSR 只渲染折叠态，这里按展开分支断言）
+  assert.match(
+    source,
+    /\{snapshot\?\.renderOversize \? \(\s*<div[^>]*>\s*\{t\("message_toolRenderOversize"\)\}/,
+    "配对结果段没有如实说明",
+  );
+});

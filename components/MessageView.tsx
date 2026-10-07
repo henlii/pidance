@@ -1531,6 +1531,7 @@ maxHeight: streamBlockMaxHeight,
         <div style={bareShell ? undefined : { borderTop: `1px solid color-mix(in srgb, ${statusColor} 24%, var(--border))`, background: "var(--tool-bg)" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "6px 10px 4px", color: "var(--text-dim)", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em" }}>
             <span>{t("message_toolLiveOutput")}</span>
+            {snapshot.renderOversize && <span style={{ color: "var(--warning)", textTransform: "none", letterSpacing: 0 }}>{t("message_toolRenderOversize")}</span>}
             {snapshot.truncated && <span style={{ color: "var(--warning)", textTransform: "none", letterSpacing: 0 }}>{t("message_toolOutputTruncated")}</span>}
           </div>
           <pre
@@ -1567,11 +1568,18 @@ maxHeight: streamBlockMaxHeight,
               isError={isError}
             />
           ) : (
-            <PairedResult
-              text={resultText ?? ""}
-              isEmpty={resultIsEmpty}
-              isError={isError}
-            />
+            <>
+              {snapshot?.renderOversize ? (
+                <div style={{ padding: "6px 10px", borderTop: `1px solid color-mix(in srgb, ${statusColor} 20%, var(--border))`, background: "var(--bg-subtle)", color: "var(--warning)", fontSize: 11 }}>
+                  {t("message_toolRenderOversize")}
+                </div>
+              ) : null}
+              <PairedResult
+                text={resultText ?? ""}
+                isEmpty={resultIsEmpty}
+                isError={isError}
+              />
+            </>
           )}
           {applyPatchFailures.length > 0 && (
             <div

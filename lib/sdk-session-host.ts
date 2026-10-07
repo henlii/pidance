@@ -168,6 +168,7 @@ import {
   loadPiTheme,
   RENDER_WIDTH,
   onPiThemeChange,
+  RENDER_MAX_TOTAL_CHARS,
   renderComponentLines,
   renderCustomMessageLines,
   renderToolCallLines,
@@ -180,7 +181,11 @@ import {
   type PiTheme,
   type PiThemeConstructor,
 } from "./tui-render-bridge";
-import { createRenderBudget } from "./render-budget";
+import {
+  createRenderBudget,
+  partialGrowthThreshold,
+  renderedLinesFrame,
+} from "./render-budget";
 import { createToolRenderScheduler, pickChangedSlots } from "./tool-render-scheduler";
 
 /**
@@ -273,6 +278,11 @@ type ToolRenderStateEntry = {
   lastResultComponent: unknown;
   /** tool_execution_update 上次渲染时间戳（节流用）。 */
   lastPartialRenderAt: number | undefined;
+  /**
+   * 上次渲染时 partial 的字符数：增长门槛用（见 shouldRenderPartialUpdate）。
+   * undefined = 还没按字符串载荷渲过（非字符串载荷不参与增长判定）。
+   */
+  lastPartialPayloadChars: number | undefined;
   /** 最近的工具参数：end 事件不带 args，而 renderResult 的 context.args 要用它。 */
   args: unknown;
   /** renderCall 调用凭据（invalidate / 宽度变化时按 SDK 语义重新调用）。 */
@@ -435,6 +445,32 @@ function readThinkingLevelFromSessionFile(sessionFile: string | null | undefined
     return null;
   }
   return null;
+}
+
+/**
+ * 载荷体量（字符数）：决定 partial 要不要重渲、以及结果是不是大到画不出卡片。
+ *
+ * **有界扫描**：累加超过 `stopAt` 就早停 —— 绝不为了一次数值把几 MB 的载荷整个 stringify 一遍。
+ * 量不出字符串叶子（纯数字/二进制载荷）返回 0。
+ */
+export function payloadCharCount(value: unknown, stopAt = RENDER_MAX_TOTAL_CHARS): number {
+  let total = 0;
+  const walk = (node: unknown, depth: number): void => {
+    if (total > stopAt || depth > 6) return;
+    if (typeof node === "string") {
+      total += node.length;
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, depth + 1);
+      return;
+    }
+    if (node && typeof node === "object") {
+      for (const item of Object.values(node as Record<string, unknown>)) walk(item, depth + 1);
+    }
+  };
+  walk(value, 0);
+  return total;
 }
 
 export class SdkSessionHost {
@@ -2439,8 +2475,9 @@ export class SdkSessionHost {
           return lines ? { ...event, renderedCallLines: lines } : event;
         }
         case "tool_execution_update": {
-          // 高频 partial：按 toolCallId 节流，防事件循环阻塞。
-          if (!this.shouldRenderPartialUpdate(event.toolCallId)) return event;
+          // 高频 partial：按 toolCallId 节流（时间预算 + 增长门槛），防事件循环阻塞。
+          const payloadChars = payloadCharCount(event.partialResult);
+          if (!this.shouldRenderPartialUpdate(event.toolCallId, payloadChars)) return event;
           const def = this.getToolRenderDefinition(event.toolName);
           if (!def) return event;
           const toolCallId = asToolCallId(event.toolCallId);
@@ -2461,8 +2498,14 @@ export class SdkSessionHost {
           // 丢掉它等于把 renderResult 就地在调用组件上写回的内容（内置 edit 的 diff）丢掉。
           if (changed.callLines) this.emitRenderedLinesUpdate(toolCallId, { callLines: changed.callLines });
           if (!changed.resultLines) return event;
+          const patch = renderedLinesFrame(entry.emittedResultLines, changed.resultLines);
           this.recordEmittedToolLines(toolCallId, { resultLines: changed.resultLines });
-          return { ...event, renderedLines: changed.resultLines };
+          return {
+            ...event,
+            renderedLines: patch.lines,
+            ...(patch.appendFrom === undefined ? {} : { renderedLinesAppendFrom: patch.appendFrom }),
+            ...(payloadChars > RENDER_MAX_TOTAL_CHARS ? { renderOversize: true } : {}),
+          };
         }
         case "tool_execution_end": {
           const def = this.getToolRenderDefinition(event.toolName);
@@ -2482,8 +2525,14 @@ export class SdkSessionHost {
           // rendered_lines_update 补一次，前端按 toolCallId 覆盖该槽。
           if (changed.callLines) this.emitRenderedLinesUpdate(toolCallId, { callLines: changed.callLines });
           if (!changed.resultLines) return event;
+          const patch = renderedLinesFrame(entry.emittedResultLines, changed.resultLines);
           this.recordEmittedToolLines(toolCallId, { resultLines: changed.resultLines });
-          return { ...event, renderedResultLines: changed.resultLines };
+          return {
+            ...event,
+            renderedResultLines: patch.lines,
+            ...(patch.appendFrom === undefined ? {} : { renderedResultLinesAppendFrom: patch.appendFrom }),
+            ...(payloadCharCount(result) > RENDER_MAX_TOTAL_CHARS ? { renderOversize: true } : {}),
+          };
         }
         case "message_start":
         case "message_end": {
@@ -2576,6 +2625,7 @@ export class SdkSessionHost {
         lastCallComponent: undefined,
         lastResultComponent: undefined,
         lastPartialRenderAt: undefined,
+        lastPartialPayloadChars: undefined,
         args: undefined,
         callRenderer: undefined,
         resultRenderer: undefined,
@@ -2736,17 +2786,32 @@ export class SdkSessionHost {
     toolCallId: string,
     changed: { callLines?: string[]; resultLines?: string[] },
   ): void {
+    // 结果槽是唯一会长到 MB 级的槽（调用槽是工具卡的标题/参数，通常很短），
+    // 只有它走增量帧；调用槽一律整份推，协议与客户端都少一条分支。
+    const entry = changed.resultLines ? this.toolRenderStates.get(toolCallId) : undefined;
+    const patch = changed.resultLines && entry ? renderedLinesFrame(entry.emittedResultLines, changed.resultLines) : null;
     this.emit({
       type: "rendered_lines_update",
       toolCallId,
       ...(changed.callLines ? { renderedCallLines: changed.callLines } : {}),
-      ...(changed.resultLines ? { renderedResultLines: changed.resultLines } : {}),
+      ...(patch
+        ? {
+            renderedResultLines: patch.lines,
+            ...(patch.appendFrom === undefined ? {} : { renderedResultLinesAppendFrom: patch.appendFrom }),
+          }
+        : {}),
     } as SdkAgentEvent);
     this.recordEmittedToolLines(toolCallId, changed);
   }
 
-  /** tool_execution_update 节流：同一 toolCallId 最短间隔内跳过渲染。 */
-  private shouldRenderPartialUpdate(toolCallId: unknown): boolean {
+  /**
+   * tool_execution_update 节流：同一 toolCallId 在「最短间隔 + 增长门槛」内跳过渲染。
+   *
+   * 两道门缺一不可：时间预算管住「渲染占多少墙钟」，增长门槛管住「渲染次数别跟时长成正比」——
+   * 只看时间的话，一个每秒涨 10KB 的 partial 会一直按 10 次/秒重渲整段（开销随总长度涨）。
+   * `payloadChars` 量不出（非字符串载荷）时只走时间预算。
+   */
+  private shouldRenderPartialUpdate(toolCallId: unknown, payloadChars: number | null): boolean {
     if (typeof toolCallId !== "string" || toolCallId === "") return true;
     const now = Date.now();
     const entry = this.getOrCreateToolRenderState(toolCallId);
@@ -2757,7 +2822,15 @@ export class SdkSessionHost {
     ) {
       return false;
     }
+    if (
+      payloadChars !== null
+      && entry.lastPartialPayloadChars !== undefined
+      && payloadChars - entry.lastPartialPayloadChars < partialGrowthThreshold(payloadChars)
+    ) {
+      return false;
+    }
     entry.lastPartialRenderAt = now;
+    if (payloadChars !== null) entry.lastPartialPayloadChars = payloadChars;
     return true;
   }
 

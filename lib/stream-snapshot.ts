@@ -78,8 +78,27 @@ export function createStreamSnapshotCache(): StreamSnapshotCache {
       callLines: string[] | null;
       /** 同上，结果槽：回放时另发一帧 `rendered_lines_update`。 */
       resultLines: string[] | null;
+      /**
+       * 结果槽**累积**出来的完整行。
+       *
+       * 实时帧是增量的（只带尾部新增几行，见 lib/render-budget.ts 的 renderedLinesFrame），
+       * 而中途接入的页面要的是完整一份 —— 快照必须按追加语义累起来再回放，否则新页面只拿到
+       * 最后几行。
+       */
+      fullResultLines: string[] | null;
     }
   >();
+
+  /** 把一帧（可能是增量）的行并进累积结果。 */
+  function accumulateRenderedLines(current: string[] | null, event: SnapshotEvent): string[] | null {
+    const incoming = linesOf(event.renderedLines) ?? linesOf(event.renderedResultLines);
+    if (!incoming) return current;
+    const from = event.renderedLinesAppendFrom ?? event.renderedResultLinesAppendFrom;
+    if (typeof from === "number" && Number.isInteger(from) && from >= 0 && current && current.length === from) {
+      return [...current, ...incoming];
+    }
+    return incoming;
+  }
 
   return {
     remember(event: SnapshotEvent): void {
@@ -107,7 +126,14 @@ export function createStreamSnapshotCache(): StreamSnapshotCache {
         case "tool_execution_start": {
           const toolCallId = toolCallIdOf(event);
           if (!toolCallId) return;
-          activeTools.set(toolCallId, { start: event, update: null, renderedUpdate: null, callLines: null, resultLines: null });
+          activeTools.set(toolCallId, {
+            start: event,
+            update: null,
+            renderedUpdate: null,
+            callLines: null,
+            resultLines: null,
+            fullResultLines: null,
+          });
           return;
         }
         case "tool_execution_update": {
@@ -115,6 +141,7 @@ export function createStreamSnapshotCache(): StreamSnapshotCache {
           if (!toolCallId) return;
           const entry = activeTools.get(toolCallId);
           if (!entry) return;
+          entry.fullResultLines = accumulateRenderedLines(entry.fullResultLines, event);
           entry.update = event;
           if (hasRenderedLines(event)) entry.renderedUpdate = event;
           return;
@@ -127,8 +154,8 @@ export function createStreamSnapshotCache(): StreamSnapshotCache {
           if (!entry) return;
           const callLines = linesOf(event.renderedCallLines);
           if (callLines) entry.callLines = callLines;
-          const resultLines = linesOf(event.renderedResultLines);
-          if (resultLines) entry.resultLines = resultLines;
+          entry.fullResultLines = accumulateRenderedLines(entry.fullResultLines, event);
+          if (entry.fullResultLines) entry.resultLines = entry.fullResultLines;
           return;
         }
         case "tool_execution_end": {
@@ -153,10 +180,19 @@ export function createStreamSnapshotCache(): StreamSnapshotCache {
           // 否则重连页面只能看到原始文本，要等下一个渲染帧才恢复 ANSI。
           // 显式给了字段（含空数组）就按它来，不能用旧行盖掉插件的「这一帧没渲染」。
           const carriesRenderedLines = Object.prototype.hasOwnProperty.call(update, "renderedLines");
+          const { renderedLinesAppendFrom: _droppedAppendFrom, ...updateWithoutAppend } = update;
           if (!carriesRenderedLines && entry.renderedUpdate) {
-            events.push({ ...update, renderedLines: entry.renderedUpdate.renderedLines });
+            // 回放最近一次**渲染过的**完整行（不是那一帧的增量尾巴）。
+            events.push(
+              entry.fullResultLines ? { ...updateWithoutAppend, renderedLines: entry.fullResultLines } : updateWithoutAppend,
+            );
           } else {
-            events.push(update);
+            // 增量帧在快照里一律还原成整份：重连页面按整份替换，不该看到「只追加了尾巴」。
+            events.push(
+              entry.fullResultLines && carriesRenderedLines
+                ? { ...updateWithoutAppend, renderedLines: entry.fullResultLines }
+                : updateWithoutAppend,
+            );
           }
         }
         // 结果槽的插件重渲也要回放：实时路径走 rendered_lines_update，

@@ -386,6 +386,7 @@ export const en = {
   message_toolCommand: 'Command',
   message_toolLiveOutput: 'Live output',
   message_toolOutputTruncated: 'Output truncated at 64 KB',
+  message_toolRenderOversize: 'Output too large to draw as a card \u2014 showing raw text',
   message_truncatedTitle: 'Response cut off',
   message_truncated: 'This response stopped at the model’s output limit. Send a follow-up to continue.',
   message_toolWaitingOutput: 'Waiting for output…',
