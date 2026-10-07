@@ -56,6 +56,45 @@ export function renderedLinesFrame(
   return { lines: [...next] };
 }
 
+/**
+ * 原始输出（`partialResult`）增量帧的游标：已经**发出去**多少字符、以及尾部一小段校验串。
+ *
+ * 只留尾部 4KB 而不是整份：整份动辄上兆，而校验只需要「上一帧的尾巴在新帧里原样还在」——
+ * 增量帧永远是「上一帧 + 新增」的前缀关系，尾巴对得上就够了。整份重写（进度条那类）会被
+ * 校验串拦住，退回整份替换。
+ */
+export const PARTIAL_TEXT_TAIL_CHARS = 4096;
+
+export interface PartialTextCursor {
+  /** 已发出的字符数（前端累加后应等于它）。 */
+  sentChars: number;
+  /** 已发出内容的尾部（最多 {@link PARTIAL_TEXT_TAIL_CHARS} 字符）。 */
+  tail: string;
+}
+
+/**
+ * 一帧原始输出的增量判定：能增量就只发新增那一段（`from` = 已发出的字符数），否则让调用方
+ * 发整份。返回的游标要在**这一帧真的推出去之后**存回（丢帧不推进游标 —— 推出去的每一帧
+ * 都必须是完整的「前缀 + 新增」关系）。
+ */
+export function framePartialText(
+  cursor: PartialTextCursor | null,
+  nextFull: string,
+): { cursor: PartialTextCursor; delta?: { from: number; text: string } } {
+  const nextCursor = (): PartialTextCursor => ({
+    sentChars: nextFull.length,
+    tail: nextFull.slice(Math.max(0, nextFull.length - PARTIAL_TEXT_TAIL_CHARS)),
+  });
+  if (
+    cursor
+    && nextFull.length > cursor.sentChars
+    && (cursor.tail.length === 0 || nextFull.startsWith(cursor.tail, cursor.sentChars - cursor.tail.length))
+  ) {
+    return { cursor: nextCursor(), delta: { from: cursor.sentChars, text: nextFull.slice(cursor.sentChars) } };
+  }
+  return { cursor: nextCursor() };
+}
+
 export interface RenderBudget {
   /** 记一次渲染的实际开销（ms）。非有限值 / 负数忽略（量不出来就不改判定）。 */
   record(costMs: number): void;

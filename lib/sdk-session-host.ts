@@ -181,10 +181,13 @@ import {
   type PiTheme,
   type PiThemeConstructor,
 } from "./tui-render-bridge";
+import { partialResultToText } from "./tool-partial-text";
 import {
   createRenderBudget,
+  framePartialText,
   partialGrowthThreshold,
   renderedLinesFrame,
+  type PartialTextCursor,
 } from "./render-budget";
 import { createToolRenderScheduler, pickChangedSlots } from "./tool-render-scheduler";
 
@@ -286,6 +289,8 @@ type ToolRenderStateEntry = {
    * undefined = 还没按字符串载荷渲过（非字符串载荷不参与增长判定）。
    */
   lastPartialPayloadChars: number | undefined;
+  /** 原始输出的增量游标（见 framePartialText）：已发出去多少字符、尾巴校验串。 */
+  partialTextCursor: PartialTextCursor | null;
   /** 最近的工具参数：end 事件不带 args，而 renderResult 的 context.args 要用它。 */
   args: unknown;
   /** renderCall 调用凭据（invalidate / 宽度变化时按 SDK 语义重新调用）。 */
@@ -474,6 +479,19 @@ export function payloadCharCount(value: unknown, stopAt = RENDER_MAX_TOTAL_CHARS
   };
   walk(value, 0);
   return total;
+}
+
+/**
+ * 把一帧 partial 的原始输出换成增量形式：能增量就**不带** `partialResult`（省下那一大段），
+ * 只带 `partialResultDelta`；不能增量（首帧 / 内容被重写）就照旧发整份。
+ */
+function withPartialTextFrame(
+  event: SdkAgentEvent,
+  frame: { cursor: PartialTextCursor | null; delta?: { from: number; text: string } },
+): SdkAgentEvent {
+  if (!frame.delta) return event;
+  const { partialResult: _replacedByDelta, ...rest } = event as SdkAgentEvent & { partialResult?: unknown };
+  return { ...rest, partialResultDelta: frame.delta } as SdkAgentEvent;
 }
 
 export class SdkSessionHost {
@@ -2482,8 +2500,12 @@ export class SdkSessionHost {
         case "tool_execution_update": {
           // 高频 partial：预算内整帧丢掉（见 partialFrameDue），到点了再按增长门槛决定要不要重渲。
           if (!this.partialFrameDue(event.toolCallId)) return null;
+          // 原始输出也走增量：partialResult 是「到此为止的完整快照」，整段重推就是每帧上兆。
+          const textFrame = this.framePartialResult(event.toolCallId, event.partialResult);
           const payloadChars = payloadCharCount(event.partialResult);
-          if (!this.shouldRenderPartialUpdate(event.toolCallId, payloadChars)) return event;
+          if (!this.shouldRenderPartialUpdate(event.toolCallId, payloadChars)) {
+            return withPartialTextFrame(event, textFrame);
+          }
           const def = this.getToolRenderDefinition(event.toolName);
           if (!def) return event;
           const toolCallId = asToolCallId(event.toolCallId);
@@ -2506,12 +2528,15 @@ export class SdkSessionHost {
           if (!changed.resultLines) return event;
           const patch = renderedLinesFrame(entry.emittedResultLines, changed.resultLines);
           this.recordEmittedToolLines(toolCallId, { resultLines: changed.resultLines });
-          return {
-            ...event,
-            renderedLines: patch.lines,
-            ...(patch.appendFrom === undefined ? {} : { renderedLinesAppendFrom: patch.appendFrom }),
-            ...(payloadChars > RENDER_MAX_TOTAL_CHARS ? { renderOversize: true } : {}),
-          };
+          return withPartialTextFrame(
+            {
+              ...event,
+              renderedLines: patch.lines,
+              ...(patch.appendFrom === undefined ? {} : { renderedLinesAppendFrom: patch.appendFrom }),
+              ...(payloadChars > RENDER_MAX_TOTAL_CHARS ? { renderOversize: true } : {}),
+            },
+            textFrame,
+          );
         }
         case "tool_execution_end": {
           const def = this.getToolRenderDefinition(event.toolName);
@@ -2632,6 +2657,7 @@ export class SdkSessionHost {
         lastResultComponent: undefined,
         lastPartialAt: undefined,
         lastPartialPayloadChars: undefined,
+        partialTextCursor: null,
         args: undefined,
         callRenderer: undefined,
         resultRenderer: undefined,
@@ -2808,6 +2834,30 @@ export class SdkSessionHost {
         : {}),
     } as SdkAgentEvent);
     this.recordEmittedToolLines(toolCallId, changed);
+  }
+
+  /**
+   * 原始输出（`partialResult`）改成增量：与上次**发出去**的内容比对，只在尾部追加时只发
+   * 新增那一段（`partialResultDelta = { from, text }`），否则这一帧照旧发整份。
+   *
+   * 为什么值得单独做：它是「到此为止的完整快照」语义，一个 55 万字符的工具输出每帧就是 1MB
+   * 上下 —— 就算把帧数压到 1 次/秒，仍然是每秒 1MB 推给每个客户端（事故里 3.5GB ArrayBuffers
+   * 最可能就出在这里）。改成增量后单帧只带新增的那几百字节。
+   *
+   * 游标在**这一帧真的推出去之后**才推进（含「到点但不重渲」的那些帧）：推出去的每一帧都
+   * 必须是完整的「前缀 + 新增」关系，丢掉的那些帧由下一帧的新增段一起补上。
+   */
+  private framePartialResult(
+    toolCallId: unknown,
+    partialResult: unknown,
+  ): { cursor: PartialTextCursor | null; delta?: { from: number; text: string } } {
+    const entry = typeof toolCallId === "string" && toolCallId !== "" ? this.getOrCreateToolRenderState(toolCallId) : null;
+    // 载荷多是 `{ content: [{ type:"text", text }] }`（bash / advisor 都是），所以先投影成文本
+    // 再比增量 —— 投影用的是和客户端**同一份** lib/tool-partial-text.ts，两边字符串必须一模一样。
+    if (!entry) return { cursor: null };
+    const framed = framePartialText(entry.partialTextCursor, partialResultToText(partialResult));
+    entry.partialTextCursor = framed.cursor;
+    return { cursor: framed.cursor, ...(framed.delta ? { delta: framed.delta } : {}) };
   }
 
   /**

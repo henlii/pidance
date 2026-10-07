@@ -7,7 +7,9 @@
  *
  * 投影规则：
  * - turn_start / turn_end：客户端不消费，丢弃（返回 null）。
- * - tool_execution_update：原样保留（含 toolCallId / toolName / args / partialResult）。
+ * - tool_execution_update：原样保留（含 toolCallId / toolName / args）。**例外**：partialResult
+ *   在宿主那里可能已被换成增量帧 partialResultDelta（大输出时只发新增那段，见
+ *   lib/render-budget.ts 的 framePartialText），这里两者都照原样透传。
  * - message_update：删除 assistantMessageEvent 大字段、保留其余字段；
  *   返回浅拷贝，不修改原事件对象（纯函数）。
  * - agent_end：瘦身为 { type: "agent_end" }，若 host 附带 contextUsage / streamRunSeq

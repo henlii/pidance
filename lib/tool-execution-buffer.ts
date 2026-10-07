@@ -1,3 +1,5 @@
+import { partialResultToText } from "./tool-partial-text";
+
 /**
  * P4a 实时工具执行缓冲（纯逻辑，无 React / 无 IO，node:test 可直接测）。
  *
@@ -9,9 +11,11 @@
  * 由后续任务实现，本模块不涉及任何渲染。
  *
  * 语义约定：
- * - **update 按 replace 处理**：上游透传的 partialResult 视为「该工具当前时刻的
- *   完整输出快照」，直接整体替换 output，而非增量拼接。若后续确认为增量（delta）
- *   语义，只在本模块改为 append 即可——不要在 UI 层猜测（UI 只读 output）。
+ * - **update 两条路**：宿主默认发**完整快照**（partialResult 整体替换 output）；原始输出
+ *   太大时宿主改发**增量帧**（partialResultDelta = { from, text }，见 lib/render-budget.ts
+ *   的 framePartialText），此时按 from 累加。from 与本地已收字符数对不上（丢过帧、重连过）
+ *   就只推进其余字段、不动 output，等下一帧整份快照修好。判增量的活儿只在本模块做，
+ *   不要在 UI 层猜测（UI 只读 output）。
  * - **output 上限**：64KB 字符，超出截断并置 truncated（UI 据此显示截断提示）。
  * - **late/stale 防护**：已终态（end 之后）迟到的 update 安全忽略；未见 start 就
  *   update 安全忽略；toolCallId 缺失/非法、非对象输入一律忽略并返回原状态，不抛错。
@@ -47,8 +51,13 @@ export interface ToolExecutionSnapshot {
   renderedResultLines?: string[];
   /** 输出超过渲染上限、卡片画不出来（宿主下发 renderOversize）：UI 明说一句再走原文。 */
   renderOversize?: true;
-  /** 实时输出（partialResult replace 语义；end 兜底时来自 result 摘要） */
+  /** 实时输出（整份快照替换 / 增量帧累加，见文件头；end 兜底时来自 result 摘要） */
   output: string;
+  /**
+   * 已收到的原始输出**真实**字符数（增量帧的 from 对的就是它）。
+   * 与 output.length 不同：output 到 64KB 就截断了，这个计数继续涨，用来认增量帧。
+   */
+  outputChars?: number;
   /** 开始时间戳（ms）；无 start 记录由 end 兜底时与 endedAt 相同 */
   startedAt: number;
   /** 结束时间戳（ms），running 时缺省 */
@@ -78,6 +87,8 @@ export interface ToolExecutionUpdateInput {
   toolName?: unknown;
   args?: unknown;
   partialResult?: unknown;
+  /** 原始输出的增量帧（{ from, text }）：带它时这一帧**没有** partialResult。 */
+  partialResultDelta?: unknown;
   renderedLines?: unknown;
   /** 增量帧：在已有第 N 行之后追加（见 lib/render-budget.ts 的 renderedLinesFrame）。 */
   renderedLinesAppendFrom?: unknown;
@@ -146,47 +157,6 @@ function applyRenderedLinesFrame(
 /** `toolShell` 只认 "self"（工具自带外壳）；其它值一律当没声明。 */
 function optionalToolShell(value: unknown): "self" | undefined {
   return value === "self" ? "self" : undefined;
-}
-
-/**
- * 把任意 partialResult / result 序列化为展示文本。
- * - 字符串原样保留（\r 去掉，保留真实换行）；
- * - AgentToolResult 形 `{ content: [{ type:"text", text }] }` 提取 text 拼接
- *   （bash 实时 update 即此形状；切勿 JSON.stringify，否则 \n 变成字面量、换行全坏）；
- * - 其它对象/数组 JSON 序列化；失败降级 String()。
- */
-function stringifyPartial(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value.replace(/\r/g, "");
-  if (typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    if (Array.isArray(record.content)) {
-      const texts: string[] = [];
-      for (const block of record.content) {
-        if (typeof block === "string") {
-          texts.push(block.replace(/\r/g, ""));
-          continue;
-        }
-        if (typeof block !== "object" || block === null) continue;
-        const item = block as Record<string, unknown>;
-        if (item.type === "text" && typeof item.text === "string") {
-          texts.push(item.text.replace(/\r/g, ""));
-        }
-      }
-      // 有 text 块或 content 为空数组时都走文本路径，避免回落成 "{}" / "[]"。
-      if (texts.length > 0 || record.content.length === 0) {
-        return texts.join("\n");
-      }
-    }
-    if (typeof record.text === "string") return record.text.replace(/\r/g, "");
-  }
-  try {
-    const json = JSON.stringify(value);
-    return json === undefined ? String(value) : json;
-  } catch {
-    // 循环引用等无法序列化的场景：降级为 String()，绝不抛错。
-    return String(value);
-  }
 }
 
 /** 超限截断：返回截断后的文本与截断标记。 */
@@ -259,8 +229,22 @@ export function applyToolExecutionStart(state: ToolExecutionBufferState, event: 
 }
 
 /**
- * tool_execution_update：**replace 语义**——partialResult 视为完整输出快照，
- * 整体替换 output（不做增量拼接；若上游确为增量，改本函数为 append）。
+ * 解析增量帧 `{ from, text }`：from 必须是整数、text 必须是字符串。
+ * 认不出（字段畸形 / 不是本机预期的下一条）返回 null —— 这一帧的输出部分丢掉，
+ * 下一帧整份快照会修好，绝不能让错位的尾巴接到正文后面。
+ */
+function parsePartialTextDelta(value: unknown): { from: number; text: string } | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const from = record.from;
+  const text = record.text;
+  if (typeof from !== "number" || !Number.isInteger(from) || from < 0) return null;
+  if (typeof text !== "string") return null;
+  return { from, text };
+}
+
+/**
+ * tool_execution_update：两条路 —— 完整快照整体替换 output，增量帧按 from 累加。
  * late/stale 防护：未见 start 或已终态（end 后迟到）的 update 安全忽略。
  * 快照缺失 command 时用本次 args 补填（end 事件不带 args，只能在此补）。
  */
@@ -270,7 +254,26 @@ export function applyToolExecutionUpdate(state: ToolExecutionBufferState, event:
   if (!id) return state;
   const existing = state.get(id);
   if (!existing || existing.status !== "running") return state;
-  const { text, truncated } = clampOutput(stringifyPartial(event.partialResult));
+  const hasPartialResult = Object.prototype.hasOwnProperty.call(event, "partialResult");
+  const delta = hasPartialResult ? null : parsePartialTextDelta(event.partialResultDelta);
+  let text = existing.output;
+  let truncated = existing.truncated ?? false;
+  let outputChars = existing.outputChars ?? existing.output.length;
+  if (hasPartialResult) {
+    const raw = partialResultToText(event.partialResult);
+    const full = clampOutput(raw);
+    text = full.text;
+    truncated = full.truncated;
+    outputChars = raw.length;
+  } else if (delta && delta.from === outputChars) {
+    outputChars += delta.text.length;
+    // output 已经截断过就别再往上接（接出来的不是正文），只把计数推上去
+    if (!truncated) {
+      const merged = clampOutput(existing.output + delta.text);
+      text = merged.text;
+      truncated = merged.truncated;
+    }
+  }
   const command = existing.command ?? extractToolCommand(event.args);
   // 服务端按 toolCallId 节流渲染：被节流那帧**根本没有** `renderedLines` 字段。
   // 缺字段表示「这一帧没重渲」，不等于「把已渲染的行清掉」——后者会让 ANSI 输出在
@@ -283,6 +286,7 @@ export function applyToolExecutionUpdate(state: ToolExecutionBufferState, event:
   if (
     text === existing.output
     && truncated === (existing.truncated ?? false)
+    && outputChars === existing.outputChars
     && command === existing.command
     && renderedLines === existing.renderedLines
     && renderOversize === existing.renderOversize
@@ -293,6 +297,7 @@ export function applyToolExecutionUpdate(state: ToolExecutionBufferState, event:
     ...existing,
     output: text,
     truncated: truncated || undefined,
+    outputChars,
     command,
     renderedLines,
     ...(renderOversize ? { renderOversize: true } : {}),
@@ -318,7 +323,7 @@ export function applyToolExecutionEnd(state: ToolExecutionBufferState, event: To
     : existing?.renderedResultLines;
   const renderOversize = event.renderOversize === true ? true : existing?.renderOversize;
   if (!existing) {
-    const { text, truncated } = clampOutput(stringifyPartial(event.result));
+    const { text, truncated } = clampOutput(partialResultToText(event.result));
     const snapshot: ToolExecutionSnapshot = {
       toolCallId: id,
       toolName,
@@ -347,7 +352,7 @@ export function applyToolExecutionEnd(state: ToolExecutionBufferState, event: To
   }
   let { output, truncated } = existing;
   if (output.length === 0 && event.result !== null && event.result !== undefined) {
-    const clamped = clampOutput(stringifyPartial(event.result));
+    const clamped = clampOutput(partialResultToText(event.result));
     output = clamped.text;
     truncated = clamped.truncated;
   }

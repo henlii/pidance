@@ -561,6 +561,12 @@ export type ToolRenderedAgentEvent =
   | { type: "tool_execution_start"; renderedCallLines?: string[]; toolLabel?: string; toolShell?: "self" }
   | {
       type: "tool_execution_update";
+      /**
+       * 原始输出的增量帧（{ from, text }，见 lib/render-budget.ts 的 framePartialText）。
+       * 带它时这一帧**不带** partialResult：`from` 是服务端已发出的字符数，客户端累加后
+       * 应等于它，对不上就忽略这一帧、等下一帧整份（宿主在内容被重写时会退回整份）。
+       */
+      partialResultDelta?: { from: number; text: string };
       renderedLines?: string[];
       /** 结果槽的增量帧：给了就是「在已有的第 N 行之后追加」（见 lib/render-budget.ts）。 */
       renderedLinesAppendFrom?: number;
