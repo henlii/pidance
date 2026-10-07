@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback, type CSSProperties, type Dispatch, type KeyboardEvent, type MouseEvent } from "react";
+import { useEffect, useMemo, useState, useRef, useCallback, type CSSProperties, type Dispatch, type KeyboardEvent, type MouseEvent } from "react";
 import {
   Prism as SyntaxHighlighter,
   createElement as renderSyntaxNode,
@@ -26,6 +26,7 @@ import { parseUnifiedPatch } from "@/lib/patch";
 import type { GitFileDiffResponse } from "@/lib/git-types";
 import { affectedPathsMatchFile } from "@/lib/git-refresh";
 import { canRedo, canUndo, type FileBuffer, type FileEditorAction } from "@/lib/file-editor-state";
+import { findMatches, replaceAllMatches, replaceMatch, stepMatchIndex } from "@/lib/file-find-replace";
 import { closeTrackedEventSource, trackLiveEventSource } from "@/lib/live-event-sources";
 import { useLiveStreamRestoreNonce } from "@/hooks/useLiveStreamRestoreNonce";
 import { useI18n } from "@/lib/i18n";
@@ -889,8 +890,24 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, writable = false, buff
   bufferRef.current = buffer;
   const forceBoundaryRef = useRef(false);
   const [savedFlash, setSavedFlash] = useState(false);
+  // 查找 / 替换：只在源码模式且拿得到编辑器（可写 buffer）时开；状态是**本文件本标签页**的，
+  // 不落盘也不跨标签同步 —— 换文件、换标签页各查各的才对。
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [replaceQuery, setReplaceQuery] = useState("");
+  const [matchCase, setMatchCase] = useState(false);
+  const [matchCursor, setMatchCursor] = useState(-1);
+  const findInputRef = useRef<HTMLInputElement>(null);
   const [acknowledgedExternalChange, setAcknowledgedExternalChange] = useState<string | null>(null);
   const savedFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 匹配结果：查询串 / 大小写开关 / 文本变了才重算（别每次渲染都扫一遍整份文件）。
+  // 这里用 `buffer?.content ?? data?.content`，与下面的 visibleContent 同一口径。
+  const findContent = buffer?.content ?? data?.content ?? "";
+  const matches = useMemo(
+    () => (findOpen && findQuery !== "" ? findMatches(findContent, findQuery, { caseSensitive: matchCase }) : []),
+    [findOpen, findQuery, matchCase, findContent],
+  );
 
   const fetchContent = useCallback((filePath: string) => {
     return fetch(getFileApiUrl(filePath, "read", sourceSessionId))
@@ -1028,6 +1045,15 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, writable = false, buff
     if (buffer && dispatchBuffer && canRedo(buffer)) dispatchBuffer({ type: "redo", key: buffer.key });
   }, [buffer, dispatchBuffer]);
 
+  const openFind = useCallback(() => {
+    setFindOpen(true);
+    // 打开就把光标放进查找框并全选：接着敲就是在改查询，不用再点一下
+    requestAnimationFrame(() => {
+      findInputRef.current?.focus();
+      findInputRef.current?.select();
+    });
+  }, []);
+
   // 文件 tab 激活时接管明确的编辑快捷键；表单焦点若在本文件工作区之外则完全放行。
   useEffect(() => {
     const handleShortcut = (event: globalThis.KeyboardEvent) => {
@@ -1036,7 +1062,11 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, writable = false, buff
       const isFormControl = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || active instanceof HTMLSelectElement || active instanceof HTMLElement && active.isContentEditable;
       if (isFormControl && !shellRef.current?.contains(active)) return;
       const key = event.key.toLowerCase();
-      if (key === "s" && !event.shiftKey) {
+      if (key === "f" && !event.shiftKey) {
+        // 文件编辑器里 Ctrl/Cmd+F 应该是「在本文件里查找」，不是浏览器页面查找
+        event.preventDefault();
+        openFind();
+      } else if (key === "s" && !event.shiftKey) {
         event.preventDefault();
         void runSave();
       } else if (key === "z" && event.shiftKey) {
@@ -1049,7 +1079,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, writable = false, buff
     };
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [buffer, runRedo, runSave, runUndo, writable]);
+  }, [buffer, openFind, runRedo, runSave, runUndo, writable]);
 
   const hasGitDiff = gitDiff?.supported === true && typeof gitDiff.patch === "string";
   const externalChangeFingerprint = buffer?.externalChange
@@ -1105,6 +1135,9 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, writable = false, buff
       ? t("viewer_readOnlySession")
       : null;
 
+  // 替换会让匹配变少，游标要夹在有效范围内（用「已替换掉的那处」下标继续往后走）
+  const safeMatchCursor = matches.length === 0 ? -1 : Math.min(Math.max(matchCursor, 0), matches.length - 1);
+
   const handleEditorChange = (content: string) => {
     if (!buffer || !dispatchBuffer) return;
     dispatchBuffer({ type: "edit", key: buffer.key, content, forceBoundary: forceBoundaryRef.current });
@@ -1124,6 +1157,40 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, writable = false, buff
       target.focus();
       target.setSelectionRange(start + 2, start + 2);
     });
+  };
+
+  // 替换是**改 buffer**（和手打一样）：脏标记、撤销、冲突检测、保存流程全都照旧，
+  // 不绕过 FileEditorState。forceBoundary 让「一次替换 = 一步撤销」。
+  const applyFindEdit = (next: string) => {
+    forceBoundaryRef.current = true;
+    handleEditorChange(next);
+  };
+
+  const runReplaceOne = () => {
+    const match = matches[safeMatchCursor];
+    if (!match) return;
+    applyFindEdit(replaceMatch(visibleContent, match, replaceQuery));
+  };
+
+  const runReplaceAll = () => {
+    if (matches.length === 0) return;
+    const { content, count } = replaceAllMatches(visibleContent, findQuery, replaceQuery, { caseSensitive: matchCase });
+    if (count === 0) return;
+    applyFindEdit(content);
+    setMatchCursor(-1);
+  };
+
+  const stepFind = (direction: 1 | -1) => {
+    if (matches.length === 0) return;
+    const next = stepMatchIndex(safeMatchCursor, matches.length, direction);
+    setMatchCursor(next);
+    // focus 是必须的：只有聚焦的 textarea 才会把选区滚进视口（换行模式下算不出行高位置）
+    const editor = editorRef.current;
+    const match = matches[next];
+    if (editor && match) {
+      editor.focus();
+      editor.setSelectionRange(match.start, match.end);
+    }
   };
 
   const discardAndReload = () => {
@@ -1172,6 +1239,19 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, writable = false, buff
                 : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3"/><path d="M16 3h3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-3"/><path d="M12 2v20"/></svg>}
             </button>
           ))}
+          {displayMode === "source" && writable && buffer && dispatchBuffer && (
+            <button
+              type="button"
+              onClick={() => (findOpen ? setFindOpen(false) : openFind())}
+              title={t("viewer_find")}
+              aria-label={t("viewer_find")}
+              aria-expanded={findOpen}
+              className="file-viewer-icon-button"
+              data-active={findOpen}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
+            </button>
+          )}
           {displayMode === "source" && (
               <button
                 type="button"
@@ -1213,6 +1293,89 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, writable = false, buff
               <button type="button" className="is-danger" onClick={discardAndReload} title={t("viewer_discardLocalDraftReload")} aria-label={t("viewer_discardLocalDraftReload")}>{t("viewer_discardLocalDraftReload")}</button>
             </span>
           )}
+        </div>
+      )}
+
+      {findOpen && displayMode === "source" && writable && buffer && dispatchBuffer && (
+        <div className="file-viewer-find" role="search" aria-label={t("viewer_find")}>
+          <div className="file-viewer-find-field">
+            <input
+              ref={findInputRef}
+              className="file-viewer-find-input"
+              type="text"
+              value={findQuery}
+              onChange={(event) => { setFindQuery(event.target.value); setMatchCursor(-1); }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  stepFind(event.shiftKey ? -1 : 1);
+                } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  setFindOpen(false);
+                  requestAnimationFrame(() => editorRef.current?.focus());
+                }
+              }}
+              placeholder={t("viewer_findQuery")}
+              aria-label={t("viewer_findQuery")}
+              spellCheck={false}
+            />
+            <span className="file-viewer-find-count" role="status" aria-live="polite">
+              {findQuery === "" ? "" : matches.length === 0
+                ? t("viewer_noMatch")
+                : t("viewer_matchCount", { index: safeMatchCursor + 1, total: matches.length })}
+            </span>
+            <button type="button" className="file-viewer-icon-button" onClick={() => stepFind(-1)} disabled={matches.length === 0} title={t("viewer_findPrev")} aria-label={t("viewer_findPrev")}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6" /></svg>
+            </button>
+            <button type="button" className="file-viewer-icon-button" onClick={() => stepFind(1)} disabled={matches.length === 0} title={t("viewer_findNext")} aria-label={t("viewer_findNext")}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+            </button>
+            <button
+              type="button"
+              className="file-viewer-icon-button"
+              onClick={() => setMatchCase((value) => !value)}
+              title={t("viewer_findMatchCase")}
+              aria-label={t("viewer_findMatchCase")}
+              aria-pressed={matchCase}
+              data-active={matchCase}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 18 8 6l5 12" /><path d="M5 14h6" /><path d="M16 18c2 0 3-1 3-3v-2c-3 0-4 1-4 2.5S16 18 16 18Z" /></svg>
+            </button>
+          </div>
+          <div className="file-viewer-find-field">
+            <input
+              className="file-viewer-find-input"
+              type="text"
+              value={replaceQuery}
+              onChange={(event) => setReplaceQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setFindOpen(false);
+                  requestAnimationFrame(() => editorRef.current?.focus());
+                  return;
+                }
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                if (event.ctrlKey || event.metaKey || event.altKey) runReplaceAll();
+                else runReplaceOne();
+              }}
+              placeholder={t("viewer_replaceQuery")}
+              aria-label={t("viewer_replaceQuery")}
+              spellCheck={false}
+            />
+            <button type="button" className="file-viewer-find-action" onClick={runReplaceOne} disabled={matches.length === 0} title={t("viewer_replaceOne")} aria-label={t("viewer_replaceOne")}>{t("viewer_replaceOne")}</button>
+            <button type="button" className="file-viewer-find-action" onClick={runReplaceAll} disabled={matches.length === 0} title={t("viewer_replaceAll")} aria-label={t("viewer_replaceAll")}>{t("viewer_replaceAll")}</button>
+            <button
+              type="button"
+              className="file-viewer-icon-button"
+              onClick={() => { setFindOpen(false); requestAnimationFrame(() => editorRef.current?.focus()); }}
+              title={t("viewer_findClose")}
+              aria-label={t("viewer_findClose")}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+            </button>
+          </div>
         </div>
       )}
 

@@ -2518,6 +2518,87 @@ span.linenumber {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* 文件编辑器：查找替换条。和提示条一样是固定条，不跟内容一起滚。 */
+.file-viewer-find {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex-shrink: 0;
+}
+.file-viewer-find-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 260px;
+}
+.file-viewer-find-input {
+  flex: 1 1 120px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.file-viewer-find-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.file-viewer-find-count {
+  flex: 0 0 auto;
+  min-width: 46px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.file-viewer-find-action {
+  height: 26px;
+  padding: 0 10px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.file-viewer-find-action:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.file-viewer-find-action:disabled {
+  opacity: 0.34;
+  cursor: not-allowed;
+}
+.file-viewer-find-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+@media (max-width: 640px) {
+  .file-viewer-find {
+    padding: 6px 10px;
+  }
+  /* 手机上没有 Ctrl+F，按钮就是唯一入口，给到能点的尺寸 */
+  .file-viewer-find-action {
+    min-height: 36px;
+    padding: 0 12px;
+  }
+  .file-viewer-find .file-viewer-icon-button {
+    width: 36px;
+    height: 36px;
+    flex-basis: 36px;
+  }
+}
 .file-editor-notice,
 .file-close-confirm {
   display: flex;
