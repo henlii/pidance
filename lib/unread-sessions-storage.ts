@@ -180,6 +180,22 @@ export function mergeUnreadSessionState(a: UnreadSessionState, b: UnreadSessionS
   return { completedAt, abnormalAt, readAt };
 }
 
+/**
+ * 未读时钟的**三路并集**：内存里的当前态 ∪ localStorage 首屏缓存 ∪ 服务端偏好。
+ *
+ * 为什么内存态也必须算进去：服务端偏好每变一次（包括本端自己推 readAt 触发的广播）都会重跑
+ * 一次合并并**整体替换**内存态。只并「localStorage ∪ 服务端」的话，**还没写进 localStorage、
+ * 也还没推给服务端**的那次阅读会被这两份旧数据盖掉 —— 表现就是「会话刚跑完、界面已经算已读，
+ * 过一会儿或切走一次又变回未读」。三份都是单调时间戳，取并集只会让「已读」更靠后，不会反过来。
+ */
+export function mergeUnreadSources(
+	memory: UnreadSessionState,
+	local: UnreadSessionState,
+	server: UnreadSessionState,
+): UnreadSessionState {
+	return mergeUnreadSessionState(mergeUnreadSessionState(memory, local), server);
+}
+
 export function unreadIdsFromState(state: UnreadSessionState): Set<string> {
   const ids = new Set<string>();
   for (const [id, completed] of Object.entries(state.completedAt)) {

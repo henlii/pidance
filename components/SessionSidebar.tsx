@@ -75,8 +75,8 @@ import { useI18n } from "@/lib/i18n";
 import { isPendingSessionId } from "@/lib/new-session-intent";
 import {
   loadUnreadSessionClock,
-  mergeUnreadSessionState,
   markSessionRead,
+  mergeUnreadSources,
   parseUnreadSessionState,
   pruneUnreadSessionState,
   saveUnreadSessionClock,
@@ -615,7 +615,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // **各端写自己的 readAt**；未读 ⟺ completedAt > readAt，两侧都是单调时间戳、取并集，
   // 天然不需要 CAS。本地那份降级为首屏缓存（旧的纯 id 列表会迁移成时钟）。
   useEffect(() => {
-    const merged = mergeUnreadSessionState(
+    // 三路并集：内存里的当前态也要算进去。少了它，服务端偏好的一次广播（本端自己推 readAt
+    // 也会触发）就能把「刚跑完、刚标成已读」的那次阅读盖回未读 —— 用户看到的就是
+    //「明明看完了，切走又变未读」。见 lib/unread-sessions-storage.ts 的 mergeUnreadSources。
+    const merged = mergeUnreadSources(
+      catalogStore.getState().unread,
       loadUnreadSessionClock(window.localStorage),
       parseUnreadSessionState(getServerPref("unreadSessionState")),
     );
