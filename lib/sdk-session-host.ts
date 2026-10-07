@@ -276,8 +276,11 @@ type ToolRenderStateEntry = {
   lastCallComponent: unknown;
   /** renderResult 槽「上一组件」。 */
   lastResultComponent: unknown;
-  /** tool_execution_update 上次渲染时间戳（节流用）。 */
-  lastPartialRenderAt: number | undefined;
+  /**
+   * 上一次**推出去** partial 帧的时间戳（节流用）。
+   * 到了预算才推，推之前先判增长门槛 —— 所以它同时是「上次渲染」的时刻（渲染只在推的那一帧发生）。
+   */
+  lastPartialAt: number | undefined;
   /**
    * 上次渲染时 partial 的字符数：增长门槛用（见 shouldRenderPartialUpdate）。
    * undefined = 还没按字符串载荷渲过（非字符串载荷不参与增长判定）。
@@ -2363,7 +2366,9 @@ export class SdkSessionHost {
     // 工具定义的显示元数据（label / renderShell，issue #75）：不依赖主题，
     // 因此放在渲染桥之前 —— 主题加载失败时仍然应该带上人类可读名与外壳声明。
     eventToEmit = this.withToolDisplayMeta(eventToEmit);
-    this.emit(this.withRenderedToolLines(eventToEmit));
+    // 工具 partial 帧可能在预算内被整帧丢掉（见 partialFrameDue）：不重渲，也不推那份整段快照
+    const rendered = this.withRenderedToolLines(eventToEmit);
+    if (rendered) this.emit(rendered);
   }
 
   /**
@@ -2437,7 +2442,7 @@ export class SdkSessionHost {
    * 自定义消息渲染器，产出 ANSI 行附加到事件；任何异常/缺失一律回退原事件，
    * 绝不阻断事件流。
    */
-  private withRenderedToolLines(event: SdkAgentEvent): SdkAgentEvent {
+  private withRenderedToolLines(event: SdkAgentEvent): SdkAgentEvent | null {
     try {
       if (!this.renderBridgeTheme) return event;
       switch (event.type) {
@@ -2475,7 +2480,8 @@ export class SdkSessionHost {
           return lines ? { ...event, renderedCallLines: lines } : event;
         }
         case "tool_execution_update": {
-          // 高频 partial：按 toolCallId 节流（时间预算 + 增长门槛），防事件循环阻塞。
+          // 高频 partial：预算内整帧丢掉（见 partialFrameDue），到点了再按增长门槛决定要不要重渲。
+          if (!this.partialFrameDue(event.toolCallId)) return null;
           const payloadChars = payloadCharCount(event.partialResult);
           if (!this.shouldRenderPartialUpdate(event.toolCallId, payloadChars)) return event;
           const def = this.getToolRenderDefinition(event.toolName);
@@ -2624,7 +2630,7 @@ export class SdkSessionHost {
         state: {},
         lastCallComponent: undefined,
         lastResultComponent: undefined,
-        lastPartialRenderAt: undefined,
+        lastPartialAt: undefined,
         lastPartialPayloadChars: undefined,
         args: undefined,
         callRenderer: undefined,
@@ -2805,23 +2811,36 @@ export class SdkSessionHost {
   }
 
   /**
-   * tool_execution_update 节流：同一 toolCallId 在「最短间隔 + 增长门槛」内跳过渲染。
+   * 这一帧 partial 到时间预算了没有：不到就**整帧不推**（返回 false）。
    *
-   * 两道门缺一不可：时间预算管住「渲染占多少墙钟」，增长门槛管住「渲染次数别跟时长成正比」——
-   * 只看时间的话，一个每秒涨 10KB 的 partial 会一直按 10 次/秒重渲整段（开销随总长度涨）。
-   * `payloadChars` 量不出（非字符串载荷）时只走时间预算。
+   * 为什么连事件一起丢，而不是只拦渲染：`partialResult` 是「到此为止的完整快照」，不是增量 ——
+   * 一秒推十份 1MB 的整段快照是纯浪费（事故里 3.5GB ArrayBuffers 最可能就是这个，见
+   * docs/incidents 那份报告）。丢帧不会丢内容：客户端手里还留着上一帧，工具结束时还有一条
+   * 整份的 `tool_execution_end`。正常情况下预算是 100ms（10 次/秒），小输出的打字机观感不变；
+   * 渲染开销大了预算自己会变长，帧跟着变稀。
    */
-  private shouldRenderPartialUpdate(toolCallId: unknown, payloadChars: number | null): boolean {
+  private partialFrameDue(toolCallId: unknown): boolean {
     if (typeof toolCallId !== "string" || toolCallId === "") return true;
     const now = Date.now();
     const entry = this.getOrCreateToolRenderState(toolCallId);
     if (!entry) return true;
-    if (
-      entry.lastPartialRenderAt !== undefined
-      && now - entry.lastPartialRenderAt < this.renderBudget.minIntervalMs()
-    ) {
+    if (entry.lastPartialAt !== undefined && now - entry.lastPartialAt < this.renderBudget.minIntervalMs()) {
       return false;
     }
+    entry.lastPartialAt = now;
+    return true;
+  }
+
+  /**
+   * 到了预算的这帧要不要**重渲**（增长门槛）：太长一档以内就只把原始输出推过去。
+   *
+   * 时间预算管住「渲染占多少墙钟」，增长门槛管住「渲染次数别跟时长成正比」—— 只看时间的话，
+   * 一个每秒涨 10KB 的 partial 会一直按 10 次/秒重渲整段（开销随总长度涨）。按「长够了才渲」
+   * 之后整条流的渲染次数是 O(log n)。`payloadChars` 量不出（非字符串载荷）时只走时间预算。
+   */
+  private shouldRenderPartialUpdate(toolCallId: unknown, payloadChars: number | null): boolean {
+    const entry = typeof toolCallId === "string" && toolCallId !== "" ? this.getOrCreateToolRenderState(toolCallId) : null;
+    if (!entry) return true;
     if (
       payloadChars !== null
       && entry.lastPartialPayloadChars !== undefined
@@ -2829,7 +2848,6 @@ export class SdkSessionHost {
     ) {
       return false;
     }
-    entry.lastPartialRenderAt = now;
     if (payloadChars !== null) entry.lastPartialPayloadChars = payloadChars;
     return true;
   }
