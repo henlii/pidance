@@ -4,9 +4,9 @@
  * 两条通道：
  * 1. **运行租约**（`~/.pi/agent/pidance-running-leases`）：对端开始/结束执行某个会话时，
  *    本进程要把「该会话被对端占用」推给浏览器 —— 不能等用户下次打开会话才亮锁定条。
- * 2. **会话目录**（`~/.pi/agent/sessions`）：对端新建/删除会话时，本进程的列表缓存
- *    要失效并通知浏览器重取，否则要刷新页面才看得见。改名是同路径追加、本帧不推
- *    （见 `sessionsFingerprint` 的说明），等下次拉列表时生效。
+ * 2. **会话目录**（`~/.pi/agent/sessions`）：对端新建/删除会话、或**在已有会话里聊完一句**
+ *    时，本进程的列表缓存要失效并通知浏览器重取，否则要刷新页面才看得见（连排序都不会变）。
+ *    判据与「正在跑的会话先不算」见 `sessionsFingerprint`。
  *
  * 机制是 `fs.watch`（Linux 走 inotify，事件驱动，不是轮询）**加** 2 秒兜底对账：
  * inotify 在网络盘、容器挂载、超出 watch 上限时会静默失效，兜底保证最终一致。
@@ -62,7 +62,12 @@ interface WatchState {
 	sessionWatchers: Map<string, FSWatcher>;
 	/** 上一次对账结果（变化才通知）。 */
 	lockedKey: string;
-	sessionsKey: string;
+	/** 「有哪些会话文件」的指纹（路径集合）。 */
+	sessionsPathsKey: string;
+	/** 已广播过的「内容」指纹（路径 + mtime + size）。 */
+	sessionsContentKey: string;
+	/** 上一轮观察到的内容指纹：连续两轮相同才算「写完了」。 */
+	sessionsPendingContentKey: string;
 	agentDir: string;
 	sessionsRoot: string;
 	/** 首次对账只建基线，不广播。 */
@@ -87,7 +92,9 @@ function state(): WatchState {
 			stateKey: "", 
 			sessionWatchers: new Map(),
 			lockedKey: "",
-			sessionsKey: "",
+			sessionsPathsKey: "",
+			sessionsContentKey: "",
+			sessionsPendingContentKey: "",
 			agentDir,
 			sessionsRoot: join(agentDir, "sessions"),
 			primed: false,
@@ -133,16 +140,31 @@ function listProjectDirs(sessionsRoot: string): string[] {
 	}
 }
 
-/** 会话目录的变更指纹：路径 + mtime + size（不解析内容）。 */
-async function sessionsFingerprint(): Promise<string> {
+/**
+ * 会话目录指纹，两份：
+ * - `pathsKey`：**有哪些**会话文件（新建/删除）；
+ * - `contentKey`：每个文件的 mtime + size（内容落没落盘）。
+ *
+ * 为什么不能只看 pathsKey（改过一版）：对端实例、或者本进程另一个标签页，在一个旧会话里
+ * 聊完一句，改的是文件**内容**，路径没变 —— 只看路径的话侧栏不会动，得切页面/刷新才看见
+ * 它排到项目最上面。用户报的两个症状（聊完不排上去、对端操作后要手动刷新）都是它。
+ *
+ * 为什么不能只凭 contentKey 变了就广播：正在跑的会话每次 flush 都在改文件，那样等于
+ * 「只要有人跑着，每秒重取几十次整份列表」（老实现实测 12 秒刷了 236 帧）。所以内容指纹
+ * 要**稳定一轮**才广播（见 reconcileSessions）：写着的时候一直在变、永远不稳定，写完了
+ * 才安静下来 —— 那一刻也正是侧栏该把这条会话排上去的时候。这条规则对「谁的写入」不敏感，
+ * 外部 agent、对端实例、另一个标签页都一样。
+ *
+ * 代价（已知）：**改名**（追加 session_info，路径不变）同样要等稳定一轮才推，最多晚一个
+ * 对账周期（兜底 5 秒）。子代理/fork 会话在 `<父文件>/run-N/` 下，不在这个集合里。
+ */
+async function sessionsFingerprint(): Promise<{ pathsKey: string; contentKey: string }> {
 	const files = await scanSessionFiles(state().sessionsRoot);
-	// 只比对「有哪些会话文件」。带上 mtime/size 会让正在跑的会话每轮都算变化 ——
-	// 另一个实例就会每 2 秒重取一次整份列表（实测 12 秒刷了 236 帧），而用户要的是
-	// 「对端新建/删除会话时列表跟着变」。内容追加与本进程自己的 run 走各自的路径。
-	//
-	// 代价（已知）：**改名**（追加 session_info，路径不变）不会触发本帧；侧栏在下次拉列表时
-	// 会看到新名字。子代理/fork 会话在 `<父文件>/run-N/` 下，不在这个集合里。
-	return files.map((f) => f.path).sort().join("\n");
+	const sorted = [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+	return {
+		pathsKey: sorted.map((file) => file.path).join("\n"),
+		contentKey: sorted.map((file) => `${file.path}:${file.mtimeMs}:${file.size}`).join("\n"),
+	};
 }
 
 function emit(event: CrossProcessEvent): void {
@@ -169,22 +191,40 @@ function reconcileLocks(): void {
 	emit({ type: "locks", lockedSessionIds: locked });
 }
 
-/** 对账会话目录：只在「有哪些会话文件」变化时广播。 */
+/**
+ * 对账会话目录：
+ * - 新建/删除会话（路径集合变了）→ 立刻广播，等一轮反而慢；
+ * - 内容变了 → **稳定一轮**才广播（见 sessionsFingerprint 的说明）。
+ */
 async function reconcileSessions(): Promise<void> {
 	const s = state();
-	let key = "";
+	let key: { pathsKey: string; contentKey: string };
 	try {
 		key = await sessionsFingerprint();
 	} catch {
 		return; // 目录暂时不可读：保持上次指纹，下轮再试
 	}
 	if (!s.primed) {
-		s.sessionsKey = key;
+		s.sessionsPathsKey = key.pathsKey;
+		s.sessionsContentKey = key.contentKey;
+		s.sessionsPendingContentKey = key.contentKey;
 		return;
 	}
-	if (key === s.sessionsKey) return;
-	s.sessionsKey = key;
-	attachWatchers(); // 新项目目录补挂 watch（幂等）
+	if (key.pathsKey !== s.sessionsPathsKey) {
+		s.sessionsPathsKey = key.pathsKey;
+		s.sessionsContentKey = key.contentKey;
+		s.sessionsPendingContentKey = key.contentKey;
+		attachWatchers(); // 新项目目录补挂 watch（幂等）
+		emit({ type: "sessions-changed" });
+		return;
+	}
+	if (key.contentKey !== s.sessionsPendingContentKey) {
+		// 还没写完：记下这一轮，下一轮要是同一个指纹才算落定
+		s.sessionsPendingContentKey = key.contentKey;
+		return;
+	}
+	if (key.contentKey === s.sessionsContentKey) return;
+	s.sessionsContentKey = key.contentKey;
 	emit({ type: "sessions-changed" });
 }
 
@@ -220,9 +260,14 @@ async function reconcile(): Promise<void> {
 	s.lockedKey = listSessionsLockedByOther(s.agentDir).join(",");
 	s.stateKey = signaledSessionsFingerprint(s.agentDir);
 	try {
-		s.sessionsKey = await sessionsFingerprint();
+		const key = await sessionsFingerprint();
+		s.sessionsPathsKey = key.pathsKey;
+		s.sessionsContentKey = key.contentKey;
+		s.sessionsPendingContentKey = key.contentKey;
 	} catch {
-		s.sessionsKey = "";
+		s.sessionsPathsKey = "";
+		s.sessionsContentKey = "";
+		s.sessionsPendingContentKey = "";
 	}
 	s.primed = true;
 }
