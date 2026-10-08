@@ -338,7 +338,8 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
   if (message.role === "custom") {
     if ((message as CustomMessage).customType === PIDANCE_BINARY_CUSTOM_TYPE) {
       const binary = parseBinaryMessageData((message as CustomMessage).details);
-      return binary ? <BinaryMessageView binary={binary} /> : null;
+      // 智能体自记的二进制消息：与其它块统一口径，默认收起，展开才加载媒体。
+      return binary ? <BinaryMessageView binary={binary} collapsible /> : null;
     }
     if ((message as CustomMessage).customType === "compaction") {
       return <CompactionMessageView message={message as CustomMessage} />;
@@ -2054,6 +2055,7 @@ function CompactionMessageView({ message }: { message: CustomMessage }) {
   const time = formatTime(message.timestamp);
   // 折叠行统一口径：本块不会流式输出，所以恒取首行（摘要的开头）。
   const summaryLine = collapsedSummaryLine(summary, { streaming: false });
+  const streamBlockMaxHeight = useStreamBlockMaxHeight();
   // 默认收起：压缩摘要通常是一大段 markdown，先把卡片收成一行，展开与否由用户决定。
   const [expanded, setExpanded] = useState(false);
   const toggleLabel = expanded ? t("message_collapse") : t("message_expand");
@@ -2113,7 +2115,8 @@ function CompactionMessageView({ message }: { message: CustomMessage }) {
         </button>
 
         {expanded && (
-          <div style={{ padding: "11px 13px 12px" }}>
+          /* 展开态与工具块同一套限高：摘要很长时块内滚动，卡片不会把会话拉成一条长带。 */
+          <div style={{ padding: "11px 13px 12px", maxHeight: streamBlockMaxHeight, overflowY: "auto", overscrollBehavior: "auto", touchAction: "pan-y" }}>
             <div style={{ color: "var(--text)", fontSize: 15, fontWeight: 700, lineHeight: 1.35 }}>
               {t("message_conversationCompacted")}
             </div>
@@ -2135,35 +2138,86 @@ function CompactionMessageView({ message }: { message: CustomMessage }) {
 
 function CommandMessageView({ message }: { message: CustomMessage }) {
   const { t } = useI18n();
+  const streamBlockMaxHeight = useStreamBlockMaxHeight();
   const command = getMessageText(message.content);
   const ok = (message.details as { ok?: boolean } | undefined)?.ok !== false;
   const result = (message.details as { result?: string } | undefined)?.result;
   const time = formatTime(message.timestamp);
+  // 统一口径：所有块默认收起。折叠行 = 这条命令本身（命令才是身份），结果输出点开再看。
+  const [expanded, setExpanded] = useState(false);
+  const toggleLabel = expanded ? t("message_collapse") : t("message_expand");
+
   return (
     <div style={{ marginBottom: 12 }}>
       <div
         style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          padding: "6px 10px",
           border: "1px solid var(--border)",
           borderLeft: "2px solid var(--accent)",
           borderRadius: 8,
           background: "var(--bg-subtle)",
+          overflow: "hidden",
         }}
       >
-        <span style={{ color: "var(--text-dim)", fontSize: 10, whiteSpace: "nowrap" }}>{t("message_command")}</span>
-        <code style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text)", overflowWrap: "anywhere" }}>
-          {command}
-        </code>
-        {ok && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>✓</span>}
-        {!ok && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>✗</span>}
-        {time && <span style={{ color: "var(--text-dim)", fontSize: 10, whiteSpace: "nowrap" }}>{time}</span>}
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          title={`${t("message_command")} · ${toggleLabel}`}
+          aria-label={`${t("message_command")} · ${toggleLabel}`}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            width: "100%",
+            padding: "6px 10px",
+            border: "none",
+            borderBottom: expanded && result ? "1px solid var(--border)" : "none",
+            background: "none",
+            color: "inherit",
+            fontFamily: "inherit",
+            textAlign: "left",
+            cursor: "pointer",
+          }}
+        >
+          <ChevronDown
+            size={12}
+            strokeWidth={1.8}
+            aria-hidden="true"
+            style={{
+              flexShrink: 0,
+              transform: expanded ? "none" : "rotate(-90deg)",
+              transition: "transform 0.15s ease",
+            }}
+          />
+          <span style={{ color: "var(--text-dim)", fontSize: 10, whiteSpace: "nowrap" }}>{t("message_command")}</span>
+          <code style={{ minWidth: 0, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text)", overflowWrap: "anywhere" }}>
+            {command}
+          </code>
+          <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10, whiteSpace: "nowrap" }}>{ok ? "✓" : "✗"}</span>
+          {time && <span style={{ color: "var(--text-dim)", fontSize: 10, whiteSpace: "nowrap" }}>{time}</span>}
+        </button>
+        {expanded && result && (
+          <pre
+            tabIndex={0}
+            style={{
+              margin: 0,
+              padding: "8px 10px",
+              maxHeight: streamBlockMaxHeight,
+              overflow: "auto",
+              overscrollBehavior: "auto",
+              touchAction: "pan-y",
+              color: "var(--text-muted)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 12,
+              lineHeight: 1.55,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+            }}
+          >
+            {result}
+          </pre>
+        )}
       </div>
-      {result && (
-        <div style={{ marginTop: 4, padding: "0 4px", color: "var(--text-muted)", fontSize: 12 }}>{result}</div>
-      )}
     </div>
   );
 }
@@ -2178,6 +2232,7 @@ function BranchSummaryMessageView({ message }: { message: CustomMessage }) {
   const time = formatTime(message.timestamp);
   // 折叠行统一口径：本块不会流式输出，所以恒取首行（摘要的开头）。
   const summaryLine = collapsedSummaryLine(summary, { streaming: false });
+  const streamBlockMaxHeight = useStreamBlockMaxHeight();
   // 与压缩块同款：系统生成的块默认收起，摘要正文按需展开。
   const [expanded, setExpanded] = useState(false);
   const toggleLabel = expanded ? t("message_collapse") : t("message_expand");
@@ -2244,7 +2299,8 @@ function BranchSummaryMessageView({ message }: { message: CustomMessage }) {
         </button>
 
         {expanded && (
-          <div style={{ padding: "11px 13px 12px" }}>
+          /* 与压缩块同款限高：展开态块内滚动。 */
+          <div style={{ padding: "11px 13px 12px", maxHeight: streamBlockMaxHeight, overflowY: "auto", overscrollBehavior: "auto", touchAction: "pan-y" }}>
             <div style={{ marginBottom: 10, color: "var(--text-muted)", fontSize: 13, lineHeight: 1.5 }}>
               {t("message_branchSummaryDescription")}
             </div>
@@ -2320,6 +2376,7 @@ function TurnWrittenFilesCard({ files, isStreaming, onOpenFile, onReferenceFile 
   onReferenceFile?: (filePath: string) => void;
 }) {
   const { t } = useI18n();
+  const streamBlockMaxHeight = useStreamBlockMaxHeight();
   const [expanded, setExpanded] = useState(false);
   if (!files || files.length === 0) return null;
 
@@ -2350,6 +2407,10 @@ function TurnWrittenFilesCard({ files, isStreaming, onOpenFile, onReferenceFile 
             padding: "8px 10px",
             borderTop: "1px solid var(--border)",
             background: "var(--bg-subtle)",
+            maxHeight: streamBlockMaxHeight,
+            overflowY: "auto",
+            overscrollBehavior: "auto",
+            touchAction: "pan-y",
           }}
         >
           {files.map((filePath) => {
@@ -2454,6 +2515,9 @@ function PidanceActivityView({ message, activity }: { message: CustomMessage; ac
   const { t } = useI18n();
   const streamBlockMaxHeight = useStreamBlockMaxHeight();
   const [copied, setCopied] = useState(false);
+  // 统一口径：默认收起，标题行（kind + title + 时间）就是折叠行。
+  const [expanded, setExpanded] = useState(false);
+  const toggleLabel = expanded ? t("message_collapse") : t("message_expand");
   const time = formatTime(message.timestamp);
   const { color, border, background, Icon } = ACTIVITY_KIND_STYLES[activity.kind];
   const hasContent = activity.content.trim() !== "";
@@ -2478,17 +2542,38 @@ function PidanceActivityView({ message, activity }: { message: CustomMessage; ac
           background,
         }}
       >
-        <div
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          title={`${activity.title} · ${toggleLabel}`}
+          aria-label={`${activity.title} · ${toggleLabel}`}
           style={{
             display: "flex",
             alignItems: "center",
             gap: 8,
+            width: "100%",
             padding: "7px 10px",
-            borderBottom: "1px solid var(--border)",
+            border: "none",
+            borderBottom: expanded ? "1px solid var(--border)" : "none",
             background: "var(--bg-panel)",
+            color: "inherit",
+            fontFamily: "inherit",
+            textAlign: "left",
+            cursor: "pointer",
             minWidth: 0,
           }}
         >
+          <ChevronDown
+            size={12}
+            strokeWidth={1.8}
+            aria-hidden="true"
+            style={{
+              flexShrink: 0,
+              transform: expanded ? "none" : "rotate(-90deg)",
+              transition: "transform 0.15s ease",
+            }}
+          />
           <span style={{ display: "flex", color, flexShrink: 0 }} aria-hidden="true">
             <Icon size={12} strokeWidth={1.8} />
           </span>
@@ -2508,10 +2593,19 @@ function PidanceActivityView({ message, activity }: { message: CustomMessage; ac
           <span style={{ color: "var(--text)", fontSize: 13, fontWeight: 600, minWidth: 0, overflowWrap: "anywhere" }}>
             {activity.title}
           </span>
+          {/* 收起态补一行内容摘要（与压缩块同口径）：一行就能看出这条记录说了什么。 */}
+          {!expanded && hasContent && (
+            <span
+              title={activity.content}
+              style={{ minWidth: 0, flex: "1 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontSize: 12 }}
+            >
+              {collapsedSummaryLine(activity.content, { streaming: false })}
+            </span>
+          )}
           {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10, flexShrink: 0 }}>{time}</span>}
-        </div>
+        </button>
 
-        {hasContent && (
+        {expanded && hasContent && (
           <pre
             tabIndex={0}
             style={{
@@ -2532,7 +2626,7 @@ function PidanceActivityView({ message, activity }: { message: CustomMessage; ac
           </pre>
         )}
 
-        <div
+        {expanded && <div
           style={{
             display: "flex",
             alignItems: "center",
@@ -2566,7 +2660,7 @@ function PidanceActivityView({ message, activity }: { message: CustomMessage; ac
           {metadataEntries.map(([key, value]) => (
             <span key={key} style={{ overflowWrap: "anywhere" }}>{key}={value}</span>
           ))}
-        </div>
+        </div>}
       </section>
     </div>
   );
@@ -2574,6 +2668,7 @@ function PidanceActivityView({ message, activity }: { message: CustomMessage; ac
 
 function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessage; cwd?: string; onOpenFile?: (filePath: string) => void }) {
   const { t } = useI18n();
+  const streamBlockMaxHeight = useStreamBlockMaxHeight();
   const isHiddenDisplay = message.display === false;
   // 默认收起：扩展自记的消息（记录/状态之类）不是智能体直接输出，先只留一行标题。
   const [contentExpanded, setContentExpanded] = useState(false);
@@ -2597,7 +2692,10 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
   const renderedSummary = renderedPlainLines
     ? collapsedSummaryLine(renderedPlainLines.join("\n"), { streaming: false })
     : "";
-  const renderedCollapsible = Boolean(renderedLines && renderedLines.length > 1);
+  // 折叠行摘要：与压缩块同一口径（首行、单行省略号），让收起态仍能看出这块说了什么。
+  const collapsedLine = renderedLines ? renderedSummary : collapsedSummaryLine(text, { streaming: false });
+  // 只画得下一行时不再「折叠」，但也照样给表头折叠按钮：一眼能看出这块是可收的。
+  const hasExpandableBody = Boolean(renderedLines || text || images.length > 0);
 
   const copyContent = () => {
     copyText(text || detailsText).then(() => {
@@ -2633,8 +2731,24 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
             {title}
           </span>
           {isHiddenDisplay && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("message_hiddenExtensionMessage")}</span>}
+          {!contentExpanded && collapsedLine && (
+            <span
+              title={collapsedLine}
+              style={{
+                minWidth: 0,
+                flex: "1 1 auto",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                color: "var(--text-dim)",
+                fontSize: 12,
+              }}
+            >
+              {collapsedLine}
+            </span>
+          )}
           {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
-          {renderedCollapsible || (isHiddenDisplay && !renderedLines) ? (
+          {hasExpandableBody ? (
             <button
               type="button"
               onClick={() => setContentExpanded((v) => !v)}
@@ -2658,84 +2772,59 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
           ) : null}
         </div>
 
-        {renderedLines ? (
-          contentExpanded || !renderedCollapsible ? (
-            <pre
-              style={{
-                margin: 0,
-                padding: "6px 9px",
-                color: "var(--text-muted)",
-                fontFamily: "var(--font-mono)",
-                fontSize: 12,
-                lineHeight: 1.55,
-                whiteSpace: "pre",
-              }}
-            >
-            {renderAnsiLines(renderedLines ?? [], "custom-rendered")}
-            </pre>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setContentExpanded(true)}
-              aria-expanded={false}
-              title={t("message_expand")}
-              style={{
-                display: "block",
-                width: "100%",
-                padding: "8px 10px",
-                border: "none",
-                background: "transparent",
-                color: "var(--text-dim)",
-                cursor: "pointer",
-                fontSize: 12,
-                textAlign: "left",
-                fontFamily: "var(--font-mono)",
-              }}
-            >
-              {previewText(renderedSummary || renderedPlainLines?.[0] || "", t("message_noExtensionMessage"))}
-            </button>
-          )
-        ) : contentExpanded ? (
-          <div style={{ padding: "6px 9px" }}>
-            {images.length > 0 && (
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: text ? 8 : 0 }}>
-                {images.map((img, i) => {
-                  const resolved = resolveImageContent(img);
-                  if (!resolved) return null;
-                  return (
-                    <MessageImage
-                      key={i}
-                      src={resolved.src}
-                      fullSrc={resolved.src}
-                      mimeType={resolved.mimeType}
-                      alt=""
-                      maxWidth={240}
-                      maxHeight={240}
-                    />
-                  );
-                })}
+        {renderedLines
+          ? contentExpanded && (
+              <pre
+                tabIndex={0}
+                style={{
+                  margin: 0,
+                  padding: "6px 9px",
+                  maxHeight: streamBlockMaxHeight,
+                  overflow: "auto",
+                  overscrollBehavior: "auto",
+                  touchAction: "pan-y",
+                  color: "var(--text-muted)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 12,
+                  lineHeight: 1.55,
+                  whiteSpace: "pre",
+                }}
+              >
+                {renderAnsiLines(renderedLines, "custom-rendered")}
+              </pre>
+            )
+          : contentExpanded && (
+              <div
+                style={{
+                  padding: "6px 9px",
+                  maxHeight: streamBlockMaxHeight,
+                  overflowY: "auto",
+                  overscrollBehavior: "auto",
+                  touchAction: "pan-y",
+                }}
+              >
+                {images.length > 0 && (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: text ? 8 : 0 }}>
+                    {images.map((img, i) => {
+                      const resolved = resolveImageContent(img);
+                      if (!resolved) return null;
+                      return (
+                        <MessageImage
+                          key={i}
+                          src={resolved.src}
+                          fullSrc={resolved.src}
+                          mimeType={resolved.mimeType}
+                          alt=""
+                          maxWidth={240}
+                          maxHeight={240}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+                {text ? <MarkdownBody className="markdown-custom-message" cwd={cwd} onOpenFile={onOpenFile}>{text}</MarkdownBody> : <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("message_noMessages")}</span>}
               </div>
             )}
-            {text ? <MarkdownBody className="markdown-custom-message" cwd={cwd} onOpenFile={onOpenFile}>{text}</MarkdownBody> : <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("message_noMessages")}</span>}
-          </div>
-        ) : (
-          <button
-            onClick={() => setContentExpanded(true)}
-            style={{
-              display: "block",
-              width: "100%",
-              padding: "8px 10px",
-              border: "none",
-              background: "transparent",
-              color: "var(--text-dim)",
-              cursor: "pointer",
-              fontSize: 12,
-              textAlign: "left",
-            }}
-          >
-            {text ? previewText(collapsedSummaryLine(text, { streaming: false }) || text, t("message_noExtensionMessage")) : t("message_showExtensionMessage")}
-          </button>
-        )}
 
         {!renderedLines && <div
           style={{
@@ -2842,11 +2931,6 @@ function safeJson(value: unknown): string {
 }
 
 
-function previewText(text: string, fallback: string): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized) return fallback;
-  return normalized.length > 140 ? `${normalized.slice(0, 140)}...` : normalized;
-}
 
 
 function getToolPreview(block: ToolCallContent): string {

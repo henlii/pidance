@@ -1,6 +1,7 @@
 "use client";
 
-import { Download, File } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { ChevronDown, Download, File } from "lucide-react";
 import { MESSAGE_IMAGE_MAX_HEIGHT, MESSAGE_IMAGE_MAX_WIDTH, MessageImage } from "./MessageImage";
 import { useI18n } from "@/lib/i18n";
 import { encodeFilePathForApi } from "@/lib/file-paths";
@@ -54,46 +55,157 @@ const downloadStyle = {
   fontSize: 11,
 };
 
-export function BinaryMessageView({ binary }: { binary: BinaryMessageData }) {
+const labelStyle = {
+  minWidth: 0,
+  flex: 1,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+} as const;
+
+/**
+ * 媒体卡片标题行：折叠时它就是整块（只剩这一行），展开时右侧照旧有下载入口。
+ *
+ * 只有 `collapsible`（智能体自记的 pidance.binary）才给折叠入口；用户自己发的附件
+ * 是「用户消息」的一部分，按产品口径不折叠也不限高。
+ */
+function BinaryCardHeader({
+  name,
+  label,
+  downloadUrl,
+  icon,
+  collapsible,
+  expanded,
+  onToggle,
+}: {
+  name: string;
+  label: string;
+  downloadUrl: string;
+  icon?: ReactNode;
+  collapsible: boolean;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
   const { t } = useI18n();
+  const toggleLabel = expanded ? t("message_collapse") : t("message_expand");
+  const labelNode = (
+    <span style={labelStyle} title={name}>
+      {label}
+    </span>
+  );
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+      {collapsible ? (
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={expanded}
+          title={`${name} · ${toggleLabel}`}
+          aria-label={`${name} · ${toggleLabel}`}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            flex: 1,
+            minWidth: 0,
+            padding: 0,
+            border: "none",
+            background: "none",
+            color: "inherit",
+            font: "inherit",
+            textAlign: "left",
+            cursor: "pointer",
+          }}
+        >
+          <ChevronDown
+            size={12}
+            strokeWidth={1.8}
+            aria-hidden="true"
+            style={{
+              flexShrink: 0,
+              transform: expanded ? "none" : "rotate(-90deg)",
+              transition: "transform 0.15s ease",
+            }}
+          />
+          {labelNode}
+        </button>
+      ) : (
+        <>
+          {icon}
+          {labelNode}
+        </>
+      )}
+      <a href={downloadUrl} download={name} style={downloadStyle} aria-label={t("message_downloadOriginal")}>
+        <Download size={13} strokeWidth={1.9} aria-hidden="true" />
+        {t("message_downloadOriginal")}
+      </a>
+    </div>
+  );
+}
+
+export function BinaryMessageView({
+  binary,
+  collapsible = false,
+}: {
+  binary: BinaryMessageData;
+  /** 智能体自记的二进制消息：默认收起，展开才加载/播放媒体。 */
+  collapsible?: boolean;
+}) {
+  const { t } = useI18n();
+  const [expanded, setExpanded] = useState(!collapsible);
   const readUrl = fileApiUrl(binary.path, "read", binary.mimeType, true);
   const downloadUrl = fileApiUrl(binary.path, "download");
   const canPlay = binary.size <= DIRECT_MEDIA_PLAY_MAX_BYTES;
   const label = `${binary.name} · ${formatBinarySize(binary.size)}`;
+  const toggle = () => setExpanded((value) => !value);
+  const header = (
+    <BinaryCardHeader
+      name={binary.name}
+      label={label}
+      downloadUrl={downloadUrl}
+      collapsible={collapsible}
+      expanded={expanded}
+      onToggle={toggle}
+    />
+  );
 
   if (binary.kind === "image") {
     const thumbnailPath = binary.previewPath || binary.path;
+    const image = (
+      <MessageImage
+        src={fileApiUrl(thumbnailPath, "read", binary.mimeType, true)}
+        fullSrc={readUrl}
+        downloadHref={downloadUrl}
+        downloadName={binary.name}
+        mimeType={binary.mimeType}
+        alt={binary.name}
+        title={binary.name}
+        maxWidth={MESSAGE_IMAGE_MAX_WIDTH}
+        maxHeight={MESSAGE_IMAGE_MAX_HEIGHT}
+      />
+    );
+    if (!collapsible) {
+      return <div style={{ marginBottom: 8, maxWidth: "100%" }}>{image}</div>;
+    }
     return (
-      <div style={{ marginBottom: 8, maxWidth: "100%" }}>
-        <MessageImage
-          src={fileApiUrl(thumbnailPath, "read", binary.mimeType, true)}
-          fullSrc={readUrl}
-          downloadHref={downloadUrl}
-          downloadName={binary.name}
-          mimeType={binary.mimeType}
-          alt={binary.name}
-          title={binary.name}
-          maxWidth={MESSAGE_IMAGE_MAX_WIDTH}
-          maxHeight={MESSAGE_IMAGE_MAX_HEIGHT}
-        />
+      <div style={{ ...cardStyle, flexDirection: "column", alignItems: "stretch", marginBottom: 8 }}>
+        {header}
+        {expanded && <div style={{ marginTop: 6 }}>{image}</div>}
       </div>
     );
   }
 
   if (binary.kind === "audio") {
     return (
-      <div style={{ ...cardStyle, flexDirection: "column", alignItems: "stretch", maxWidth: 480, marginBottom: 8 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-          <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={binary.name}>{label}</span>
-          <a href={downloadUrl} download={binary.name} style={downloadStyle} aria-label={t("message_downloadOriginal")}>
-            <Download size={13} strokeWidth={1.9} aria-hidden="true" />
-            {t("message_downloadOriginal")}
-          </a>
-        </div>
-        {canPlay ? (
-          <audio controls preload="metadata" src={readUrl} style={{ width: "100%" }} />
-        ) : (
-          <div style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("message_mediaTooLargeToPlay")}</div>
+      <div style={{ ...cardStyle, flexDirection: collapsible ? "column" : "row", alignItems: collapsible ? "stretch" : "center", maxWidth: 480, marginBottom: 8 }}>
+        {header}
+        {expanded && (
+          canPlay ? (
+            <audio controls preload="metadata" src={readUrl} style={{ width: "100%" }} />
+          ) : (
+            <div style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("message_mediaTooLargeToPlay")}</div>
+          )
         )}
       </div>
     );
@@ -101,18 +213,14 @@ export function BinaryMessageView({ binary }: { binary: BinaryMessageData }) {
 
   if (binary.kind === "video") {
     return (
-      <div style={{ ...cardStyle, flexDirection: "column", alignItems: "stretch", maxWidth: 640, marginBottom: 8 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-          <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={binary.name}>{label}</span>
-          <a href={downloadUrl} download={binary.name} style={downloadStyle} aria-label={t("message_downloadOriginal")}>
-            <Download size={13} strokeWidth={1.9} aria-hidden="true" />
-            {t("message_downloadOriginal")}
-          </a>
-        </div>
-        {canPlay ? (
-          <video controls preload="metadata" src={readUrl} style={{ display: "block", width: "100%", maxHeight: 360, borderRadius: 5, background: "var(--bg)", border: "1px solid var(--border)" }} />
-        ) : (
-          <div style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("message_mediaTooLargeToPlay")}</div>
+      <div style={{ ...cardStyle, flexDirection: collapsible ? "column" : "row", alignItems: collapsible ? "stretch" : "center", maxWidth: 640, marginBottom: 8 }}>
+        {header}
+        {expanded && (
+          canPlay ? (
+            <video controls preload="metadata" src={readUrl} style={{ display: "block", width: "100%", maxHeight: 360, borderRadius: 5, background: "var(--bg)", border: "1px solid var(--border)" }} />
+          ) : (
+            <div style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("message_mediaTooLargeToPlay")}</div>
+          )
         )}
       </div>
     );
@@ -120,12 +228,15 @@ export function BinaryMessageView({ binary }: { binary: BinaryMessageData }) {
 
   return (
     <div style={{ ...cardStyle, marginBottom: 8 }}>
-      <File size={15} strokeWidth={1.8} color="var(--text-dim)" aria-hidden="true" />
-      <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={binary.name}>{label}</span>
-      <a href={downloadUrl} download={binary.name} style={downloadStyle} aria-label={t("message_downloadOriginal")}>
-        <Download size={13} strokeWidth={1.9} aria-hidden="true" />
-        {t("message_downloadOriginal")}
-      </a>
+      <BinaryCardHeader
+        name={binary.name}
+        label={label}
+        downloadUrl={downloadUrl}
+        icon={<File size={15} strokeWidth={1.8} color="var(--text-dim)" aria-hidden="true" />}
+        collapsible={collapsible}
+        expanded={expanded}
+        onToggle={toggle}
+      />
     </div>
   );
 }

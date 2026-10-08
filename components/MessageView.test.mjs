@@ -75,47 +75,85 @@ test("pidance.activity：title/content 为纯文本，恶意 HTML/script 不注�
   assert.doesNotMatch(html, /<img src=x/);
   // onerror 只允许作为转义文本出现，不允许是真实事件属性
   assert.doesNotMatch(html, /onerror="/);
-  assert.ok(html.includes("&lt;script&gt;alert(2)&lt;/script&gt;"));
   assert.ok(html.includes("&lt;img src=x onerror=alert(1)&gt;"));
+  // 收起态的标题行带内容摘要，转义同样成立（正文本身在展开态，见下一条）
+  assert.ok(html.includes("&lt;script&gt;alert(2)&lt;/script&gt;"));
+  assert.doesNotMatch(html, /dangerouslySetInnerHTML/);
+});
+
+/** 活动卡片正文只在展开态渲染：正文语义用源码形状钉住（与工具卡同一做法）。 */
+function activityBodySource() {
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  return source.slice(source.indexOf("function PidanceActivityView("), source.indexOf("function CustomMessageView("));
+}
+
+test("pidance.activity：默认收起，标题行就是折叠入口", () => {
+  const html = renderMessage(activityMessage(validDetails({ kind: "output", content: "line1\nline2" })));
+
+  assert.match(html, /aria-expanded="false"/, "默认收起");
+  assert.ok(html.includes("line1"), "收起态摘要显示内容首行");
+  assert.ok(!html.includes("white-space:pre-wrap"), "收起态不渲染正文容器（标题属性里的全文不算）");
+  // 正文段落只在展开态渲染
+  assert.match(activityBodySource(), /\{expanded && hasContent && \(\s*<pre/);
 });
 
 test("pidance.activity：content 换行保留在 pre-wrap 容器内", () => {
   const html = renderMessage(activityMessage(validDetails({ content: "line1\nline2" })));
+  assert.ok(html.includes("line1"));
 
-  assert.ok(html.includes("line1\nline2"));
-  assert.match(html, /<pre[^>]*white-space:pre-wrap/);
+  const body = activityBodySource();
+  assert.match(body, /whiteSpace: "pre-wrap"/);
+  assert.match(body, /\{activity\.content\}/, "正文以文本子节点渲染，不拼 HTML");
 });
 
 test("pidance.activity：长 content 不截断，内部滚动且键盘可达", () => {
   const lines = Array.from({ length: 400 }, (_, i) => `row-${i}`);
   const html = renderMessage(activityMessage(validDetails({ kind: "output", content: lines.join("\n") })));
-
   assert.ok(html.includes("row-0"));
-  assert.ok(html.includes("row-399"), "长内容不得截断");
-  assert.match(html, /<pre[^>]*tabindex="0"/);
-  assert.match(html, /max-height:min\(320px, 45vh\)/);
-  assert.match(html, /overflow:auto/);
+
+  const body = activityBodySource();
+  // 不截断：直接渲染整段 content
+  assert.match(body, /\{activity\.content\}/);
+  assert.match(body, /<pre[\s\S]{0,200}tabIndex=\{0\}/);
+  assert.match(body, /maxHeight: streamBlockMaxHeight/);
+  assert.match(body, /overflow: "auto"/);
 });
 
 test("pidance.activity：source/requestId 展示，metadata 只取原始键值预览不整对象倾倒", () => {
-  const html = renderMessage(activityMessage(validDetails({
-    source: "deploy.sh",
-    requestId: "req-abc-123",
-    metadata: { url: "https://example.com", retries: 2, nested: { a: 1 } },
-  })));
+  const body = activityBodySource();
+  assert.match(body, /\{activity\.source && <span/);
+  assert.match(body, /\{activity\.requestId && <span/);
+  assert.match(body, /metadataEntries\.map\(\(\[key, value\]\) =>/);
+  // metadata 预览只取原始类型键值，不整对象倾倒
+  const preview = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  const fn = preview.slice(preview.indexOf("function activityMetadataPreview("), preview.indexOf("function PidanceActivityView("));
+  assert.match(fn, /typeof value === "string"/);
+  assert.match(fn, /entries\.length >= 4/);
+});
 
-  assert.ok(html.includes("deploy.sh"));
-  assert.ok(html.includes("req-abc-123"));
-  assert.ok(html.includes("url=https://example.com"));
-  assert.ok(html.includes("retries=2"));
-  // 嵌套对象不倾倒
-  assert.ok(!html.includes("nested"));
-  assert.ok(!html.includes("&quot;a&quot;"));
+test("每类块都有高度上限：压缩 / 分支摘要 / 写入文件 / 活动 / 自定义正文 / 命令结果", () => {
+  const source = readFileSync(fileURLToPath(new URL("./MessageView.tsx", import.meta.url)), "utf8");
+  const slice = (from, to) => {
+    const start = source.indexOf(`function ${from}(`);
+    const end = source.indexOf(`function ${to}(`);
+    assert.ok(start > 0 && end > start, `${from} 切片`);
+    return source.slice(start, end);
+  };
+  const blocks = [
+    ["CompactionMessageView", "CommandMessageView"],
+    ["CommandMessageView", "BranchSummaryMessageView"],
+    ["BranchSummaryMessageView", "FileContextMetadata"],
+    ["TurnWrittenFilesCard", "FileContextList"],
+    ["PidanceActivityView", "CustomMessageView"],
+    ["CustomMessageView", "getMessageText"],
+  ];
+  for (const [from, to] of blocks) {
+    assert.match(slice(from, to), /maxHeight: streamBlockMaxHeight/, `${from} 正文必须有高度上限（块内滚动）`);
+  }
 });
 
 test("pidance.activity：复制按钮复用现有 aria 文案", () => {
-  const html = renderMessage(activityMessage(validDetails()));
-  assert.ok(html.includes('aria-label="Copy message"'));
+  assert.match(activityBodySource(), /aria-label=\{t\("message_copy"\)\}/);
 });
 
 test("pidance.activity：非法 details 安全回退通用 custom view", () => {
@@ -175,16 +213,17 @@ test("custom 渲染桥：插件渲染行默认折叠成首行，展开才铺全�
   assert.match(html, /font-family:var\(--font-mono\)/);
 });
 
-test("custom 渲染桥：只有一行渲染行时不折叠（不必为一行内容再点一次）", () => {
+test("custom 渲染桥：单行渲染行也给折叠入口，收起态只留标题行 + 摘要", () => {
   const html = renderMessage({
     role: "custom",
     customType: "extension_notice",
     content: "原始文本",
     display: true,
-    renderedLines: ["\u001b[33m单行提示\u001b[0m"],
+    renderedLines: ["\u001b[1m单行标题\u001b[0m", "\u001b[33m单行提示\u001b[0m"],
   });
-  assert.ok(html.includes("单行提示"));
-  assert.ok(!html.includes('aria-label="Expand"'), "单行不需要展开入口");
+  assert.match(html, /aria-expanded="false"/, "扩展自记消息默认收起");
+  assert.ok(html.includes("单行标题"), "收起态摘要取首行");
+  assert.ok(!html.includes("单行提示"), "收起态不铺开整段渲染行");
 });
 
 test("custom 渲染桥：空数组和非法载荷回退现有文本与详情逻辑", () => {
