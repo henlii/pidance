@@ -399,3 +399,42 @@ export function mergeFollowUpPayload(
 export function followUpItemMedia(items: readonly FollowUpItem[]): QueuedMediaRef[] {
   return items.flatMap((item) => item.media ?? []);
 }
+
+/**
+ * 「已受理 ≠ 已送达」的保护窗口。
+ *
+ * 投递受理后我们会立刻把条目出队（不这么做就会重复投递），但 SDK 的 `prompt()` 是
+ * **异步**结算的：会话刚好被回收时它会稍后才抛出 `SDK session is not alive`。
+ * 2026-10-08 实测到排队消息就是这么静默消失的（受理 → 出队 → 异步失败 → 内容没了）。
+ * 窗口内这类失败把条目原样放回队列：宁可重投一次，也不丢用户写下的话。
+ */
+export const FOLLOW_UP_DELIVERY_GRACE_MS = 60_000;
+
+export type FollowUpDeliveryGrace = {
+  /** 本次投递认领的条目 id。 */
+  ids: readonly string[];
+  /** 出队前的原文条目（state 已归位 waiting，便于原样放回）。 */
+  items: readonly FollowUpItem[];
+  /** 本次投递的正文：只放回「同一段正文」失败的条目。 */
+  text: string;
+  at: number;
+};
+
+/**
+ * 送达确认窗口：受理之后要在这个窗口内看到那条 user 消息落盘，否则把条目放回队列。
+ *
+ * 排队投递是「受理同步、送达异步」，中间任何一环死掉（实测：SDK session 已被回收）
+ * 都不会有回执。窗口取 15s：正常投递的 user 消息在受理后 1s 内就落盘。
+ */
+export const FOLLOW_UP_DELIVERY_CONFIRM_MS = 15_000;
+
+/** 落盘的那条 user 消息是不是本次投递的内容（前后空白不算差异）。 */
+export function isFollowUpDeliveryConfirmed(
+  grace: { text: string } | null | undefined,
+  message: unknown,
+): boolean {
+  if (!grace) return false;
+  if (typeof message !== "string") return false;
+  return message.trim() === grace.text.trim();
+}
+

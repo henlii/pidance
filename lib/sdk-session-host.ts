@@ -71,13 +71,17 @@ import {
 import {
   followUpItemMedia,
   followUpItemTexts,
+  isFollowUpDeliveryConfirmed,
   mergeFollowUpPayload,
   parseFollowUpQueue,
   newFollowUpItem,
   reconcileFollowUpItems,
+  FOLLOW_UP_DELIVERY_CONFIRM_MS,
+  FOLLOW_UP_DELIVERY_GRACE_MS,
   serializeFollowUpQueue,
   withAdmittedAttemptIds,
   MAX_QUEUED_ITEM_MEDIA,
+  type FollowUpDeliveryGrace,
   type FollowUpItem,
   type QueuedMediaRef,
 } from "./session-queue";
@@ -494,6 +498,21 @@ function withPartialTextFrame(
   return { ...rest, partialResultDelta: frame.delta } as SdkAgentEvent;
 }
 
+/** user 消息正文（字符串或 content 分块）→ 纯文本，用于投递确认比对。 */
+function messageTextOf(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => {
+      if (typeof block === "string") return block;
+      if (!block || typeof block !== "object") return "";
+      const record = block as { type?: unknown; text?: unknown };
+      return record.type === "text" && typeof record.text === "string" ? record.text : "";
+    })
+    .filter((text) => text.length > 0)
+    .join("\n");
+}
+
 export class SdkSessionHost {
   private listeners: SdkEventListener[] = [];
   private runtime: AgentSessionRuntime | null = null;
@@ -554,6 +573,13 @@ export class SdkSessionHost {
    * 外部 prompt 于是和 flush 并发写同一个 SessionManager。
    */
   private readonly internalPromptTicket = Symbol("pidance internal follow-up prompt");
+  /**
+   * 刚按「已受理」出队的那批排队条目：
+   * 受理是同步的、送达是异步的，两者之间失败要把内容放回去。
+   */
+  private followUpDeliveryGrace: FollowUpDeliveryGrace | null = null;
+  /** 送达确认窗口的兜底计时器：窗口内没看到那条 user 消息就把条目放回队列。 */
+  private followUpDeliveryTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * 认领落盘失败后的 fail-closed：禁止自动重试。否则 resetIdleTimer →
    * scheduleFollowUpFlush 会立刻重入同一失败，磁盘写不进去时无限循环。
@@ -1018,6 +1044,8 @@ export class SdkSessionHost {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
     if (!this._alive || !this.runtime || this.startupHold || this.isRunning() || this.flushingFollowUp) return;
+    // 送达确认窗口内不安排回收：销毁 runtime 会让在途的排队投递失败（见 disposeAfterSettle）。
+    if (this.followUpDeliveryGrace) return;
     // 自动投递由 Host 拥有，不依赖是否还有浏览器订阅。有人看只是推迟 dispose。
     if (this.hasWaitingFollowUp() && !this.isFollowUpHeld()) {
       this.scheduleFollowUpFlush();
@@ -1805,33 +1833,88 @@ export class SdkSessionHost {
       if (released) this.emitQueueChanged();
       return;
     }
-    // 2) 已受理：删除本次单元（按 id）并落盘。
-    // 2) 已受理：删除本次单元（按 id）并落盘。
-    const delivered = new Set(ids);
-    const deliveredMedia = followUpItemMedia(live);
+    // 2) 已受理 ≠ 已送达：条目**先不出队**，等那条 user 消息真的落盘再删。
+    //    旧实现在这里立刻按 id 出队，于是「受理 → 出队 → SDK 稍后失败」就静默丢消息
+    //    （2026-10-08 实测：排队消息在 run 结束后消失，JSONL 里从未出现）。
+    //    条目留在队列里是 claimed 态，不会被重复投递；确认失败才放回 waiting。
+    this.followUpDeliveryGrace = {
+      ids,
+      items: live.map((item) => ({ ...item, state: "waiting" })),
+      text,
+      at: Date.now(),
+    };
+    this.armFollowUpDeliveryWatch();
+    this.emitQueueChanged();
+    this.emitQueueChanged();
+  }
+
+  /** 起送达确认的兜底计时器：窗口内没有落盘证据就把条目放回队列，绝不静默丢内容。 */
+  private armFollowUpDeliveryWatch(): void {
+    if (this.followUpDeliveryTimer) clearTimeout(this.followUpDeliveryTimer);
+    this.followUpDeliveryTimer = setTimeout(() => {
+      this.followUpDeliveryTimer = null;
+      const grace = this.followUpDeliveryGrace;
+      if (!grace) return;
+      this.restoreFollowUpDeliveryAfterFailure(grace.text);
+    }, FOLLOW_UP_DELIVERY_CONFIRM_MS);
+  }
+
+  /**
+   * 落盘的 user 消息 = 投递到位的证据：这时才真正出队（并回收模型副本）。
+   * 返回是否确认了本次投递。
+   */
+  private confirmFollowUpDelivery(message: unknown): boolean {
+    const grace = this.followUpDeliveryGrace;
+    if (!isFollowUpDeliveryConfirmed(grace, message)) return false;
+    this.followUpDeliveryGrace = null;
+    if (this.followUpDeliveryTimer) clearTimeout(this.followUpDeliveryTimer);
+    this.followUpDeliveryTimer = null;
+    const ids = new Set(grace!.ids);
+    const live = grace!.items;
     const removed = this.commitFollowUpQueue(
-      this.followUpQueue.filter((item) => !delivered.has(item.id)),
-      "deliver",
+      this.followUpQueue.filter((item) => !ids.has(item.id)),
+      "deliver-confirm",
     );
-    // 已受理就回收模型副本（内联字节已在 JSONL 里）；队列删除未落盘时条目仍是
-    // claimed，discardDeliveredModelMedia 的「仍被引用」判定会放过这批文件。
-    if (removed) this.discardDeliveredModelMedia(deliveredMedia);
+    if (removed) this.discardDeliveredModelMedia(followUpItemMedia(live));
     this.emit({
       type: "follow_up_flushed",
       sessionId: this.realSessionId,
-      item: text,
+      item: grace!.text,
       ...this.queueReceiptBase(),
     });
-    if (!removed) {
-      // 已送达但删除没落盘：条目保持 claimed（不会自动重投），重启后转 unknown。
-      // 绝不标成 waiting——那会把已送达的内容再投一次。
-      this.emit({
-        type: "follow_up_flush_error",
-        errorMessage: "follow-up delivered but queue removal was not persisted",
-        ...this.queueReceiptBase(),
-      });
-    }
     this.emitQueueChanged();
+    return true;
+  }
+
+  /**
+   * 受理后异步失败：把刚出队的条目原样放回队列，并让用户看见这条没送出去。
+   *
+   * 宁可重投一次也不丢内容 —— 队列的删除是「已受理」时做的，而 SDK 的失败可能
+   * 晚一步才到（2026-10-08 复现：排队消息在 run 结束后消失，JSONL 里从没出现过）。
+   */
+  private restoreFollowUpDeliveryAfterFailure(message: unknown): void {
+    const grace = this.followUpDeliveryGrace;
+    if (!grace) return;
+    // 只处理这一批：正文对不上说明是另一轮 prompt 的失败
+    if (!isFollowUpDeliveryConfirmed(grace, message)) return;
+    // 太久了就不再回填：可能其实已经送达，回填会变成重复投递
+    if (Date.now() - grace.at > FOLLOW_UP_DELIVERY_GRACE_MS) {
+      this.followUpDeliveryGrace = null;
+      return;
+    }
+    this.followUpDeliveryGrace = null;
+    if (this.followUpDeliveryTimer) clearTimeout(this.followUpDeliveryTimer);
+    this.followUpDeliveryTimer = null;
+    const ids = new Set(grace.ids);
+    const rest = this.followUpQueue.filter((item) => !ids.has(item.id));
+    const ok = this.commitFollowUpQueue([...rest, ...grace.items], "restore-after-failure");
+    this.emit({
+      type: "follow_up_flush_error",
+      errorMessage: "follow-up delivery failed after the queue was cleared; the message was put back in the queue",
+      ...this.queueReceiptBase(),
+    });
+    if (ok) this.emitQueueChanged();
+    this.resetIdleTimer();
   }
 
   private abortFollowUpFlush(): void {
@@ -2294,6 +2377,9 @@ export class SdkSessionHost {
         const disposeAfterSettle =
           event.type === "agent_settled"
           && !this.flushingFollowUp
+          // 排队投递「已受理但还没确认送达」时必须活着：此刻销毁 runtime，
+          // 那条 prompt 就会以 "SDK session is not alive" 结束（2026-10-08 实测丢消息）。
+          && !this.followUpDeliveryGrace
           && (!this.hasWaitingFollowUp() || this.isFollowUpHeld())
           && !this.hasActiveExternalWork();
         this.resetIdleTimer();
@@ -2321,8 +2407,11 @@ export class SdkSessionHost {
       case "message_end": {
         // user 消息确认：SDK 在订阅者回调返回后才执行 sessionManager.appendMessage，
         // 延后一帧再 materialize，确保 header+user 一同落盘（避免列表只见空会话/消失）。
-        const msg = (event as { message?: { role?: string } }).message;
+        const msg = (event as { message?: { role?: string; content?: unknown } }).message;
         if (msg?.role === "user") {
+          // 排队投递的送达证据：这一条落盘了，才把队列里的认领条目真正出队。
+          this.confirmFollowUpDelivery(messageTextOf(msg.content));
+
           // 注意：队列推进**不在这里**。
           // 旧实现的删除动作本就在 prompt 受理时就完成了，message_end 的「确认」
           // 反而靠游标推进误删下一条（同文本两条时更糟）；紧跟在受理后的再次
@@ -3480,6 +3569,9 @@ export class SdkSessionHost {
                 clearIdlePrompt();
               })
               .catch((error) => {
+                // 受理之后才失败的这一类（SDK session 已被回收 → "SDK session is not alive"）：
+                // 条目已经按「已受理」出队了，这里必须把它放回队列，否则排队消息静默消失。
+                this.restoreFollowUpDeliveryAfterFailure(parsed.message);
                 if (this.lastStopReason !== "aborted") this.lastStopReason = "error";
                 this.setFollowUpHeld(true);
                 clearIdlePrompt();
