@@ -480,6 +480,17 @@ const APP_EVENTS_WAKE_RETRY_MAX = 6;
  */
 const SESSION_LOCK_PROBE_MS = 2_000;
 const BASH_STATE_RECONCILE_MS = 1_000;
+/** 取时间线最后一个非空 entryId：用来判断这次重拉有没有把尾部推进。 */
+function lastEntryIdOfSlot(snapshot: { entryIds?: readonly string[] } | null | undefined): string | null {
+  const ids = snapshot?.entryIds;
+  if (!ids || ids.length === 0) return null;
+  for (let i = ids.length - 1; i >= 0; i -= 1) {
+    const id = ids[i];
+    if (id) return id;
+  }
+  return null;
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -497,6 +508,15 @@ type SteerOptimisticMessage = AgentMessage;
  * 而不是无限空白。
  */
 const DETAIL_LOAD_TIMEOUT_MS = 12_000;
+/**
+ * 回前台那次「重拉尾页」没推进尾条时的补跑等待。
+ *
+ * 为什么要补跑：这次重拉是「后台期间新消息」的唯一补齐入口，而它可能什么都没补到 ——
+ * hydrate 在有 live 事件之后到达会被判 stale 整份丢弃，磁盘页也可能刚好早于最后一笔 append
+ * （页比时间线旧）。两种情况都不报错、也没有任何提示，界面就永远停在旧内容，
+ * 用户看到的就是「后台跑完切回来不刷新、手动刷新才正常」。
+ */
+const TAB_RETURN_RELOAD_RETRY_MS = 800;
 const DETAIL_LOAD_MAX_RETRIES = 2;
 const DETAIL_LOAD_RETRY_DELAY_MS = 1_500;
 /**
@@ -1341,6 +1361,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const res = await loadWithBoundedRetry({
         url: `/api/sessions/${encodeURIComponent(sid)}?${params}`,
         signal,
+        // 实测这个响应的响应头里没有 Cache-Control，同源的锁/状态探针都显式 no-store 了。
+        // 回前台那次重拉要是吃到缓存，就会「拉了个和上次一样的结果」而看起来没刷新。
+        cache: "no-store",
         timeoutMs: DETAIL_LOAD_TIMEOUT_MS,
         maxRetries: DETAIL_LOAD_MAX_RETRIES,
         retryDelayMs: DETAIL_LOAD_RETRY_DELAY_MS,
@@ -2815,7 +2838,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 无论是否 running 都重拉：空闲会话也可能在后台跑完（本 slot 未感知）。
     // includeState：漏掉的事件（尤其是扩展提问、custom 面板）只能靠状态快照补回。
     // 本进程不知道那一轮在跑时 reconcile 会直接返回，所以必须走状态这条路。
-    void loadSession(sid, false, true);
+    //
+    // 这一次是唯一的内容补齐入口，所以要看结果：尾条没推进就再拉一次（见常量注释）。
+    // 正常情况下尾条会推进 → 零额外请求；异常路径最多多一次 GET。
+    const tailBefore = lastEntryIdOfSlot(registry.getSnapshot(sid));
+    await loadSession(sid, false, true);
+    if (sessionIdRef.current !== sid) return;
+    if (lastEntryIdOfSlot(registry.getSnapshot(sid)) === tailBefore) {
+      await delay(TAB_RETURN_RELOAD_RETRY_MS);
+      if (sessionIdRef.current === sid) await loadSession(sid, false, true);
+    }
     // 隐藏期间发生过主题切换（那时刻意没拉）：这里**按会话**补上换色。上面那次重拉只覆盖
     // 当前会话的尾页，已 prepend 的更早页仍要按 entryId 换；隐藏期间切走过的会话也要补
     // （所以待办是集合，不是「当前会话」一个布尔）。
@@ -2991,12 +3023,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // bfcache 恢复（#91）：pagehide 已把本页的长期连接让出去（不关的话旧文档会占着同源
     // 6 条连接，把新文档的普通请求饿住），文档回来必须重连 + 对账 —— 复用同一条激活路径。
     // 与 #86 的区别：那条管「文档还在跑但切后台」，这条管「文档走了又回来」。
+    // 页面生命周期 resume（冻结恢复）：真机上存在「只发 resume、可见性还是 hidden」的组合，
+    // 只认 visibilitychange 会整条漏掉。这里按 pageshow 同款形状处理：如实上报可见性再走激活路径
+    // （可见性没变时 syncOnTabReturn 自己会按现状决定重连，不会强留后台流）。
+    const onResume = () => {
+      registry.setTabVisibility(document.visibilityState === "visible");
+      recovery.notify();
+    };
+    document.addEventListener("resume", onResume);
     const unsubscribeRestore = subscribeLiveStreamRestore(() => {
       registry.setTabVisibility(document.visibilityState === "visible");
       recovery.notify();
     });
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
+      document.removeEventListener("resume", onResume);
       window.removeEventListener("focus", onActivate);
       unsubscribeRestore();
       recovery.dispose();

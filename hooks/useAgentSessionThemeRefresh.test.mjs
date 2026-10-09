@@ -91,6 +91,14 @@ function makeEnv(options = {}) {
     THEME_REFRESH_MAX_HOPS: 4,
     THEME_REFRESH_MAX_PENDING: 8,
     isAbortError: () => false,
+    // syncOnTabReturn 现在会看「尾条有没有推进」，没推进就补跑一次 —— 注入同值替身，
+    // 并让补跑等待瞬间返回（这几条用例验的是换色待办，不关心那次补跑）。
+    TAB_RETURN_RELOAD_RETRY_MS: 800,
+    delay: async () => {},
+    lastEntryIdOfSlot: (snapshot) => {
+      const ids = snapshot?.entryIds;
+      return ids && ids.length > 0 ? ids[ids.length - 1] : null;
+    },
     getOrCreateBrowserSessionRuntimeRegistry: () => ({
       // 默认不给 entryIds（退回到 entryIdsRef）；snapshotEntryIds/snapshotMissing 用来验「按 slot 取数」。
       getSnapshot: (id) => {

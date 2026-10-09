@@ -51,6 +51,8 @@ export type LoadWithRetryOptions = {
   /** 第 n 次重试前等待 `retryDelayMs * n`。 */
   retryDelayMs: number;
   fetchImpl?: typeof fetch;
+  /** 透传给 fetch 的缓存策略（详情 GET 用 no-store，避免回前台重拉吃到缓存）。 */
+  cache?: RequestCache;
   /** 注入定时器（测试用）；默认全局 setTimeout。 */
   schedule?: (fn: () => void, ms: number) => unknown;
   /** 每次失败后回调（用于日志/埋点）。 */
@@ -115,7 +117,10 @@ export async function loadWithBoundedRetry(options: LoadWithRetryOptions): Promi
     if (options.signal.aborted) throw abortError();
     const combined = combineSignals(options.signal, options.timeoutMs);
     try {
-      const response = await doFetch(options.url, { signal: combined.signal });
+      const response = await doFetch(options.url, {
+        signal: combined.signal,
+        ...(options.cache ? { cache: options.cache } : {}),
+      });
       if (response.ok) return response;
       if (response.status === 404 || !isRetryableStatus(response.status)) return response;
       lastFailure = { kind: "http", status: response.status, detail: `HTTP ${response.status}` };
