@@ -16,6 +16,9 @@ import {
   createAgentSessionFromServices,
   createAgentSessionRuntime,
   createAgentSessionServices,
+  createCodemodeExtension,
+  createMcpExtension,
+  createToolSearchExtension,
   renderDiff,
   SessionManager,
   Theme as SdkTheme,
@@ -23,6 +26,7 @@ import {
   type AgentSession,
   type AgentSessionRuntime,
   type AgentSessionServices,
+  type InlineExtension,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { mergeWidgetFrame, projectWidgetEntries } from "./extension-widget-state";
@@ -495,6 +499,16 @@ export function payloadCharCount(value: unknown, stopAt = RENDER_MAX_TOTAL_CHARS
  * 把一帧 partial 的原始输出换成增量形式：能增量就**不带** `partialResult`（省下那一大段），
  * 只带 `partialResultDelta`；不能增量（首帧 / 内容被重写）就照旧发整份。
  */
+/** 读一个工具的 exposure；取不到就按 direct（SDK 的默认值）。 */
+function readToolExposure(session: AgentSession, name: string): string {
+  try {
+    const def = session.getToolDefinition(name) as { exposure?: unknown } | undefined;
+    return typeof def?.exposure === "string" && def.exposure ? def.exposure : "direct";
+  } catch {
+    return "direct";
+  }
+}
+
 function withPartialTextFrame(
   event: SdkAgentEvent,
   frame: { cursor: PartialTextCursor | null; delta?: { from: number; text: string } },
@@ -518,6 +532,27 @@ function messageTextOf(content: unknown): string {
     .filter((text) => text.length > 0)
     .join("\n");
 }
+
+/**
+ * 内核内置扩展（codemode / tool-search / mcp）：以**可替换形态**参与加载。
+ *
+ * 为什么必须是对象形态 + `replaceable: true`：纯函数形态下，插件与内置会**同时加载**
+ * （冲突只记诊断、两个都留着），而内置 MCP 会在 session_start 去读 mcp.json 连服务器 ——
+ * 那就是双重连接。可替换形态下，谁先注册了同名命令/工具（例如 pi-mcp-adapter 注册的 `/mcp`），
+ * 内置那个就整个被略过，factory 都不跑。
+ *
+ * 由此得到的现状：能力接上了（内置在、可由 settings 关、可被我们投影），但 MCP 流量仍走插件 ——
+ * 用户口径就是「实现功能，实际还是用插件的 MCP」。
+ *
+ * 注意 `tools` allowlist：一旦传了非空名单且没点名 `codemode` / `tool_search`，
+ * 这两个工具会被 SDK 从注册表里彻底移除（连同 MCP 工具的可达性）。现在的调用方都不传
+ * toolNames（只有 docs 下的复现脚本传空数组 = 全关），所以走的是安全路径；新增调用方时别踩。
+ */
+export const PIDANCE_BUILTIN_EXTENSIONS: InlineExtension[] = [
+  { name: "codemode", factory: createCodemodeExtension(), replaceable: true },
+  { name: "tool-search", factory: createToolSearchExtension(), replaceable: true },
+  { name: "mcp", factory: createMcpExtension(), replaceable: true },
+];
 
 export class SdkSessionHost {
   private listeners: SdkEventListener[] = [];
@@ -3107,7 +3142,7 @@ export class SdkSessionHost {
             // 说明固定写入并声明“工具可用时”；工具是否启用交给 SDK 的
             // tools/noTools/set_tools 语义，避免 allow-list 会话无法后续启用。
             appendSystemPromptOverride: appendPidanceFileDeliveryPrompt,
-            extensionFactories: [(pi) => pi.registerTool(sendFileTool)],
+            extensionFactories: [(pi) => pi.registerTool(sendFileTool), ...PIDANCE_BUILTIN_EXTENSIONS],
           },
         });
         // 省略的 xhigh/max 补恒等，让 settings 默认 xhigh 在建 session 时不被 Pi 钳成 high
@@ -3849,6 +3884,9 @@ export class SdkSessionHost {
             name: t.name,
             description: t.description ?? "",
             active: active.has(t.name),
+            // SDK 1.1.0 的工具暴露面（direct / model-only / codemode 等）：TUI 侧由权限扩展读取，
+            // 我们以前整条丢掉，前端就没法说明「这个工具为什么不在模型眼前」。
+            exposure: readToolExposure(session, t.name),
           })),
         };
       }

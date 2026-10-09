@@ -92,8 +92,20 @@ vs **得到 8 项**（`structuredContent`/`isError`/`annotations` 真正进工�
 | `mcp_servers_change` | 显式忽略：MCP 走 `pi-mcp-adapter`，状态由适配器自己的命令与工具呈现 |
 | `provider_stream_event` | 显式忽略：官方定位是调试观察事件，TUI 默认也不显示 |
 | 虚拟模型（`pi.registerVirtualModel()`） | 显式忽略，且有已知偏差：我们的「当前模型」是最后写者胜（`model_change` 与助手消息共用槽位），虚拟模型场景下会显示**实际派发的物理模型**；本机没有扩展注册虚拟模型，真用到时再补「选中 → 实际」 |
-| codemode / `tool_search` | 未接：与内置 MCP 同批，留到需要时（现在 MCP 走适配器） |
+| codemode / `tool_search` / `mcp`（内置） | **已接**：以可替换形态进 `extensionFactories`（`PIDANCE_BUILTIN_EXTENSIONS`）。插件注册同名命令时内置整个被略过 —— 所以 MCP 流量仍走 `pi-mcp-adapter`；codemode/tool_search 注册但不激活（`defaultTools` 没点名它们，默认零提示词开销），要用时点 `set_tools` 或 `defaultTools: ["+codemode"]`。实测：`get_tools` 24 项含 `codemode`/`tool_search`，`mcp__*` 与资源工具一个都没有 |
 | MCP Apps（`ui://`、`profile=mcp-app`） | 未接：内核不渲染；适配器自己渲染，我们按通用扩展 UI 投影 |
+| 工具的 `exposure` | 已投影：`get_tools` 多回一个 `exposure`（`direct` / `model-only` / …），以前整条丢掉 —— 前端解释不了「这工具为什么不在模型眼前」 |
+
+## 4.8 内置扩展接入实测（2026-10-09）
+
+子 agent 盘查结论与落地（报告全文 `/tmp/pi-upgrade/builtin-ext-plan.md`，25.9k）：
+
+- **形态**：`{ name, factory, replaceable: true }`，三项（codemode / tool-search / mcp）。纯函数形态会让内置与插件同时加载 → 内置 MCP 的 `session_start` 会去连同一批服务器 = 双重连接，所以 `replaceable` 是硬要求。
+- **顶掉机制**：`omitReplacedExtensions` 收走「非 replaceable 扩展登记的 tool/command/flag 名」，再把同名的可替换扩展整个丢掉。适配器注册 `/mcp` ⇒ 内置 MCP 不加载。单测用真的 `DefaultResourceLoader` + 假适配器证明了两个方向（有适配器 → 内置 MCP 不在场；没适配器 → 在场）。
+- **不要传 `tools` allowlist**：非空名单且没点名 `codemode`/`tool_search` 时，这两个工具会被 SDK 从注册表**彻底移除**，连带 MCP 工具不可达（`_isAllowedTool` 只给 MCP 工具留了后门）。当前产品路径不传 `toolNames`（只有 docs 下的复现脚本传空数组 = 全关），所以走的是安全路径。
+- **代价**：codemode 只有真跑脚本时才起 worker + 加载 `quickjs-wasi`；tool-search 是进程内 BM25；内置 MCP 被顶掉后连 `mcp.json` 都不读。无新增监听端口、无新增原生依赖、`next.config.ts` 不用动。
+- **实测（31416）**：`get_tools` 24 项，含 `codemode` / `tool_search`，`exposure` 字段在；`mcp__*` 与 MCP 资源工具零个（内置 MCP 确实没接流量）；`/mcp` 命令仍在（适配器占着）；扩展加载错误 0；真会话 bash 卡片正常。
+- **刻意不做**：内置 `/mcp` 管理面板与 OAuth 走 `ctx.ui.custom`（适配器已提供；且要真机 OAuth 回调验证）；`mcp_servers_change` 实时状态面板（它不是 `AgentSessionEvent`，要自研扩展才能拿到）；`llama.cpp` 内置扩展（与本任务无关，且非 replaceable）；任何写用户 `settings.json` / `mcp.json` 的开关。
 
 ## 5. 建议的推进顺序
 
