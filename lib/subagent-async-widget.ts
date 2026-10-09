@@ -251,6 +251,25 @@ export interface SubagentAsyncHeading {
   byteLimitExceeded: boolean;
 }
 
+/**
+ * 快照签名：只取 run / 子节点的 id + 状态。
+ *
+ * 用途是「异步面板一变就让侧栏与谱系补一次数据」。**不能带时间戳类字段**
+ * （updatedAt/generatedAt 每秒都在动），否则会变成每秒一次的刷新风暴。
+ */
+export function subagentAsyncSignature(snapshot: SubagentAsyncSnapshot | null | undefined): string {
+  if (!snapshot) return "";
+  const parts: string[] = [];
+  const walk = (nodes: readonly SubagentAsyncNode[] | undefined, depth: number): void => {
+    for (const node of nodes ?? []) {
+      parts.push(`${depth}:${node.id}:${node.state}`);
+      walk(node.children, depth + 1);
+    }
+  };
+  walk(snapshot.runs, 0);
+  return parts.join("|");
+}
+
 export function subagentAsyncHeading(snapshot: SubagentAsyncSnapshot): SubagentAsyncHeading {
   const summary = summarizeSubagentAsyncSnapshot(snapshot);
   const runs = Array.isArray(snapshot.runs) ? snapshot.runs : [];

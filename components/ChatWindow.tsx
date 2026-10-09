@@ -68,7 +68,8 @@ const NO_WRITTEN_FILES: string[] = [];
 import { ExtensionDialog } from "./ExtensionDialog";
 import { ExtensionCustomPanel } from "./ExtensionCustomPanel";
 import { SubagentAsyncWidget } from "./SubagentAsyncWidget";
-import { ASYNC_STATUS_SNAPSHOT_PREFIX, parseSubagentAsyncSnapshot, rewriteFleetStatusLines, subagentAsyncHeading } from "@/lib/subagent-async-widget";
+import { ASYNC_STATUS_SNAPSHOT_PREFIX, parseSubagentAsyncSnapshot, rewriteFleetStatusLines, subagentAsyncHeading, subagentAsyncSignature } from "@/lib/subagent-async-widget";
+import { refreshSubagentActivity } from "@/hooks/useSubagentActivity";
 import { NewSessionGuide } from "./NewSessionGuide";
 import { TodoPanel } from "./TodoPanel";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
@@ -1052,6 +1053,29 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   );
 
   const aboveEditorWidgets = extensionWidgets.filter((widget) => widget.placement !== "belowEditor");
+
+  /**
+   * 子代理异步面板一变，就补一次 subagent 运行数据。
+   *
+   * 面板本体走扩展的实时快照（每秒级），而侧栏 running 点、顶栏谱系下拉用的是
+   * `/api/subagent-runs` 的 30s 轮询 —— 中间最多 30 秒两边对不上（用户看到的就是
+   * 「面板里明明在跑，下拉里却没有」）。这里用面板自己的快照当信号：只认 run/子节点的
+   * id + 状态变化（时间戳类字段排除），所以一个 run 起止各触发一次，不会退化成轮询。
+   */
+  const asyncWidgetSignature = useMemo(
+    () =>
+      extensionWidgets
+        .filter((widget) =>
+          widget.lines.some((line) => typeof line === "string" && line.startsWith(ASYNC_STATUS_SNAPSHOT_PREFIX)),
+        )
+        .map((widget) => subagentAsyncSignature(parseSubagentAsyncSnapshot(widget.lines)))
+        .join("\n"),
+    [extensionWidgets],
+  );
+  useEffect(() => {
+    if (!asyncWidgetSignature) return;
+    refreshSubagentActivity();
+  }, [asyncWidgetSignature]);
   const belowEditorWidgets = extensionWidgets.filter((widget) => widget.placement === "belowEditor");
   const persistedActivities = messages.flatMap((message, index) => {
     if (message.role !== "custom" || message.customType !== "pidance.activity" || !message.details) return [];

@@ -409,3 +409,12 @@ test("widget 鼠标：长按映射右键且吃掉补发的 click", () => {
   assert.match(body, /WIDGET_LONG_PRESS_MS/, "长按计时用共享常量");
   assert.match(body, /isScrollGesture\(dx, dy\)/, "滑动必须取消长按（滚动优先）");
 });
+
+test("子代理异步面板变化要即时补一次 subagent 运行数据（否则面板在跑、下拉里没有）", () => {
+  const source = readFileSync(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
+  // 面板走扩展每秒级快照，侧栏/谱系走 /api/subagent-runs 的 30s 轮询，中间要对齐
+  assert.match(source, /import \{ refreshSubagentActivity \} from "@\/hooks\/useSubagentActivity";/);
+  assert.match(source, /const asyncWidgetSignature = useMemo\(/);
+  assert.match(source, /subagentAsyncSignature\(parseSubagentAsyncSnapshot\(widget\.lines\)\)/);
+  assert.match(source, /if \(!asyncWidgetSignature\) return;\s*\n\s*refreshSubagentActivity\(\);/);
+});
