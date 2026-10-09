@@ -3336,6 +3336,9 @@ export class SdkSessionHost {
     // 一次调用同时拿到清单与诊断（`getShortcuts` 每次进来都会清空诊断列表）。
     const shortcutState = this.resolveExtensionShortcutState();
     const model = session.model;
+    // 虚拟模型路由（SDK 1.1.0）：用户选中的可能是虚拟模型，实际派发的是另一个物理模型。
+    // TUI 页脚会把它显示成「选中 → 实际」；没有虚拟选择时这个读数是 undefined。
+    const routed = session.routedModel;
     const projected: Record<string, unknown> = {
       stateSources: {
         rpcGetState: false,
@@ -3362,6 +3365,14 @@ export class SdkSessionHost {
       systemPrompt: session.systemPrompt ?? "",
       model: model
         ? { id: model.id, provider: model.provider, modelId: model.id }
+        : undefined,
+      // 与 model（选中）并列：实际派发的物理模型与档位。两者不同才是「路由发生了」。
+      routedModel: routed
+        ? {
+            id: routed.model.id,
+            provider: routed.model.provider,
+            ...(routed.thinkingLevel ? { thinkingLevel: routed.thinkingLevel } : {}),
+          }
         : undefined,
       messageCount: session.messages.length,
       pendingMessageCount: session.pendingMessageCount,
