@@ -176,9 +176,8 @@ export function ExtensionPanelChrome({
         </div>
         {extraHeader ? <div className="extension-panel-header-actions">{extraHeader}</div> : null}
       </header>
-      {/* data-extension-panel-body：尺寸上报选宿主用（面板占屏幕时插件看到的「终端」就是它） */}
       {expanded ? (
-        <div className="extension-panel-body" data-extension-panel-body="true">
+        <div className="extension-panel-body">
           {children}
         </div>
       ) : null}

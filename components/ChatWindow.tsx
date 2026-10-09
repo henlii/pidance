@@ -579,31 +579,28 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
   // 这个值也是 effect 的依赖——换会话时它必须真的变，否则 effect 不重跑，
   // 新会话的 host 就不会收到尺寸（columns/rows 会停在默认值，插件按默认值裁切）。
   /**
-   * 上报尺寸的宿主：平时是会话滚动区，**插件面板占屏幕时换成面板正文**。
+   * 上报尺寸的宿主：平时是会话滚动区，**插件面板占屏幕时换成整个会话列**。
    *
-   * 面板激活后会话区被面板挤成一条缝甚至 0 高，而插件是拿上报的 rows 当终端高度排版/裁切的
-   * （rpiv-ask-user 的 dialog-builder 就按 `tui.terminal.rows` 裁可见行、超了才滚动）。
-   * 继续按会话区上报，拖大面板只会让插件重排成更少的行 —— 用户看到的就是「面板变大、
-   * 内容反而变小」。面板正文和终端行同源（同一套等宽字体、同一个盒子），量出来就是插件
-   * 真正能用的行数与列数。
+   * 两个坑都在这里：
+   * 1）不能用会话滚动区：面板激活后面板会把会话区挤成一条缝甚至 0 高，而插件是拿上报的 rows
+   *    当终端高度排版/裁切的（rpiv-ask-user 的 dialog-builder 按 `tui.terminal.rows` 裁可见行）。
+   *    按会话区上报，就等于「面板越大，插件看到的终端越小」。
+   * 2）**也不能用面板正文**：面板高度是内容撑出来的（可拖动、有上限但自适应），拿它当终端尺寸
+   *    就形成「内容 → 高度 → 行数 → 内容」的回环 —— 真机上表现为面板一出现高度就持续往下缩，
+   *    最后问题正文只剩一行。TUI 里终端尺寸也不随内容变化。
+   * 会话列在面板展开时高度不变（面板是它里面的一个块），所以它才是那个稳定盒子。
    */
   const renderSizeHostRef = useRef<HTMLElement | null>(null);
   useLayoutEffect(() => {
-    const root = scrollContainerRef.current?.closest("[data-chat-root]") ?? null;
-    const panelBody =
-      panelActive && panelExpanded
-        ? root?.querySelector<HTMLElement>("[data-extension-panel-body]") ?? null
-        : null;
-    renderSizeHostRef.current = panelBody ?? scrollContainerRef.current;
-  }, [panelActive, panelExpanded, extensionCustomUi?.id, extensionDialog]);
+    const root = scrollContainerRef.current?.closest<HTMLElement>("[data-chat-root]") ?? null;
+    renderSizeHostRef.current = (panelActive ? root : null) ?? scrollContainerRef.current;
+  }, [panelActive, extensionCustomUi?.id, extensionDialog]);
   useRenderSize({
     sessionId: session?.id ?? sessionIdRef.current,
     containerRef: renderSizeHostRef,
     enabled: !isReadOnly,
-    // 收起态没有正文节点，会退回会话区；展开/换面板都要重新挂一次观察者
-    hostKey: panelActive
-      ? `panel:${extensionCustomUi?.id ?? extensionDialog?.id ?? "?"}:${panelExpanded ? "open" : "collapsed"}`
-      : "chat",
+    // 换面板/收起都要重新挂一次观察者（宿主元素可能换、也可能刚从 null 变成真节点）
+    hostKey: panelActive ? "panel" : "chat",
   });
   /**
    * 会话全部用户消息大纲（左侧导航条「列出所有提问」）。
