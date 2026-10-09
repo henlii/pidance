@@ -8,6 +8,7 @@ import type { BranchActions } from "@/lib/branch-bookmarks";
 import { parseAnsiLine } from "@/lib/ansi";
 import { RenderedLineBlocks } from "./RenderedLines";
 import { planOptionClick, verifyOptionCursor } from "@/lib/extension-panel-view";
+import type { BuiltinSlashUiAction } from "@/lib/builtin-slash-actions";
 import { EXTENSION_KEY_BAR_HEIGHT, ExtensionKeyBar } from "./ExtensionKeyBar";
 import {
   resolveExtensionKeyBarChannel,
@@ -110,6 +111,8 @@ interface Props {
   onSystemPromptChange?: (prompt: string | null) => void;
   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
   onSessionStatsPanelOpen?: () => void;
+  /** 内置斜杠命令里的界面动作（设置页 / 新建 / 切换会话 / 分支树）：输入框够不着这些界面，透传给 AppShell。 */
+  onUiAction?: (action: BuiltinSlashUiAction) => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
   /** 最近一轮 run 的延迟/吞吐，供顶栏显示。 */
   onTurnMetricsChange?: (metrics: TurnMetrics) => void;
@@ -158,7 +161,7 @@ function planItemStableKey(
 /** 「切回原样」按浏览器记忆（与折叠状态同一套做法）。 */
 const RAWPANEL_MODE_KEY = "pidance.panelRawMode.v1";
 
-export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, projectRoots, onGuideTargetChange, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onTurnMetricsChange, onOpenFile, onReferenceFile, entryJumpRequest, onEntryJumpHandled, footerCollapsed, onFooterToggle }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDefaultCwd, projectRoots, onGuideTargetChange, onAgentEnd, onAgentRunningChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onUiAction, onContextUsageChange, onTurnMetricsChange, onOpenFile, onReferenceFile, entryJumpRequest, onEntryJumpHandled, footerCollapsed, onFooterToggle }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -1004,6 +1007,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
       onLoadCompletionSuggestions={loadCompletionSuggestions}
       onApplyCompletionSuggestion={applyCompletionSuggestion}
       onBuiltinCommand={handleBuiltinSlashCommand}
+      onUiAction={onUiAction}
       soundEnabled={soundEnabled}
       onSoundToggle={onSoundToggle}
       footerCollapsed={footerCollapsed}

@@ -9,6 +9,16 @@ import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft
 import { getServerPref, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import { listThinkingDisplayLevel, modelClickThinkingLevel } from "@/lib/thinking-level-policy";
 import { thinkingLevelsFromMap } from "@/lib/thinking-levels";
+import {
+  BUILTIN_SLASH_PALETTE,
+  resolveBuiltinSlashCommand,
+  resolveModelArgument,
+  resolveThinkingLevelArgument,
+  type BuiltinSlashUiAction,
+} from "@/lib/builtin-slash-actions";
+import { getNoticeQueueStore } from "@/lib/notice-queue-store";
+import { buildSessionExportHtmlHref } from "./session-export-links";
+import type { TranslationKey } from "@/lib/locales/en";
 import { hydrateDraftFromServer, shouldPersistComposerDraft } from "@/lib/draft-store";
 import { ensureServerPrefsLoaded } from "@/lib/server-preferences";
 import {
@@ -171,6 +181,11 @@ interface Props {
     prefix: string;
   }) => Promise<{ lines: string[]; cursorLine: number; cursorCol: number } | null>;
   onBuiltinCommand?: (message: string) => Promise<BuiltinSlashCommandResult>;
+  /**
+   * 内置斜杠命令里的**界面动作**（打开设置页 / 新建会话 / 切换会话 / 分支树）。
+   * 由 AppShell 实现 —— 输入框这层够不着那些界面。缺省时降级成一条可见提示，不静默吞掉。
+   */
+  onUiAction?: (action: BuiltinSlashUiAction) => void;
   soundEnabled?: boolean;
   onSoundToggle?: () => void;
   onAudioUnlock?: () => void;
@@ -234,13 +249,17 @@ type SlashCommandPaletteItem = SlashCommandInfo | {
 
 type SlashCommandSource = SlashCommandPaletteItem["source"];
 
-const BUILTIN_SLASH_COMMANDS: SlashCommandPaletteItem[] = [
-  { name: "compact", description: "input_compactCommandDescription", source: "builtin" },
-  { name: "reload", description: "input_reloadCommandDescription", source: "builtin" },
-  { name: "name", description: "input_nameCommandDescription", source: "builtin" },
-  { name: "session", description: "input_sessionCommandDescription", source: "builtin" },
-  { name: "copy", description: "input_copyCommandDescription", source: "builtin" },
-];
+/**
+ * 内置命令面板：名单与描述键由 lib/builtin-slash-actions.ts 给出（单一来源，测试钉住），
+ * 描述在这里翻成人话 —— 面板以前直接渲染键名，用户看到的是 input_xxxCommandDescription。
+ */
+function builtinSlashCommands(t: (key: TranslationKey) => string): SlashCommandPaletteItem[] {
+  return BUILTIN_SLASH_PALETTE.map((entry) => ({
+    name: entry.name,
+    description: t(entry.descriptionKey as TranslationKey),
+    source: "builtin" as const,
+  }));
+}
 
 const SLASH_SOURCES: SlashCommandSource[] = ["builtin", "extension", "prompt", "skill"];
 
@@ -436,6 +455,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   slashCommands, slashCommandsLoading, onLoadSlashCommands, onLoadCommandArgumentCompletions,
   autocompleteProviderCount, autocompleteTriggerCharacters, onLoadCompletionSuggestions, onApplyCompletionSuggestion,
   onBuiltinCommand,
+  onUiAction,
   onAudioUnlock,
   onPromptWithStreamingBehavior,
   footerCollapsed, onFooterToggle,
@@ -1172,10 +1192,120 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const hasFailedAttachments = pendingAttachments.some((item) => item.status === "failed");
   const hasAttachments = attachedImages.length > 0 || hasReadyUploads;
 
+  /**
+   * 输入框侧的可见提示。
+   *
+   * 命令的反馈本来走宿主 addNotice（hooks/useAgentSession），但那几条 Web 落点命令**不经宿主**
+   * —— 由界面自己完成，所以这里直接用同一个每会话通知队列（同一套展示、同一条队列）。
+   */
+  const notifyLocal = useCallback((message: string, type: "info" | "success" | "warning" | "error") => {
+    getNoticeQueueStore().enqueue({ sessionId: sessionId ?? null, message, type });
+  }, [sessionId]);
+
+  /**
+   * 内置斜杠命令里的「Web 落点」类（模型 / 思考 / 设置 / 新建 / 恢复 / 分支树 / 导出）。
+   *
+   * 返回值：true = 已被这里处理掉（不要继续走发送）。这些命令不经过模型、也不进队列，
+   * 所以运行中同样可用（与 TUI 一致）。名字认不出来或属于被排除的终端命令时返回 false，
+   * 交给下面的既有路径（宿主扩展命令 / 普通发送）。
+   */
+  const runUiSlashCommand = useCallback((text: string): boolean => {
+    const match = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
+    if (!match) return false;
+    const name = match[1].toLowerCase();
+    const args = (match[2] ?? "").trim();
+
+    // 宿主/扩展提供的同名命令优先：扩展可以注册与内置重名的命令（例如 /share）。
+    if ((slashCommands ?? []).some((command) => command.name.toLowerCase() === name)) return false;
+
+    const resolved = resolveBuiltinSlashCommand(name);
+    if (resolved.kind === "excluded") {
+      // 终端命令：以前会被当成普通消息发给模型。这里明确说清楚，而不是静默丢。
+      notifyLocal(t("input_commandUnsupported", { command: name }) + " —— " + resolved.reason, "warning");
+      return true;
+    }
+    if (resolved.kind !== "ui") return false;
+
+    switch (resolved.action) {
+      case "openModelSelector":
+      case "openSettings":
+      case "newSession":
+      case "resumeSession":
+      case "openTree": {
+        // /model、/thinking 带参数时直接生效（与 TUI 一致）；参数非法就让选择器兜底。
+        if (resolved.action === "openModelSelector" && args) {
+          const level = resolveThinkingLevelArgument(args);
+          const wantsThinking = name === "thinking";
+          if (wantsThinking) {
+            if (!level) {
+              notifyLocal(t("input_thinkingLevelUnknown", { level: args }), "error");
+              return true;
+            }
+            onThinkingLevelChange?.(level);
+            notifyLocal(t("input_thinkingLevelApplied", { level }), "success");
+            return true;
+          }
+          const picked = resolveModelArgument(args, modelList ?? []);
+          if (picked) {
+            setModelDropdownOpen(false);
+            closeDepthMenu();
+            const cached = cachedThinkingLevel(picked.provider, picked.id);
+            // 按既有契约看结果：onModelChange 返回 false 表示「没有真的生效」（运行中门禁等），
+            // 这时必须明说 —— 否则界面上的模型名是乐观值，用户以为切了其实没有。
+            void Promise.resolve(onModelChange?.(picked.provider, picked.id, modelClickThinkingLevel(cached, thinkingFallback)))
+              .then((applied) => {
+                if (applied === false) notifyLocal(t("input_commandFailed"), "error");
+              })
+              .catch((error) => notifyLocal(error instanceof Error ? error.message : String(error), "error"));
+            return true;
+          }
+          notifyLocal(t("input_modelNotFound", { value: args }), "warning");
+        }
+        if (resolved.action === "openModelSelector") {
+          setModelDropdownOpen(true);
+          return true;
+        }
+        if (onUiAction) {
+          onUiAction(resolved.action);
+        } else {
+          // 没有接线（理论上不该发生）：明说，别装成功。
+          notifyLocal(t("input_commandUnsupported", { command: name }) + " —— 界面未接线", "warning");
+        }
+        return true;
+      }
+      case "exportSessionHtml": {
+        if (!sessionId) {
+          notifyLocal(t("input_commandUnsupported", { command: name }), "warning");
+          return true;
+        }
+        // 与侧栏同一套下载方式：原生 <a download>，不 fetch/blob、不把导出读进内存。
+        const link = document.createElement("a");
+        link.href = buildSessionExportHtmlHref(sessionId);
+        link.download = "";
+        link.rel = "noopener";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        return true;
+      }
+      default:
+        return false;
+    }
+  }, [cachedThinkingLevel, closeDepthMenu, modelList, notifyLocal, onModelChange, onThinkingLevelChange, onUiAction, sessionId, slashCommands, t, thinkingFallback]);
+
   const handleSend = useCallback(async () => {
     const base = value.trim();
     if (!base && !attachedImages.length && !hasReadyUploads) return;
     onAudioUnlock?.();
+    // 内置斜杠命令的 Web 落点优先于一切发送路径：不叫模型、不进队列，运行中也能用。
+    // 带附件时不当命令看待（附件+命令没有语义），按普通发送走。
+    if (base.startsWith("/") && !attachedImages.length && !hasReadyUploads && !hasUploading) {
+      if (runUiSlashCommand(base)) {
+        clearInput();
+        inputHistoryRef.current?.push(base);
+        return;
+      }
+    }
     // 运行中（流式）：纯文本点击发送默认以 follow_up 方式入本地队列（Codex 风格，
     // 引导按钮/空回车合并消费）；有附件或非流式走下方正常发送。
     if (isStreaming && !attachedImages.length && !hasReadyUploads && onPromptWithStreamingBehavior) {
@@ -1253,7 +1383,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     }
     inputHistoryRef.current?.push(base);
     sentDraftRef.current = null;
-  }, [value, attachedImages, attachedUploads, hasReadyUploads, hasUploading, hasFailedAttachments, isStreaming, onBuiltinCommand, onPromptWithStreamingBehavior, onSend, clearInput, restoreSentDraft, onAudioUnlock, composeMessageWithUploads, t]);
+  }, [value, attachedImages, attachedUploads, hasReadyUploads, hasUploading, hasFailedAttachments, isStreaming, onBuiltinCommand, onPromptWithStreamingBehavior, onSend, clearInput, restoreSentDraft, onAudioUnlock, composeMessageWithUploads, runUiSlashCommand, t]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -1263,7 +1393,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (slashQuery === null) return [];
     // 运行中（isStreaming）也展示全部内置命令：选择后以 followUp/steer 发送，
     // 由上层排队到本轮结束再执行（与纯文本 follow-up 一致），避免菜单空面板。
-    const commands = [...BUILTIN_SLASH_COMMANDS, ...(slashCommands ?? [])];
+    const commands = [...builtinSlashCommands(t), ...(slashCommands ?? [])];
     return [...commands]
       .filter((command) => {
         const name = command.name.toLowerCase();
@@ -1693,6 +1823,15 @@ type AtMenuItem = CompletionMenuEntry<FileIndexEntry>;
   const sendQueued = useCallback((mode: "steer" | "followup") => {
     const base = value.trim();
     if (!base && !hasReadyUploads && attachedImages.length === 0) return;
+    // 运行中按 Enter 走的是这条路（不走 handleSend）：Web 落点的内置命令同样要先接管，
+    // 否则 /model、/settings 会被当成一条消息排进 follow-up 队列。
+    if (base.startsWith("/") && !attachedImages.length && !hasReadyUploads && !hasUploading) {
+      if (runUiSlashCommand(base)) {
+        clearInput();
+        inputHistoryRef.current?.push(base);
+        return;
+      }
+    }
     if (hasUploading) return;
     // 附件没传完/传失败时不入队：只把正文排进去 = 静默丢图（用户已明确拒绝这种降级）。
     if (hasFailedAttachments) {
@@ -1953,7 +2092,7 @@ type AtMenuItem = CompletionMenuEntry<FileIndexEntry>;
     },
     // argMenuOpen / argItems / argActiveIndex / applyArgCompletion 必须在这里：少了它们，
     // 闭包停留在「候选还没到」的那一帧，Tab/Enter 拦不住 —— Enter 会把没补全的正文直接发出去。
-    [isStreaming, isMobile, streamingEnterDefault, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, argMenuOpen, argItems, argActiveIndex, applyArgCompletion, sendQueued, handleSend, getNextSlashIndex, atMenuVisible, atMenuOpen, atQuery, atMenuItems, atActiveIndex, applyMenuItem, cancelPluginCompletion, queuedMessages, onSendQueueAsSteer, flushQueueAsSteer]
+    [isStreaming, isMobile, streamingEnterDefault, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, argMenuOpen, argItems, argActiveIndex, applyArgCompletion, sendQueued, handleSend, runUiSlashCommand, getNextSlashIndex, atMenuVisible, atMenuOpen, atQuery, atMenuItems, atActiveIndex, applyMenuItem, cancelPluginCompletion, queuedMessages, onSendQueueAsSteer, flushQueueAsSteer]
   );
 
   const handleInput = useCallback((e: React.FormEvent<HTMLTextAreaElement>) => {

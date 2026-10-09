@@ -22,10 +22,11 @@ test("↑/↓ 取回历史：只在浮层没开、光标在首行/末行时接�
   assert.match(source, /node\.setSelectionRange\(len, len\);/);
 });
 
-test("提交成功后记进历史（普通发送 / 运行中入队 / 内置命令三条路都要记）", () => {
+test("提交成功后记进历史（五条路径都要记）", () => {
+  // 普通发送 / 运行中入队 / 内置命令（宿主）/ 界面类内置命令的两条接管点（handleSend 与 sendQueued）
   assert.equal(
     (source.match(/inputHistoryRef\.current\?\.push\(base\);/g) ?? []).length,
-    3,
-    "三条提交路径都要 push，否则排队发出去或走内置命令的内容回溯不到",
+    5,
+    "有提交路径没记历史：排队发出去或走内置命令的内容就回溯不到",
   );
 });

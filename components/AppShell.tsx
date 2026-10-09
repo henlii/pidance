@@ -13,6 +13,7 @@ import { SessionInfoPanel } from "./SessionInfoPanel";
 import { SessionStatsPopover } from "./SessionStatsPopover";
 import { SettingsView } from "./SettingsView";
 import { CommandPalette } from "./CommandPalette";
+import type { BuiltinSlashUiAction } from "@/lib/builtin-slash-actions";
 import type { SettingsPageId } from "./settings-nav";
 import { useDesktopBridge } from "@/hooks/useDesktopBridge";
 import { AboutDialog } from "./AboutDialog";
@@ -1224,6 +1225,33 @@ function AppShellInner() {
     setActiveRightTabId("info");
   }, [applyRightPanelOpen, isMobile]);
 
+  /**
+   * 内置斜杠命令的界面落点（/settings /new /resume /tree）。
+   *
+   * 输入框那层够不着设置页、侧栏与右栏，所以由这里实现；命令本身在
+   * components/ChatInput.tsx 解析（见 lib/builtin-slash-actions.ts 的分类表）。
+   */
+  const handleBuiltinUiAction = useCallback((action: BuiltinSlashUiAction) => {
+    switch (action) {
+      case "openSettings":
+        setSettingsInitialPage(null);
+        setSettingsOpen(true);
+        return;
+      case "newSession":
+        handleNewSession();
+        return;
+      case "resumeSession":
+        // 与 TUI 的 /resume 一致：列出会话让你选一个切过去（这里复用命令面板的会话列表）。
+        setPaletteOpen(true);
+        return;
+      case "openTree":
+        handleSelectRightTab("branch");
+        return;
+      default:
+        return;
+    }
+  }, [handleNewSession, handleSelectRightTab]);
+
   // NavigationStore 是 target 唯一 owner；React state 只缓存 SessionInfo。
   void navEpoch;
   const chatSession = navTarget.kind === "persisted"
@@ -1649,6 +1677,7 @@ aria-valuemax={Math.round(chatColumnAvailable)}
                 onSystemPromptChange={handleSystemPromptChange}
                 onSessionStatsChange={handleSessionStatsChange}
                 onSessionStatsPanelOpen={openSessionInfoTab}
+                onUiAction={handleBuiltinUiAction}
                 onContextUsageChange={handleContextUsageChange}
                 onTurnMetricsChange={handleTurnMetricsChange}
                 onOpenFile={handleOpenLinkedFile}
