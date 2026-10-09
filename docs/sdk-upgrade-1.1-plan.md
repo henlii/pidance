@@ -73,6 +73,28 @@ vs **得到 8 项**（`structuredContent`/`isError`/`annotations` 真正进工�
 `mcp_servers_change` 事件、codemode/tool_search 一等公民、项目信任门、重试语义、跨进程 OAuth 刷新锁、排障体验）。
 **结论：保留适配器**；将来若要换，必须先把 MCP Apps 渲染这条产品原则 1 的破口补上再谈。
 
+## 4.7 新事件 / 新字段：已投影 or 显式忽略（不许无行丢弃）
+
+产品原则 1 要求「原生 TUI 有的都要有，暂不具备的按可见方式降级」。下表把 1.1.0 带进来的
+每一样东西都点名，写明落点；写「显式忽略」的是有意的，不是漏了。
+
+| 新东西（1.1.0） | 落点 |
+|---|---|
+| `agent_settled.aborted` | 已投影：优先当「被取消」判据（PR-B） |
+| `tool_execution_*.parentToolCallId` | 已投影：整条事件放过，不单独成卡（与 TUI 一致） |
+| `tool_execution_end.durationMs` | 已投影：进 `ToolRenderContext.durationMs` |
+| 渲染上下文的 `outputPad` | 已投影：取 SettingsManager，缺省 1 |
+| `pi.registerToolRenderer()` 解析链 | 已投影：先问 `resolveToolRenderers`，取不到才回落 definition（PR-B） |
+| `LoadExtensionsResult.warnings` | 已投影：进结果 + 缓存时打服务端日志；插件页展示留待需要时 |
+| `isError` | 已投影：工具卡片的错误态 |
+| `structuredContent` | 显式忽略：TUI 也没有单独界面，用户看到的仍是渲染行 |
+| 工具 `annotations`（readOnly/destructive 等） | 显式忽略：目前没有「按标记弹确认」的界面；等接了需要确认的工具再投影 |
+| `mcp_servers_change` | 显式忽略：MCP 走 `pi-mcp-adapter`，状态由适配器自己的命令与工具呈现 |
+| `provider_stream_event` | 显式忽略：官方定位是调试观察事件，TUI 默认也不显示 |
+| 虚拟模型（`pi.registerVirtualModel()`） | 显式忽略，且有已知偏差：我们的「当前模型」是最后写者胜（`model_change` 与助手消息共用槽位），虚拟模型场景下会显示**实际派发的物理模型**；本机没有扩展注册虚拟模型，真用到时再补「选中 → 实际」 |
+| codemode / `tool_search` | 未接：与内置 MCP 同批，留到需要时（现在 MCP 走适配器） |
+| MCP Apps（`ui://`、`profile=mcp-app`） | 未接：内核不渲染；适配器自己渲染，我们按通用扩展 UI 投影 |
+
 ## 5. 建议的推进顺序
 
 - **PR-A（本轮，已完成）**：B1–B5 + 第 2 节全部 + 验收：`npm run check` 绿、只有一份 pi-tui、`edit`/`bash` 卡片在 31416 实测正常、主题副本与解析器同批、`desktop` lock 对齐。

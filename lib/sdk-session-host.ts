@@ -2357,7 +2357,11 @@ export class SdkSessionHost {
         this.notifyRunning();
         this.emit({ type: "prompt_done", streamRunSeq: this.streamRunSeq });
         break;
-      case "agent_settled":
+      case "agent_settled": {
+        // SDK 1.1.0 起这个事件自带 aborted（「这次是不是被取消的」权威判据）；有就用它，
+        // 拿不到才沿用 agent_end 推出来的 lastStopReason（旧内核路径）。
+        const aborted = (event as { aborted?: unknown }).aborted;
+        if (typeof aborted === "boolean" && aborted) this.lastStopReason = "aborted";
         this.promptRunning = false;
         releaseRunningLease(this.realSessionId);
         this.notifyRunning();
@@ -2395,6 +2399,7 @@ export class SdkSessionHost {
           });
         }
         break;
+      }
       case "compaction_start":
       case "auto_compaction_start":
         this.notifyRunning();
@@ -2703,11 +2708,25 @@ export class SdkSessionHost {
   /** 取原始 ToolDefinition（绕过 wrapToolDefinition 的渲染器剥离）。 */
   private getToolRenderDefinition(toolName: unknown): unknown {
     if (typeof toolName !== "string" || toolName === "") return undefined;
+    const fallback = () => {
+      try {
+        return this.session.getToolDefinition(toolName);
+      } catch {
+        return undefined;
+      }
+    };
+    // SDK 1.1.0 起扩展可以注册工具渲染器（pi.registerToolRenderer）：它按工具名决定画法，
+    // 包括「还没注册的工具」（例如恢复会话里的 MCP 工具）。只读 definition 会把它们静默丢掉。
     try {
-      return this.session.getToolDefinition(toolName);
+      const runner = this.session.extensionRunner as
+        | { resolveToolRenderers?: (name: string, fallback: () => unknown) => unknown }
+        | undefined;
+      const resolved = runner?.resolveToolRenderers?.(toolName, fallback);
+      if (resolved) return resolved;
     } catch {
-      return undefined;
+      /* resolver 抛错就当没注册，回落到 definition */
     }
+    return fallback();
   }
 
   /**
