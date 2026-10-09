@@ -37,7 +37,9 @@ export const BUILTIN_API_KEY_PROVIDERS: readonly BuiltinApiKeyProvider[] = [
   { id: "nvidia", displayName: "NVIDIA" },
   { id: "opencode", displayName: "OpenCode" },
   { id: "amazon-bedrock", displayName: "Amazon Bedrock" },
-  { id: "azure-openai-responses", displayName: "Azure OpenAI" },
+  // SDK 1.0.3 把 provider id 从 azure-openai-responses 改成 azure；老配置仍要认得
+  { id: "azure", displayName: "Azure OpenAI" },
+  { id: "azure-openai-responses", displayName: "Azure OpenAI (legacy id)" },
   { id: "cloudflare-ai-gateway", displayName: "Cloudflare AI Gateway" },
   { id: "vercel-ai-gateway", displayName: "Vercel AI Gateway" },
   { id: "xiaomi", displayName: "Xiaomi" },

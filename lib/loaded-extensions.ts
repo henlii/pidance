@@ -24,6 +24,11 @@ export interface LoadedExtensions {
   runtime: Record<string, unknown>;
   /** 加载过程中的扩展错误（SDK 收集的），诊断用。 */
   errors: Array<{ path: string; error: string }>;
+  /**
+   * SDK 1.1.0 新增的 `LoadExtensionsResult.warnings`（例如「有两份 pi-tui」）。
+   * 不静默丢：这里原样带上，缓存时打一条日志，插件页/诊断能看到。
+   */
+  warnings: Array<{ path: string; warning: string }>;
 }
 
 export type LoadedExtensionsLoader = () => Promise<LoadedExtensions>;
@@ -80,7 +85,7 @@ export function createSdkExtensionsLoader(cwd: string, agentDir: string | undefi
     const mod = (await import("@earendil-works/pi-coding-agent")) as unknown as {
       DefaultResourceLoader?: new (options: { cwd: string; agentDir?: string }) => {
         reload: (options?: unknown) => Promise<void>;
-        getExtensions: () => { extensions?: unknown; errors?: unknown; runtime?: unknown };
+        getExtensions: () => { extensions?: unknown; errors?: unknown; runtime?: unknown; warnings?: unknown };
       };
     };
     if (!mod.DefaultResourceLoader) throw new Error("DefaultResourceLoader is not available");
@@ -93,7 +98,10 @@ export function createSdkExtensionsLoader(cwd: string, agentDir: string | undefi
     const errors = Array.isArray(result?.errors)
       ? (result.errors as Array<{ path: string; error: string }>)
       : [];
-    return { extensions, runtime: asRecord(result?.runtime) ?? {}, errors };
+    const warnings = Array.isArray(result?.warnings)
+      ? (result.warnings as Array<{ path: string; warning: string }>)
+      : [];
+    return { extensions, runtime: asRecord(result?.runtime) ?? {}, errors, warnings };
   };
 }
 
@@ -133,6 +141,11 @@ export async function loadExtensionsForCwd(options: LoadExtensionsOptions): Prom
       error: error instanceof Error ? error.message : String(error),
     }) as LoadedExtensionsResult)
     .then((value) => {
+      if (value.ok && (value.value.warnings?.length ?? 0) > 0) {
+        for (const entry of value.value.warnings ?? []) {
+          console.warn(`[pidance] 扩展加载告警 ${entry.path}: ${entry.warning}`);
+        }
+      }
       if (!options.bypassCache && state.generation === generationAtStart) {
         state.entries.set(key, { value, expiresAt: Date.now() + LOADED_EXTENSIONS_CACHE_TTL_MS });
       }

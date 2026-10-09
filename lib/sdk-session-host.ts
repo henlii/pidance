@@ -297,6 +297,12 @@ type ToolRenderStateEntry = {
   partialTextCursor: PartialTextCursor | null;
   /** 最近的工具参数：end 事件不带 args，而 renderResult 的 context.args 要用它。 */
   args: unknown;
+  /**
+   * 工具执行耗时（SDK 1.1.0 的 tool_execution_end.durationMs，单调时钟、重载后仍在）。
+   * 只喂给最终渲染的 ToolRenderContext.durationMs：partial 阶段它是 undefined，
+   * 与 TUI 一致（否则 bash 卡片要回落到渲染器自己的时钟，重载后不显示）。
+   */
+  durationMs: number | undefined;
   /** renderCall 调用凭据（invalidate / 宽度变化时按 SDK 语义重新调用）。 */
   callRenderer: ToolRendererInvocation | undefined;
   /** renderResult 调用凭据（保留最后到的那次 partial / 最终结果）。 */
@@ -2552,6 +2558,12 @@ export class SdkSessionHost {
   private withRenderedToolLines(event: SdkAgentEvent): SdkAgentEvent | null {
     try {
       if (!this.renderBridgeTheme) return event;
+      // 嵌套工具调用（扩展用 ctx.executeTool() 发起）在 TUI 里不单独成卡：结果留在父调用的
+      // nestedCalls 里。我们若照常渲染就会多出幽灵卡片，所以这里整条事件原样放过（不渲染、不下发）。
+      if (typeof (event as { parentToolCallId?: unknown }).parentToolCallId === "string"
+        && (event as { parentToolCallId?: string }).parentToolCallId) {
+        return event;
+      }
       switch (event.type) {
         case "tool_execution_start": {
           // 真实事件名：SDK 只发 tool_execution_start/update/end（tool_call/tool_result 是
@@ -2639,6 +2651,8 @@ export class SdkSessionHost {
             isError: event.isError === true,
           };
           entry.resultRenderer = { slot: "result", def, result, isPartial: false, isError: event.isError === true };
+          // 1.1.0 起事件自带权威耗时（TUI 的 Took 就用它）
+          entry.durationMs = typeof event.durationMs === "number" ? event.durationMs : undefined;
           const changed = this.renderToolSlotsNow(toolCallId, entry);
           if (!changed) return event;
           // 调用槽在这些事件里也可能变（renderResult 会就地把预览写回 call 组件）：用
@@ -2700,6 +2714,17 @@ export class SdkSessionHost {
    * 构造 ToolRenderContext 兼容对象（对齐 pi tool-renderer）：state/lastComponent
    * 取自 toolCallId 的稳定入口，跨事件共享；invalidate 重渲这一块并推给前端。
    */
+  /** 工具输出缩进（SDK 设置，缺省 1）；SettingsManager 不可用时按缺省走，不抛。 */
+  private settingsOutputPad(): number {
+    try {
+      const value = (this.session as unknown as { settingsManager?: { getOutputPad?: () => unknown } })
+        .settingsManager?.getOutputPad?.();
+      return typeof value === "number" && Number.isFinite(value) ? value : 1;
+    } catch {
+      return 1;
+    }
+  }
+
   private buildToolRenderContext(
     toolCallId: unknown,
     args: unknown,
@@ -2728,6 +2753,10 @@ export class SdkSessionHost {
       argsComplete: true,
       isPartial: opts.isPartial,
       expanded: opts.expanded,
+      // SDK 1.1.0 起这两个字段进了 ToolRenderContext：内置 edit 渲染器按 outputPad 设缩进
+      // （缺了会让 Box 宽度算成 NaN），bash/edit 结果按 durationMs 打 Took。
+      outputPad: this.settingsOutputPad(),
+      durationMs: opts.isPartial ? undefined : entry.durationMs,
       // 如实声明宿主能力：headless 终端不支持 Kitty/iTerm2 图片协议，
       // 插件据此走文字降级（不是缺口）。
       showImages: false,
@@ -2748,6 +2777,7 @@ export class SdkSessionHost {
         lastPartialPayloadChars: undefined,
         partialTextCursor: null,
         args: undefined,
+        durationMs: undefined,
         callRenderer: undefined,
         resultRenderer: undefined,
         emittedCallLines: undefined,

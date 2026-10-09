@@ -256,7 +256,16 @@ function resolveVarRefs(
   vars: Record<string, string>,
   visited = new Set<string>(),
 ): string | number {
-  if (typeof value === "number" || value === "" || value.startsWith("#")) return value;
+  // 与 SDK theme.js 的 resolveVarRefs 同规则：数字、空串、# 字面量、oklch()/okhsl()
+  // 都是值本身；SDK 1.1.0 的内置主题整套改用 okhsl()，不认就会整条渲染桥熄火。
+  if (
+    typeof value === "number"
+    || value === ""
+    || value.startsWith("#")
+    || /^ok(lch|hsl)\(/i.test(value)
+  ) {
+    return value;
+  }
   if (visited.has(value)) {
     throw new Error(`Circular variable reference detected: ${value}`);
   }

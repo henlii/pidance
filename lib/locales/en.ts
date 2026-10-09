@@ -887,6 +887,7 @@ export const en = {
   defaults_cacheWarmingIdle: "also while waiting for your next prompt",
   defaults_retrySection: "Retry",
   defaults_quietStartup: 'Quiet startup',
+  defaults_quietStartupHeader: 'Pi is set to "header": only the startup header is kept (this form cannot express that value).',
   defaults_showCacheMissNotices: 'Show cache-miss notices',
   defaults_hideThinkingBlock: 'Hide thinking blocks',
   defaults_advancedSection: 'Network & Advanced',

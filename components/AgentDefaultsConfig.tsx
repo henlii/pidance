@@ -54,6 +54,13 @@ const inputStyle: React.CSSProperties = {
   fontFamily: "var(--font-mono)",
 };
 
+/** 说明性小字（例如表单表达不了的三态设置值）。 */
+const hintStyle: React.CSSProperties = {
+  marginTop: 4,
+  fontSize: 12,
+  color: "var(--text-dim)",
+};
+
 const selectStyle: React.CSSProperties = {
   ...inputStyle,
   fontFamily: "inherit",
@@ -201,7 +208,11 @@ type Draft = {
   httpIdleTimeoutMs: string;
   sessionDir: string;
   shellPath: string;
-  quietStartup: boolean;
+  /**
+   * SDK 1.1.0 起是三态：true / false / "header"（只留版本行）。
+   * 表单只表达前两态；`"header"` 保留原值，保存时原样写回，不被当成 false 抹掉。
+   */
+  quietStartup: boolean | "header";
   externalEditor: string;
   defaultProjectTrust: string;
   doubleEscapeAction: string;
@@ -229,7 +240,7 @@ function rawToDraft(raw: SettingsObject): Draft {
     httpIdleTimeoutMs: asNumStr(raw.httpIdleTimeoutMs),
     sessionDir: asStr(raw.sessionDir),
     shellPath: asStr(raw.shellPath),
-    quietStartup: asBool(raw.quietStartup),
+    quietStartup: raw.quietStartup === "header" ? "header" : asBool(raw.quietStartup),
     externalEditor: asStr(raw.externalEditor),
     defaultProjectTrust: asStr(raw.defaultProjectTrust),
     doubleEscapeAction: asStr(raw.doubleEscapeAction),
@@ -382,7 +393,10 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
         draft.defaultThinkingLevel === "" ? undefined : draft.defaultThinkingLevel;
       next.hideThinkingBlock = draft.hideThinkingBlock || undefined;
       next.showCacheMissNotices = draft.showCacheMissNotices || undefined;
-      next.quietStartup = draft.quietStartup || undefined;
+      // "header" 是我们无法在表单里表达的三态值：原样留着，不要把用户设置删掉
+      next.quietStartup = draft.quietStartup === "header"
+        ? "header"
+        : (draft.quietStartup || undefined);
       next.cacheWarming = draft.cacheWarming;
 
       const compaction = { ...asRecord(next.compaction) };
@@ -788,11 +802,18 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
                   <option value="websocket">{t("defaults_transportWebsocket")}</option>
                 </select>
               </div>
-              <BooleanField
-                label={t("defaults_quietStartup")}
-                checked={draft.quietStartup}
-                onChange={(v) => setDraft({ ...draft, quietStartup: v })}
-              />
+              <div>
+                <BooleanField
+                  label={t("defaults_quietStartup")}
+                  checked={draft.quietStartup === true}
+                  onChange={(v) => setDraft({ ...draft, quietStartup: v })}
+                />
+                {draft.quietStartup === "header" && (
+                  // SDK 1.1.0 的第三态：只留启动头部。表单表达不了，就如实说出来，
+                  // 而不是显示成「关」并在保存时把它抹掉。
+                  <div style={hintStyle}>{t("defaults_quietStartupHeader")}</div>
+                )}
+              </div>
             </div>
           </div>
 

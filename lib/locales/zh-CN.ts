@@ -885,6 +885,7 @@ export const zhCN: Record<TranslationKey, string> = {
   defaults_cacheWarmingIdle: "等待下一条消息时也保活",
   defaults_retrySection: "重试",
   defaults_quietStartup: '安静启动（quietStartup）',
+  defaults_quietStartupHeader: '当前是「只留启动头部」（header）—— 这个开关表达不了该值，保存时原样保留。',
   defaults_showCacheMissNotices: '缓存未命中提示（showCacheMissNotices）',
   defaults_hideThinkingBlock: '隐藏思考块（hideThinkingBlock）',
   defaults_advancedSection: '网络与高级',
