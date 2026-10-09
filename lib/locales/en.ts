@@ -662,6 +662,7 @@ export const en = {
   input_controlsTitle: "Controls",
   input_toolsTitle: "Tools",
   input_thinkingTitle: "Thinking",
+  input_routedModel: "Routed to {model}",
   input_modelTitle: "Model",
   input_modelThinkingLevel: 'Thinking level',
   input_modelMaxOutput: 'Max output',

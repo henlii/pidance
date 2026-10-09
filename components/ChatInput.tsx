@@ -49,6 +49,7 @@ import {
 } from "@/lib/attachment-upload";
 import { buildAttachmentPrompt } from "@/lib/attachment-prompt";
 import { createInputHistory, type InputHistory } from "@/lib/input-history";
+import { routedModelSuffix } from "@/lib/model-routing";
 import type { AttachedImage, BinaryMessageInput, ChatInputHandle } from "@/lib/types";
 import {
   loadStreamingEnterAction,
@@ -114,6 +115,8 @@ interface Props {
   model?: { provider: string; modelId: string } | null;
   isAutoModelSelection?: boolean;
   modelNames?: Record<string, string>;
+  /** 实际派发的物理模型与档位（虚拟模型路由过才有）；与 model 不同才显示。 */
+  routedModel?: { id: string; provider: string; thinkingLevel?: string } | null;
   modelList?: {
     id: string;
     name: string;
@@ -448,7 +451,7 @@ function supportsFieldSizing(): boolean {
 }
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, blocked = false, model, isAutoModelSelection, modelNames, modelList, sessionTokens, modelAuthConfigured, onModelChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, blocked = false, model, isAutoModelSelection, modelNames, modelList, sessionTokens, modelAuthConfigured, onModelChange, routedModel,
   onAbortCompaction, isCompacting, compactError, compactResult,
   thinkingLevel, thinkingReady, onThinkingLevelChange, defaultThinkingLevel, availableThinkingLevels, thinkingLevelMap, thinkingLevelMaps,
   retryInfo, queuedMessages, onRecallQueue, onSendQueueAsSteer,
@@ -522,6 +525,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const trimmedValue = value.trimStart();
   const bashMode = attachedImages.length === 0 && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
+  // 虚拟模型路由：选中的可能是虚拟模型，实际派发的是另一个物理模型（TUI 页脚会写「→ 实际」）。
+  const routedSuffix = useMemo(() => routedModelSuffix(routedModel, model), [routedModel, model]);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   // 斜杠命令的参数候选（issue #75）：与命令名菜单互斥（由 argQuery 驱动）。
   const [argItems, setArgItems] = useState<CommandArgumentCompletion[]>([]);
@@ -3293,6 +3298,17 @@ type AtMenuItem = CompletionMenuEntry<FileIndexEntry>;
                     {thinkingLabel ? (
                       <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginLeft: 2 }}>
                         ·{thinkingLabel}
+                      </span>
+                    ) : null}
+                    {/* 虚拟模型路由：只有「选中的 ≠ 实际派发的」才挂，普通模型不会多这一截 */}
+                    {routedSuffix ? (
+                      <span
+                        title={`${t("input_routedModel", { model: routedSuffix.id })}${routedSuffix.thinkingLevel ? ` · ${routedSuffix.thinkingLevel}` : ""}`}
+                        style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginLeft: 2, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                      >
+                        {"→ "}
+                        {routedSuffix.id}
+                        {routedSuffix.thinkingLevel ? ` ·${routedSuffix.thinkingLevel}` : ""}
                       </span>
                     ) : null}
                   </button>

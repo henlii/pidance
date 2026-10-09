@@ -664,6 +664,7 @@ export const zhCN: Record<TranslationKey, string> = {
   input_thinkingTitle: "思考",
   input_changeAppliesNextTurn: "下次发送时生效（含引导 / 队列）",
   input_changeLockedWhileRunning: '运行中不能修改模型或思考深度',
+  input_routedModel: "实际派发 {model}",
   input_modelTitle: "模型",
   input_modelThinkingLevel: '思考深度',
   input_modelMaxOutput: '最大输出',

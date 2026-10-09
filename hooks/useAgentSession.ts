@@ -225,6 +225,11 @@ type AgentStateResponse = {
   thinkingLevel?: string;
   /** host 热投影的当前模型（切回会话时 loadSession 返回前恢复模型显示用） */
   model?: { provider: string; modelId: string } | null;
+  /**
+   * 实际派发的物理模型与档位（SDK 的 session.routedModel）：只有虚拟模型路由过才有。
+   * 与 `model`（用户选中的那个）不同才是「路由发生了」。
+   */
+  routedModel?: { id: string; provider: string; thinkingLevel?: string } | null;
   isStreaming?: boolean;
   isPromptRunning?: boolean;
   isBashRunning?: boolean;
@@ -735,6 +740,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * 数据源：hot/live state 投影与磁盘 context.model（loadSession 成功后登记）。
    */
   const [lastKnownModel, setLastKnownModel] = useState<{ provider: string; modelId: string } | null>(null);
+  // 虚拟模型路由读数：只来自热 state（磁盘里没有这个信息）。
+  const [routedModel, setRoutedModel] = useState<{ id: string; provider: string; thinkingLevel?: string } | null>(null);
   const lastKnownModelBySessionRef = useRef<Map<string, { provider: string; modelId: string }>>(new Map());
   /**
    * 仅由**磁盘上下文**写入的观察值（hot/live 不写）：
@@ -1498,6 +1505,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             source: "live-hydrate",
           });
         }
+        if (liveState.routedModel !== undefined) setRoutedModel(liveState.routedModel ?? null);
         if (liveState.model?.provider && liveState.model?.modelId) {
           lastKnownModelBySessionRef.current.set(sid, { provider: liveState.model.provider, modelId: liveState.model.modelId });
           setLastKnownModel({ provider: liveState.model.provider, modelId: liveState.model.modelId });
@@ -5009,6 +5017,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentRunning, turnMetrics, lockedByOther, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, thinkingLevel: resolvedThinking, thinkingReady, defaultThinkingLevel: isNew ? settingsDefaultThinking : null,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
+    // 虚拟模型路由读数：选中与实际派发不同时，模型 chip 后面挂「→ 实际模型」。
+    routedModel,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices,
     liveNoticeActivities,

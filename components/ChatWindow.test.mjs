@@ -418,3 +418,13 @@ test("子代理异步面板变化要即时补一次 subagent 运行数据（否�
   assert.match(source, /subagentAsyncSignature\(parseSubagentAsyncSnapshot\(widget\.lines\)\)/);
   assert.match(source, /if \(!asyncWidgetSignature\) return;\s*\n\s*refreshSubagentActivity\(\);/);
 });
+
+test("虚拟模型路由要看得见：宿主投影 routedModel，模型 chip 挂「→ 实际派发」", () => {
+  const chatWindow = readFileSync(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
+  assert.match(chatWindow, /displayModel: displayModelValue, routedModel, sessionStats/, "路由读数要透传到输入区");
+  const input = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+  assert.match(input, /routedModelSuffix\(routedModel, model\)/);
+  assert.match(input, /t\("input_routedModel", \{ model: routedSuffix\.id \}\)/);
+  const host = readFileSync(new URL("../lib/sdk-session-host.ts", import.meta.url), "utf8");
+  assert.match(host, /routedModel: routed/, "服务端要投影 session.routedModel");
+});

@@ -229,7 +229,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionIntentId, guideDe
     loading, historyLoading, hasMoreBefore, error, retryLoadSession, messages, entryIds, messageKeys, streamState,
     agentRunning, turnMetrics, bashRunning, pendingBash, modelNames, modelList, modelAuthConfigured, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, thinkingReady,
     retryInfo, contextUsage, forkingEntryId,
-    isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, defaultThinkingLevel,
+    isCompacting, compactError, compactResult, displayModel: displayModelValue, routedModel, sessionStats, defaultThinkingLevel,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices, liveNoticeActivities, dismissNotice, toggleNoticePin, extensionDialog, extensionCustomUi, extensionEditorTakeover, extensionStatuses, extensionWidgets, extensionHeader, extensionFooter, extensionTerminalInputListenerCount, extensionShortcuts, extensionWorkingMessage, extensionWorkingVisible, extensionWorkingIndicator, hiddenThinkingLabel, extensionToolsExpandedRequest, respondToExtensionUi, sendExtensionCustomInput, sendExtensionCustomMouse, sendExtensionCustomBounds, sendExtensionWidgetMouse, sendExtensionEditorInput, runExtensionShortcut,
     todos,
