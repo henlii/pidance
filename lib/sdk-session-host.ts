@@ -434,6 +434,67 @@ let tuiDefaultKeybindingsCache: KeybindingsConfig | null = null;
  *
  * 读不到（文件缺失/空/损坏）返回 null，调用方保持 SDK 给的值。
  */
+/**
+ * 读盘上**权威的模型**：沿 parentId 从末尾回溯，取路径上最后一条 `model_change`，
+ * 没有就取最后一条助手消息上报的 provider/model（与 SDK/session-reader 同口径：最后写者胜）。
+ *
+ * 为什么需要：SDK 建 session 时 leafId 还没恢复，模型会落到 `settings.json` 的默认模型
+ * **并且被写进文件**（实测：切到 grok 后，另一次建会话又追加 model_change(默认模型)）。
+ * 症状就是「切了模型，改一下档位又变回去」。读不到（缺失/空/损坏）返回 null。
+ */
+export function readModelFromSessionFile(
+  sessionFile: string | null | undefined,
+): { provider: string; modelId: string } | null {
+  if (!sessionFile || !existsSync(sessionFile)) return null;
+  try {
+    type Entry = {
+      parentId?: unknown;
+      type?: unknown;
+      provider?: unknown;
+      modelId?: unknown;
+      message?: { role?: unknown; provider?: unknown; model?: unknown };
+    };
+    const entries = new Map<string, Entry>();
+    let lastId: string | null = null;
+    for (const line of readFileSync(sessionFile, "utf8").split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let entry: { id?: unknown };
+      try {
+        entry = JSON.parse(trimmed) as typeof entry;
+      } catch {
+        continue; // 半截行（写入中）：跳过
+      }
+      if (typeof entry.id !== "string") continue;
+      entries.set(entry.id, entry as Entry);
+      lastId = entry.id;
+    }
+    let cursor = lastId;
+    const seen = new Set<string>();
+    while (cursor && !seen.has(cursor)) {
+      seen.add(cursor);
+      const entry = entries.get(cursor);
+      if (!entry) break;
+      if (entry.type === "model_change" && typeof entry.provider === "string" && typeof entry.modelId === "string") {
+        return { provider: entry.provider, modelId: entry.modelId };
+      }
+      const message = entry.message;
+      if (
+        entry.type === "message" &&
+        message?.role === "assistant" &&
+        typeof message.provider === "string" &&
+        typeof message.model === "string"
+      ) {
+        return { provider: message.provider, modelId: message.model };
+      }
+      cursor = typeof entry.parentId === "string" ? entry.parentId : null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function readThinkingLevelFromSessionFile(sessionFile: string | null | undefined): string | null {
   if (!sessionFile || !existsSync(sessionFile)) return null;
   try {
@@ -3179,6 +3240,10 @@ export class SdkSessionHost {
         };
       };
 
+      // 建 runtime **之前**的磁盘权威值：SDK 建 session 时 leafId 未恢复，会把 settings.json 的
+      // 默认模型/默认档位写进文件；建完再读盘就只能读到刚写进去的默认值了。
+      const diskLevelBeforeCreate = readThinkingLevelFromSessionFile(this.sessionFile);
+      const diskModelBeforeCreate = readModelFromSessionFile(this.sessionFile);
       this.runtime = await createAgentSessionRuntime(createRuntime, {
         cwd,
         agentDir,
@@ -3205,6 +3270,37 @@ export class SdkSessionHost {
         }
       } catch (error) {
         console.error("[pidance] failed to align thinking level with disk:", error);
+      }
+      // 同一个根因的另一半：SDK 建 session 时会把 settings.json 的默认模型/默认档位写进文件，
+      // 于是「切了模型，改一下档位又变回去」。
+      //
+      // 顺序与目标都很讲究（都是实测踩出来的）：
+      // - 先恢复模型、再恢复档位：SDK 的 setModel 会套用模型自带档位，反过来会被它冲掉。
+      // - 目标是「文件当前的值」——用户刚下的命令已经落盘，它比建会话前的快照新；
+      //   只有当文件当前值正好等于设置默认值（说明是 SDK 刚写进去的默认值）时，才退回快照。
+      // - 只在「当前值等于设置默认值」时才动：用户刚下过的命令会让值≠默认值，那时绝不能覆盖。
+      try {
+        const settings = (this.session as { settingsManager?: { getDefaultModel?: () => string } }).settingsManager;
+        const defaultModel = settings?.getDefaultModel?.();
+        const isDefaultModel = (m: { provider: string; modelId: string } | null | undefined) =>
+          !!m && !!defaultModel && (m.modelId === defaultModel || `${m.provider}/${m.modelId}` === defaultModel);
+        const current = this.runtime.session.model;
+        const target = isDefaultModel(readModelFromSessionFile(this.sessionFile)) ? diskModelBeforeCreate : readModelFromSessionFile(this.sessionFile);
+        const onDefault =
+          !!current &&
+          !!defaultModel &&
+          (current.id === defaultModel || `${current.provider}/${current.id}` === defaultModel);
+        if (target && current && onDefault && (current.provider !== target.provider || current.id !== target.modelId)) {
+          let model = resolveSessionModel(this.runtime.session.modelRuntime, target.provider, target.modelId);
+          if (!model) {
+            const available = await this.runtime.session.modelRuntime.getAvailable().catch(() => []);
+            model = available.find((m) => m.provider === target.provider && m.id === target.modelId);
+          }
+          // 解析不到（模型被删/未配置凭据）就保持现状：宁可显示默认值，也不要抛。
+          if (model) await this.runtime.session.setModel(withPassThroughExtendedThinking(model));
+        }
+      } catch (error) {
+        console.error("[pidance] failed to restore model after create:", error);
       }
       this.runtime.setRebindSession(async () => {
         await this.rebindSession();
