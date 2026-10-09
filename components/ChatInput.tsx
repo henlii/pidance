@@ -37,6 +37,7 @@ import {
   uploadImageAttachment,
   uploadMessageMedia,
 } from "@/lib/attachment-upload";
+import { buildAttachmentPrompt } from "@/lib/attachment-prompt";
 import type { AttachedImage, BinaryMessageInput, ChatInputHandle } from "@/lib/types";
 import {
   loadStreamingEnterAction,
@@ -1042,14 +1043,19 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     }
   }, [clearImages, clearUploads, clearPendingAttachments, draftKey, setValueTouched]);
 
-  /** 把已就绪上传路径拼进消息正文，供 agent 用工具读取。 */
+  /** 把附件的落盘路径拼进消息正文，供 agent 用工具读取（图片注入原图路径）。 */
   const composeMessageWithUploads = useCallback((base: string): string => {
     const ready = attachedUploadsRef.current.filter((u) => u.status === "ready" && u.path);
-    if (ready.length === 0) return base;
-    // 用 path= 让 agent 能读取附件，同时避免 MessageMediaGallery 把同一
-    // 个二进制块当成普通正文路径再渲染一遍（BinaryMessageView 负责阈值）。
-    const list = ready.map((u) => `- path=${u.path}`).join("\n");
-    const block = `${t("input_attachedFilesPrompt")}\n${list}`;
+    const images = attachedImagesRef.current
+      .map((image) => image.media?.original.path ?? image.original?.path)
+      .filter((path): path is string => Boolean(path));
+    // path= 前缀既让 agent 能读附件，也避免 MessageMediaGallery 把同一张图
+    // 当成正文路径再渲染一遍（BinaryMessageView 负责阈值）。
+    const block = buildAttachmentPrompt(
+      { files: ready.map((u) => u.path as string), images },
+      { files: t("input_attachedFilesPrompt"), images: t("input_attachedImagesPrompt") },
+    );
+    if (!block) return base;
     return base.trim() ? `${base.trim()}\n\n${block}` : block;
   }, [t]);
 

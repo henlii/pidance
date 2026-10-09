@@ -760,6 +760,7 @@ export const en = {
   input_attachUnsupported: "Only images and text-like files are supported (code/config/Markdown, etc.)",
   input_attachNeedCwd: "Select a project before attaching non-image files",
   input_attachedFilesPrompt: "The following files were uploaded to the Pidance attachments directory. Read them with tools as needed:",
+  input_attachedImagesPrompt: "The images below are already inlined as downscaled copies. Read the originals with tools only when you need full detail (resolution, EXIF, cropping, OCR):",
   input_uploadingAttachment: "Uploading…",
   input_removeAttachment: "Remove attachment",
   input_compact: "Compact",
