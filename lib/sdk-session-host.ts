@@ -499,6 +499,22 @@ export function payloadCharCount(value: unknown, stopAt = RENDER_MAX_TOTAL_CHARS
  * 把一帧 partial 的原始输出换成增量形式：能增量就**不带** `partialResult`（省下那一大段），
  * 只带 `partialResultDelta`；不能增量（首帧 / 内容被重写）就照旧发整份。
  */
+/** 读工具注解；没有就不带这个字段（前端据缺失判「未声明」）。 */
+function readToolAnnotations(session: AgentSession, name: string): { annotations?: Record<string, boolean> } {
+  try {
+    const def = session.getToolDefinition(name) as { annotations?: Record<string, unknown> } | undefined;
+    const raw = def?.annotations;
+    if (!raw || typeof raw !== "object") return {};
+    const out: Record<string, boolean> = {};
+    for (const [key, value] of Object.entries(raw)) {
+      if (typeof value === "boolean") out[key] = value;
+    }
+    return Object.keys(out).length > 0 ? { annotations: out } : {};
+  } catch {
+    return {};
+  }
+}
+
 /** 读一个工具的 exposure；取不到就按 direct（SDK 的默认值）。 */
 function readToolExposure(session: AgentSession, name: string): string {
   try {
@@ -3887,6 +3903,9 @@ export class SdkSessionHost {
             // SDK 1.1.0 的工具暴露面（direct / model-only / codemode 等）：TUI 侧由权限扩展读取，
             // 我们以前整条丢掉，前端就没法说明「这个工具为什么不在模型眼前」。
             exposure: readToolExposure(session, t.name),
+            // 工具注解（readOnly / destructive / idempotent / openWorld，语义同 MCP annotations）：
+            // TUI 的权限扩展据此决定要不要确认；我们把它们一并回给前端，将来做破坏性操作的确认界面。
+            ...readToolAnnotations(session, t.name),
           })),
         };
       }
