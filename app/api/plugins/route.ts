@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { getAgentDir } from "@/lib/pi-paths";
 import { setPackageDisabledInSettings } from "@/lib/settings-store";
-import { listPluginPackages } from "@/lib/plugin-packages";
+import { extensionDiagnostics, listPluginPackages } from "@/lib/plugin-packages";
+import { loadExtensionsForCwd } from "@/lib/loaded-extensions";
 import {
   PluginUnsupportedSourceError,
   installPluginPackage,
@@ -34,8 +35,21 @@ function setPackageDisabled(
 }
 
 /** 自管插件列表：GET 路径不依赖 @earendil-works/pi-coding-agent */
-function readPlugins(cwd: string): PluginsResponse {
-  return listPluginPackages({ agentDir: getAgentDir(), cwd });
+async function readPlugins(cwd: string): Promise<PluginsResponse> {
+  const result = listPluginPackages({ agentDir: getAgentDir(), cwd });
+  // 扩展加载的告警/错误也要出现在插件页（以前只进日志，用户看不到）。
+  // 加载器自带 30s 缓存，正常路径不会拖慢这个页面。
+  try {
+    const loaded = await loadExtensionsForCwd({ cwd, agentDir: getAgentDir() });
+    if (!loaded.ok) {
+      result.diagnostics.push({ type: "error", message: loaded.error, source: "extensions" });
+    } else {
+      result.diagnostics.push(...extensionDiagnostics(loaded.value));
+    }
+  } catch (error) {
+    result.diagnostics.push({ type: "warning", message: String(error), source: "extensions" });
+  }
+  return result;
 }
 
 export async function GET(req: Request) {
@@ -44,7 +58,7 @@ export async function GET(req: Request) {
   if (!cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
 
   try {
-    return NextResponse.json(readPlugins(cwd));
+    return NextResponse.json(await readPlugins(cwd));
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }
@@ -99,7 +113,7 @@ export async function POST(req: Request) {
     invalidateMarkdownTransformCache();
     invalidateModelsCache();
 
-    return NextResponse.json(readPlugins(body.cwd));
+    return NextResponse.json(await readPlugins(body.cwd));
   } catch (error) {
     if (error instanceof PluginUnsupportedSourceError) {
       return NextResponse.json({ error: error.message }, { status: 400 });

@@ -362,6 +362,26 @@ export function listConfiguredPackages(options: ListPluginPackagesOptions): Conf
 }
 
 /**
+ * 扩展加载的 errors / warnings → 插件页诊断（SDK 1.1.0 起 LoadExtensionsResult 带 warnings，
+ * 例如「同一个进程里装了两份 pi-tui」）。以前只在服务端日志里，用户看不到。
+ */
+export function extensionDiagnostics(loaded: {
+  errors?: Array<{ path?: string; error?: string }>;
+  warnings?: Array<{ path?: string; warning?: string }>;
+}): PluginDiagnostic[] {
+  const out: PluginDiagnostic[] = [];
+  for (const item of loaded.errors ?? []) {
+    const message = typeof item?.error === "string" && item.error ? item.error : "Extension failed to load.";
+    out.push({ type: "error", message, source: "extensions", ...(item?.path ? { path: item.path } : {}) });
+  }
+  for (const item of loaded.warnings ?? []) {
+    const message = typeof item?.warning === "string" && item.warning ? item.warning : "Extension warning.";
+    out.push({ type: "warning", message, source: "extensions", ...(item?.path ? { path: item.path } : {}) });
+  }
+  return out;
+}
+
+/**
  * 自管插件列表（readPlugins 等价实现）：
  * 对每个配置包计算安装路径、资源计数与状态；missing 包 push warning diagnostic。
  */
