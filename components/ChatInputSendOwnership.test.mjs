@@ -71,6 +71,9 @@ function composer(initial) {
     attachedImagesRef,
     attachedUploadsRef,
     sentDraftRef,
+    // 提交成功后要把内容记进输入历史（↑/↓ 回溯）。这里只要一个能收下的替身：
+    // 这几条用例验的是草稿归属，不验历史本身（历史逻辑在 lib/input-history.test.mjs）。
+    inputHistoryRef: { current: { push() {}, prev: () => null, next: () => null, reset() {} } },
     attachmentIdentity,
     getDraft: (key) => drafts[key] ?? null,
     setDraft: (key, draft) => { drafts[key] = draft; calls.values.push([key, draft.value]); },

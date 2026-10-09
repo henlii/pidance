@@ -38,6 +38,7 @@ import {
   uploadMessageMedia,
 } from "@/lib/attachment-upload";
 import { buildAttachmentPrompt } from "@/lib/attachment-prompt";
+import { createInputHistory, type InputHistory } from "@/lib/input-history";
 import type { AttachedImage, BinaryMessageInput, ChatInputHandle } from "@/lib/types";
 import {
   loadStreamingEnterAction,
@@ -515,6 +516,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [atServerResult, setAtServerResult] = useState<{ cwd: string; query: string; matches: FileIndexEntry[] } | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // 输入历史：内存级、不落盘（TUI 也是内存级）。多标签各记各的，避免互相踩。
+  const inputHistoryRef = useRef<InputHistory | null>(null);
+  if (!inputHistoryRef.current) inputHistoryRef.current = createInputHistory();
   /** 内建 slash 提交中：同帧重复提交只发一次（ref 挡同步重入，state 给 a11y 用）。 */
   const builtinCommandPendingRef = useRef(false);
   const [builtinCommandPending, setBuiltinCommandPending] = useState(false);
@@ -1176,6 +1180,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     // 引导按钮/空回车合并消费）；有附件或非流式走下方正常发送。
     if (isStreaming && !attachedImages.length && !hasReadyUploads && onPromptWithStreamingBehavior) {
       clearInput();
+      inputHistoryRef.current?.push(base);
       onPromptWithStreamingBehavior(base, "followUp", undefined);
       return;
     }
@@ -1225,7 +1230,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         const result = await onBuiltinCommand(base);
         if (result.handled) {
           if (result.error) restoreSentDraft();
-          else sentDraftRef.current = null;
+          else {
+            // 内置命令也是「发出去的一条」，同样进历史（回退到同一条命令很常见）。
+            inputHistoryRef.current?.push(base);
+            sentDraftRef.current = null;
+          }
           return;
         }
       } finally {
@@ -1242,6 +1251,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       restoreSentDraft();
       return;
     }
+    inputHistoryRef.current?.push(base);
     sentDraftRef.current = null;
   }, [value, attachedImages, attachedUploads, hasReadyUploads, hasUploading, hasFailedAttachments, isStreaming, onBuiltinCommand, onPromptWithStreamingBehavior, onSend, clearInput, restoreSentDraft, onAudioUnlock, composeMessageWithUploads, t]);
 
@@ -1873,6 +1883,31 @@ type AtMenuItem = CompletionMenuEntry<FileIndexEntry>;
         if ((e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) && atMenuItems[atActiveIndex]) {
           e.preventDefault();
           applyMenuItem(atMenuItems[atActiveIndex]);
+          return;
+        }
+      }
+
+      // 输入历史回溯（↑ 取上一条 / ↓ 取下一条）：终端里的肌肉记忆。
+      // 只在浮层都没开、且光标确实在首行（↓ 则末行）时接管 —— 否则会抢掉在正文里
+      // 上下移动光标的行为；多行草稿里第一行以上还有内容时也不接管。
+      if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !isComposing) {
+        const ta = e.currentTarget;
+        const caret = ta.selectionStart ?? 0;
+        const beforeCaret = value.slice(0, caret);
+        const afterCaret = value.slice(ta.selectionEnd ?? caret);
+        const onFirstLine = !beforeCaret.includes("\n");
+        const onLastLine = !afterCaret.includes("\n");
+        const recall = e.key === "ArrowUp" ? (onFirstLine ? inputHistoryRef.current?.prev(value) : null)
+                                           : (onLastLine ? inputHistoryRef.current?.next() : null);
+        if (recall !== null && recall !== undefined) {
+          e.preventDefault();
+          setValue(recall);
+          const len = recall.length;
+          requestAnimationFrame(() => {
+            const node = textareaRef.current;
+            if (!node) return;
+            node.setSelectionRange(len, len);
+          });
           return;
         }
       }
