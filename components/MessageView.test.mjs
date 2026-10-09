@@ -906,3 +906,18 @@ test("输出超过渲染上限：卡片位置明说「未渲染成卡片」，�
     "配对结果段没有如实说明",
   );
 });
+
+test("隐藏思考块（settings.json 的 hideThinkingBlock）：只画一行标签，不给展开入口", () => {
+  // 这个设置以前没有任何消费点（开关点了没效果）。行为逻辑在 lib/thinking-visibility.test.mjs，
+  // 这里钉接线：真的读了设置、真的换了渲染分支、文案走 i18n。
+  const source = readFileSync(new URL("./MessageView.tsx", import.meta.url), "utf8");
+  assert.match(source, /useSyncExternalStore\(\s*subscribeHideThinkingBlock,\s*loadHideThinkingBlockSetting,\s*serverHideThinkingBlockSetting,\s*\)/);
+  assert.match(source, /if \(hideThinking\) \{/);
+  assert.match(source, /hiddenThinkingLabel \?\? t\("message_thinkingHidden"\)/);
+  // 反面契约：隐藏态里不能再出现可展开的表头（否则「隐藏」只是换了个标签，正文还能点开）
+  const start = source.indexOf("if (hideThinking) {");
+  const end = source.indexOf("\n  return (", start);
+  assert.ok(start >= 0 && end > start, "找不到隐藏分支的边界");
+  const hidden = source.slice(start, end);
+  assert.doesNotMatch(hidden, /BlockHeaderRow/, "隐藏态不该保留展开表头");
+});

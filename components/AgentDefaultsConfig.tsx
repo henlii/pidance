@@ -21,6 +21,7 @@ import {
   saveSessionLazyLoadSetting,
   type SessionLazyLoadSetting,
 } from "@/lib/session-lazy-load";
+import { saveHideThinkingBlockSetting } from "@/lib/thinking-visibility";
 import { SettingsJsonEditor } from "./SettingsJsonEditor";
 import { SettingsPageFooter, settingsPrimaryButtonStyle, settingsSecondaryButtonStyle } from "./SettingsPageFooter";
 
@@ -337,7 +338,11 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
         parsed = {};
       }
       setRaw(parsed);
-      setDraft(rawToDraft(parsed));
+      const loaded = rawToDraft(parsed);
+      setDraft(loaded);
+      // 把文件里的值镜像到本机界面偏好：消息渲染（MessageView 的思考块）读的是它，
+      // settings.json 仍是权威值 —— 每次加载同步一次，避免两边漂移。见 lib/thinking-visibility.ts。
+      saveHideThinkingBlockSetting(loaded.hideThinkingBlock);
 
       if (modelsRes.ok) {
         const modelsBody = (await modelsRes.json()) as {
@@ -443,7 +448,9 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
         throw new Error(body.error ?? `HTTP ${res.status}`);
       }
       setRaw(next);
-      setDraft(rawToDraft(next));
+      const saved = rawToDraft(next);
+      setDraft(saved);
+      saveHideThinkingBlockSetting(saved.hideThinkingBlock);
       setSavedFlash(true);
       window.setTimeout(() => setSavedFlash(false), 2000);
     } catch (e) {
@@ -727,7 +734,11 @@ export function AgentDefaultsConfig({ cwd, onClose }: AgentDefaultsConfigProps &
               <BooleanField
                 label={t("defaults_hideThinkingBlock")}
                 checked={draft.hideThinkingBlock}
-                onChange={(v) => setDraft({ ...draft, hideThinkingBlock: v })}
+                onChange={(v) => {
+                  setDraft({ ...draft, hideThinkingBlock: v });
+                  // 立刻生效：不必先保存，已经渲染出来的思考块马上跟着变。
+                  saveHideThinkingBlockSetting(v);
+                }}
               />
               <BooleanField
                 label={t("defaults_showCacheMissNotices")}

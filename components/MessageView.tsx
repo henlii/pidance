@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, memo, useContext, useState, useRef, useEffect, useMemo, type ReactNode } from "react";
+import { createContext, memo, useContext, useState, useRef, useEffect, useMemo, type ReactNode, useSyncExternalStore } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { AlertTriangle, AtSign, Check, CheckCircle2, ChevronDown, ChevronUp, Copy, FilePlus, GitBranch, Terminal, XCircle } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
@@ -20,6 +20,11 @@ import { getBranchSummaryFileMetadata } from "@/lib/branch-bookmarks";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isUnexplainedUpstreamRejection } from "@/lib/provider-error";
 import { humanizeExtensionIdentifier } from "@/lib/extension-labels";
+import {
+  loadHideThinkingBlockSetting,
+  serverHideThinkingBlockSetting,
+  subscribeHideThinkingBlock,
+} from "@/lib/thinking-visibility";
 import { collapsedSummaryLine, isActiveStreamBlock, isAssistantTruncated, isEmptyThinkingBlock, shouldRenderLiveToolOutput } from "@/lib/message-display";
 import { getThinkingText, projectDisplayBlocks } from "@/lib/thinking-content";
 import { parseAnsiLine, stripAnsi } from "@/lib/ansi";
@@ -1168,6 +1173,14 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
   hiddenThinkingLabel?: string;
 }) {
   const { t } = useI18n();
+  // 「隐藏思考块」（settings.json 的 hideThinkingBlock）：终端 TUI 把它读出来，
+  // 把思考块换成一行标签；Web 侧以前没有任何地方消费这个设置（开关点了没效果）。
+  // 这里用订阅而不是只在挂载时读一次：设置页改完，已经渲染出来的块要立刻跟着变。
+  const hideThinking = useSyncExternalStore(
+    subscribeHideThinkingBlock,
+    loadHideThinkingBlockSetting,
+    serverHideThinkingBlockSetting,
+  );
   // 折叠/展开完全由用户决定：不随流式自动展开，也不随流式结束自动收回。
   const [expanded, setExpanded] = useState(false);
   const [content, setContent] = useState<string | null>(null);
@@ -1255,6 +1268,30 @@ function ThinkingBlock({ block, duration, isStreaming, sessionId, entryId, block
     setExpanded(nextExpanded);
     if (nextExpanded && block.deferred && content === null) await loadIfDeferred();
   };
+
+  // 设置要求隐藏：只画一行标签，**不给展开入口**（对齐 TUI：隐藏时思考正文不出现在时间线里）。
+  // 标签优先用插件给的（ctx.ui.setHiddenThinkingLabel），没有就用我们的文案。
+  if (hideThinking) {
+    return (
+      <div
+        ref={holderRef}
+        style={{
+          border: "1px solid var(--border)",
+          borderRadius: 6,
+          overflow: "hidden",
+          fontSize: 13,
+          background: "var(--bg-panel)",
+          padding: "6px 10px",
+          color: "var(--text-dim)",
+          whiteSpace: "nowrap",
+          textOverflow: "ellipsis",
+        }}
+        title={hiddenThinkingLabel ?? t("message_thinkingHidden")}
+      >
+        {hiddenThinkingLabel ?? t("message_thinkingHidden")}
+      </div>
+    );
+  }
 
   return (
     <div

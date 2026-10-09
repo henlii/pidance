@@ -381,6 +381,7 @@ export const zhCN: Record<TranslationKey, string> = {
   message_compactContext: '压缩上下文',
   message_compactContextHint: '压缩完成后请重新发送上一条消息以继续。',
   message_thinkingUnavailable: '思考不可用',
+  message_thinkingHidden: "思考已隐藏",
   message_thinkingLoading: '正在加载思考内容…',
   message_noOutput: '无输出',
   message_toolCommand: '命令',

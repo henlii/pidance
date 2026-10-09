@@ -381,6 +381,7 @@ export const en = {
   message_compactContext: 'Compact context',
   message_compactContextHint: 'After compaction finishes, send your last message again to continue.',
   message_thinkingUnavailable: 'Thinking unavailable',
+  message_thinkingHidden: "Thinking hidden",
   message_thinkingLoading: 'Loading thinking…',
   message_noOutput: 'No output',
   message_toolCommand: 'Command',
