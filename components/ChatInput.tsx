@@ -141,7 +141,7 @@ interface Props {
   thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   /** 会话思考档是否已被权威源确认；未确认（会话切换/加载中）时不显示档位标签。 */
   thinkingReady?: boolean;
-  onThinkingLevelChange?: (level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") => void;
+  onThinkingLevelChange?: (level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") => boolean | void | Promise<boolean | void>;
   /** settings.json defaultThinkingLevel，无会话档/无缓存时的回退 */
   defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
   availableThinkingLevels?: string[] | null;
@@ -1246,8 +1246,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               notifyLocal(t("input_thinkingLevelUnknown", { level: args }), "error");
               return true;
             }
-            onThinkingLevelChange?.(level);
-            notifyLocal(t("input_thinkingLevelApplied", { level }), "success");
+            // 返回 false = 模型不支持这个档位、SDK 夹住了；那时 hook 已经如实报过，
+            // 这里不能再报「已切到 X」，否则界面自己打自己。
+            // hook 是 async（这里不同步等待，免得卡住输入框）：只有没被夹住才报成功。
+            const applied = onThinkingLevelChange?.(level);
+            if (applied instanceof Promise) {
+              void applied.then((ok) => {
+                if (ok !== false) notifyLocal(t("input_thinkingLevelApplied", { level }), "success");
+              });
+            } else if (applied !== false) {
+              notifyLocal(t("input_thinkingLevelApplied", { level }), "success");
+            }
             return true;
           }
           const picked = resolveModelArgument(args, modelList ?? []);

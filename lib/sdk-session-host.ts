@@ -3872,11 +3872,13 @@ export class SdkSessionHost {
       case "set_thinking_level": {
         if (session.model) applyPassThroughExtendedThinkingInPlace(session.model);
         session.setThinkingLevel(command.level as never);
+        // 回**生效**档位：SDK 会把模型不支持的档位夹到它能支持的那个，而且不写盘、不报错。
+        // 不回传的话，界面就会一边说「已切到 max」一边还是 xhigh（实测踩到）。
         // 主动通知其他实例：空闲时任何实例都能改档位，改完要让别人的页面跟着变
         // （他们读同一份磁盘，这里只是让他们知道「该重读了」）。
         signalSessionStateChanged(this.realSessionId, this.agentDir);
         this.options.onSessionListInvalidate?.();
-        return null;
+        return { level: session.thinkingLevel };
       }
 
       case "compact": {

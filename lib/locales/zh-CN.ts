@@ -648,6 +648,7 @@ export const zhCN: Record<TranslationKey, string> = {
   input_exportCommandDescription: "把本会话导出为 HTML",
   input_commandUnsupported: "`/{command}` 是终端命令，Web 端没有对应动作",
   input_thinkingLevelApplied: "思考档位已切到 {level}",
+  input_thinkingLevelClamped: "该模型不支持档位 {requested}，已改为 {effective}",
   input_thinkingLevelUnknown: "无法识别的思考档位：{level}",
   input_modelNotFound: "找不到模型：{value}",
   input_reloadCommandDescription: "重新加载当前会话",

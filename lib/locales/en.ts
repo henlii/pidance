@@ -648,6 +648,7 @@ export const en = {
   input_exportCommandDescription: "Export this session as HTML",
   input_commandUnsupported: "`/{command}` is a terminal command with no Web equivalent",
   input_thinkingLevelApplied: "Thinking level set to {level}",
+  input_thinkingLevelClamped: "This model does not support thinking level {requested}; using {effective} instead",
   input_thinkingLevelUnknown: "Unknown thinking level: {level}",
   input_modelNotFound: "No such model: {value}",
   input_reloadCommandDescription: "Reload the current session",

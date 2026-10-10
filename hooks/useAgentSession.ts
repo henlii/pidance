@@ -3580,6 +3580,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     onFailure?: () => void;
   }): Promise<boolean> => {
     const { sessionId, model, thinkingLevel, onFailure } = args;
+    // 被模型夹住的档位：返回 false 让调用方别再报「已切到 X」。
+    let clampedThinkingLevel: string | null = null;
     const opId = ++selectionOpSeqRef.current;
     selectionOpBookRef.current = openSelectionOp(selectionOpBookRef.current, sessionId, opId);
     const previous = selectionChainRef.current[sessionId] ?? Promise.resolve();
@@ -3592,14 +3594,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
       }
       if (thinkingLevel && isThinkingLevel(thinkingLevel)) {
-        await sendAgentCommand(sessionId, { type: "set_thinking_level", level: thinkingLevel });
+        // 命令回执是 { success, data } 包一层（实测），两种形状都认。
+        const response = await sendAgentCommand<{ level?: unknown; data?: { level?: unknown } }>(sessionId, {
+          type: "set_thinking_level",
+          level: thinkingLevel,
+        });
+        const reported = response?.data?.level ?? response?.level;
+        const effective = typeof reported === "string" ? reported : null;
+        if (effective && effective !== thinkingLevel) {
+          // 模型不支持这个档位：SDK 夹到了它能支持的那个，且**不写盘**。必须说出来，
+          // 否则界面一边报「已切到 max」一边还停在 xhigh（实测）。
+          clampedThinkingLevel = effective;
+          setThinkingLevel(effective as ThinkingLevelOption);
+          addNotice({
+            type: "error",
+            message: t("input_thinkingLevelClamped", { requested: thinkingLevel, effective }),
+          });
+        }
       }
     });
     selectionChainRef.current[sessionId] = run;
     try {
       await run;
       selectionOpBookRef.current = closeSelectionOp(selectionOpBookRef.current, sessionId, opId);
-      return true;
+      return clampedThinkingLevel === null;
     } catch (e) {
       // 只有仍是最新操作时才回滚/报错：更新的选择已经把它顶替。
       if (isLatestOp(selectionOpBookRef.current, sessionId, opId)) {
