@@ -148,14 +148,14 @@ Pi AgentSessionRuntime
 - **只读浏览**直接解析 Pi `.jsonl` 会话，不创建 AgentSession；快扫和缓存不得写 JSONL。
 - **写操作或显式 wake**按需创建或复用 SDK session host；SSE 本身只观察已有 Host。
 - Pi SDK 拥有 Agent、会话替换、资源和 JSONL/tree 语义；Pidance 只拥有产品用例、live registry、Web 事件与 UI 适配。
-- 单向依赖与单写者是维护约束；目前仍有销毁、队列、停止和恢复方面的[已知架构风险](./docs/architecture-review-2026-09-15.md)，不应把目标约束当作完整并发保证。
+- 单向依赖与单写者是维护约束；销毁、队列、停止与恢复仍有已知风险，不应把目标约束当作完整的并发保证。
 - 文件访问当前不限制在项目根目录；已认证使用者应视为拥有本机 Agent 与文件能力的可信操作者。
 
 ## 文档
 
 完整入口：[文档导航](./docs/README.md)。
 
-- [架构与会话交互](./docs/architecture.md) · [静态审查](./docs/architecture-review-2026-09-15.md)
+- [架构与会话交互](./docs/architecture.md)
 - [开发与验证](./docs/development.md) · [安全边界](./docs/security.md)
 - [Windows 桌面壳](./desktop/README.md) · [版本变更](./docs/release-notes/README.md)
 - [发布与制品审计](./docs/release.md)

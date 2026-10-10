@@ -13,7 +13,6 @@
 | Windows 桌面壳 | [Desktop](../desktop/README.md) | 安装制品、服务复用、托盘、IPC、独立构建 |
 | 正式发布 / 候选包 | [发布指南](release.md) | 版本准备、tag、CI OIDC、审计、失败处理 |
 | 产物保留与清理 | [产物管理](artifacts.md) | 测试输出、tgz、正式安装、临时数据 |
-| 已知架构风险 | [2026-09-15 静态审查](architecture-review-2026-09-15.md) | 审查基线、未解决问题、建议回归矩阵 |
 | 版本变更 | [发布记录索引](release-notes/README.md) | 各版本当时的变更与验收记录 |
 | 界面分区对照 | [Web 与 TUI 对照](ui-vs-tui.md) | 分区/部件映射、扩展 UI 槽位、刻意分叉、改界面时的维护清单 |
 | 设计研究 | [UI 设计稿](ui-redesign/README.md) | 历史 HTML 原型、主题和图标研究，不代替当前实现 |
@@ -38,3 +37,4 @@
 - [Pi TUI 与 Pidance 渲染对照稿](assets/pi-tui-vs-pidance-rendering.html)
 
 本轮文档整理未修改业务代码，也未重新执行历史发布记录中的验收。
+
