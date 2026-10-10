@@ -177,4 +177,4 @@
 | 新增 Web 专属面或新的刻意分叉 | §6、§3 | 对应组件 + `docs/architecture.md` 的源码地图 |
 | Electron 壳新增 bridge 能力 | §6、§3 | `desktop/src/preload.js`、页面侧接线 |
 
-约定：本文件只写“面与分区、映射与分叉”，不复制像素级样式；视觉规范放 `docs/ui-redesign/`，架构与状态所有权放 `docs/architecture.md`。
+约定：本文件只写“面与分区、映射与分叉”，不复制像素级样式；视觉政策的取舍见 `.agents/notes/implemented/process/2026-09-15-ui-design-policy.md`（数值以 `app/globals.css` 为准），架构与状态所有权放 `docs/architecture.md`。

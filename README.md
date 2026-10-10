@@ -159,8 +159,6 @@ Pi AgentSessionRuntime
 - [开发与验证](./docs/development.md) · [安全边界](./docs/security.md)
 - [Windows 桌面壳](./desktop/README.md) · [版本变更](./docs/release-notes/README.md)
 - [发布与制品审计](./docs/release.md)
-- [历史界面设计稿](./docs/ui-redesign/README.md)
-- [主题 Token 设计参考](./docs/ui-redesign/theme-tokens.md)
 
 ## 上游与许可
 

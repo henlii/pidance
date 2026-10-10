@@ -155,8 +155,6 @@ Start with the [documentation index](./docs/README.md). Detailed maintainer guid
 - [Development](./docs/development.md) · [Security](./docs/security.md)
 - [Windows desktop shell](./desktop/README.md) · [Version history](./docs/release-notes/README.md)
 - [Release and package auditing](./docs/release.md)
-- [Historical interface prototypes](./docs/ui-redesign/README.md)
-- [Theme token design reference](./docs/ui-redesign/theme-tokens.md)
 
 ## Upstream and license
 
