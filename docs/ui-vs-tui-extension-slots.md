@@ -1,0 +1,138 @@
+# 扩展 UI 槽位：现状与已知缺口
+
+[界面分区对照](ui-vs-tui.md) 的 §5 单独成篇：改下拉/弹窗/自定义面板/widget/页头页脚时的维护清单。
+
+## 5. 扩展 UI 槽位：现状与已知缺口
+
+Pidance 的适配器（`lib/web-extension-ui.ts`）把 Pi 的 `ExtensionUIContext` 投影成 SSE 上的 `extension_ui_request`，再由 `lib/extension-ui-bridge.ts` 落到 UI。几个已知事实：
+
+1. **widget 的 placement**：缺省按 `aboveEditor` 处理（与 Pi 默认一致），所以扩展不写 placement 时，Web 就会把它渲染在**输入框上方**。
+2. **组件工厂形式**（`setWidget(key, (tui, theme) => Component)`）：工厂只调用一次，组件实例常驻在适配器里，`tui.requestRender()` 触发重新渲染并按 microtask 合并，产出走与字符串数组相同的 `setWidget` 通道（`lib/web-extension-ui.ts` 的 `mountWidgetFactory` + `lib/tui-render-bridge.ts` 的 `renderWidgetComponentLines`）。渲染失败保留上一次的行（不推空帧）；卸载、替换成字符串数组或适配器 dispose 时调组件的 `dispose?.()`。工厂收到的 `tui` 是有 `requestRender` + `terminal` 的真对象（此前传 `undefined`）。
+3. **`custom()` 的 overlay 与 keybindings**：`ctx.ui.custom(factory, options)` 接收第二参，把 `overlayOptions` 的 `anchor` / `width` / `minWidth` / `maxHeight` / `margin` 归一化成 `ExtensionUiCustomLayout` 随事件下发（`lib/web-extension-ui.ts` 的 `normalizeCustomOverlayLayout`），前端由 `lib/extension-overlay-layout.ts` 映射成浮层的对齐与尺寸。**两种 custom（写不写 overlayOptions）与阻塞弹窗现在落在同一个插槽里**（2026-10-06 用户口径）：会话区之下、输入区的位置，展开时占可用高度的一半、收起时只留一行标题，会话区始终可见。**高度后来交回用户**（同日稍后口径）：上限从「一半」放大到**整个会话列**（插槽 `max-height: 100%`），标题区（左侧折叠按钮之外的整行）按下拖动即可改高、下界是标题行本身、不吸附；折叠改由标题行最左的独立按钮负责 —— 整行让给拖动，点标题不再折叠。高度状态由 `ChatWindow` 持有（一次流程会连着换面板，外壳实例跟着换，状态留在它里面每换一步就丢），面板整块关掉后复位；拖到上限时会话区被挤到 0 高（用户口径就是「最大高度 100%」）。触屏上这块区域仍是**纵向滚动**（`touch-action` 保持 pan-y）：长提问要能滚，拖动只接鼠标与触控笔。
+也没有键盘调高度：面板可见期间 keytrap 是键盘的归属者（焦点一离开面板就被守卫拉回去），把手拿不到焦点；键盘用户靠左侧按钮折叠/展开。非 overlay 的 custom 在 TUI 里替换的是 **editor 区域**（不是整屏，如 pi-subagents 的 SelectorComponent），而 Web 上 editor 就是输入区 —— 此前把它画到会话区上方并把会话区藏掉，既不对齐 TUI 语义，短面板还会在下方留一大片空白。`overlayOptions` 仍只决定插件给的定位与尺寸（anchor / width / minWidth / maxHeight / margin）。外壳标题栏对 custom 面板取**插件自己画的标题行**（加粗且短的那一行，`lib/extension-panel-view.ts` 的 `isHeadingRow`），识别不到才退回通用名「扩展面板」——同一段流程里可能连着开好几个面板（`/advisor-models` 先选 Executor 模型、再选 Advisor 模型），正文长得几乎一样，靠标题栏才分得清在回答哪一个。回调第 3 参注入真的 `KeybindingsManager`（键名定义取 pi-tui 的 `TUI_KEYBINDINGS`）；pi 的应用级键位（如 `app.editor.external`）不在这份定义里，对应的 `matches()` 恒为 false。`tui.stop()` / `tui.start()` 是 no-op 占位（Web 没有可让出的终端），插件的外部编辑器路径会因 spawn 不到 tty 自行失败；`stop()` 会经 `notifyUnsupported` **报一次可见失败**（#76），免得用户只看到面板静静地卡住。
+4. **`mode` 是 `"tui"`**（`lib/sdk-session-host.ts` 的 `bindExtensions`）：宿主声明能渲染扩展自绘组件，插件因此走富路径而不是降级——pi-subagents 的 async widget 走组件工厂、pi-mcp-adapter 启用 `/mcp` 的 overlay、pi-advisor-flow 才进 `custom()`。`lib/subagent-async-widget.ts` 仍保留 rpc 快照载荷的解析（`PI_SUBAGENT_ASYNC_JSON:`），作为旧会话与兼容路径。
+5. **`mode === "rpc"` 快照已解码**：pi-subagents 在检测到宿主是 rpc 模式时，发的是同一份数据的一行快照
+   `PI_SUBAGENT_ASYNC_JSON:{"kind":"pi-subagents.async-status-snapshot",…}`（见其 `src/tui/render.ts` 与 `src/runs/background/async-status-snapshot.ts`）。
+   Pidance 现在在 `lib/subagent-async-widget.ts` 里解析它，并**按 TUI 的行结构**渲染成 `components/SubagentAsyncWidget.tsx`：
+   标题 `异步子代理 <agent> · 后台`（多个 run 时是 `异步子代理`），每行 = 状态字形（●/◦/✓/■/✗，颜色同 TUI 的 accent/success/warning/error）＋ label ＋ 状态 ＋ 已用时长 ＋ `⎿ 当前工具 工具时长 · N 轮 · N 次工具`；位置仍是输入框上方（TUI 的 aboveEditor 语义）。
+   有意不搬的：终端键位提示（`↓/← to inspect`）——Web 里换成面板自身折叠，子会话导航在顶栏谱系下拉。
+   解析失败时**不显示原始载荷**（宁可空着，也不把 JSON 糊到界面上）。
+   子代理全部结束后 pi-subagents 会 `setWidget(key, undefined)`，面板消失。
+6. **`onTerminalInput`（插件全局按键）有三条窄道**：pi-tui 的 `addInputListener` 是全局同步的，Web 没有等价层，**也不做「每个键都往返」**。现在有三种情形会把按键 POST 给 `terminal_input`（服务端按 pi-tui 语义逐个调监听器：先 `consume` 再 `data` 改写，见 `dispatchTerminalInput`）：
+   - **面板收起**（`hidden` 且注册了监听器）：前端把白名单键（Escape / F1–F12 / Ctrl·Alt + 非保留字符，见 `lib/extension-panel-keys.ts` 的 `shouldRouteKeyToExtensionListener`）拿去问插件。rpiv-ask-user 的折叠键靠它把面板重新展开。
+   - **插件界面显示中**（`hooks/useExtensionTerminalInput.ts` 的窗口 ③，issue #102）：可见的 custom 面板（含 overlay）或扩展对话框在屏幕上时，按键归插件的全局监听器 —— 此前这种情形下只有面板自己的 keytrap 能收到按键，焦点一旦不在面板里（用户点了别处，或对话框这种没有 keytrap 的界面）插件就完全收不到。排除项：Cmd(Meta) 组合、浏览器保留的 Ctrl 组合（含 Ctrl+Space）、壳自己的 Ctrl+K（命令面板，依据 TUI 的 app 保留键位规则）、**Tab**（无障碍焦点遍历，键盘用户只能靠它走到面板里的按钮）、输入法合成中与 `compositionend` 后的 80ms 宽限，以及**事件目标已经有 DOM 归属者**的按键（输入框本身、面板 keytrap、按钮/链接/菜单项等）——最后这条同时保证了「输入框聚焦时维持现状」。面板/对话框关掉后由 `ChatWindow` 在同一提交里把焦点还给输入框。
+   - **插件 widget 的选择态**（`hooks/useExtensionWidgetKeys.ts`）：没有 custom 面板、该会话存在 widget、且有监听器时，输入框**为空且聚焦**的前提下——未入选择态只送 `↓`/`←`（插件的激活键，且**不拦截**，空输入框里这两个键本来没可见行为）；插件消费了就进入选择态，此后只路由导航键（方向键 / `j` / `k` / `Enter` / `Esc`，这些会 `preventDefault`）；任何其它键立刻退出选择态并把按键原样留给输入框。普通打字一次请求都不发。选择态是**本地推断**（看插件有没有消费上一次按键），所以有三道复位：`Esc`/`Enter` 被消费也**无条件清零**（它们是插件的离开/提交键，继续记着会把之后的 `j`/`k`/回车吞掉）、任何非导航键清零、超过 10 秒没有路由过按键即视为已离开。切后台、失焦、换会话同样复位。输入法合成中（含 `keyCode === 229` 与 `compositionend` 之后的 80ms 宽限）一律不参与，避免合成提交那一下被当成导航键拦截。
+
+   代价与限制：选择态下 `j`/`k` 是导航而非字母，所以只能在「空输入框 + 已激活」时拦；插件在 Web 端的 `Esc` 取消长任务仍然没接（只接了 widget 选择态里的 `Esc`）。
+   **注册时会告知覆盖范围**（issue #74）：`onTerminalInput` 落地时发一条只发一次的 warning（`lib/web-extension-ui.ts` 的 `notifyLimitedSupport`），逐字写明三个窗口——① widget 存在且输入框**聚焦且为空**时，`↓`/`←` 开局、之后方向键/`j`/`k`/`Enter`/`Esc` 才会路由；② 存在**已收起**的扩展面板时 `Esc`、`F1`–`F12`、`Alt+<字符>`、`Ctrl+<字符>`（浏览器保留组合与 `Ctrl+Space` 除外）会路由；③ 插件面板 / overlay / 扩展对话框**显示中**时，除 Meta 组合、浏览器保留的 Ctrl 组合、壳自己的 `Ctrl+K`、`Tab`（焦点遍历）以及**已有 DOM 归属者**（焦点所在的那个控件）的按键之外，都路由给插件——以及「普通打字到不了」。否则插件无从区分「用户没按」和「Web 端收不到」，这块交互会静默消失 —— 但也不能写成「不支持」：按键确实会送达，只是覆盖面窄。**这条提示本身也要能水合**（issue #93）：它走一次性 SSE 事件，而扩展加载发生在浏览器订阅之前，那一刻没有订阅者就永久丢掉（实测：服务端日志 5 次、页面 DOM 0 次），所以宿主把它留成只读快照、`extensionCapabilityNotices` 随状态下发，客户端按 id 去重补进通知队列。
+7. **面板内鼠标事件**：`ExtensionCustomPanel` 把点击换算成字符行列后发 `extension_ui_mouse`，服务端调**面板组件**的 `handleMouse`。只转 click，不转 move / drag / wheel。**`setWidget` 的组件同样收得到**（2026-09-26，issue #103）：卡片**正文区**的点击按同一套换算（`lib/extension-widget-mouse.ts`；字符宽/行高量的是正文区自己 —— 与服务端渲染这些行用的是同一套字体上下文，所以列宽一致。事件里的 `width`/`height` 是**可见正文盒**的格数，**不是** `render(width)` 的列数：pi-tui 的 `Container.handleMouse` 正是用 `y >= event.height` 丢掉可见区以下的点击，所以给的必须是「用户能点到的那块区域」）发 `extension_ui_widget_mouse`，服务端按 **widget key** 调该组件的 `handleMouse`（局部字符坐标）；量不出尺寸（未布局）时这一次点击不转发，不给插件送错坐标。仍然只转 click（不转 move / drag / wheel），**滚动不拦**（往返回来再 preventDefault 已经来不及）。**卡片头（折叠按钮）始终归我们的槽位外壳**，插件只拿正文区；坐标原点也在正文区。触摸：tap → 左键、长按 → 右键；**滑动（超过 10px）与被系统取消的手势都不转发 click**（浏览器滑动后通常不补发，但这不是保证 —— 补发的那次若被当成 tap，插件会看成「点了第 0 行」而误切换整块），长按与滑动之后补发的 click 一律吃掉并复位（标记不跨手势存活，不会永久吞点击）。只有组件真的实现了 `handleMouse` 才在状态投影与 `setWidget` 帧里带 `interactive: true`，前端据它决定要不要为点击付一次往返（字符串数组 widget 永远不可交互）。已装插件里只有 pi-subagents 的 fleet widget 用到它（「第 0 行左键」把**整块**在「一行摘要」与「全列表」之间切，`src/tui/render.ts:2837-2845,2887`）—— 与我们的卡片级折叠并存（两个粒度都能用），方向键驱动的 roster 已在 #83 打通。custom 面板的 overlay 句柄也已实现（2026-09-26，issue #99）：`focus()` 把键盘交给面板（面板隐藏或已摘除时是 no-op，对齐 pi-tui —— 不去唤醒不在屏幕上的面板）、`unfocus({target})` 三态（`target: null` = 谁都不聚焦；不给 options = 交回输入框；给具体组件时因 Web 只能程序化聚焦输入框而按同一落点降级，理由写在实现里）、`getBounds()` 返回**客户端上报**的字符单元格矩形（原点取会话滚动区，与面板鼠标坐标同一元素同源；未挂载或量不出时返回 `undefined`，后台标签不上报）；`nonCapturing` 的 overlay 初始焦点留在编辑器。`hide()` 仍按 pi-tui 契约做成**永久移除**（#76）。
+8. **`getToolsExpanded` / `setToolsExpanded` 自洽**：服务端维护布尔并下发事件，插件 set 之后自己 get 得到的是一致的值；界面上的工具块仍按各自的折叠规则（`setToolsExpanded(true)` 不会展开所有块）。
+9. **没有等价语义的能力改成可见失败**：仍然会发 warning 的只剩两条 —— 让出终端 stdio（`tui.stop()` / `start()`，B7 判定不做，理由见第 11 条）与 `onTerminalInput` 的部分支持（只开三个窄窗口）。不静默 no-op 的理由：静默会让插件作者以为生效了（例如 `getEditorComponent()` 永远返回 undefined，插件以为包裹链装上了）。`getAllThemes` / `getTheme` / `setTheme`（#97）、`setFooter` / `setHeader`（#98）、`setEditorComponent`（#107）**都已经实现**，不再走告警：插件工厂返回的 `EditorComponent` 会在**输入框位置**接管（桌面、可写、设置里没关掉、用户没点「返回输入框」时）；工厂第二个参数与 TUI 一致是编辑器主题（`getEditorTheme()` 的 `{ borderColor, selectList }`，不是插件那个 `Theme`），`onSubmit` / `onChange` 由宿主挂到组件实例上，接管时把已有草稿 `setText` 灌进去；按键进它的 `handleInput`，`onSubmit(text)` 交给**既有发送管线**（不绕队列与写者所有权），手机与只读/被对端持有的会话不接管，壳外一直有「返回输入框」按钮可退出。工厂值仍会被 `getEditorComponent()` 如实回传（SDK 契约是「当前**配置的**工厂」，未配置才是 undefined），「拿旧的包一层再设回去」的写法不断链（issue #74）。传 `undefined` / 无参的「恢复默认」不算降级，不提示。
+三处多标签/多端语义（2026-09-26，issue #107 三轮审查）：① **提交恰好一次** —— 每个标签与服务端共用一个 clientId（`lib/client-id.ts`），按键同步提交带上来源标签、只由它执行；插件**自己**调 `onSubmit`（没有来源）时由宿主挑一个归属者（最近上报过「本页知道这个接管、正在显示它」的标签，其次退到「知道但已收起」的标签），一个标签都没上报过时把正文写进**会话草稿**（不静默丢）；② **交还组件文本只发给刚才在显示接管的标签**（手机、点过「返回输入框」的标签不会被塞进一段它们没看过的正文），且落点是**替换**草稿（TUI 的 `editor.setText`）而不是插入 —— 插入会把组件全文拼在草稿后面；③ 提交失败/命令报错时正文交回组件**并**写一份草稿（命令可能因为接管换过或组件没有 `setText` 而没落地），接管期间的忙碌口径与输入框一致（`agentRunning || bashRunning || isCompacting`），`getEditorText()` 在组件**为空**时返回空串而不是回退到 400ms 防抖的陈旧草稿镜像。`setWorkingMessage` / `setWorkingVisible` / `setWorkingIndicator` **已经实现**（不再走告警）。
+**`setFooter` / `setHeader` 也已实现**（2026-09-26，issue #98）：插件工厂拿到的组件走与 widget 同一条渲染桥
+（headless `render(width)` → ANSI 行），页头常驻在转写区之上、页脚在我们自己的状态条之上；替换时先 `dispose()` 旧组件
+（对齐 TUI 的 `setExtensionFooter`），`setFooter(undefined)` / `setHeader(undefined)` 恢复内置（页脚回到我们自己的状态条）。
+槽位限高内滚（移动端约 4 行 / 桌面约 6 行），组件抛错或渲染不出行就隐藏槽位并**每种槽位只提示一次**，异常文本不进界面。
+两处**有意分叉**：① TUI 是「替换」整个内置页脚，我们保留状态 chip —— 状态是独立机制，而页脚数据（git 分支等）我们没有等价物，
+真替换会把 `setStatus` 的信息整块吞掉；② 页脚工厂的第三个参数（`ReadonlyFooterDataProvider`）按 SDK 契约给全四个成员
+（`getGitBranch` 恒 `null`、`getAvailableProviderCount` 恒 `0` —— 都没有同步来源）：**不传**会让按官方示例写的页脚
+（工厂里无条件调 `footerData.onBranchChange(...)`）直接抛错、整槽消失。
+
+**`addAutocompleteProvider` 也已实现**（2026-09-26，issue #101）：插件按注册顺序**依次包裹**补全 provider（与 SDK 的 `setupAutocompleteProvider` 同语义），
+`triggerCharacters` **原地**写并集（对象展开会丢掉类实例挂在原型上的方法）。输入区在**触发字符**（`@` token，或插件声明的触发字符所在的词；
+词边界与 pi-tui 的 `autocompleteSeparatorRegex` 同口径 —— 空白与 CJK 标点都算）时才问服务端，防抖 120ms、只认最新一次、单次请求 800ms 超时。
+四种结果区别明确：**插件给了候选**用插件的（选中后用插件的 `applyCompletion` 决定替换区间，替换期间用户改了输入就丢弃这次应用，
+不覆盖新输入）、**插件明确返回空数组**则不显示（不回退）、**在途**同样什么都不显示（不能让用户在这几百毫秒里提交我们自己的文件项，
+那会把插件刻意的「没有候选」盖掉）、**链没给结果/抛错/超时/没注册**才回退到 Pidance 自己的 `@` 文件补全 ——「链没给结果时落到基础 provider」与 TUI 一致。
+没有插件注册 provider 时**一次往返都不发**（门槛是**有效**工厂数：坏工厂不计入，否则每次输入都白付一次注定 `none` 的往返；
+门槛随状态下发，后加载的页面/刚注册的插件拿到后会**立刻用当前输入补问一次**）。
+菜单可见性与「有东西可显示」用同一个判据：插件声明的非 `@` 触发字符不会出现「列表挂进 DOM 却不可见、按键却作用在它上面」。
+**取消挂在这一次请求上**（客户端 AbortSignal → HTTP → 宿主交给插件的 `getSuggestions`）：换输入、关菜单（Esc 也作废在途那次，
+不会自己再弹回来）、开始输入法合成、卸载都会叫停插件侧的原生搜索；不用 host 级共享锁，多标签不会互相取消。
+一处**有意分叉**：`getSuggestions(..., { force })` 恒收到 `false` —— TUI 的 `force` 来自 Tab（显式请求补全），
+而 Web 的 Tab 是**焦点遍历**（刻意留给浏览器，见 `lib/extension-panel-keys.ts`），没有等价的显式入口；正常输入照常给候选。
+**`setHiddenThinkingLabel` 也已实现**（2026-09-25，issue #96）：折叠态思考块的那一行改用插件给的标签
+（TUI 语义就是「收起时只画这个标签，展开才画正文」，依据 `assistant-message.js` 的
+`hidden ? new Text(...hiddenThinkingLabel...) : new Markdown(正文)`），未设置 / 空串 / 纯空白恢复既有的 i18n 摘要；
+标签**原样显示**（插件文案，不走 i18n），超过 60 个码点从中间截断、全文进 `title`（仅在真的截断时挂）。
+随状态下发（`state.hiddenThinkingLabel`）以便后开的页面补上，切会话与插件 `reload()` 都会重置。
+**`registerMarkdownTransformer` 也已实现**（2026-09-26，issue #106）：插件转换器在**服务端渲染边界**应用，
+而且是**两条**边界，缺一条都会让转换在真实使用时看不见：
+- **已落盘的投影**：分页 / 首屏切完窗口之后（`lib/session-service.ts` 的 `getContextPage`，以及首屏路由切完尾页调的
+  `transformContextMarkdown`），加上按需加载的思考正文（`getEntryThinking`，首屏 `deferThinking` 之后正文是单独取回的）。
+- **流式消息**：SSE 的 `message_start` / `message_update` / `message_end`（`lib/sdk-session-host.ts` 的
+  `withTransformedMessage`）。进行中的助手消息**还没入库**，投影窗口里根本没有它 —— 只接第一条边界的话，
+  整段生成（含流式思考块）都不过转换器，用户看到的始终是原文，只有 run 结束后的尾页归并才纠正一次。
+  只改**发给浏览器的副本**，不写回 SessionManager（写回会让读盘投影再转一次 = 双应用）。
+语义逐条对齐 SDK 的 `markdown-transform.js`：
+链式传递（后一个拿前一个的输出）、返回非字符串忽略、**抛错只跳过这一个**（不是整条放弃）；
+上下文与 SDK 的调用点一致：用户消息 `"user"`（`isStreaming` 恒 false）、助手正文 `"assistant"`、
+助手思考 `"assistant-thinking"`。**`isStreaming` 只在流式边界上为真**（`message_update` 每帧 true、
+`message_end` 以 false 转一次，与 TUI 的最终渲染同口径）；**投影边界一律 false** —— 宿主暴露的
+`isStreaming()` 是**整轮 run** 的标记（SDK 的 `_isAgentRunActive`），不是「这条 entry 正在收 token」，
+拿它去标窗口末尾会把刚落盘的用户消息或上一条已结束的助手消息错标成流式（审查 P1）。
+`availableWidth` 取客户端上报的渲染列数（没上报过就是渲染桥的默认宽度）；多标签是**最后上报者胜**，
+宽度变化不会像工具行那样主动推一帧，已显示的正文要等下一次上下文拉取才重算（取舍：缓存键里带宽度，
+所以重算一定正确，只是不主动刷新）。只在**切片后的窗口**内工作（不为了渲染去扫整条 leaf），
+工具结果 / 自定义消息 / bash 输出**不动**；单条消息按 (链指纹, entryId, 内容 hash, 宽度, 流式状态, messageType)
+记忆化（流式帧内容每帧都变，那条路径不用记忆化）。
+**转换器链一律取「按 cwd 从磁盘加载的扩展」**（与 entry 渲染器、工具显示元数据同一条来源），
+**不看活宿主手里那批函数对象**：插件增删只失效模块缓存、不会重建活会话的 extension runner，
+以宿主为准的话卸载插件后这个会话会一直用旧插件的转换器改文本（一页里混两代插件，审查 P1）。
+宿主缓存了一份链供流式路径同步使用，`invalidateMarkdownTransformCache()` 会通知活宿主立刻重解析；
+失效到重解析落地之间**按原文发**（宁可原文，也不用已卸载插件的代码 —— 流式只是过程态，run 结束时投影会给出最终文本）。
+**一处有意分叉**：TUI 的链首还有 SDK 自带的 mermaid 转换器，它把 ```mermaid 代码块换成本地渲染的 **ASCII 图**
+（实测：输入 `graph TD; A-->B;` 的围栏 → 输出 `` ` ┌───┐` `` 这类行内 code span，还按 `availableWidth` 裁剪）。
+Web 端已经有**真正的图形渲染**（`components/MarkdownBody.tsx` 动态 `import("mermaid")` 出 SVG，带预览与代码回退），
+接上链首会把围栏换掉、把更好的渲染路径挡死，所以这里**只跑扩展转换器**（两条边界都不拼；
+宿主侧的护栏测试用恒等转换器断言 `mermaid` 围栏原样传下去）。
+**第二处有意分叉（分块粒度）**：TUI 渲染前把**连续 thinking 块**用 `\n\n` 拼成一次转换、把用户消息的
+**全部 text 块**拼成一个字符串再转，正文还会 `trim()`。这里**逐块**转换、只跳过空白块、不 trim ——
+投影里的块与磁盘 entry 是**按下标一一对应**的（`getEntryThinking(sessionId, entryId, blockIndex)` 按这个
+下标回读磁盘），并块会让下标错位、按需加载取到错的块；一次转换后的整段文本也无法可靠拆回 N 块；
+而投影出来的 text 同时供复制/摘录使用，`trim()` 会悄悄改内容。单块消息（绝大多数）两条路径完全一致。
+
+
+10. **仍存在的差异**：
+   - `subagent-fleet-status`（placement `belowEditor`）是 TUI 组件，经渲染桥转成文本，里面的 `↓/← to inspect` 是终端键位。Web 侧现在改写这行：去掉键位提示段，保留 agent 数与 token 读数（`rewriteFleetStatusLines`）；整行只剩提示时不渲染该 widget。
+   - **`tui.focusedComponent` 已注入**（2026-09-24）：客户端在输入框聚焦/失焦/切后台时上报 `editor_focus`，服务端把它投影成 `tui.focusedComponent`——有焦点时给一个**鸭子类型探针**（只有 `render`/`invalidate`/`handleInput`/`getText`/`setText` 五个 no-op 成员，见 `lib/custom-ui-terminal.ts` 的 `createEditorFocusProbe`），无焦点时 `undefined`。pi-subagents 的 fleet widget 靠它决定方向键能不能进选择态（`fleet-status.ts` 的 `editorHasFocus()`），配合第 6 条的 widget 选择态窄道即可用。焦点按**标签**（clientId）聚合：任一标签的输入框聚焦即视为聚焦，后台标签失焦不会清掉前台标签的焦点（旧实现是单槽 last-write）；每项带 60 秒 TTL，标签被直接关掉后焦点自己过期。客户端不为补报单独发请求——**窗口 ②**（widget 选择态）那条 `terminal_input` 命令带 `assertFocus`，服务端把按键交给插件**之前**先刷新焦点（拆成两条 HTTP 会乱序，表现为冷启动或过期后第一次 `↓` 不激活）。**窗口 ①/③ 故意不带**：它们成立时输入框并没有聚焦（① 是面板已被收起、③ 是用户正在跟插件界面交互），带上等于把 `tui.focusedComponent` 谎报成「主编辑器聚焦」，会骗过 pi-subagents 那类拿它当激活门槛的界面（`lib/extension-panel-keys.ts` 的模块注释里写了这条取舍）。
+   - **`getEditorText()` 回传的是「已同步到服务端的输入框草稿」**（2026-09-25，issue #74）：宿主把 `lib/composer-draft-text.ts` 的读取器注入适配器，读的是客户端**本来就会**镜像到 `/api/preferences` 的那份草稿（`lib/draft-store.ts`，键是**已存在会话**的会话 id）—— **零新增往返**，代价是一次小文件读（本机 42KB / 148 条草稿时 `readFileSync` + `JSON.parse` 实测约 0.5ms，复现命令见 `lib/composer-draft-text.test.mjs` 末尾；超过 4MB 直接降级为空串）。语义边界：比输入框**滞后**（客户端 400ms 防抖 + 落盘），多标签共用同一个草稿键（最后写入者胜出），所以是「这个会话的草稿」而不是「某个标签页的编辑器」；没有草稿 / 读失败一律空串。
+     **已知副作用**（审查 P1，不要写成「不影响」）：pi-subagents 的激活门槛也是 `ctx.ui.getEditorText() === ""`，而这里读的是**盘上镜像** —— 用户清空输入框后立刻按 `↓`（清空走立即 flush，但仍要等一次 PUT 到达），或另一个标签往同一会话写了草稿时，插件会认为「框里还有字」而**不激活**，那一下按键看起来没反应。客户端那条门槛（只在输入框为空时才路由按键）只看本地状态、不受影响，所以两条判据**不是**独立的：客户端管「键要不要送」，插件管「送了之后认不认」。
+     另：会话创建之前客户端把草稿存在 `new:${cwd}` / `new:${intentId}` / `"new"` 键下（`hooks/useAgentSession.ts` 的 `draftKey`），宿主传的是已落盘会话 id，所以那一段文本这里读不到（那时也还没有会话宿主会调这个 API）。
+   - ~~新开页面拿不到已存在的 widget~~ **已核实不是问题**：widget 会随状态水合（`/api/sessions/<id>/state` 的 `state.extensionWidgets`）在打开会话时出现。此前判定「拿不到」是探针口径造成的误判。
+   - **左侧用户消息导航条铺满整列**（2026-09-22 决定）：短横线首尾贴住列内缩位置、中间按条数均分，**一条横线的纵向位置就对应它在会话里的先后** —— 贴底时「当前」那条落在轨道最下面（此前整条限高 320px、垂直居中，当前项落在屏幕中部，看不出与会话位置的关系）。条数多到每格矮于 8px（点不中）时退回旧的「限高 + 居中 + 内部滚动」，此时才显示上下小三角。
+   - **侧栏里的 fork 子会话平铺显示**（2026-09-22 决定）：Pi 原生 fork 出来的会话是**独立会话**，与父平级各占一行，侧栏不再有「展开/折叠子会话」；父行下也不再嵌 fork 子行。此前把它嵌在父下，而 fork 会连标题一起复制，于是看起来像「同一个会话显示了好几行」。subagent 子会话仍然整体隐藏（只在顶栏「子会话谱系」里）。
+   - **折叠属于槽位外壳，不属于内容**：所有 `setWidget` 部件（含 `subagent-async` 这种机器载荷）都由 `ExtensionWidgets` 的**同一个卡片模板**渲染标题行 —— 折叠按钮、`aria-expanded`、展开/折叠文案、按 widget key 持久化的折叠状态只有一处。所以**任何插件用这个槽位都自动能折叠**，不需要各自实现。标题也是外壳给的，走**通用规则**：机器载荷用它能解析出的友好名（`异步子代理 <agent>`，副标题带「后台 / N queued / 另有 N 个 / 截断」），其余部件统一把 key 的美化形式当标题（`subagent-async` → `Subagent Async`）—— 不为个别插件写特例（`mode=tui` 下 pi-subagents 不再发 JSON 快照，它也就走这条通用路径）。面板组件只负责正文（状态行）。
+   - **子代理通知消息块**（`subagent-notify` 这类扩展自定义消息）：标题走通用美化（`Subagent Notify`），不露出内部 customType 原名；折叠开关在卡片头部（默认收起），展开后才显示通知正文。
+   - **会话内容区宽度可拖拽、按比例记忆**（2026-09-22 决定）：宽度 = 内容区**可用宽度** × 比例，再夹到 [1000, 1600]，可用宽度不够时由 `100%` 兜住 —— 于是宽屏到 1600 封顶后只长两侧空白，窄到下限后只缩空白，空白归零后内容才跟着缩。比例存 `localStorage`（本机 UI 状态，随 #65 口径），窗口/侧栏尺寸变化自动重算。把手贴在内容列左右缘（`role="separator"`，拖任一侧对称改宽、被拖那条边跟手；双击回默认）。宽度用 CSS 变量 `--pidance-chat-column-width` **一处设置**（AppShell），消息列/输入栏/扩展面板/widget/底栏共用同一变量，保证同宽同中心线。
+   - **折叠总规则（2026-09-22 决定）**：会话时间线里**只有智能体直接输出的正文默认展开**；除此之外的块（thinking、工具调用、过程分组、压缩、分支摘要、扩展自定义消息、子代理通知）一律可折叠且**默认收起**。过程分组只包中间过程（thinking / 工具 / 子代理回复），每轮末尾的正式回答由 compositor 渲染在组外，所以收起不会藏掉智能体输出。**2026-10-07 补齐**：此前漏在规则外的几类也一并纳入 —— 扩展自定义消息的纯文本/单行形态（表头给折叠箭头，收起行显示首行摘要）、`!命令` 记录块、活动记录块（`pidance.activity`）、智能体自记的媒体块（`pidance.binary`，默认收起，展开才加载媒体）——用户自己发的消息与附件仍不折叠。**同一条规则的另一半：每个块的正文都有高度上限**（`CHAT_BLOCK_MAX_HEIGHT`，桌面 `min(320px, 45vh)` / 窄屏 `min(240px, 32vh)`，块内滚动）：压缩块与分支摘要此前没有，现在展开态也照这个上限滚动。
+11. **状态条与 widget 不区分“谁提供”**：Web 侧只按 key 渲染与折叠（折叠状态存 `localStorage` 的 `pidance.collapsedWidgetKeys.v1`）。
+12. **`select` / `confirm` 用 SDK 组件做终端渲染，`input` / `editor` 仍是 Web 弹窗**（2026-10-06 用户口径：用 SDK 的 TUI 组件真渲染）。
+   `lib/web-extension-ui.ts` 的 `runTuiSelector` 直接实例化 SDK 导出的 `ExtensionSelectorComponent`，走**已有的 `ctx.ui.custom` 通道**
+   （渲染成行 → SSE → 前端按键经 `extension_ui_input` 回到组件的 `handleInput`），所以 `select` 面板与插件自绘面板**同槽位、同外壳、同按键条**，
+   边框、粗体标题、`→` 选中项、`↑↓ navigate / enter select / escape cancel` 提示行都是组件自己画的。
+   `confirm` 与 TUI 的 `showExtensionConfirm` 同形：标题里带上 `message`，选项固定 `Yes`/`No`，`Yes` 才为真。`timeout` 交给组件自己的倒计时。
+   **已确认接受的三项代价**（换来的是与插件面板逐字符一致的观感）：
+   - 每按一次方向键一次 HTTP 往返 + 一次整面板重渲染（与面板里打字同一条路径）；
+   - 选项行**不再是可点按钮**（选择只能靠面板按键区 / 手机端底部按键条），点击选项的路径消失、无障碍退化为普通文本；
+   - 面板底部「取消」发的是 `\x03`（与其它面板一致：交回插件侧取消），**不再**触发 `input`/`editor` 那条「cancelled 之后补发 `abort`」的语义。
+   按键之后适配器会**立刻重画一帧**：pi-tui 的 TUI 在 `handleInput` 之后紧跟 `requestImmediateRender()`，而组件自己不一定请求渲染
+   （`ExtensionSelectorComponent.updateList()` 只换子节点），少了这一步方向键改了选中项而界面停在旧光标上。
+   保留 Web 弹窗的只有 `input` / `editor`（原生 `<input>`/`textarea`，IME、聚焦、真按钮与移动端可用性都在它身上；也正因如此 `select`/`confirm` 的
+   旧协议（`extension_ui_settled`、`expiresAt`、按 id 响应）只剩这两个 method 在用）。
+   仍由 Web 侧定的部分：
+   - `input`/`editor` 的按钮固定为「取消 + 提交」；「取消」的语义不止关窗：`hooks/useAgentSession.ts` 在 cancelled 之后若 agent 仍在跑会补发 `abort`（对齐 OpenChamber）。
+   - **长提问可滚**：扩展经常把 preview / 说明折进 `title`，所以标题本身就是内容区（`.extension-panel-title`，`max-height: min(30vh, 240px); overflow-y: auto`）；正文（选项等）在 `.extension-panel-body` 里滚动。
+   - **展开/收回，默认展开**：header 有「收回 / 展开」开关（`ExtensionPanelChrome` 的本地 state，不跨请求记忆，默认展开）。展开同时抬高面板与提问区的上限（`.extension-panel-shell--expanded`，桌面 `min(78vh, 900px)` / 窄屏 `calc(100dvh - 96px - 安全区)`，提问区 60vh / 窄屏 56vh）——**只抬面板不抬提问区等于没解决「问题显示不全」**，这条改动两侧必须成对。默认展开是安全的：`max-height` 只是上限，面板高度仍由内容决定，短提问不会因此占满屏。
+   - 验收：`/tmp` 下的临时脚本 `extension-panel-readability.mjs`（CDP 拦截 `/state` 注入 `pendingExtensionRequests`，桌面 1280x900 + 窄屏 390x844 各 10 项）与单测 `components/ExtensionDialog.test.mjs` 的 CSS 契约。
+
+11. **终端内联图片（Kitty 图形协议）有落点**（2026-09-26，issue #104）：渲染期间**临时**把 `getCapabilities().images` 置成 `kitty`
+    （渲染完立刻还原 —— 能力是进程全局的，长期置位会污染别的渲染路径），插件用 pi-tui 的 `Image` 组件时才会编码出 `\x1b_G…` 序列。
+    渲染桥**先摘图、再判文本上限**：一张图的 base64 轻易超过「单行 4000 字符 / 合计 200KB」，
+    先校验的话整段渲染（含旁边的正常文本）会被一起丢掉。摘出的图随渲染结果下发（`{ id, mime, base64, cols, rows, lineIndex }`），
+    客户端按 `rows × 实测行高` 预留高度画真 `<img>`（`alt` 走 i18n 的「图片」），并把后面 `rows-1` 个占位空行跳过（否则高度会算两遍）。
+    **已有图片**：custom 面板、widget 组件。**仍是可见降级（一句文本说明）**：工具卡、页头/页脚槽位、entry 与消息投影行
+    （后两者在磁盘投影里是 `string[]`，要带图得改读写视图的形状）。摘不出图的（超过 4MB、非 PNG、分块不完整、空载荷）
+    也一律降级成说明，**不静默丢**。
+---
+

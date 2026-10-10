@@ -14,7 +14,8 @@
 | 正式发布 / 候选包 | [发布指南](release.md) | 版本准备、tag、CI OIDC、审计、失败处理 |
 | 产物保留与清理 | [产物管理](artifacts.md) | 测试输出、tgz、正式安装、临时数据 |
 | 版本变更 | [发布记录索引](release-notes/README.md) | 各版本当时的变更与验收记录 |
-| 界面分区对照 | [Web 与 TUI 对照](ui-vs-tui.md) | 分区/部件映射、扩展 UI 槽位、刻意分叉、改界面时的维护清单 |
+| 扩展 UI 槽位 | [扩展面板与槽位](ui-vs-tui-extension-slots.md) | 插件面板/弹窗/widget/页头页脚的落点与已知缺口 |
+| 界面分区对照 | [Web 与 TUI 对照](ui-vs-tui.md) | 分区/部件映射、状态呈现、刻意分叉、改界面时的维护清单 |
 | 设计研究 | [UI 设计稿](ui-redesign/README.md) | 历史 HTML 原型、主题和图标研究，不代替当前实现 |
 
 ## 文档职责与事实来源
