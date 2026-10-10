@@ -4,7 +4,7 @@
  * 必须同版本、且 `resolved` 指向与「目标版本是否已发布」相符的那份 tgz。
  *
  * 发布流程里两处必跑（见 docs/release.md 2.5 与
- * .agents/skills/pidance-development/references/release.md）：
+ * docs/release.md）：
  *   1. 版本准备、提交 chore(release) 之前：`npm run release:desktop-check`
  *   2. 发行完成、npm 传播结束后的对齐提交之前：
  *      `npm run release:desktop-check -- --stage=post`
