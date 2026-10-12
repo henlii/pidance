@@ -40,7 +40,11 @@ function openStream(): void {
     }
   };
   stream.onerror = () => {
-    // EventSource 自己会重连；不主动重建，避免叠加多条流。
+    // 致命关闭（如 401 未认证被拒、404、5xx）：浏览器不会自动重连。
+    // 必须清理死连接，避免 source 引用残留阻塞后续重连。
+    if (stream.readyState === 2) {
+      closeStream();
+    }
   };
 }
 
@@ -74,11 +78,22 @@ export function subscribeAppEvents(listener: AppEventListener): () => void {
   if (typeof EventSource === "undefined") return () => undefined;
   listeners.add(listener);
   ensureRestoreSubscription();
-  if (!source) openStream();
+  if (!source || source.readyState === 2) {
+    if (source) closeStream();
+    openStream();
+  }
   return () => {
     listeners.delete(listener);
     if (listeners.size === 0) closeStream();
   };
+}
+
+/** 重新连接应用级流（如登录成功后重建之前 401 失败的连接）。 */
+export function reconnectAppEvents(): void {
+  if (listeners.size > 0) {
+    closeStream();
+    openStream();
+  }
 }
 
 /** 测试用：当前是否已建立连接。 */

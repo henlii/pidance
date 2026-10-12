@@ -16,7 +16,7 @@ const stateFile = join(root, "state.json");
 const logFile = join(root, "next.log");
 const port = 31416;
 const host = "127.0.0.1";
-const source = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+const source = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const namePattern = /^pidance-isolated-(?:\d+|user)$/;
 const pidanceBin = join(app, "bin", "pidance.js");
 

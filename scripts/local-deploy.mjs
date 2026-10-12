@@ -23,7 +23,7 @@ if (process.platform === "win32") {
 
 // 这是 Linux 本地开发工具；使用 systemd transient unit + /proc 做归属校验，避免 PID 重用误杀。
 // 持续测试端口规范：31416。30141 上游 pi-web / 31415 正式版永不操作。
-const repository = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../../"));
+const repository = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), ".."));
 const host = "0.0.0.0";
 const port = 31416;
 const url = "http://127.0.0.1:31416/api/home";

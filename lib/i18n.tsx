@@ -4,7 +4,7 @@ import { createElement, useCallback, useEffect, useMemo, useState } from "react"
 import { createContext, useContext } from "react";
 import { en, type TranslationKey } from "./locales/en";
 import { zhCN } from "./locales/zh-CN";
-import { ensureServerPrefsLoaded, getServerPref, setServerPref } from "./server-preferences";
+import { ensureServerPrefsLoaded, getServerPref, setServerPref, subscribeServerPrefs } from "./server-preferences";
 
 export const I18N_STORAGE_KEY = "pidance:i18n:v1";
 export type Locale = "en" | "zh-CN";
@@ -94,13 +94,15 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
     const next = stored ?? normalizeLocale(window.navigator.language);
     setLocaleState(next);
     document.documentElement.lang = next;
-    void ensureServerPrefsLoaded().then(() => {
+    const applyRemoteLocale = () => {
       const remote = getServerPref<unknown>("locale");
       if (typeof remote !== "string") return;
       const normalized = normalizeLocale(remote);
       setLocaleState(normalized);
       document.documentElement.lang = normalized;
-    });
+    };
+    void ensureServerPrefsLoaded().then(applyRemoteLocale);
+    return subscribeServerPrefs(applyRemoteLocale);
   }, []);
 
   const setLocale = useCallback((next: Locale) => {

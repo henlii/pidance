@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useI18n } from "@/lib/i18n";
+import { syncServerPrefsFromServer } from "@/lib/server-preferences";
+import { reconnectAppEvents } from "@/lib/app-events-stream";
 
 type AuthStatus = {
   authenticated: boolean;
@@ -78,6 +80,12 @@ export function UiLoginGate({ children }: Props) {
         return;
       }
       setPassword("");
+      reconnectAppEvents();
+      void syncServerPrefsFromServer();
+      if (typeof window !== "undefined" && typeof window.location?.reload === "function") {
+        window.location.reload();
+        return;
+      }
       setPhase("ready");
     } catch {
       setError(t("auth_loginFailed"));

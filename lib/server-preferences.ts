@@ -76,10 +76,10 @@ export function ensureServerPrefsLoaded(): Promise<ServerPrefs> {
         return singletonPrefs;
       })
       .catch((err) => {
-        // 加载失败：用空对象继续（可降级），下次激活再试
+        // 加载失败：用空对象继续（可降级），下次激活或调用再试。
+        // 关键：不置 singletonLoaded = true，否则未登录（401）或网络故障会被当成已加载，后续调用无法重试
         console.error("[pidance] failed to load server preferences:", err);
         singletonPrefs = singletonPrefs ?? {};
-        singletonLoaded = true;
         loadPromise = null;
         notify();
         return singletonPrefs;
@@ -591,4 +591,11 @@ export function resetServerPrefsDirtyStateForTests(): void {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
+}
+
+/** 测试用：重置单例加载状态。 */
+export function resetServerPrefsLoadedStateForTests(): void {
+  singletonLoaded = false;
+  singletonPrefs = null;
+  loadPromise = null;
 }

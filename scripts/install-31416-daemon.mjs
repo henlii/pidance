@@ -34,7 +34,7 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 
 const repository = realpathSync(
-	resolve(dirname(fileURLToPath(import.meta.url)), "../../../../"),
+	resolve(dirname(fileURLToPath(import.meta.url)), ".."),
 );
 // 无显式 -H：31416 默认绑定跟随设置（~/.pi/agent/pidance-server.json 的 remoteEnabled），
 // 开启远程 → 0.0.0.0，关闭 → 127.0.0.1。端口仍固定 31416（测试部署约定）。
