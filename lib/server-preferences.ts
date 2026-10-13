@@ -199,13 +199,8 @@ function scheduleSave(): void {
   }, SYNC_DEBOUNCE_MS);
 }
 
-/** 修改偏好：路径写法 key 支持 "a.b" 点路径（浅层）。 */
-export function setServerPref(key: string, value: unknown): void {
-  if (!singletonLoaded) {
-    // 未加载完成：加载后再写入（避免「思考深度」等选择被静默丢弃）
-    void ensureServerPrefsLoaded().then(() => setServerPref(key, value));
-    return;
-  }
+/** 写入内存 store + 标脏 + 通知 + 防抖落盘（不关心「服务端是否已加载」）。 */
+function applyPrefWrite(key: string, value: unknown): void {
   const parts = key.split(".");
   const prefs = readPrefs();
   let target = prefs;
@@ -228,6 +223,22 @@ export function setServerPref(key: string, value: unknown): void {
   dirtyPaths.add(key);
   notify();
   scheduleSave();
+}
+
+/**
+ * 修改偏好：路径写法 key 支持 "a.b" 点路径（浅层）。
+ *
+ * 未加载完成时先等一次加载再写，避免「思考深度」等选择被静默丢弃。加载**失败**也
+ * 照写内存：`singletonLoaded` 只有加载成功才为真；失败后若回调再走一遍上面那个
+ * 分支，就是「加载失败 → 回调 → 再加载」的无限微任务（离线 / 未登录 / Node 测试
+ * 里都会把进程挂死）。写进去的值留在内存与脏键里，等真正成功的那次同步合并。
+ */
+export function setServerPref(key: string, value: unknown): void {
+  if (!singletonLoaded) {
+    void ensureServerPrefsLoaded().then(() => applyPrefWrite(key, value));
+    return;
+  }
+  applyPrefWrite(key, value);
 }
 
 /**
