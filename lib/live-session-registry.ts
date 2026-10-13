@@ -10,6 +10,7 @@ import { getPidancePref, readPidancePrefs, updatePidancePref, type PidancePrefs 
 import { hasQueuedFollowUp } from "./session-queue";
 import { startSdkSessionHost, type SdkSessionHost } from "./sdk-session-host";
 import { getRunningStartedAt as getLocalRunningStartedAt } from "./running-state";
+import { getAgentDir } from "./pi-paths";
 import { subscribeCrossProcessEvents } from "./cross-process-watch";
 import type { TreeNavigationSessionManager } from "./session-tree-navigation";
 import {
@@ -370,7 +371,13 @@ function syncOwnedRunningLeases(): void {
   }
 }
 
-export function notifyRunningChange(): void {
+/**
+ * 运行集合变了。
+ *
+ * `agentDir` 由触发它的 host 带上来（见 sdk-session-host 的 notifyRunning）：未读时钟存在
+ * preferences 里，而 registry 是进程级单例、本身不知道目录。缺省仍是默认 agent dir。
+ */
+export function notifyRunningChange(agentDir: string = getAgentDir()): void {
   syncOwnedRunningLeases();
   // 与侧栏同一套（不含仅 starting），见 getRunningSessionIds 的注释。
   const ids = getRunningSessionIds();
@@ -400,7 +407,7 @@ export function notifyRunningChange(): void {
     setTimeout(() => {
       for (const id of finished) {
         try {
-          updatePidancePref(`unreadSessionState.completedAt.${id}`, at);
+          updatePidancePref(`unreadSessionState.completedAt.${id}`, at, agentDir);
         } catch (error) {
           // 偏好文件写失败不该影响运行态；下一次 run 结束仍会尝试。
           console.error("[pidance] failed to record unread completedAt:", error);
@@ -409,7 +416,7 @@ export function notifyRunningChange(): void {
       // 顺手回收不会再被显示的条目（被删的会话、子代理子会话）。内部按 10 分钟节流，
       // 所以这里 fire-and-forget 不会变成每次 run 结束都扫一遍目录；
       // 启动时还有一次（instrumentation.ts），覆盖「只是删了会话、之后没再跑过」的情况。
-      void sweepStaleUnreadEntries()
+      void sweepStaleUnreadEntries({ agentDir })
         .then((result) => {
           if (result.swept.length > 0) {
             console.log(`[pidance] 已回收 ${result.swept.length} 条不会再显示的未读条目`);
@@ -544,7 +551,7 @@ export async function startLiveSession(
         cwd,
         toolNames,
         navigationActions,
-        onRunningChange: () => notifyRunningChange(),
+        onRunningChange: (dir) => notifyRunningChange(dir),
         onSessionListInvalidate: () => invalidateSessionListCache(),
         cacheSessionPath: (id, file) => cacheSessionPath(id, file),
         onSessionRekeyed: (oldId, newId, rekeyed) => {

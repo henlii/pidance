@@ -364,7 +364,11 @@ export type SdkSessionHostOptions = {
    */
   destroyWaitMs?: number;
   agentDir?: string;
-  onRunningChange?: () => void;
+  /**
+   * 运行集合变了。带上本 host 的 agentDir —— 未读时钟（completedAt）由 registry 写盘，
+   * 它不知道每个 host 用的是哪个目录，只能靠这里告诉它（测试/隔离实例可能不是默认目录）。
+   */
+  onRunningChange?: (agentDir: string) => void;
   onSessionListInvalidate?: () => void;
   cacheSessionPath?: (sessionId: string, sessionFile: string) => void;
   /** registry rekey：fork/new 替换 session 后更新 key */
@@ -1124,7 +1128,7 @@ export class SdkSessionHost {
   }
 
   private notifyRunning(): void {
-    this.options.onRunningChange?.();
+    this.options.onRunningChange?.(this.agentDir);
   }
 
   /**
@@ -2478,6 +2482,7 @@ export class SdkSessionHost {
           updatePidancePref(
             `unreadSessionState.abnormalAt.${this.realSessionId}`,
             abnormal ? new Date().toISOString() : null,
+            this.agentDir,
           );
         } catch (error) {
           console.error("[pidance] failed to record abnormal-end marker:", error);
@@ -2510,6 +2515,7 @@ export class SdkSessionHost {
             updatePidancePref(
               `unreadSessionState.abnormalAt.${this.realSessionId}`,
               new Date().toISOString(),
+              this.agentDir,
             );
           } catch (error) {
             console.error("[pidance] failed to record abnormal-end marker:", error);
@@ -3758,6 +3764,9 @@ export class SdkSessionHost {
         }
         this.promptRunning = true;
         this.lastStopReason = null;
+        // 新的一轮 prompt：清掉上次自动重试留下的续跑标记，免得第一次 agent_start
+        // 被当成续跑而漏记开始时间。
+        this.retryContinuation = false;
         recordRunningStartedAt(this.realSessionId, Date.now());
         this.notifyRunning();
         const flight = (async (): Promise<PromptReceipt> => {
