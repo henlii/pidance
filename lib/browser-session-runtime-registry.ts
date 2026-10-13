@@ -959,7 +959,7 @@ export function createBrowserSessionRuntimeRegistry(
       slot.snapshot.finishingRunId = null;
       slot.snapshot.streamState = { isStreaming: true, streamingMessage: null };
       slot.metrics = {};
-    } else if (type === "agent_end" || type === "prompt_done") {
+    } else if (type === "agent_end" || type === "prompt_done" || type === "agent_settled") {
       // 迟到的上一轮终止事件：新一轮已经 agent_start（序号前移），不能把它的运行态
       // 判成结束（复核 G1）。**只丢更旧的**：序号更大说明我们错过了新轮的
       // agent_start（重连只拿到 connected + 快照），那种情况必须收尾，否则
@@ -968,6 +968,13 @@ export function createBrowserSessionRuntimeRegistry(
         return;
       }
       if (streamRunSeq !== null) slot.snapshot.streamRunSeq = streamRunSeq;
+      // 自动重试：agent_end 只是这次尝试的中间点，SDK 接着会在同一个 run 里继续
+      // （再发 agent_start）。此时不能收尾，否则重试期间停止按钮消失、重试横幅被清
+      // （2026-10-13）。真正的结束是重试成功后那次不带 willRetry 的 agent_end，
+      // 或者（重试期间被 abort 时）唯一一次的 agent_settled。
+      if (type === "agent_end" && (event as { willRetry?: unknown }).willRetry === true) {
+        return;
+      }
       slot.snapshot.agentRunning = false;
       slot.snapshot.completedRunId = slot.snapshot.promptRunId;
       slot.snapshot.streamState = emptyStream();

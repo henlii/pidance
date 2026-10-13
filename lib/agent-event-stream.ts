@@ -13,7 +13,8 @@
  * - message_update：删除 assistantMessageEvent 大字段、保留其余字段；
  *   返回浅拷贝，不修改原事件对象（纯函数）。
  * - agent_end：瘦身为 { type: "agent_end" }，若 host 附带 contextUsage / streamRunSeq
- *   （本轮 run 序号）则保留这些小型字段。
+ *   （本轮 run 序号）则保留这些小型字段；`willRetry`（这一轮还要自动重试）也保留，
+ *   客户端据此**不在重试期间收尾**。
  * - 其他带合法 type 的事件：原样保留（返回原对象，避免多余拷贝）。
  * - 无合法 type（缺 type / type 非非空字符串 / 非对象）：返回 null，不发送。
  */
@@ -52,6 +53,10 @@ export function projectAgentEvent(event: unknown): Record<string, unknown> | nul
     // run 序号必须随收尾事件一起下发，否则客户端无法区分「本轮结束」与
     // 「上一轮的结束事件迟到」（复核 G1）。
     if (typeof record.streamRunSeq === "number") slim.streamRunSeq = record.streamRunSeq;
+    // 自动重试：SDK 在「马上就要 retry」时给 agent_end 标 willRetry，随后才 emit
+    // auto_retry_start 并在同一个 run 里继续。必须透传 —— 客户端要靠它免于收尾，
+    // 否则重试期间停止按钮消失、侧栏计时归零、重试横幅刚出现就被收尾逻辑抹掉。
+    if (record.willRetry === true) slim.willRetry = true;
     return slim;
   }
 

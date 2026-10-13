@@ -2613,13 +2613,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [applyExtensionUiProjection, applyProjectedQueues, applyRemoteThinking, seedTurnMetricsFromState, setLastKnownModel]);
 
   /**
-   * 统一 agent run 结束路径（P2）：agent_end / prompt_done / reconcile idle 三路合一。
-   * token（sid/runId/claim）校验通过才进入异步收尾：loadSession（含 includeState，
-   * 刷新 contextUsage/systemPrompt/thinkingLevel/extensionStatuses/extensionWidgets/
-   * queuedMessages 并顺手覆盖 isCompacting）→ 消息整体替换回调设置 settle/end-pin →
-   * 按同一 token 安全结束状态。loadSession 失败也必须在 finally 结束，不得永久 running。
+   * 统一 agent run 结束路径（P2）：agent_end / prompt_done / agent_settled / reconcile
+   * idle 四路合一。token（sid/runId/claim）校验通过才进入异步收尾：loadSession（含
+   * includeState，刷新 contextUsage/systemPrompt/thinkingLevel/extensionStatuses/
+   * extensionWidgets/queuedMessages 并顺手覆盖 isCompacting）→ 消息整体替换回调设置
+   * settle/end-pin → 按同一 token 安全结束状态。loadSession 失败也必须在 finally 结束，
+   * 不得永久 running。
+   *
+   * `keepRun`：这一帧只是**自动重试的中间点** —— 内容按磁盘刷新（把失败那次尝试从
+   * 时间线里去掉），但运行态不收（SDK 会在同一个 run 里继续）。不收尾才不会把重试
+   * 横幅、停止按钮和侧栏计时一起清掉（2026-10-13 用户实测）。
    */
-  const finishAgentRun = useCallback(async (sid: string | null, runId: number) => {
+  const finishAgentRun = useCallback(async (
+    sid: string | null,
+    runId: number,
+    options?: { keepRun?: boolean },
+  ) => {
     if (!sid) return;
     const registry = getOrCreateBrowserSessionRuntimeRegistry();
     const before = registry.getRunState(sid);
@@ -2629,6 +2638,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       || before.promptRunId !== runId
       || before.sendInFlight
     ) return;
+    // 同一次结束会有多路到达（agent_end / prompt_done / agent_settled，自动重试时
+    // 还有中间那一帧）：已经收过尾就不再重复拉取与回调。
+    if (before.completedRunId === runId) return;
+    const keepRun = options?.keepRun === true;
     // claim 必须在第一个 await 前占住：agent_end/prompt_done/reconcile 共用 slot claim。
     if (!registry.beginRunFinish(sid, runId)) return;
     try {
@@ -2647,18 +2660,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         && current.promptRunId === runId
         && current.finishingRunId === runId,
       );
-      registry.completeRun(sid, runId);
       registry.releaseRunFinish(sid, runId);
-      if (!valid) return;
-      setAgentPhase(null);
-      setRetryInfo(null);
-      {
-        const nextSnapshots = finalizeRunningToolExecutions(toolExecutionBufferRef.current);
-        toolExecutionBufferRef.current = nextSnapshots;
-        setToolExecutionSnapshots(getToolExecutionSnapshots(nextSnapshots));
+      // 中间点只刷新内容：不收 run，也不碰 retryInfo（横幅/停止按钮/计时都得留着）。
+      if (!keepRun) {
+        registry.completeRun(sid, runId);
+        if (valid) {
+          setAgentPhase(null);
+          setRetryInfo(null);
+          {
+            const nextSnapshots = finalizeRunningToolExecutions(toolExecutionBufferRef.current);
+            toolExecutionBufferRef.current = nextSnapshots;
+            setToolExecutionSnapshots(getToolExecutionSnapshots(nextSnapshots));
+          }
+          dispatch({ type: "end" });
+          onAgentEnd?.();
+        }
       }
-      dispatch({ type: "end" });
-      onAgentEnd?.();
     }
   }, [loadSession, onAgentEnd, applyAgentStateSnapshot, dispatch, setAgentRunning, setAgentPhase, setRetryInfo, notifyAutoFollowEnd, t]);
 
@@ -3070,20 +3087,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatch({ type: "start" });
         break;
       case "agent_end":
-      case "prompt_done": {
+      case "prompt_done":
+      case "agent_settled": {
         if (event.type === "agent_end") {
           const usage = event.contextUsage as AgentStateResponse["contextUsage"] | undefined;
           if (usage && typeof usage.contextWindow === "number" && usage.contextWindow > 0) {
             applyLiveContextUsage(usage);
           }
         }
+        // 自动重试的中间点：内容照刷（把失败那次的错误卡从时间线里去掉），但**不收尾**
+        // —— SDK 随后会在同一个 run 里继续。收尾会把刚设好的重试横幅清掉、停止按钮
+        // 弄没、计时归零（2026-10-13 用户实测）。agent_settled 是本轮真正的结束点。
+        const willRetry = event.type === "agent_end"
+          && (event as { willRetry?: unknown }).willRetry === true;
         const sid = sessionIdRef.current;
         const runId = sid
           ? getOrCreateBrowserSessionRuntimeRegistry().getRunState(sid)?.promptRunId
           : undefined;
-        if (sid && runId !== undefined) void finishAgentRun(sid, runId);
+        if (sid && runId !== undefined) void finishAgentRun(sid, runId, { keepRun: willRetry });
         // 本轮消息刚落盘：稍后重取全量统计，弹窗/信息面板不必等下次打开会话。
-        if (sid) setTimeout(() => { void refreshServerSessionStats(sid); }, 300);
+        if (sid && !willRetry) setTimeout(() => { void refreshServerSessionStats(sid); }, 300);
         break;
       }
       case "prompt_error": {

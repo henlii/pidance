@@ -656,6 +656,13 @@ export class SdkSessionHost {
   private pendingDestroys = new Map<number, Promise<void>>();
   private _alive = true;
   private promptRunning = false;
+  /**
+   * 这次 `agent_start` 是不是「自动重试的续跑」。
+   *
+   * 自动重试时 SDK 先发 agent_end(willRetry)、再发 auto_retry_start，然后在**同一个
+   * run** 里继续（又发一次 agent_start）。续跑要沿用本轮开始时刻，不能重新记时。
+   */
+  private retryContinuation = false;
   /** 本轮 SDK run 的本地序号（agent_start 递增；随 SSE 事件下发，见 handleSessionEvent）。 */
   private streamRunSeq = 0;
   /** 最近一次 prompt 结束原因：队列自动投递只认 completed。 */
@@ -2436,12 +2443,30 @@ export class SdkSessionHost {
     switch (event.type) {
       case "agent_start":
         this.promptRunning = true;
-        recordRunningStartedAt(this.realSessionId, Date.now());
+        // 续跑沿用本轮开始时刻（recordRunningStartedAt 本身首次写入胜）；只有真正的
+        // 新一轮才重新记时，否则侧栏「执行时间」会在每次重试时归零。
+        if (!this.retryContinuation) {
+          recordRunningStartedAt(this.realSessionId, Date.now());
+        }
         this.notifyRunning();
         break;
-      case "agent_end":
+      case "agent_end": {
+        const readStopReason = this.readStopReasonFromAgentEnd(event);
+        // 自动重试：SDK 在「马上就要 retry」时给 agent_end 标 willRetry，随后才 emit
+        // auto_retry_start 并在**同一个 run** 里继续。这一帧只是中间点 —— 若照常收尾，
+        // 重试期间就会出现「停止按钮消失、侧栏计时归零、重试横幅刚出现就被抹掉」
+        // （2026-10-13 用户实测三条）。
+        if ((event as { willRetry?: unknown }).willRetry === true) {
+          this.retryContinuation = true;
+          if (readStopReason) this.lastStopReason = readStopReason;
+          // 队列不会被提前取走：scheduleFollowUpFlush 的 isSettled()/isRunning()
+          // 在重试期间仍是「没结束」，真正投递只发生在 agent_settled(completed)。
+          this.notifyRunning();
+          break;
+        }
+        this.retryContinuation = false;
         this.promptRunning = false;
-        this.lastStopReason = this.readStopReasonFromAgentEnd(event) ?? this.lastStopReason ?? "completed";
+        this.lastStopReason = readStopReason ?? this.lastStopReason ?? "completed";
         if (this.lastStopReason === "aborted" || this.lastStopReason === "error") {
           this.setFollowUpHeld(true);
         }
@@ -2469,12 +2494,27 @@ export class SdkSessionHost {
         this.notifyRunning();
         this.emit({ type: "prompt_done", streamRunSeq: this.streamRunSeq });
         break;
+      }
       case "agent_settled": {
         // SDK 1.1.0 起这个事件自带 aborted（「这次是不是被取消的」权威判据）；有就用它，
         // 拿不到才沿用 agent_end 推出来的 lastStopReason（旧内核路径）。
         const aborted = (event as { aborted?: unknown }).aborted;
         if (typeof aborted === "boolean" && aborted) this.lastStopReason = "aborted";
+        this.retryContinuation = false;
         this.promptRunning = false;
+        // 本轮**真正**结束（重试期间被 abort 时不会再有第二次非重试 agent_end）：
+        // 计时到这里才清，异常红点也以最终结果为准。中间重试那一帧不动它们。
+        clearRunningStartedAt(this.realSessionId);
+        if (this.lastStopReason === "aborted" || this.lastStopReason === "error") {
+          try {
+            updatePidancePref(
+              `unreadSessionState.abnormalAt.${this.realSessionId}`,
+              new Date().toISOString(),
+            );
+          } catch (error) {
+            console.error("[pidance] failed to record abnormal-end marker:", error);
+          }
+        }
         releaseRunningLease(this.realSessionId);
         this.notifyRunning();
         // 触发点必须是 agent_settled；agent_end 只记录本轮结果。

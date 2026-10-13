@@ -12,7 +12,10 @@
  * - `message_start` / `message_update` 只缓存非 user 角色（与浏览器侧的过滤一致）。
  * - `agent_start` 清掉上一轮快照；`message_end` / `agent_end` / `prompt_done` /
  *   `agent_settled` 表示本轮结束，流式快照清空（否则重连的页面会把上一轮的文字
- *   当成还在生成）。
+ *   当成还在生成）。**例外**：`agent_end` 带 `willRetry` 说明接下来会自动重试并
+ *   在同一个 run 里继续 —— 这时不清重试状态，重连的页面才看得到「重试中」。
+ * - `auto_retry_start` 缓存、`auto_retry_end` 清除：中途接入的页面回放它即可恢复
+ *   重试横幅；`isStreaming` 在重试等待期间也为真（停止按钮要还在）。
  * - 工具按 toolCallId 键控：**必须先有 start 才记 update**（浏览器工具缓冲会忽略
  *   未见 start 的 update，所以回放顺序必须是 start → update）；update 另外记一份
  *   「最近一条带渲染行」的（服务端按 toolCallId 节流渲染，被节流的那帧没有
@@ -68,6 +71,8 @@ function hasRenderedLines(event: SnapshotEvent): boolean {
 
 export function createStreamSnapshotCache(): StreamSnapshotCache {
   let streamingEvent: SnapshotEvent | null = null;
+  /** 最近一次 auto_retry_start（重试等待中）；auto_retry_end / 本轮真正结束才清。 */
+  let retryEvent: SnapshotEvent | null = null;
   const activeTools = new Map<
     string,
     {
@@ -126,6 +131,7 @@ export function createStreamSnapshotCache(): StreamSnapshotCache {
         case "agent_start":
           streamingEvent = null;
           activeTools.clear();
+          // 不碰 retryEvent：重试的续跑 agent_start 之后，横幅要一直挂到 auto_retry_end。
           return;
         case "message_start":
         case "message_update": {
@@ -138,10 +144,23 @@ export function createStreamSnapshotCache(): StreamSnapshotCache {
           streamingEvent = null;
           return;
         case "agent_end":
+          streamingEvent = null;
+          activeTools.clear();
+          // 还要自动重试：run 会在同一个 agent_start 里继续，重连页面得看到「重试中」。
+          if (event.willRetry === true) return;
+          retryEvent = null;
+          return;
         case "prompt_done":
         case "agent_settled":
           streamingEvent = null;
           activeTools.clear();
+          retryEvent = null;
+          return;
+        case "auto_retry_start":
+          retryEvent = event;
+          return;
+        case "auto_retry_end":
+          retryEvent = null;
           return;
         case "tool_execution_start": {
           const toolCallId = toolCallIdOf(event);
@@ -192,6 +211,8 @@ export function createStreamSnapshotCache(): StreamSnapshotCache {
     },
     snapshot(): StreamSnapshot {
       const events: SnapshotEvent[] = [];
+      // 重试事件排最前：客户端先恢复「重试中」横幅，再回放消息 / 工具。
+      if (retryEvent) events.push(retryEvent);
       if (streamingEvent) events.push(streamingEvent);
       for (const entry of activeTools.values()) {
         // 调用槽：插件重渲过的行优先于 start 自带的那份（start 只带首次 renderCall 的结果）。
@@ -235,11 +256,12 @@ export function createStreamSnapshotCache(): StreamSnapshotCache {
           });
         }
       }
-      return { isStreaming: streamingEvent !== null || activeTools.size > 0, events };
+      return { isStreaming: retryEvent !== null || streamingEvent !== null || activeTools.size > 0, events };
     },
     reset(): void {
       streamingEvent = null;
       activeTools.clear();
+      retryEvent = null;
     },
   };
 }
