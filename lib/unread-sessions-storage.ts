@@ -188,6 +188,30 @@ export function mergeUnreadSessionState(a: UnreadSessionState, b: UnreadSessionS
  * 也还没推给服务端**的那次阅读会被这两份旧数据盖掉 —— 表现就是「会话刚跑完、界面已经算已读，
  * 过一会儿或切走一次又变回未读」。三份都是单调时间戳，取并集只会让「已读」更靠后，不会反过来。
  */
+/**
+ * 「选中即已读」的兜底：当前选中的会话在**时钟里**仍是未读时，readAt 该补到哪个时刻。
+ *
+ * 侧栏 getSnapshot 只把选中的会话从 unreadIds 里遮掉（显示层）。一旦客户端错过了
+ * running→idle 那次跃迁，或某个端拿自己那份旧缓存把服务端的 readAt 整表盖回去，
+ * completedAt 就会大于 readAt —— 遮罩一撤（切到别的会话、刷新、别的端打开），
+ * 未读点立刻冒出来。这里把这层不变量落到数据上。
+ *
+ * 返回要写入的 readAt；不需要动返回 null。取值 max(nowIso, completedAt)：本端时钟偏慢
+ * （手机与服务器不同步）时也补得动，不然会一直补不掉。
+ */
+export function selectedReadBumpAt(
+  state: UnreadSessionState,
+  selectedSessionId: string | null | undefined,
+  nowIso: string,
+): string | null {
+  if (!selectedSessionId) return null;
+  const completed = state.completedAt[selectedSessionId];
+  if (!completed) return null;
+  const read = state.readAt[selectedSessionId];
+  if (read !== undefined && read >= completed) return null;
+  return completed > nowIso ? completed : nowIso;
+}
+
 export function mergeUnreadSources(
 	memory: UnreadSessionState,
 	local: UnreadSessionState,

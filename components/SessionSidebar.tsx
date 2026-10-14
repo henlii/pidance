@@ -77,6 +77,7 @@ import {
   loadUnreadSessionClock,
   markSessionRead,
   mergeUnreadSources,
+  selectedReadBumpAt,
   parseUnreadSessionState,
   pruneUnreadSessionState,
   saveUnreadSessionClock,
@@ -629,6 +630,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   useEffect(() => {
     const unread = catalogStore.getState().unread;
     saveUnreadSessionClock(window.localStorage, unread);
+    // 先等服务端偏好到齐再推：本地那份只是首屏缓存，可能比别的端已经推进过的 readAt 旧。
+    // 拿它去 PUT 会把服务端**整份** readAt 表盖回去（mergePidancePrefs 对 unreadSessionState
+    // 的子键是整体替换，不是逐个 id 取大），于是刚标已读的会话在别的端、刷新之后又变未读
+    //（2026-10-14 用户复现：A 在前台跑完，切到 B 就显示未读，刷新仍在）。
+    if (!isServerPrefsLoaded()) return;
     // 只有**本端产生的阅读时刻**要推给服务端：completedAt 的事实由服务端记录，
     // 客户端重复写同一事实没有意义（还会造成两边时间戳互相追着涨）。
     const pushed = pushedReadAtRef.current;
@@ -640,7 +646,24 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       pushed[id] = at;
       setServerPref(`unreadSessionState.readAt.${id}`, at);
     }
-  }, [allSessions, catalogTick, catalogStore]);
+  }, [allSessions, catalogTick, catalogStore, serverPrefs]);
+
+  /**
+   * 选中的会话在**时钟里**也必须是已读，不只靠 getSnapshot 的显示遮罩。
+   *
+   * 遮罩挡住的是「看着它的时候」；一旦错过 running→idle 那次跃迁、或 readAt 被别的端的旧值
+   * 盖过，切走/刷新就会露出未读点（2026-10-14 用户复现）。这里只处理「确实已是未读」的情形，
+   * 所以不会每次 catalogTick 都推进 readAt；补完即稳定（下一次读到的 read >= completed）。
+   */
+  useEffect(() => {
+    if (!selectedSessionId) return;
+    const bumpAt = selectedReadBumpAt(
+      catalogStore.getState().unread,
+      selectedSessionId,
+      new Date().toISOString(),
+    );
+    if (bumpAt) catalogStore.markRead(selectedSessionId, bumpAt);
+  }, [selectedSessionId, catalogTick, catalogStore]);
 
   useEffect(() => {
     // 运行集走**共用的应用级流**（lib/app-events-stream）：一个页面只开一条
