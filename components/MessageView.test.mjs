@@ -469,6 +469,11 @@ test("TUI 渲染桥：ANSI 调用/实时行优先于原始输出；有 result �
   const toolBlock = source.slice(source.indexOf("function ToolCallBlock("), source.indexOf("/** 空数组或畸形数组视为缺失"));
   assert.match(toolBlock, /\{expanded && renderedCallLines && \(/, "展开分支应渲染 ANSI 调用行");
   assert.match(toolBlock, /renderAnsiLines\(renderedLiveLines, "tool-live"\)/, "展开分支应优先渲染 ANSI 实时行");
+  // 同一份内容不上屏两遍：工具自己画了调用行（bash 的 `$ <命令>`）时，不再另画「命令」分区，
+  // 否则展开后同一条命令上下各出现一次（2026-10-13 用户实测）。
+  assert.match(toolBlock, /const showCommandSection = Boolean\(command\) && !renderedCallLines;/, "工具画了调用行就不另画命令分区");
+  assert.match(toolBlock, /\{\(!expanded \|\| !showCommandSection\) && \(/, "表头判定要用 showCommandSection");
+  assert.match(toolBlock, /\{expanded && showCommandSection && \(/, "命令分区只在没有调用行时渲染");
 });
 
 test("实时工具：终态默认折叠为标签、命令行与固定耗时摘要", () => {

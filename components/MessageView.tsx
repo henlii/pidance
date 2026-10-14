@@ -1401,6 +1401,15 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, onReferen
   const statusColor = getToolStatusColor(status, isError, effectiveResult != null, pending);
   const command = getToolCommand(block, snapshot);
   const renderedCallLines = getRenderableAnsiLines(snapshot?.renderedCallLines ?? block.renderedCallLines);
+  /**
+   * 「命令」分区只在工具**自己没有**画调用行时才出现。
+   *
+   * 工具画了 renderedCallLines（bash 的 `$ <命令>`、其他插件的调用框）时再画一遍，展开后
+   * 同一条命令就会上下各出现一次（2026-10-13 用户实测：bash 块展开后命令显示 2 次）。
+   * 反过来不能省：那几行是插件/TUI 的原样渲染（自带外壳的工具整个界面就是它），
+   * 不能因为我们另画了命令就把它们丢掉。
+   */
+  const showCommandSection = Boolean(command) && !renderedCallLines;
   const renderedLiveLines = getRenderableAnsiLines(snapshot?.renderedLines);
   const renderedResultLines = getRenderableAnsiLines(snapshot?.renderedResultLines ?? effectiveResult?.renderedResultLines);
   /**
@@ -1506,7 +1515,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, onReferen
     >
       {/* 标签与内容同一行：折叠/运行中整块只有一行（不再有标题栏 + 预览行两层）。
           展开且存在命令分区时，标签并进该分区表头（展开后同样不出现标题行）。 */}
-      {(!expanded || !command) && (
+      {(!expanded || !showCommandSection) && (
         <BlockHeaderRow
           label={headerLabel}
           expanded={expanded}
@@ -1518,7 +1527,7 @@ function ToolCallBlock({ block, result, snapshot, duration, sessionId, onReferen
       )}
 
       {/* ── Expanded: 参数友好摘要（替代原始 JSON，OpenChamber 风格） ── */}
-      {expanded && command && (
+      {expanded && showCommandSection && (
         <div style={bareShell ? undefined : { background: "var(--bg-subtle)" }}>
           <BlockHeaderRow
             label={headerLabel}
