@@ -310,14 +310,34 @@ export {
 export type PendingExtensionUi = {
   sessionId: string;
   requests: Record<string, unknown>[];
+  /** 会话卡在插件自绘面板上（没有可重放的请求对象，只有面板开着）。 */
+  customPanel?: boolean;
 };
+
+/**
+ * 「这个会话在等用户操作」的判定。对话框 pending 与插件自绘面板都算。
+ *
+ * 两件事分开记（requests 保持只有真请求），是因为面板没有请求对象可报；只报 requests
+ * 就会把面板阻塞的会话漏掉，侧栏黄点随之消失。
+ */
+export function isSessionWaitingForUser(input: {
+  requests: readonly unknown[];
+  openCustomPanel: boolean;
+}): boolean {
+  return input.requests.length > 0 || input.openCustomPanel;
+}
 
 export function listPendingExtensionUi(): PendingExtensionUi[] {
   const out: PendingExtensionUi[] = [];
   for (const [key, host] of getRegistry()) {
     const requests = host.listPendingExtensionRequests();
-    if (requests.length === 0) continue;
-    out.push({ sessionId: host.sessionId || key, requests });
+    const openCustomPanel = requests.length === 0 && host.hasOpenExtensionPanel();
+    if (!isSessionWaitingForUser({ requests, openCustomPanel })) continue;
+    out.push({
+      sessionId: host.sessionId || key,
+      requests,
+      ...(openCustomPanel ? { customPanel: true } : {}),
+    });
   }
   return out;
 }

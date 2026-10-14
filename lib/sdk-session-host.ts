@@ -872,6 +872,19 @@ export class SdkSessionHost {
     return Array.from(this.extensionUi?.pendingSnapshot.values() ?? []);
   }
 
+  /**
+   * 是否开着插件自绘面板（`ctx.ui.custom`，插件自己画界面那种）。
+   *
+   * 这类面板**不进 pending 快照**（适配器里只有事件、没有可重放的请求），而 select/confirm
+   * 从 2026-10-06 起也走这条路。所以「会话在等你操作」不能只看 listPendingExtensionRequests：
+   * 不看面板的话，会话明明卡在等你点，侧栏却只显示「运行中」，黄点消失
+   *（2026-10-14 用户：扩展窗口阻塞会话后不显示黄点了）。
+   */
+  hasOpenExtensionPanel(): boolean {
+    // 面板被插件设成 hidden 也算：那一刻会话同样卡着，用户更需要这个提示。
+    return Boolean(this.extensionUi?.customSnapshot);
+  }
+
   /** 供 SessionService 识别 in-process 写路径 */
   get inner(): { sessionManager: SessionManager } | undefined {
     const session = this.runtime?.session;
