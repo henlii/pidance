@@ -27,6 +27,7 @@
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
+import { expandTilde } from "./pi-paths";
 import type { Dirent } from "node:fs";
 import type { SkillInfo } from "./api-types";
 
@@ -289,7 +290,8 @@ export function discoverSkills(options: SkillDiscoveryOptions): SkillDiscoveryRe
 
   // 4. settings.json 的 skills 路径列表（文件或目录）。
   for (const rawPath of readSettingsSkills(join(agentDir, "settings.json"))) {
-    const resolved = resolve(cwd, rawPath);
+    // Pi 侧按 resolvePath 展开 ~（1.1.0 起即如此）；这里对齐，避免技能页说路径不存在。
+    const resolved = resolve(cwd, expandTilde(rawPath, homeDir));
     if (!existsSync(resolved)) {
       diagnostics.push({ type: "warning", message: "skill path does not exist", path: resolved });
       continue;

@@ -462,7 +462,16 @@ export function saveModelsConfig(
     const cur = isPlainObject(rawCur) ? rawCur : undefined;
     mergedProviders[name] = resolveProviderSecrets(provider as Record<string, unknown>, cur);
   }
-  const finalData = { providers: mergedProviders };
+  // 根级键保真：面板的 GET 投影只回 providers（见 getSanitizedModelsConfig），
+  // 以载荷为准会把磁盘上的根级配置（如 1.2.0 起的 "$schema"）写没。
+  // 以磁盘现值为底、载荷给出的根级键覆盖其上，providers 始终用合并结果。
+  const finalData: Record<string, unknown> = { ...current.data };
+  if (isPlainObject(incoming)) {
+    for (const [key, value] of Object.entries(incoming)) {
+      if (key !== "providers") finalData[key] = value;
+    }
+  }
+  finalData.providers = mergedProviders;
   const serialized = JSON.stringify(finalData, null, 2);
   if (Buffer.byteLength(serialized, "utf8") > MODELS_CONFIG_MAX_BYTES) {
     throw new ModelsConfigError("bad-request", `配置超过 ${MODELS_CONFIG_MAX_BYTES / 1024 / 1024}MiB 上限`);

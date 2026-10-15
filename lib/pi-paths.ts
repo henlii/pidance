@@ -9,10 +9,14 @@ import { join } from "node:path";
 /** 与 pi 的 ENV_AGENT_DIR 一致 */
 export const PI_CODING_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR";
 
-function expandTilde(path: string): string {
-  if (path === "~") return homedir();
+/**
+ * 展开开头的 `~`（与 SDK resolvePath 的 expandTilde 默认语义一致）；
+ * `home` 可注入，便于测试。
+ */
+export function expandTilde(path: string, home: string = homedir()): string {
+  if (path === "~") return home;
   if (path.startsWith("~/") || path.startsWith("~\\")) {
-    return join(homedir(), path.slice(2));
+    return join(home, path.slice(2));
   }
   return path;
 }
