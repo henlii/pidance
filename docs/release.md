@@ -20,11 +20,11 @@
 4. 执行发布前门禁：`npm run typecheck` + `npm test` + 主浏览器套件 + 31416 部署冒烟，
    通过后显式创建 `chore(release)` 提交。（`npm run check` 还含 lint 段；本仓当前有 14 个既有的
    React Compiler memo error 会让它在 lint 处停下，门禁现状与处理口径见
-5. **桌面壳发布暂冻结（2026-10-09 起，用户决定「暂时停更，等有空用用再看」）**：
-   发主包时**不动** `desktop/package.json` 与 `desktop/package-lock.json` 的版本，也不跑
-   `npm run release:desktop-check`、不在 Release 里补桌面条目。恢复办法：把下面第 5 条的桌面口径
-   照做一遍即可（代码与 workflow 都留着没删）。
-6. （解冻后）桌面壳与主包**同版本**：改 `desktop/package.json` 的 `version` 与 `@henlii/pidance` 依赖，
+5. 桌面壳与主包**同版本发布**，2026-10-15 恢复（2026-10-09 起曾按用户决定冻结停更）。
+   停更与桌面构建的版本校验本质冲突：冻结期间 `desktop/` 停在 0.2.54，而 `v*` tag 构建会用工作区
+   源码打候选包替换内置服务，于是 v0.2.55、v0.2.56、v0.2.57 三次桌面构建都因「内置服务版本与
+   `desktop/package.json` 声明不一致」变红。发主包时按第 6 条同步 `desktop/` 的两个版本文件。
+6. 桌面壳与主包**同版本**：改 `desktop/package.json` 的 `version` 与 `@henlii/pidance` 依赖，
    以及 `desktop/package-lock.json` 的顶层 `version`、`packages.""` 的 `version` 与依赖声明。
    **lockfile 里 `node_modules/@henlii/pidance` 条目：`version` 跟到新版本，`resolved`/`integrity`
    仍指向上一版正式 tgz** —— 目标版本此刻还没发布，指向它会让桌面 workflow 的 `npm ci` 直接 404；
