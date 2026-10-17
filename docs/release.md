@@ -20,10 +20,12 @@
 4. 执行发布前门禁：`npm run typecheck` + `npm test` + 主浏览器套件 + 31416 部署冒烟，
    通过后显式创建 `chore(release)` 提交。（`npm run check` 还含 lint 段；本仓当前有 14 个既有的
    React Compiler memo error 会让它在 lint 处停下，门禁现状与处理口径见
-5. 桌面壳与主包**同版本发布**，2026-10-15 恢复（2026-10-09 起曾按用户决定冻结停更）。
+5. 桌面壳与主包**同版本发布**，2026-10-17 恢复（2026-10-09 起曾按用户决定冻结停更）。
    停更与桌面构建的版本校验本质冲突：冻结期间 `desktop/` 停在 0.2.54，而 `v*` tag 构建会用工作区
    源码打候选包替换内置服务，于是 v0.2.55、v0.2.56、v0.2.57 三次桌面构建都因「内置服务版本与
    `desktop/package.json` 声明不一致」变红。发主包时按第 6 条同步 `desktop/` 的两个版本文件。
+   解冻后的 0.2.57 安装包只落在 Actions Artifacts（构建 run 39040747600，保留 30 天），没挂
+   Release：已推送的 tag 不能动，三个旧 Release 补不了桌面包，下次 `v*` 起恢复自动挂同一个 Release。
 6. 桌面壳与主包**同版本**：改 `desktop/package.json` 的 `version` 与 `@henlii/pidance` 依赖，
    以及 `desktop/package-lock.json` 的顶层 `version`、`packages.""` 的 `version` 与依赖声明。
    **lockfile 里 `node_modules/@henlii/pidance` 条目：`version` 跟到新版本，`resolved`/`integrity`

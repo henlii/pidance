@@ -299,7 +299,7 @@ cd /home/moss/works/open/pidance && node ./.tmp-clean-unread.mjs && rm -f ./.tmp
 瘦身后打包 → 在 `dist/*-unpacked` 上验页面、`_next` 静态资源、版本、node-pty、SDK 会话与可停 →
 真实 Electron 壳冒烟 → 静默安装/卸载。桌面壳只操作 31415。
 
-**桌面壳与主包同版本发布**（2026-10-15 恢复；2026-10-09 至 10-15 曾冻结停更）：发主包时同步
+**桌面壳与主包同版本发布**（2026-10-17 恢复；2026-10-09 至 10-17 曾冻结停更）：发主包时同步
 `desktop/` 的版本与 lockfile，并跑 `release:desktop-check`；`v*` tag 触发的 `desktop-win` 构建会把
 Setup exe 挂到同一个 Release。冻结期不这么做的后果是 tag 构建必然失败——`desktop/` 停在旧版、
 CI 又用工作区源码替换内置服务，两边版本对不上（v0.2.55 / v0.2.56 / v0.2.57 三次变红）。
