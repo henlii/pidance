@@ -926,3 +926,9 @@ test("隐藏思考块（settings.json 的 hideThinkingBlock）：只画一行标
   const hidden = source.slice(start, end);
   assert.doesNotMatch(hidden, /BlockHeaderRow/, "隐藏态不该保留展开表头");
 });
+
+test("用户消息限高：超高在气泡内滚动，不把输入区顶出可视区", () => {
+  const html = renderMessage({ role: "user", content: "x".repeat(2000) });
+  assert.match(html, /max-height:min\(320px, 45vh\)/, "用户消息缺少块内限高");
+  assert.match(html, /overflow-y:auto/, "超高时没有滚动条");
+});

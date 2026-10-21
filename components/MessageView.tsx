@@ -420,6 +420,8 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onBranchHere, onNe
   const hasBinaryImage = binaryBlocks.some((block) => block.kind === "image");
   const pathMedia = useMemo(() => extractMediaPathsFromText(content), [content]);
 
+  /** 用户消息也走块内限高：超长内容在气泡里滚动，不把输入区顶出可视区。 */
+  const streamBlockMaxHeight = useStreamBlockMaxHeight();
   const time = formatTime(message.timestamp);
   const canBranchHere = !!entryId && !!onBranchHere;
   const canNewSession = !!entryId && !!onNewSessionFromHere;
@@ -446,6 +448,10 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onBranchHere, onNe
             border: "1px solid color-mix(in srgb, var(--accent) 18%, var(--border))",
             borderRadius: "var(--radius-lg) var(--radius-lg) var(--radius-xs) var(--radius-lg)",
             padding: "11px 14px",
+            maxHeight: streamBlockMaxHeight,
+            overflowY: "auto",
+            overscrollBehavior: "auto",
+            touchAction: "pan-y",
             fontSize: 14,
             lineHeight: 1.6,
             color: "var(--text)",
