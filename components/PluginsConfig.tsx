@@ -8,6 +8,7 @@ import { ExtensionShortcutsList } from "./ExtensionShortcutsList";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { PluginPackageInfo, PluginsResponse } from "@/lib/api-types";
 import { shortenPath } from "@/lib/file-paths";
+import { MarkdownBody } from "./MarkdownBody";
 import { useI18n } from "@/lib/i18n";
 import { getServerPref, setServerPref } from "@/lib/server-preferences";
 
@@ -318,18 +319,22 @@ function AddPluginPanel({
   scope,
   busy,
   actionError,
+  packages,
   onSourceChange,
   onScopeChange,
   onInstall,
+  onInstallSource,
 }: {
   cwd: string;
   source: string;
   scope: PluginScope;
   busy: boolean;
   actionError: string | null;
+  packages: PluginPackageInfo[];
   onSourceChange: (value: string) => void;
   onScopeChange: (scope: PluginScope) => void;
   onInstall: () => void;
+  onInstallSource: (source: string, scope: PluginScope) => Promise<void>;
 }) {
   const { t } = useI18n();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -439,119 +444,277 @@ function AddPluginPanel({
         </div>
       )}
 
-      {/* 插件库搜索（npm registry） */}
+      {/* 插件市场（npm registry） */}
       <div style={{ borderTop: "1px solid var(--border)", paddingTop: 14, marginTop: 4 }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", marginBottom: 8 }}>
-          {t("plugins_searchLibrary")}
-        </div>
-        <PluginLibrarySearch onPick={(name) => onSourceChange(`npm:${name}`)} />
+        <PluginMarket scope={scope} packages={packages} onInstallSource={onInstallSource} />
       </div>
     </div>
   );
 }
 
-function PluginLibrarySearch({ onPick }: { onPick: (name: string) => void }) {
+type MarketItem = {
+  name: string;
+  version: string;
+  description: string;
+  keywords: string[];
+  publisher?: string;
+  monthlyDownloads: number | null;
+  updated: string | null;
+};
+
+type MarketDetail = {
+  name: string;
+  version: string;
+  description: string;
+  readme: string;
+  repository: string | null;
+  homepage: string | null;
+  license: string | null;
+  monthlyDownloads: number | null;
+};
+
+function formatDownloads(value: number | null): string {
+  if (value === null) return "—";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return String(value);
+}
+
+function marketDate(value: string | null): string {
+  if (!value) return "";
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString();
+}
+
+/** registry 里的仓库地址可能是 git+https://… 或 git://…；只放行 http(s)。 */
+function safeHref(value: string | null): string | null {
+  if (!value) return null;
+  const normalized = value
+    .replace(/^git\+/, "")
+    .replace(/^git:\/\//, "https://")
+    .replace(/\.git$/, "");
+  try {
+    const url = new URL(normalized);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 插件市场：热门榜（pi-package 关键词按月下载量）+ npm 关键词搜索 + README 详情 + 一键安装。
+ * 数据全部来自 npm registry，不抓 pi.dev 的 HTML。
+ */
+function PluginMarket({ scope, packages, onInstallSource }: {
+  scope: PluginScope;
+  packages: PluginPackageInfo[];
+  onInstallSource: (source: string, scope: PluginScope) => Promise<void>;
+}) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<Array<{ name: string; version: string; description: string }> | null>(null);
-  const [searching, setSearching] = useState(false);
+  const [items, setItems] = useState<MarketItem[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [details, setDetails] = useState<Record<string, MarketDetail | "loading" | "error">>({});
+  const [installing, setInstalling] = useState<string | null>(null);
 
-  const runSearch = useCallback(async () => {
-    const q = query.trim();
-    if (!q) return;
-    setSearching(true);
+  const installedNames = useMemo(
+    () => new Set(packages.map((pkg) => pkg.packageName).filter((name): name is string => Boolean(name))),
+    [packages],
+  );
+
+  const load = useCallback(async (q: string) => {
+    setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/plugins/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: q }),
-      });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(body.error ?? `HTTP ${res.status}`);
-      }
-      const body = (await res.json()) as { results?: Array<{ name: string; version: string; description: string }> };
-      setResults(body.results ?? []);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setResults(null);
+      const res = await fetch(`/api/plugins/market?q=${encodeURIComponent(q)}`, { cache: "no-store" });
+      const body = (await res.json()) as { items?: MarketItem[]; error?: string };
+      if (!res.ok || body.error) throw new Error(body.error ?? `HTTP ${res.status}`);
+      setItems(body.items ?? []);
+      setExpanded(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setItems([]);
     } finally {
-      setSearching(false);
+      setLoading(false);
     }
-  }, [query]);
+  }, []);
+
+  useEffect(() => {
+    void load("");
+  }, [load]);
+
+  const toggleDetail = useCallback(async (name: string) => {
+    setExpanded((current) => (current === name ? null : name));
+    const cached = details[name];
+    if (cached && cached !== "error") return;
+    setDetails((prev) => ({ ...prev, [name]: "loading" }));
+    try {
+      const res = await fetch(`/api/plugins/market/detail?name=${encodeURIComponent(name)}`, { cache: "no-store" });
+      const body = (await res.json()) as MarketDetail & { error?: string };
+      if (!res.ok || body.error) throw new Error(body.error ?? `HTTP ${res.status}`);
+      setDetails((prev) => ({ ...prev, [name]: body }));
+    } catch {
+      setDetails((prev) => ({ ...prev, [name]: "error" }));
+    }
+  }, [details]);
+
+  const install = useCallback(async (name: string) => {
+    setInstalling(name);
+    try {
+      await onInstallSource(`npm:${name}`, scope);
+    } finally {
+      setInstalling(null);
+    }
+  }, [onInstallSource, scope]);
 
   return (
-    <div>
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{t("plugins_marketTitle")}</div>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 3 }}>{t("plugins_marketHint")}</div>
+      </div>
+
       <div style={{ display: "flex", gap: 8 }}>
         <input
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") void runSearch();
+            if (e.key === "Enter") void load(query.trim());
           }}
           placeholder={t("plugins_searchLibraryPlaceholder")}
-          aria-label={t("plugins_searchLibrary")}
+          aria-label={t("plugins_marketTitle")}
           style={{
-            flex: 1, height: 30, padding: "0 10px", borderRadius: 6,
+            flex: 1, height: 32, padding: "0 10px", borderRadius: 6,
             border: "1px solid var(--border)", background: "var(--bg)",
             color: "var(--text)", fontSize: 12, outline: "none",
           }}
         />
         <button
           type="button"
-          onClick={() => void runSearch()}
-          disabled={searching || !query.trim()}
+          onClick={() => void load(query.trim())}
+          disabled={loading}
           style={{
-            minHeight: 30, padding: "0 12px", borderRadius: 6,
+            minHeight: 32, padding: "0 12px", borderRadius: 6,
             border: "1px solid var(--border)", background: "var(--bg-panel)",
-            color: "var(--text)", cursor: searching || !query.trim() ? "not-allowed" : "pointer",
-            fontSize: 12, opacity: searching || !query.trim() ? 0.5 : 1,
+            color: "var(--text)", cursor: loading ? "not-allowed" : "pointer",
+            fontSize: 12, opacity: loading ? 0.5 : 1,
           }}
         >
-          {searching ? t("common_loading") : t("common_search")}
+          {loading ? t("common_loading") : t("common_search")}
         </button>
       </div>
-      {error && <div style={{ fontSize: 11, color: "var(--status-danger)", marginTop: 6 }}>{error}</div>}
-      {results && results.length === 0 && !error && (
-        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 6 }}>{t("plugins_searchEmpty")}</div>
+
+      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)" }}>
+        {query.trim() ? t("common_search") : t("plugins_marketHot")}
+      </div>
+
+      {error && <div style={{ fontSize: 11, color: "var(--status-danger)" }}>{t("plugins_marketFailed")}: {error}</div>}
+      {!error && !loading && items.length === 0 && (
+        <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("plugins_marketEmpty")}</div>
       )}
-      {results && results.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8, maxHeight: 240, overflowY: "auto" }}>
-          {results.map((r) => (
-            <button
-              key={r.name}
-              type="button"
-              onClick={() => onPick(r.name)}
-              style={{
-                textAlign: "left", padding: "7px 9px", borderRadius: 6,
-                border: "1px solid var(--border)", background: "var(--bg-panel)",
-                color: "var(--text)", cursor: "pointer", fontSize: 11,
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-panel)"; }}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {items.map((item) => {
+          const detail = details[item.name];
+          const installed = installedNames.has(item.name);
+          const isOpen = expanded === item.name;
+          return (
+            <div
+              key={item.name}
+              style={{ border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-panel)", overflow: "hidden" }}
             >
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ fontFamily: "var(--font-mono)", fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {r.name}
-                </span>
-                <span style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", flexShrink: 0 }}>v{r.version}</span>
-              </div>
-              {r.description && (
-                <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {r.description}
+              <button
+                type="button"
+                onClick={() => void toggleDetail(item.name)}
+                aria-expanded={isOpen}
+                style={{
+                  width: "100%", display: "block", textAlign: "left", padding: "9px 11px",
+                  border: "none", background: "none", color: "var(--text)", cursor: "pointer",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                  <span style={{ fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {item.name}
+                  </span>
+                  <span style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", flexShrink: 0 }}>
+                    v{item.version}
+                  </span>
+                  {installed && (
+                    <span style={{ fontSize: 9, padding: "1px 6px", borderRadius: 999, background: "var(--bg-selected)", color: "var(--text-muted)", flexShrink: 0 }}>
+                      {t("plugins_marketInstalled")}
+                    </span>
+                  )}
+                  <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--text-dim)", flexShrink: 0 }}>
+                    {t("plugins_marketDownloads", { count: formatDownloads(item.monthlyDownloads) })}
+                  </span>
+                </div>
+                {item.description && (
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {item.description}
+                  </div>
+                )}
+              </button>
+
+              {isOpen && (
+                <div style={{ borderTop: "1px solid var(--border)", padding: "10px 11px" }}>
+                  {detail === "loading" && <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("common_loading")}</div>}
+                  {detail === "error" && <div style={{ fontSize: 11, color: "var(--status-danger)" }}>{t("plugins_marketFailed")}</div>}
+                  {detail && detail !== "loading" && detail !== "error" && (
+                    <>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 10, color: "var(--text-dim)", marginBottom: 8 }}>
+                        {item.updated && <span>{t("plugins_marketUpdated", { date: marketDate(item.updated) })}</span>}
+                        {detail.license && <span>{detail.license}</span>}
+                        {safeHref(detail.repository) && (
+                          <a href={safeHref(detail.repository) ?? undefined} target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>
+                            {t("plugins_marketRepo")}
+                          </a>
+                        )}
+                        {safeHref(detail.homepage) && (
+                          <a href={safeHref(detail.homepage) ?? undefined} target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>
+                            {t("plugins_marketHomepage")}
+                          </a>
+                        )}
+                      </div>
+                      <div style={{ maxHeight: 320, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 6, padding: "8px 10px", background: "var(--bg)" }}>
+                        {detail.readme.trim()
+                          ? <MarkdownBody>{detail.readme}</MarkdownBody>
+                          : <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("plugins_marketReadmeEmpty")}</div>}
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
+                        {installed ? (
+                          <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("plugins_marketInstalled")}</span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => void install(item.name)}
+                            disabled={installing !== null}
+                            style={{
+                              minHeight: 30, padding: "0 12px", borderRadius: 6, border: "1px solid var(--accent)",
+                              background: "var(--accent)", color: "var(--accent-foreground)", fontSize: 12, fontWeight: 600,
+                              cursor: installing !== null ? "not-allowed" : "pointer", opacity: installing !== null ? 0.5 : 1,
+                            }}
+                          >
+                            {installing === item.name ? t("plugins_installing") : t("common_install")}
+                          </button>
+                        )}
+                        <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+                          npm:{item.name}
+                        </span>
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
-            </button>
-          ))}
-        </div>
-      )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
-
 function PackageDetail({
   pkg,
   cwd,
@@ -931,10 +1094,15 @@ export function PluginsConfig({
     }
   }, [data, locks, pluginUpdates, runAction, checkAllUpdates]);
 
-  const installPlugin = useCallback(async () => {
-    const source = installSource.trim();
+  const installPlugin = useCallback(async (
+    sourceOverride?: string,
+    scopeOverride?: PluginScope,
+    keepPanel = false,
+  ) => {
+    const source = (sourceOverride ?? installSource).trim();
+    const scope = scopeOverride ?? installScope;
     if (!source) return;
-    const key = `${installScope}\0${source}`;
+    const key = `${scope}\0${source}`;
     setBusyKey(`install:${key}`);
     setActionError(null);
     setActionMessage(null);
@@ -942,12 +1110,18 @@ export function PluginsConfig({
       const res = await fetch("/api/plugins", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "install", source, scope: installScope, cwd }),
+        body: JSON.stringify({ action: "install", source, scope, cwd }),
       });
       const next = (await res.json()) as PluginsResponse & { error?: string };
       if (!res.ok || next.error) throw new Error(next.error ?? `HTTP ${res.status}`);
       setData(next);
-      const installed = findInstalledPackage(next.packages, source, installScope);
+      if (keepPanel) {
+        // 市场里连续装：留在市场，只刷新「已安装」状态
+        setActionMessage(t("plugins_installed"));
+        setPluginsRevision((prev) => prev + 1);
+        return;
+      }
+      const installed = findInstalledPackage(next.packages, source, scope);
       setSelected(installed ? packageKey(installed) : key);
       setAddMode(false);
       setInstallSource("");
@@ -977,6 +1151,11 @@ export function PluginsConfig({
       setBusyKey(null);
     }
   }, [loadPlugins, onReloaded, sessionId, t]);
+
+  const installFromMarket = useCallback(
+    (source: string, scope: PluginScope) => installPlugin(source, scope, true),
+    [installPlugin],
+  );
 
   const addBusy = busyKey?.startsWith("install:") ?? false;
 
@@ -1266,9 +1445,11 @@ export function PluginsConfig({
                 scope={installScope}
                 busy={addBusy}
                 actionError={actionError}
+                packages={packages}
                 onSourceChange={setInstallSource}
                 onScopeChange={setInstallScope}
-                onInstall={installPlugin}
+                onInstall={() => void installPlugin()}
+                onInstallSource={installFromMarket}
               />
             ) : loading ? null : selectedPackage ? (
               <PackageDetail
