@@ -27,12 +27,19 @@ import ts from "typescript";
 
 const SOURCE = readFileSync(new URL("./useAgentSession.ts", import.meta.url), "utf8");
 
-/** 抽出「body 里出现 marker 的那个 useEffect」的第一个参数（回调本身）。 */
+/**
+ * 抽出「body 里出现 marker 的**第一个** useEffect」的回调本身。
+ *
+ * 取第一个而不是最后一个：这个文件测的是 #110 那个「运行集变化 → 补状态」effect。
+ * 源码里后来还加了别的 subscribeAppEvents 订阅（例如只读子代理会话的内容跟随），
+ * 取最后一个会抽到别的 effect，断言就变得与被测对象无关。
+ */
 function extractEffect(env, marker) {
   const tree = ts.createSourceFile("hook.tsx", SOURCE, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let expression;
   function visit(node) {
-    if (ts.isCallExpression(node)
+    if (!expression
+      && ts.isCallExpression(node)
       && node.expression.getText(tree) === "useEffect"
       && node.arguments.length > 0
       && node.arguments[0].getText(tree).includes(marker)) {

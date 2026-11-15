@@ -16,10 +16,11 @@
  * 的同一时刻推给浏览器；轮询则平均要多等 1 秒、最坏 2 秒。两条通道都在，事件优先、
  * 轮询兜底。
  */
-import { readdirSync, watch, type FSWatcher } from "node:fs";
-import { join } from "node:path";
+import { closeSync, openSync, readFileSync, readdirSync, readSync, statSync, watch, type FSWatcher } from "node:fs";
+import { basename, join } from "node:path";
 import { getAgentDir } from "./pi-paths";
 import { scanSessionFiles } from "./session-metadata-cache";
+import { resolveAsyncRunsRoot } from "./subagent-runs";
 import { RUNNING_LEASE_DIRNAME, isRunningLeaseActivelyRunningByOther } from "./session-running-lease";
 import { SESSION_STATE_DIRNAME, SESSION_STATE_POLL_MS, listSignaledSessionIds, signaledSessionsFingerprint } from "./session-state-signal";
 
@@ -32,6 +33,27 @@ export const LOCK_POLL_MS = 2_000;
 export const SESSION_POLL_MS = 5_000;
 /** fs.watch 事件风暴（一次 append 会触发多次回调）合并窗口。 */
 const EVENT_DEBOUNCE_MS = 50;
+/**
+ * 子代理 run 记录的兜底对账间隔。run 记录只在真跑的时候变，2s 足够；
+ * `fs.watch` 正常时是事件驱动的，这里只兜 inotify 失效。
+ */
+export const SUBAGENT_RUNS_POLL_MS = 2_000;
+/**
+ * run 记录广播节流下限。子代理每个工具边界都会改写 status.json，
+ * 逐次广播等于让页面跟着每一次工具调用重拉。
+ */
+const SUBAGENT_RUNS_EMIT_MIN_MS = 500;
+/**
+ * run 目录 watch 上限。已完成的 run 记录不会自动删除，目录会一直累积；
+ * 超出后只靠 SUBAGENT_RUNS_POLL_MS 的兜底对账（最多晚 2s），不再逐个挂 watch。
+ */
+const SUBAGENT_WATCH_MAX_DIRS = 64;
+/**
+ * status.json 解析缓存上限。只在 run 记录真的变了时重读 —— 子代理每个工具边界
+ * 都改写 status.json，逐次把所有历史 run 重读重解析（单份十几到几十 KB）
+ * 会让广播路径随 run 数量线性变慢。
+ */
+const SUBAGENT_STATUS_CACHE_MAX = 256;
 
 export type CrossProcessEvent =
 	/** 对端进程当前持有写租约的会话 id（已排序、不含本进程）。 */
@@ -44,7 +66,16 @@ export type CrossProcessEvent =
 	 * 与 `sessions-changed` 分开：那个是「列表变了」，这个是「同一个会话的权威值变了」，
 	 * 消费方要按 id 重新对齐（而不是重取整份列表）。空数组表示没有信号。
 	 */
-	| { type: "session-state"; sessionIds: string[] };
+	| { type: "session-state"; sessionIds: string[] }
+	/**
+	 * 子代理异步 run 的记录变了（status.json 改写，或 run 目录增删）。
+	 *
+	 * 只读子代理会话没有属于自己的 host（`canConnectEvents: false`），连不到
+	 * per-session 事件流，页面上的快照只在切会话时读过一次。这条广播是它唯一的
+	 * 「你手里那份落后了」信号。`sessionIds` 是 run 名下子会话的 header id
+	 * （**不是** runId）；解析不出来时为空数组，消费方仍可按变化本身刷新运行面板。
+	 */
+	| { type: "subagent-runs-changed"; sessionIds: string[] };
 
 type Listener = (event: CrossProcessEvent) => void;
 
@@ -72,6 +103,22 @@ interface WatchState {
 	sessionsRoot: string;
 	/** 首次对账只建基线，不广播。 */
 	primed: boolean;
+	/** pi-subagents 异步 run 根（系统临时目录，与 PI_CODING_AGENT_DIR 无关）。 */
+	subagentRunsRoot: string;
+	/** run 根 + 每个 run 子目录各一个非递归 watch（run 目录数是个位到几十）。 */
+	subagentWatchers: Map<string, FSWatcher>;
+	subagentTimer: ReturnType<typeof setInterval> | null;
+	/** run 目录集合 + 每个 status.json 的 mtime:size。 */
+	subagentKey: string;
+	/** 「有哪些 run 目录」——变化才补挂 watch，避免每轮遍历项目目录。 */
+	subagentDirsKey: string;
+	/** session.jsonl 路径 → header id（header 写入后不再改，一次读够）。 */
+	subagentSessionIds: Map<string, string>;
+	/** status.json 路径 → 上次解析出的 sessionIds（带 mtime:size 以判断是否复用）。 */
+	subagentStatusCache: Map<string, { mtimeMs: number; size: number; ids: string[] }>;
+	/** 上次广播时间（节流用）。 */
+	subagentEmittedAt: number;
+	subagentEmitTimer: ReturnType<typeof setTimeout> | null;
 }
 
 declare global {
@@ -98,6 +145,15 @@ function state(): WatchState {
 			agentDir,
 			sessionsRoot: join(agentDir, "sessions"),
 			primed: false,
+			subagentRunsRoot: resolveSubagentRunsRoot(),
+			subagentWatchers: new Map(),
+			subagentTimer: null,
+			subagentKey: "",
+			subagentDirsKey: "",
+			subagentSessionIds: new Map(),
+			subagentStatusCache: new Map(),
+			subagentEmittedAt: 0,
+			subagentEmitTimer: null,
 		};
 	}
 	return globalThis.__piCrossProcessWatch;
@@ -254,6 +310,7 @@ async function reconcile(): Promise<void> {
 	if (s.primed) {
 		reconcileLocks();
 		reconcileSessionState();
+		reconcileSubagentRuns();
 		await reconcileSessions();
 		return;
 	}
@@ -269,6 +326,12 @@ async function reconcile(): Promise<void> {
 		s.sessionsContentKey = "";
 		s.sessionsPendingContentKey = "";
 	}
+	const subagentBaseline = subagentRunsFingerprint(s.subagentRunsRoot);
+	s.subagentKey = subagentBaseline.key;
+	s.subagentDirsKey = subagentBaseline.dirsKey;
+	// 同 reconcileSubagentRuns 的基线：先把现有 run 的 id 读进缓存，
+	// 这样第一帧广播只带真正变化的那些。
+	collectSubagentSessionIds(subagentBaseline.statuses);
 	s.primed = true;
 }
 
@@ -281,9 +344,215 @@ function scheduleReconcile(): void {
 		if (s.primed) {
 			reconcileLocks();
 			reconcileSessionState();
+			reconcileSubagentRuns();
 			void reconcileSessions();
 		}
 	}, EVENT_DEBOUNCE_MS);
+}
+
+/**
+ * 异步 run 根目录。默认是系统临时目录下的 `pi-subagents-<scope>/async-subagent-runs`，
+ * **不在** `PI_CODING_AGENT_DIR` 下面：测试必须用 `PI_SUBAGENT_RUNS_ROOT` 指到临时目录，
+ * 否则会去听真实用户的 run 记录。
+ */
+function resolveSubagentRunsRoot(): string {
+	const override = process.env.PI_SUBAGENT_RUNS_ROOT;
+	if (override) return override;
+	try {
+		return resolveAsyncRunsRoot();
+	} catch {
+		return "";
+	}
+}
+
+/** run 根下的各个 run 目录（跳过 pi-subagents 自己的 `.active-runs` / `.terminal-runs`）。 */
+function listSubagentRunDirs(root: string): string[] {
+	try {
+		return readdirSync(root, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+			.map((entry) => join(root, entry.name));
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * run 记录指纹：run 目录集合 + 每个 `status.json` 的 mtime:size。
+ *
+ * 与 `sessionsFingerprint` 不同，这里**变了就广播**，不做「稳定一轮」判定：
+ * 子代理跑的时候 status.json 每个工具边界都在改写，等稳定等于让只读页面
+ * 「跑完才跳一下」。合并写入交给 EVENT_DEBOUNCE_MS 与广播节流。
+ */
+type SubagentStatusStamp = { path: string; mtimeMs: number; size: number };
+
+function subagentRunsFingerprint(root: string): { key: string; dirsKey: string; statuses: SubagentStatusStamp[] } {
+	if (!root) return { key: "", dirsKey: "", statuses: [] };
+	const statuses: SubagentStatusStamp[] = [];
+	const parts: string[] = [];
+	const dirs = listSubagentRunDirs(root);
+	for (const dir of dirs) {
+		// 用 basename 而不是切 "/"：Windows 上 join 产出的是反斜杠。
+		const runId = basename(dir);
+		const statusPath = join(dir, "status.json");
+		let st: ReturnType<typeof statSync>;
+		try {
+			st = statSync(statusPath);
+		} catch {
+			parts.push(`${runId}:-`);
+			continue;
+		}
+		parts.push(`${runId}:${st.mtimeMs}:${st.size}`);
+		statuses.push({ path: statusPath, mtimeMs: st.mtimeMs, size: st.size });
+	}
+	return { key: parts.join("\n"), dirsKey: dirs.join("\n"), statuses };
+}
+
+/**
+ * 读 JSONL 首行 header 的 id。只读前 64 KiB，结果按路径缓存 ——
+ * header 写进文件后不会再改。
+ */
+function readSubagentSessionId(filePath: string): string | undefined {
+	const s = state();
+	const cached = s.subagentSessionIds.get(filePath);
+	if (cached) return cached;
+	let fd: number;
+	try {
+		fd = openSync(filePath, "r");
+	} catch {
+		return undefined;
+	}
+	try {
+		const buffer = Buffer.allocUnsafe(64 * 1024);
+		const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+		if (bytesRead <= 0) return undefined;
+		const slice = buffer.subarray(0, bytesRead);
+		const newline = slice.indexOf(0x0a);
+		const firstLine = slice.subarray(0, newline === -1 ? bytesRead : newline).toString("utf8").trimEnd();
+		if (!firstLine) return undefined;
+		const header = JSON.parse(firstLine) as { type?: unknown; id?: unknown };
+		if (header?.type !== "session" || typeof header.id !== "string" || !header.id) return undefined;
+		s.subagentSessionIds.set(filePath, header.id);
+		return header.id;
+	} catch {
+		return undefined;
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/**
+ * 解析单份 status.json 里的 step sessionFile → 子会话 header id。
+ *
+ * 返回 `null` 表示「这次读不出来」（写了一半 / 刚被删）：调用方不要缓存它，
+ * 否则这份 status 不再改动时，它名下的子会话会永远进不了 broadcast。
+ */
+function readStatusSessionIds(statusPath: string): string[] | null {
+	let payload: unknown;
+	try {
+		payload = JSON.parse(readFileSync(statusPath, "utf8"));
+	} catch {
+		return null; // 写了一半 / 刚被删：下一轮再看
+	}
+	const steps = (payload as { steps?: unknown } | null)?.steps;
+	if (!Array.isArray(steps)) return [];
+	const ids: string[] = [];
+	for (const step of steps) {
+		const sessionFile = (step as { sessionFile?: unknown } | null)?.sessionFile;
+		if (typeof sessionFile !== "string" || !sessionFile) continue;
+		const id = readSubagentSessionId(sessionFile);
+		if (id) ids.push(id);
+	}
+	return ids;
+}
+
+/**
+ * run 的 status.json 里各 step 的 `sessionFile` → 子会话 header id。
+ *
+ * 按 mtime:size 复用上次的解析结果：一次广播通常只有一两个 run 真的变了，
+ * 其余历史 run 的记录（单份十几到几十 KB）不必每次重读重解析。
+ */
+function collectSubagentSessionIds(statuses: readonly SubagentStatusStamp[]): string[] {
+	const s = state();
+	const ids = new Set<string>();
+	for (const stamp of statuses) {
+		const cached = s.subagentStatusCache.get(stamp.path);
+		let stepIds: readonly string[];
+		if (cached && cached.mtimeMs === stamp.mtimeMs && cached.size === stamp.size) {
+			stepIds = cached.ids;
+		} else {
+			const parsed = readStatusSessionIds(stamp.path);
+			// 读不出来就不写缓存：这份 status 可能不再改写，缓存住会把它的子会话挡在广播外。
+			if (parsed === null) continue;
+			stepIds = parsed;
+			s.subagentStatusCache.set(stamp.path, { mtimeMs: stamp.mtimeMs, size: stamp.size, ids: [...parsed] });
+		}
+		for (const id of stepIds) ids.add(id);
+	}
+	// 被删掉的 run 记录不留缓存，免得长期运行后无界增长。
+	if (s.subagentStatusCache.size > SUBAGENT_STATUS_CACHE_MAX) {
+		const live = new Set(statuses.map((stamp) => stamp.path));
+		for (const path of [...s.subagentStatusCache.keys()]) {
+			if (!live.has(path)) s.subagentStatusCache.delete(path);
+		}
+	}
+	return [...ids];
+}
+
+/**
+ * 只取「这次真的变了」的 run 名下的子会话 id。
+ *
+ * 广播必须收成 diff：把全部历史 run 的子会话都带上，等于「任何一个 run 动一下，
+ * 打开着的所有只读会话都重拉一遍」。判定用 status.json 缓存的 mtime:size ——
+ * 缓存只在广播路径里更新，存的正是「上次广播看到的样子」。
+ */
+function collectChangedSubagentSessionIds(statuses: readonly SubagentStatusStamp[]): string[] {
+	const s = state();
+	const changed = statuses.filter((stamp) => {
+		const cached = s.subagentStatusCache.get(stamp.path);
+		return !cached || cached.mtimeMs !== stamp.mtimeMs || cached.size !== stamp.size;
+	});
+	if (changed.length === 0) return [];
+	return collectSubagentSessionIds(changed);
+}
+
+/**
+ * 对账 run 记录。变了就广播（带节流），不做「稳定一轮」。
+ *
+ * 广播内容是「请重读」，不是权威值：真正的数据仍然只在 status.json / session.jsonl 里。
+ */
+function reconcileSubagentRuns(): void {
+	const s = state();
+	const fingerprint = subagentRunsFingerprint(s.subagentRunsRoot);
+	if (!s.primed) {
+		s.subagentKey = fingerprint.key;
+		s.subagentDirsKey = fingerprint.dirsKey;
+		// 基线也要把各 status 的 id 读进缓存：否则第一帧广播会把全部历史 run
+		// 都当成「这次变了」，又回到「一个 run 动一下、所有只读页都重拉」。
+		collectSubagentSessionIds(fingerprint.statuses);
+		return;
+	}
+	// run 目录增删才补挂 watch：每轮都遍历项目目录代价不低。
+	if (fingerprint.dirsKey !== s.subagentDirsKey) {
+		s.subagentDirsKey = fingerprint.dirsKey;
+		attachWatchers();
+	}
+	if (fingerprint.key === s.subagentKey) return;
+	s.subagentKey = fingerprint.key;
+	const flush = () => {
+		s.subagentEmitTimer = null;
+		s.subagentEmittedAt = Date.now();
+		// 用「当前」的 status 列表：等节流这段时间里可能又落了新 step。
+		const latest = subagentRunsFingerprint(s.subagentRunsRoot);
+		emit({ type: "subagent-runs-changed", sessionIds: collectChangedSubagentSessionIds(latest.statuses) });
+	};
+	const wait = SUBAGENT_RUNS_EMIT_MIN_MS - (Date.now() - s.subagentEmittedAt);
+	if (wait > 0) {
+		if (s.subagentEmitTimer) return;
+		s.subagentEmitTimer = setTimeout(flush, wait);
+		s.subagentEmitTimer.unref?.();
+		return;
+	}
+	flush();
 }
 
 function attachWatchers(): void {
@@ -332,6 +601,41 @@ function attachWatchers(): void {
 			// 目录不可读/刚被删：跳过，下一轮对账再试
 		}
 	}
+	// 异步 run 记录：只读子代理页面没有自己的 host，连不到 per-session 事件流，
+	// 这条 watcher 是它唯一的「快照落后了」信号。run 根在系统临时目录（与
+	// PI_CODING_AGENT_DIR 无关），测试用 PI_SUBAGENT_RUNS_ROOT 注入。
+	if (s.subagentRunsRoot) {
+		// 根目录必挂（新建/删除 run）；run 子目录按上限挂，超出的靠 2s 兜底对账。
+		// 目录名的排序不是新旧，按 mtime 倒序挑最近的：挑错了会一直挂着一堆已完成的 run。
+		const ranked = listSubagentRunDirs(s.subagentRunsRoot)
+			.map((dir) => {
+				try { return { dir, mtimeMs: statSync(dir).mtimeMs }; } catch { return { dir, mtimeMs: 0 }; }
+			})
+			.sort((a, b) => b.mtimeMs - a.mtimeMs)
+			.slice(0, SUBAGENT_WATCH_MAX_DIRS)
+			.map((entry) => entry.dir);
+		const watchTargets = new Set([s.subagentRunsRoot, ...ranked]);
+		// 已经不存在的 run 目录要卸掉，否则 map 只增不删。
+		for (const [dir, watcher] of [...s.subagentWatchers]) {
+			if (watchTargets.has(dir)) continue;
+			try { watcher.close(); } catch { /* 已关闭 */ }
+			s.subagentWatchers.delete(dir);
+		}
+		for (const dir of watchTargets) {
+			if (s.subagentWatchers.has(dir)) continue;
+			try {
+				const watcher = watch(dir, { persistent: false }, scheduleReconcile);
+				watcher.on("error", () => {
+					// error 后必须 close，否则 native handle 拴到进程退出。
+					try { watcher.close(); } catch { /* 已关闭 */ }
+					s.subagentWatchers.delete(dir);
+				});
+				s.subagentWatchers.set(dir, watcher);
+			} catch {
+				// run 目录还没建（第一个 run 还没启动）：兜底轮询覆盖，下次对账补挂
+			}
+		}
+	}
 }
 
 /**
@@ -353,6 +657,10 @@ export function subscribeCrossProcessEvents(listener: Listener): () => void {
 		const stateTimer = setInterval(() => { reconcileSessionState(); }, SESSION_STATE_POLL_MS);
 		stateTimer.unref?.();
 		s.stateTimer = stateTimer;
+		// run 记录兜底：fs.watch 失效时，只读页面的「落后」最多晚 2s 被发现。
+		const subagentTimer = setInterval(() => { reconcileSubagentRuns(); }, SUBAGENT_RUNS_POLL_MS);
+		subagentTimer.unref?.();
+		s.subagentTimer = subagentTimer;
 		void reconcile(); // 建基线（首次不广播）
 	}
 	return () => {
@@ -377,6 +685,14 @@ export function stopCrossProcessWatch(): void {
 		clearInterval(s.stateTimer);
 		s.stateTimer = null;
 	}
+	if (s.subagentTimer) {
+		clearInterval(s.subagentTimer);
+		s.subagentTimer = null;
+	}
+	if (s.subagentEmitTimer) {
+		clearTimeout(s.subagentEmitTimer);
+		s.subagentEmitTimer = null;
+	}
 	if (s.stateWatcher) {
 		try { s.stateWatcher.close(); } catch { /* 已关闭 */ }
 		s.stateWatcher = null;
@@ -391,6 +707,12 @@ export function stopCrossProcessWatch(): void {
 		try { watcher.close(); } catch { /* 已关闭 */ }
 	}
 	s.sessionWatchers.clear();
+	for (const watcher of s.subagentWatchers.values()) {
+		try { watcher.close(); } catch { /* 已关闭 */ }
+	}
+	s.subagentWatchers.clear();
+	s.subagentSessionIds.clear();
+	s.subagentStatusCache.clear();
 	s.primed = false;
 }
 

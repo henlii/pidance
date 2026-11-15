@@ -145,6 +145,7 @@ export const en = {
   sidebar_projectSortAz: 'A-Z 0-9',
   sidebar_projectSortZa: 'Z-A 9-0',
   sidebar_projectSortFixed: 'Fixed',
+  sidebar_projectMoved: '{project} moved to position {index} of {total}',
   sidebar_collapseAll: 'Collapse all',
   sidebar_expandAll: 'Expand all',
   sidebar_showMore: 'Show more',
@@ -343,6 +344,7 @@ export const en = {
   notice_activityHistoryDescription: 'Warnings and errors retained with this session',
   notice_activityPending: 'The saved record will appear after the session refreshes.',
   session_leafDrift: 'This branch cannot be resumed by the external Pi runtime; the session will continue from the end of the file.',
+  session_externalRewrite: 'The session file was modified externally. The running instance will not adopt these changes; refresh after it finishes.',
   // input
   input_thinkingOff: 'Thinking off',
   input_thinkingMinimal: 'Minimal thinking',

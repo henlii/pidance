@@ -522,6 +522,11 @@ const DETAIL_LOAD_TIMEOUT_MS = 12_000;
  * 用户看到的就是「后台跑完切回来不刷新、手动刷新才正常」。
  */
 const TAB_RETURN_RELOAD_RETRY_MS = 800;
+/**
+ * 只读（子代理）会话的尾页重拉合并窗口。子代理每个工具边界都会改写 run 记录，
+ * 服务端广播因此成串到来；只拉最后一次，避免每次都打一遍会话详情。
+ */
+const READ_ONLY_CONTENT_RELOAD_DEBOUNCE_MS = 600;
 const DETAIL_LOAD_MAX_RETRIES = 2;
 const DETAIL_LOAD_RETRY_DELAY_MS = 1_500;
 /**
@@ -1341,6 +1346,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     reportSuccess = false,
     resetBranchFollow = false,
     onMessagesReplaced?: () => void,
+    /**
+     * 后台静默重拉（只读会话跟随子代理写入）用：失败只记控制台，不 setError。
+     * 那种情况下页面本来就有可看的内容，一次网络抖动不该把整段对话换成
+     * 「加载失败」（run 停了之后也不会再有下一次成功重拉把它清掉）。
+     */
+    options?: { silentFailure?: boolean },
   ) => {
     const loadRequestSeq = ++loadRequestSeqRef.current;
     const thinkingGenAtLoad = thinkingGenerationRef.current;
@@ -1573,8 +1584,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       // 切走/被新加载取代导致的取消不是错误，不写 error。
       if (!isAbortError(e)) {
-        // 重试用尽：给用户看得懂的一句话（细节留在控制台），文案由聊天区的重试按钮配上（#91）。
-        if (e instanceof LoadFailedError) {
+        if (options?.silentFailure === true) {
+          // 静默重拉：正文已经有内容，失败不该把页面换成错误页。
+          console.warn("[pidance] read-only tail reload failed:", e);
+        } else if (e instanceof LoadFailedError) {
+          // 重试用尽：给用户看得懂的一句话（细节留在控制台），文案由聊天区的重试按钮配上（#91）。
           console.warn("[pidance] session detail load failed:", e.failure, "attempts:", e.attempts);
           setError(t("chat_loadFailed", { attempts: e.attempts }));
         } else {
@@ -1586,6 +1600,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
   }, [applyExtensionHiddenThinkingLabel, applyExtensionSlots, applyExtensionUiProjection, applyProjectedQueues, applyRemoteThinking, beginLoadRequest, notifyAutoFollowBranchReset, patchExtensionUiState, queueEntryNow]);
+
+  /**
+   * loadSession 的 ref：只读会话的内容跟随走它，而不是把 loadSession 放进 effect 依赖。
+   * loadSession 的依赖是一串 apply* 回调，任一变化都会重建 effect 并清掉未决的防抖
+   * 定时器 —— 事件成串到来时就永远等不到那次重拉。
+   */
+  const loadSessionRef = useRef(loadSession);
+  loadSessionRef.current = loadSession;
 
   /**
    * 重试当前会话的内容加载（#91）：加载超时/失败后聊天区给出的可点入口。
@@ -2035,6 +2057,73 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setHistoryLoading(false);
     }
   }, [activeLeafId, beginLoadRequest]);
+
+  /**
+   * 追加会话尾部（跨进程文件跟随 / 外部修改）。
+   *
+   * 与 loadNewerHistory 的区别：不要求 hasMoreAfter（那是跳读窗口的游标），
+   * 只要手里有最后一个 entryId 就能按 `after` 取增量。守卫仍是那三条：
+   * 后台标签不拉、跳读窗口不覆盖、正在翻历史时让路。
+   *
+   * 投影由服务端 `/api/sessions/[id]/context?after=` 负责，客户端只做归并，
+   * 不在这里重写 entry → message 的规则。
+   */
+  const appendSessionTail = useCallback(async (): Promise<"appended" | "empty" | "skipped"> => {
+    const sid = sessionIdRef.current;
+    if (!sid) return "skipped";
+    if (document.visibilityState !== "visible") return "skipped";
+    if (historyLoadingRef.current) return "skipped";
+    if (hasMoreAfterRef.current) return "skipped";
+    const after = entryIdsRef.current[entryIdsRef.current.length - 1];
+    if (!after) return "skipped";
+    const registry = getOrCreateBrowserSessionRuntimeRegistry();
+    const hydrateRequestSeq = registry.beginHydrate(sid);
+    const hydrateSinceSeq = registry.getSnapshot(sid)?.timelineSeq ?? 0;
+    // 自己的 abort 控制器：后台追加不能把用户正在做的分页/跳转请求 abort 掉。
+    const controller = new AbortController();
+    try {
+      const params = new URLSearchParams({ after, deferThinking: "1", deferMedia: "1" });
+      if (activeLeafId) params.set("leafId", activeLeafId);
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`, {
+        signal: controller.signal,
+      });
+      if (!res.ok) return "skipped";
+      const data = await res.json() as {
+        context: {
+          messages: AgentMessage[];
+          entryIds: string[];
+          hasMoreAfter?: boolean;
+        } | null;
+      };
+      if (sessionIdRef.current !== sid) return "skipped";
+      const newerIds = data.context?.entryIds ?? [];
+      const newerMessages = data.context?.messages ?? [];
+      if (newerIds.length === 0) return "empty";
+      const outcome = registry.hydrate(
+        sid,
+        [...(registry.getSnapshot(sid)?.messages ?? []), ...newerMessages],
+        [...entryIdsRef.current, ...newerIds],
+        {
+          sinceSeq: hydrateSinceSeq,
+          hydrateRequestSeq,
+          mode: "replace",
+          pending: "retain",
+          hasMoreAfter: data.context?.hasMoreAfter === true,
+        },
+      );
+      if (outcome !== "applied") return "skipped";
+      hasMoreAfterRef.current = data.context?.hasMoreAfter === true;
+      setHasMoreAfter(hasMoreAfterRef.current);
+      return "appended";
+    } catch (error) {
+      if (!isAbortError(error)) console.warn("[pidance] session tail append failed:", error);
+      return "skipped";
+    }
+  }, [activeLeafId]);
+
+  /** 跟随循环只认 ref：回调身份变化不该重启或打断在途的长轮询。 */
+  const appendSessionTailRef = useRef(appendSessionTail);
+  appendSessionTailRef.current = appendSessionTail;
 
   const loadTools = useCallback(async (_sid: string) => {
     // 外部 Pi RPC 无 get_tools；工具由会话启动 allow-list 控制，无需探测。
@@ -2967,6 +3056,215 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
   }, [session?.id, session?.readOnly, reconcileAgentState]);
 
+  /**
+   * 只读（子代理）会话的内容跟随。
+   *
+   * 这类会话没有属于自己的 host：`canConnectEvents` 为 false，拿不到 per-session 的
+   * `/api/agent/<id>/events`，而 `loadSession` 只在切进来时读过一次磁盘快照 —— 子代理
+   * 还在往同一个 JSONL 里写，页面就停在切进来那一刻（上面那条 effect 的早退正是为
+   * 这个设计服务的，别把它放开）。
+   *
+   * 但**应用级流**是页面单例（`/api/agent/running/events`），它不按会话判可写，所以
+   * 订阅它不会给只读会话建任何 host。服务端 watch 到 run 记录变化后经这条流广播
+   * `subagent-runs-changed`，带上子会话的 header id；命中本会话就静默重拉尾页。
+   */
+  useEffect(() => {
+    const sid = session?.id;
+    if (!sid || !session?.readOnly) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const unsubscribe = subscribeAppEvents((payload) => {
+      const data = payload as { type?: unknown; sessionIds?: unknown } | null;
+      if (data?.type !== "subagent-runs-changed") return;
+      // 广播里带的是 header id（不是 runId）：只读会话的 id 正是它。
+      if (sessionIdRef.current !== sid) return;
+      if (!Array.isArray(data.sessionIds) || !data.sessionIds.includes(sid)) return;
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        // 会话已经切走：这次重拉会覆盖别人的时间线，丢掉。
+        if (cancelled || sessionIdRef.current !== sid) return;
+        // 标签页在后台就先不拉；回前台走 syncOnTabReturn 的尾页重拉与重试，
+        // 不必在隐藏期间反复打请求。
+        if (document.visibilityState !== "visible") return;
+        // 跳读窗口（around 窗口）：尾页归并会把整段时间线换成最新一屏，
+        // 用户正在看的那一段直接消失。只读会话没有 live 事件，挡不住这次覆盖。
+        if (hasMoreAfterRef.current) return;
+        // 正在向上翻历史：这次重拉会 abort 掉那次分页请求。
+        if (historyLoadingRef.current) return;
+        void loadSessionRef.current(sid, false, true, false, false, undefined, { silentFailure: true });
+      }, READ_ONLY_CONTENT_RELOAD_DEBOUNCE_MS);
+    });
+    return () => {
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
+      unsubscribe();
+    };
+  }, [session?.id, session?.readOnly]);
+  /**
+   * 跨进程 / 外部修改的文件跟随（1–7 的客户端侧）。
+   *
+   * 三态互斥：本进程有 live host 时以 per-session SSE 为权威（`localLive`），
+   * 跟随只做低频探测不合并；没有 host 时才按文件增量合并；两者都不成立就是
+   * 一次性快照（不启动循环）。
+   *
+   * 订阅语义由在途长轮询承担：切会话 / 关页面 / 后台标签都 abort，服务端随之退订。
+   * 守卫与只读跟随同口径：跳读窗口不覆盖、翻历史时让路、成串变化合并。
+   */
+  // 跟随循环不随渲染重启：提示与文案走 ref，deps 只留会话身份。
+  const followNoticeRef = useRef(addNotice);
+  followNoticeRef.current = addNotice;
+  const followTranslateRef = useRef(t);
+  followTranslateRef.current = t;
+
+  useEffect(() => {
+    const sid = session?.id;
+    if (!sid || isNew || session?.readOnly) return;
+    let cancelled = false;
+    let stopped = false;
+    let consecutiveSkips = 0;
+    let controller: AbortController | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let baseline: { offset: number; ino: number } | null = null;
+    let rewriteNotified = false;
+
+    const schedule = (delayMs: number) => {
+      if (cancelled || stopped) return;
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        void tick();
+      }, delayMs);
+    };
+
+    const tick = async () => {
+      if (cancelled || stopped || sessionIdRef.current !== sid) return;
+      // 后台标签不跟随：回前台由 visibilitychange 重启（与 syncOnTabReturn 同口径）。
+      if (document.visibilityState !== "visible") return;
+      controller = new AbortController();
+      try {
+        const params = new URLSearchParams();
+        if (baseline) {
+          params.set("offset", String(baseline.offset));
+          params.set("ino", String(baseline.ino));
+          params.set("wait", "8000");
+        }
+        const res = await fetch(
+          `/api/sessions/${encodeURIComponent(sid)}/tail?${params.toString()}`,
+          { cache: "no-store", signal: controller.signal },
+        );
+        if (!res.ok) {
+          schedule(5_000);
+          return;
+        }
+        const probe = await res.json() as {
+          available?: boolean;
+          localLive?: boolean;
+          writerActive?: boolean;
+          ino?: number;
+          size?: number;
+          lastEntryId?: string | null;
+          changed?: boolean;
+          reset?: boolean;
+          externalRewrite?: boolean;
+        };
+        if (cancelled || sessionIdRef.current !== sid) return;
+        if (probe.available !== true) {
+          baseline = null;
+          schedule(10_000);
+          return;
+        }
+        const nextBaseline = { offset: probe.size ?? 0, ino: probe.ino ?? 0 };
+        const isBaselineProbe = baseline === null;
+        baseline = nextBaseline;
+
+        if (probe.localLive === true) {
+          // 本进程自己有 host：SSE 已经在校准时间线，文件事件合并会重复/回退。
+          schedule(5_000);
+          return;
+        }
+        // 建基线这一刻可能正好错过了「加载详情 → 建基线」之间的追加：文件尾巴与手里
+        // 的最后一条对不上就补一次增量（空窗口 = 只是改名/usage 之类，不重载）。
+        if (
+          isBaselineProbe &&
+          probe.lastEntryId &&
+          probe.lastEntryId !== entryIdsRef.current[entryIdsRef.current.length - 1]
+        ) {
+          const outcome = await appendSessionTailRef.current();
+          if (outcome === "skipped") schedule(1_000);
+          else schedule(150);
+          return;
+        }
+        if (probe.externalRewrite === true) {
+          // writer 活着却检测到截断：外部改写。静默合并会把内存树写回，用户的手改就丢了。
+          if (!rewriteNotified) {
+            rewriteNotified = true;
+            followNoticeRef.current({
+              type: "warning",
+              message: followTranslateRef.current("session_externalRewrite"),
+            });
+          }
+          stopped = true;
+          return;
+        }
+        if (probe.reset === true) {
+          // 无 writer 时的重写：文件是权威，整份重载后重新建基线。
+          baseline = null;
+          rewriteNotified = false;
+          consecutiveSkips = 0;
+          await loadSessionRef.current(sid, false, true, false, false, undefined, { silentFailure: true });
+          schedule(300);
+          return;
+        }
+        if (probe.changed === true) {
+          const outcome = await appendSessionTailRef.current();
+          if (outcome === "skipped") {
+            // 没有合并成功就别推进基线：下一轮还要把这段增量补回来。
+            consecutiveSkips += 1;
+            if (consecutiveSkips > 5) {
+              consecutiveSkips = 0;
+              baseline = nextBaseline;
+              schedule(5_000);
+              return;
+            }
+            schedule(1_000);
+            return;
+          }
+          consecutiveSkips = 0;
+          baseline = nextBaseline;
+          schedule(150);
+          return;
+        }
+        consecutiveSkips = 0;
+        baseline = nextBaseline;
+        // 长轮询超时：立刻再等下一次变化。
+        schedule(0);
+      } catch (error) {
+        if (cancelled || isAbortError(error)) return;
+        schedule(5_000);
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (cancelled || stopped) return;
+      if (document.visibilityState === "visible") {
+        schedule(0);
+      } else {
+        controller?.abort();
+        if (timer !== null) clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    schedule(0);
+    return () => {
+      cancelled = true;
+      controller?.abort();
+      if (timer !== null) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [isNew, session?.id, session?.readOnly]);
   useEffect(() => {
     const sid = session?.id;
     if (!sid || isNew || session?.readOnly) return;

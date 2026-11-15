@@ -1,6 +1,7 @@
 "use client";
 
 import { useSyncExternalStore } from "react";
+import { subscribeAppEvents } from "@/lib/app-events-stream";
 import { buildSubagentActivity, EMPTY_SUBAGENT_ACTIVITY, type SubagentActivity } from "@/lib/subagent-activity";
 import type { SubagentRunView } from "@/lib/subagent-run-types";
 
@@ -31,6 +32,14 @@ let snapshot: SubagentActivitySnapshot = INITIAL_SNAPSHOT;
 const listeners = new Set<() => void>();
 let timer: ReturnType<typeof setInterval> | null = null;
 let inFlight = false;
+let unsubscribeAppEvents: (() => void) | null = null;
+/**
+ * 请求进行中时又收到刷新信号：记下来在收尾后再拉一次。
+ *
+ * 没有这个位，子代理收尾那次 `subagent-runs-changed` 一旦撞上 in-flight 就被丢掉，
+ * 侧栏/谱系会停在「还在跑」直到下一次 30s 轮询。
+ */
+let pendingRefresh = false;
 
 function publish(next: SubagentActivitySnapshot): void {
   snapshot = next;
@@ -38,7 +47,10 @@ function publish(next: SubagentActivitySnapshot): void {
 }
 
 async function fetchActivity(): Promise<void> {
-  if (inFlight) return;
+  if (inFlight) {
+    pendingRefresh = true;
+    return;
+  }
   inFlight = true;
   try {
     const res = await fetch("/api/subagent-runs?limit=50");
@@ -52,6 +64,10 @@ async function fetchActivity(): Promise<void> {
     publish({ ...snapshot, stale: true });
   } finally {
     inFlight = false;
+    if (pendingRefresh) {
+      pendingRefresh = false;
+      void fetchActivity();
+    }
   }
 }
 
@@ -70,11 +86,20 @@ function startPolling(): void {
     if (!document.hidden) void fetchActivity();
   }, POLL_INTERVAL_MS);
   document.addEventListener("visibilitychange", handleVisibility);
+  // 服务端 watch 到子代理 run 记录变化就推一次（只读子代理页面也靠这同一个信号），
+  // 不必等 30s 轮询 —— 轮询只留作事件流断开时的兜底。
+  unsubscribeAppEvents = subscribeAppEvents((payload) => {
+    const data = payload as { type?: unknown } | null;
+    if (data?.type !== "subagent-runs-changed") return;
+    void fetchActivity();
+  });
 }
 
 function stopPolling(): void {
   if (timer) clearInterval(timer);
   timer = null;
+  unsubscribeAppEvents?.();
+  unsubscribeAppEvents = null;
   document.removeEventListener("visibilitychange", handleVisibility);
 }
 

@@ -145,6 +145,7 @@ export const zhCN: Record<TranslationKey, string> = {
   sidebar_projectSortAz: 'A-Z 0-9',
   sidebar_projectSortZa: 'Z-A 9-0',
   sidebar_projectSortFixed: '固定',
+  sidebar_projectMoved: '{project} 已移到第 {index}/{total} 位',
   sidebar_collapseAll: '全部折叠',
   sidebar_expandAll: '全部展开',
   sidebar_showMore: '显示更多',
@@ -343,6 +344,7 @@ export const zhCN: Record<TranslationKey, string> = {
   notice_activityHistoryDescription: '随当前会话保留的警告与错误',
   notice_activityPending: '会话刷新后将在此显示保存记录。',
   session_leafDrift: '外部 Pi runtime 无法恢复该分支；会话将从文件末尾继续。',
+  session_externalRewrite: '会话文件已被外部修改：运行中的实例不会采纳本次改动，请等它结束后再刷新。',
   // input
   input_thinkingOff: '关闭思考',
   input_thinkingMinimal: '最少思考',

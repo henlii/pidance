@@ -66,6 +66,13 @@ export async function GET(req: Request) {
             if (event.sessionIds.length > 0) encode({ type: "session-state", sessionIds: event.sessionIds });
             return;
           }
+          if (event.type === "subagent-runs-changed") {
+            // 子代理 run 记录变了。只读子代理页面没有属于自己的 host，连不到
+            // per-session 事件流，这是它唯一能知道「我这份快照落后了」的途径；
+            // 运行面板也据此立刻重取，不必等 30s 轮询。
+            encode({ type: "subagent-runs-changed", sessionIds: event.sessionIds });
+            return;
+          }
           invalidateSessionListCache();
           encode({ type: "sessions-changed" });
         } catch {
