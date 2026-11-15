@@ -26,6 +26,7 @@ import {
   projectHasRunningSession,
   sortSidebarProjects,
   UNGROUPED_GROUP_KEY,
+  type ProjectDropSide,
   type SidebarProjectNode,
 } from "./session-sidebar-model";
 import {
@@ -53,6 +54,7 @@ const SESSION_LIST_TIMEOUT_MS = 10_000;
 const SESSION_LIST_MAX_RETRIES = 2;
 const SESSION_LIST_RETRY_DELAY_MS = 2_000;
 import { refreshSubagentActivity, useSubagentActivity } from "@/hooks/useSubagentActivity";
+import { useProjectDrag } from "@/hooks/useProjectDrag";
 import { createActivationRecovery } from "@/lib/activation-recovery";
 import { getServerPref, isServerPrefsLoaded, sendPrefOps, setServerPref, useServerPreferences } from "@/lib/server-preferences";
 import {
@@ -303,6 +305,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [displayMenuOpen]);
   // 跨刷新偏好：显示模式 + 项目折叠集合（独立 seam）
   const [prefs, setPrefs] = useState<SidebarPreferences>(() => loadSidebarPreferences());
+  /** 项目换位后的无障碍播报（键盘路径与拖放路径共用；seq 让重复文案也重新播报）。 */
+  const [reorderNotice, setReorderNotice] = useState<{ text: string; seq: number } | null>(null);
   /**
    * 会话列表请求的超时与重试（#67）。
    *
@@ -1355,24 +1359,39 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     });
   }, [updatePrefs, visibleTree]);
 
-  const handleProjectDrop = useCallback((fromRoot: string, toRoot: string) => {
+  /**
+   * 项目顺序落定：拖放与 Alt+↑/↓ 都走这里。
+   * 顺序本身就是位置语义，改完统一切到固定排序（否则下一次按近期/名称重排会把结果冲掉）。
+   */
+  const handleProjectDrop = useCallback((fromRoot: string, toRoot: string, side: ProjectDropSide) => {
     if (!fromRoot || !toRoot || fromRoot === toRoot) return;
-    updatePrefs((prev) => {
-      const base = prev.projectSort === "fixed" && prev.projectOrder.length > 0
-        ? [...prev.projectOrder]
-        : visibleTree.map((p) => p.root);
-      for (const project of visibleTree) {
-        if (!base.includes(project.root)) base.push(project.root);
-      }
-      if (!base.includes(fromRoot)) base.push(fromRoot);
-      if (!base.includes(toRoot)) base.push(toRoot);
-      return {
-        ...prev,
-        projectSort: "fixed",
-        projectOrder: moveProjectInOrder(base, fromRoot, toRoot),
-      };
-    });
-  }, [updatePrefs, visibleTree]);
+    const base = prefs.projectSort === "fixed" && prefs.projectOrder.length > 0
+      ? [...prefs.projectOrder]
+      : visibleTree.map((p) => p.root);
+    for (const project of visibleTree) {
+      if (!base.includes(project.root)) base.push(project.root);
+    }
+    if (!base.includes(fromRoot)) base.push(fromRoot);
+    if (!base.includes(toRoot)) base.push(toRoot);
+    const nextOrder = moveProjectInOrder(base, fromRoot, toRoot, side);
+    if (nextOrder.join("\n") === base.join("\n")) return;
+    updatePrefs((prev) => ({ ...prev, projectSort: "fixed", projectOrder: nextOrder }));
+    const index = nextOrder.indexOf(fromRoot) + 1;
+    const name = projectAliases[fromRoot] ?? projectDisplayName(fromRoot);
+    setReorderNotice((prev) => ({
+      text: t("sidebar_projectMoved", { project: name, index, total: nextOrder.length }),
+      seq: (prev?.seq ?? 0) + 1,
+    }));
+  }, [prefs.projectSort, prefs.projectOrder, visibleTree, updatePrefs, projectAliases, t]);
+
+  /** 可见项目顺序：键盘换位的相邻项以屏幕上看到的顺序为准。 */
+  const projectDragOrder = useMemo(() => visibleTree.map((p) => p.root), [visibleTree]);
+  const projectDrag = useProjectDrag({
+    enabled: !searchActive,
+    order: projectDragOrder,
+    scrollRef: sessionListRef,
+    onMove: handleProjectDrop,
+  });
 
   const collapseAll = useCallback(() => {
     const ids = collectAllCollapseIds(openTree, { includeUngrouped: visibleUngroupedTree.length > 0 });
@@ -1904,7 +1923,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             onSessionArchive={handleArchiveSession}
             isSessionPinned={(id) => pinnedIds.has(id)}
             onTogglePin={togglePinSession}
-            onProjectDrop={searchActive ? undefined : handleProjectDrop}
+            drag={searchActive ? undefined : projectDrag}
            />
          ))}
         {/* 未分组会话区（#53）：不在项目列表里的目录（从未加入过的、关闭项目后的）会话
@@ -1985,6 +2004,26 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
        </>
       )}
 
+
+      {/* 项目换位播报：拖放与 Alt+↑/↓ 共用，seq 让同一文案也能重新播报。 */}
+      <div className="sr-only" role="status" aria-live="polite" key={reorderNotice?.seq ?? 0}>
+        {reorderNotice?.text ?? ""}
+      </div>
+
+      {/* 项目拖放的浮动标签：portal 到 body，避开侧栏的 transform/overflow 裁切。 */}
+      {projectDrag.dragLabel !== null && typeof document !== "undefined" &&
+        createPortal(
+          <div
+            ref={projectDrag.ghostRef}
+            className={`sidebar-project-drag-ghost${projectDrag.ghostDropping ? " is-dropping" : ""}`}
+            aria-hidden="true"
+            style={{ transform: "translate3d(-9999px, -9999px, 0)" }}
+          >
+            <FolderIcon size={13} />
+            <span>{projectDrag.dragLabel}</span>
+          </div>,
+          document.body,
+        )}
 
       <AddProjectDialog
         open={customPathOpen}

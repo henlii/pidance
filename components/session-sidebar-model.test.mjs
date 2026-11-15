@@ -314,6 +314,25 @@ test("项目排序：az/za 按显示名，fixed 按指定顺序，拖动改序",
   assert.deepEqual(moveProjectInOrder(["/alpha", "/beta", "/gamma"], "/gamma", "/alpha"), ["/gamma", "/alpha", "/beta"]);
 });
 
+test("项目拖动：落点在目标上半插到前、下半插到后，往后拖不再错位", async () => {
+  const { moveProjectInOrder, pickProjectDropSide, moveProjectByStep } = await jiti.import("./session-sidebar-model.ts");
+  const order = ["/alpha", "/beta", "/gamma"];
+  // 拖到目标前半 → 目标之前；拖到后半 → 目标之后（旧实现在往后拖时会少走一格）
+  assert.deepEqual(moveProjectInOrder(order, "/gamma", "/alpha", "before"), ["/gamma", "/alpha", "/beta"]);
+  assert.deepEqual(moveProjectInOrder(order, "/alpha", "/gamma", "after"), ["/beta", "/gamma", "/alpha"]);
+  assert.deepEqual(moveProjectInOrder(order, "/alpha", "/gamma", "before"), ["/beta", "/alpha", "/gamma"]);
+  // 缺省 before：保持旧调用点的行为不变
+  assert.deepEqual(moveProjectInOrder(order, "/gamma", "/alpha"), ["/gamma", "/alpha", "/beta"]);
+  // 落点侧以行中线为界
+  assert.equal(pickProjectDropSide(10, 0, 32), "before");
+  assert.equal(pickProjectDropSide(17, 0, 32), "after");
+  // 键盘换位：与相邻项交换，越界不动
+  assert.deepEqual(moveProjectByStep(order, "/beta", -1), ["/beta", "/alpha", "/gamma"]);
+  assert.deepEqual(moveProjectByStep(order, "/beta", 1), ["/alpha", "/gamma", "/beta"]);
+  assert.deepEqual(moveProjectByStep(order, "/alpha", -1), ["/alpha", "/beta", "/gamma"]);
+  assert.deepEqual(moveProjectByStep(order, "/gamma", 1), ["/alpha", "/beta", "/gamma"]);
+});
+
 test("projectHasRunningSession：只认本目录的 running，旁路 checkout 不阻止关闭", async () => {
   const { projectHasRunningSession } = await jiti.import("./session-sidebar-model.ts");
   const main = session("s1", { cwd: "/repo" });

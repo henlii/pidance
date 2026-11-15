@@ -47,6 +47,7 @@ import {
   type SessionRelationKind,
 } from "../session-tree";
 import { type SidebarProjectNode } from "../session-sidebar-model";
+import type { ProjectDragBinding } from "@/hooks/useProjectDrag";
 import {
   getGroupVisibleCount,
   getVisibleTopLevelNodes,
@@ -92,7 +93,7 @@ function ProjectSection({
   onSessionArchive,
   isSessionPinned,
   onTogglePin,
-  onProjectDrop,
+  drag,
 }: {
   project: SidebarProjectNode;
   displayMode: SidebarDisplayMode;
@@ -124,8 +125,8 @@ function ProjectSection({
   isSessionPinned?: (id: string) => boolean;
   /** 置顶/取消置顶动作；不传则不显示置顶菜单。 */
   onTogglePin?: (id: string) => void;
-  /** 项目行拖放到另一项目时回调；缺省则不可拖。 */
-  onProjectDrop?: (fromRoot: string, toRoot: string) => void;
+  /** 项目行拖放绑定（指针拖拽 + Alt+↑/↓ 换位）；缺省则不可拖。 */
+  drag?: ProjectDragBinding;
 }) {
   const { t } = useI18n();
   const collapsed = isSessionNodeEffectivelyCollapsed(collapsedProjectRoots, project.root, searchActive);
@@ -136,41 +137,37 @@ function ProjectSection({
     ? t("sidebar_expandProjectNamed", { project: projectName })
     : t("sidebar_collapseProjectNamed", { project: projectName });
   // 项目行运行中标记已移除（会话行各自显示运行圆点）
-
   return (
-    <div>
+    // data-project-section：落点归属判据。会话区（项目行下面的会话列表）里拖动时
+    // 按「属于哪个项目」定落点，不再按最近行距在上下两个项目之间跳。
+    <div data-project-section={project.root}>
       {/* 项目行仅控制折叠；cwd 由会话行或新建会话入口切换。 */}
       <div
-        className="sidebar-row"
+        className={`sidebar-row sidebar-project-row${drag?.draggingRoot === project.root ? " is-dragging" : ""}${drag?.dropTarget?.root === project.root ? " is-drop-target" : ""}${drag?.settledRoot === project.root ? " is-settled" : ""}`}
         data-sidebar-depth={0}
+        data-project-root={project.root}
+        data-drop-side={drag?.dropTarget?.root === project.root ? drag.dropTarget.side : undefined}
         role="button"
         tabIndex={0}
         aria-expanded={!collapsed}
         aria-label={collapseLabel}
-        draggable={Boolean(onProjectDrop)}
-        onDragStart={(event) => {
-          if (!onProjectDrop) return;
-          event.dataTransfer.effectAllowed = "move";
-          event.dataTransfer.setData("text/pidance-project", project.root);
-          event.dataTransfer.setData("text/plain", project.root);
+        aria-keyshortcuts={drag ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
+        onPointerDown={drag ? (event) => drag.start(event, project.root, projectName) : undefined}
+        onClick={() => {
+          // 拖拽刚结束时浏览器还会补一次 click：跳过它，别顺带折叠/展开。
+          if (drag?.shouldSuppressClick()) return;
+          onToggleProject(project.root);
         }}
-        onDragOver={(event) => {
-          if (!onProjectDrop) return;
-          event.preventDefault();
-          event.dataTransfer.dropEffect = "move";
-        }}
-        onDrop={(event) => {
-          if (!onProjectDrop) return;
-          event.preventDefault();
-          event.stopPropagation();
-          const from = event.dataTransfer.getData("text/pidance-project") || event.dataTransfer.getData("text/plain");
-          if (from) onProjectDrop(from, project.root);
-        }}
-        onClick={() => onToggleProject(project.root)}
         onMouseEnter={(event) => { event.currentTarget.style.background = "var(--bg-hover)"; }}
         onMouseLeave={(event) => { event.currentTarget.style.background = "transparent"; }}
         onKeyDown={(event) => {
-          if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+          if (event.target !== event.currentTarget) return;
+          if (drag && event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+            event.preventDefault();
+            drag.moveByStep(project.root, event.key === "ArrowUp" ? -1 : 1);
+            return;
+          }
+          if (event.key !== "Enter" && event.key !== " ") return;
           event.preventDefault();
           onToggleProject(project.root);
         }}

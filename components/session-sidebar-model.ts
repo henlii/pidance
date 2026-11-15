@@ -224,15 +224,45 @@ export function sortSidebarProjects(
   return copy;
 }
 
-/** 把 fromRoot 挪到 toRoot 的位置（插入到目标处）。 */
-export function moveProjectInOrder(order: readonly string[], fromRoot: string, toRoot: string): string[] {
+/** 落点在目标行的哪一侧：决定插到目标前还是目标后。 */
+export type ProjectDropSide = "before" | "after";
+
+/** 项目行的拖放落点。 */
+export type ProjectDropTarget = { root: string; side: ProjectDropSide };
+
+/**
+ * 把 fromRoot 挪到 toRoot 的位置。
+ *
+ * side = "before" 插到目标前，side = "after" 插到目标后（缺省 before，保持旧行为）。
+ * 目标下标在移除 fromRoot 之后重新计算，所以「往后拖」也会落在目标的正确一侧。
+ */
+export function moveProjectInOrder(
+  order: readonly string[],
+  fromRoot: string,
+  toRoot: string,
+  side: ProjectDropSide = "before",
+): string[] {
   const next = [...order];
   const from = next.indexOf(fromRoot);
   const to = next.indexOf(toRoot);
   if (from < 0 || to < 0 || from === to) return next;
   next.splice(from, 1);
-  next.splice(to, 0, fromRoot);
+  const target = next.indexOf(toRoot);
+  next.splice(side === "after" ? target + 1 : target, 0, fromRoot);
   return next;
+}
+
+/** 键盘换位：把 root 与相邻项（delta = -1 上一项 / +1 下一项）交换，越界不动。 */
+export function moveProjectByStep(order: readonly string[], root: string, delta: -1 | 1): string[] {
+  const index = order.indexOf(root);
+  const neighbor = index < 0 ? undefined : order[index + delta];
+  if (neighbor === undefined) return [...order];
+  return moveProjectInOrder(order, root, neighbor, delta < 0 ? "before" : "after");
+}
+
+/** 按指针纵坐标落在行上半还是下半，给出插入侧；阈值取行中线。 */
+export function pickProjectDropSide(pointerY: number, rowTop: number, rowHeight: number): ProjectDropSide {
+  return pointerY < rowTop + rowHeight / 2 ? "before" : "after";
 }
 
 // ── 项目关闭过滤（纯 UI 隐藏，不触碰任何会话数据） ─────────────────────────

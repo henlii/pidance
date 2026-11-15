@@ -2805,3 +2805,137 @@ span.linenumber {
     opacity: 0.4;
   }
 }
+
+/* ── 项目行拖放（指针事件：鼠标 / 触摸 / 笔同一实现） ─────────────────────
+   touch-action: pan-y 让起拖前仍能竖向滚动列表；长按（240ms）成立后由
+   useProjectDrag 的非被动 touchmove 接管，横向位移不再被当成滚动。
+   移动端长按还要屏蔽系统「长按菜单/选中」：touch-callout + user-select。 */
+.sidebar-project-row {
+  touch-action: pan-y;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  /* 只过渡颜色与透明度：行的位置由文档流决定，拖拽中不做位移（见下方说明）。 */
+  transition: background 140ms ease-out, opacity 140ms ease-out;
+}
+/* 被拖行留在原位当占位槽：淡出 + 虚线轮廓，落点由目标行的插入线表示。
+   不做 translateY 让位：项目行与它自己的会话行同处一个 wrapper，
+   行一让位就会压在仍在文档流里的被拖行上（实测截图里整片文字叠在一起）。 */
+.sidebar-project-row.is-dragging {
+  opacity: 0.3;
+  background: transparent !important;
+  outline: 1px dashed var(--border-strong);
+  outline-offset: -1px;
+}
+.sidebar-project-row.is-dragging:hover {
+  background: transparent !important;
+}
+.sidebar-project-row.is-drop-target {
+  background: var(--bg-selected);
+}
+/* 落定：顺序刚变过的行闪一下，随后淡回（transition 负责淡出，重复落位也能重播）。 */
+.sidebar-project-row.is-settled {
+  background: var(--bg-selected) !important;
+}
+/* 插入位置指示线：落点在目标上半 → 线上；下半 → 线下 */
+.sidebar-project-row.is-drop-target[data-drop-side="before"]::after,
+.sidebar-project-row.is-drop-target[data-drop-side="after"]::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+  transform-origin: left center;
+  animation: project-drop-line-in 140ms ease-out;
+}
+.sidebar-project-row.is-drop-target[data-drop-side="before"]::after {
+  top: -1px;
+}
+.sidebar-project-row.is-drop-target[data-drop-side="after"]::after {
+  bottom: -1px;
+}
+
+/* 拖拽中的浮动标签：portal 到 body，固定定位，不接收指针事件 */
+.sidebar-project-drag-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 4000;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text);
+  box-shadow: var(--shadow-float);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  pointer-events: none;
+  will-change: transform;
+  /* 起拖：标签从略小浮起；定位写在外层 transform 上，缩放走独立的 scale 属性，互不干扰。 */
+  animation: project-drag-lift 150ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+.sidebar-project-drag-ghost.is-dropping {
+  animation: project-drag-drop 130ms ease-in both;
+}
+.sidebar-project-drag-ghost > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes project-drag-lift {
+  from {
+    scale: 0.92;
+    opacity: 0;
+  }
+  to {
+    scale: 1;
+    opacity: 1;
+  }
+}
+@keyframes project-drag-drop {
+  from {
+    scale: 1;
+    opacity: 1;
+  }
+  to {
+    scale: 0.96;
+    opacity: 0;
+  }
+}
+@keyframes project-drop-line-in {
+  from {
+    transform: scaleX(0.4);
+    opacity: 0;
+  }
+  to {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-project-row {
+    transition: none;
+  }
+  .sidebar-project-row.is-drop-target::after,
+  .sidebar-project-drag-ghost,
+  .sidebar-project-drag-ghost.is-dropping {
+    animation: none;
+  }
+}
+
+/* 拖拽期间整页锁指针态：避免鼠标拖出侧栏时选中正文文字 */
+body.pidance-project-dragging,
+body.pidance-project-dragging * {
+  cursor: grabbing !important;
+  -webkit-user-select: none;
+  user-select: none;
+}
